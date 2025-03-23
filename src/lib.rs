@@ -28,13 +28,22 @@ trait RBC {
     fn broadcast();
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Now, it's time to define the MPC Protocol trait.
+/// Given an underlying secret sharing protocol and a reliable broadcast protocol,
+/// you can define an MPC protocol. 
+trait MPCProtocol<S: Share, R: RBC> {
+    /// Defines the information needed to run and define the MPC protocol.
+    type MPCOpts;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+    /// Runs the online phase for an MPC protocol
+    fn run(opts: Self::MPCOpts);
+}
+
+/// Some MPC protocols require preprocessing before they can be used
+trait PreprocessingMPCProtocol<S: Share, R: RBC>: MPCProtocol<S, R> {
+    /// Defines the information needed to run the preprocessing phase of an MPC protocol
+    type PreprocessingOpts;
+
+    /// Runs the offline/preprocessing phase for an MPC protocol
+    fn run_preprocessing(opts: Self::PreprocessingOpts);
 }
