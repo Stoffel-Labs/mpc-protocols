@@ -24,7 +24,8 @@ trait Share {
 /// When implementing your own custom MPC protocols, you must implement the RBC trait.
 trait RBC {
 
-
+    /// Broadcast messages to other nodes.
+    fn broadcast();
 }
 
 #[cfg(test)]
