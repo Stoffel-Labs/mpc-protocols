@@ -26,7 +26,7 @@ trait Share {
 /// When implementing your own custom MPC protocols, you must implement the RBC trait.
 trait RBC {
     ///Processing messages sent by other nodes
-    async fn process(&self,msg:Msg); 
+    async fn process(&mut self,msg:Msg); 
     /// Broadcast messages to other nodes.
     async fn broadcast(msg:Msg);
 }
