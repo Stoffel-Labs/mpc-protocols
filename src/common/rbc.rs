@@ -2,12 +2,12 @@
 /// You can reuse them in your own custom MPC protocol implementations.
 use super::rbc_store::*;
 use crate::RBC;
-use std::{
-    collections::HashMap,
-    sync::Arc
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{
+    mpsc::{Receiver, Sender},
+    Mutex,
 };
-use tokio::sync::{Mutex,mpsc::{Receiver, Sender}};
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /*
 /// CommonSubset is a subroutine used to implement many RBC protocols.
@@ -127,7 +127,11 @@ impl Bracha {
 
         // Ignore if session has already ended
         if store.ended {
-            debug!(id = self.id, session_id = msg.session_id, "Session already ended, ignoring ECHO");
+            debug!(
+                id = self.id,
+                session_id = msg.session_id,
+                "Session already ended, ignoring ECHO"
+            );
             return;
         }
 
@@ -136,7 +140,7 @@ impl Bracha {
             store.set_echo_sent(msg.sender_id);
             store.increment_echo(&msg.payload);
             let count = store.get_echo_count(&msg.payload);
-            
+
             if count >= 2 * self.t + 1 {
                 if !store.ready {
                     store.mark_ready();
@@ -159,13 +163,13 @@ impl Bracha {
                     store.mark_echo();
                     let new_msg =
                         Msg::new(self.id, msg.session_id, msg.payload, "ECHO".to_string());
-                        info!(
-                            id = self.id,
-                            session_id = msg.session_id,
-                            msg_type = "ECHO",
-                            "Re-broadcasting ECHO due to threshold"
-                        );
-    
+                    info!(
+                        id = self.id,
+                        session_id = msg.session_id,
+                        msg_type = "ECHO",
+                        "Re-broadcasting ECHO due to threshold"
+                    );
+
                     Bracha::broadcast(&self, new_msg, parties).await;
                 }
             }
@@ -188,7 +192,11 @@ impl Bracha {
 
         // Ignore if session has already ended
         if store.ended {
-            debug!(id = self.id, session_id = msg.session_id, "Session already ended, ignoring READY");
+            debug!(
+                id = self.id,
+                session_id = msg.session_id,
+                "Session already ended, ignoring READY"
+            );
             return;
         }
 
@@ -197,7 +205,7 @@ impl Bracha {
             store.set_ready_sent(msg.sender_id);
             store.increment_ready(&msg.payload);
             let count = store.get_ready_count(&msg.payload);
-    
+
             if count >= self.t + 1 && count < 2 * self.t + 1 {
                 if !store.ready {
                     store.mark_ready();
@@ -220,12 +228,12 @@ impl Bracha {
                     store.mark_echo();
                     let new_msg =
                         Msg::new(self.id, msg.session_id, msg.payload, "ECHO".to_string());
-                        info!(
-                            id = self.id,
-                            session_id = msg.session_id,
-                            msg_type = "ECHO",
-                            "Broadcasting ECHO along with READY"
-                        );
+                    info!(
+                        id = self.id,
+                        session_id = msg.session_id,
+                        msg_type = "ECHO",
+                        "Broadcasting ECHO along with READY"
+                    );
                     Bracha::broadcast(&self, new_msg, parties).await;
                 }
             } else if count >= 2 * self.t + 1 {
@@ -242,60 +250,74 @@ impl Bracha {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
     use std::time::Duration;
+    use tokio::sync::mpsc;
     use tracing_subscriber;
 
-
-    #[tokio::test]
-    async fn test_bracha_rbc_basic() {
-        let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_test_writer() 
-        .try_init();
-
-        // Set the parameters
-        let n = 4;
-        let t = 1;
-        let payload = b"Hello, MPC!".to_vec();
-        let session_id = 42;
-
-        //Set the channels for broadcasting
-        let mut receivers = Vec::new();
+    async fn setup_channels(n: u32) -> (Vec<mpsc::Sender<Msg>>, Vec<mpsc::Receiver<Msg>>) {
         let mut senders = Vec::new();
+        let mut receivers = Vec::new();
         for _ in 0..n {
             let (tx, rx) = mpsc::channel(100);
             senders.push(tx);
             receivers.push(rx);
         }
+        (senders, receivers)
+    }
 
-        // Create Bracha instances and their networks
-        let mut parties = Vec::new();
-        for i in 0..n {
-            let bracha = Bracha::new(i as u32, n, t);
-            let net = Arc::new(Network {
-                id: i as u32,
-                senders: senders.clone(),
-            });
-            parties.push((bracha, net));
-        }
+    async fn setup_parties(
+        n: u32,
+        t: u32,
+        senders: Vec<mpsc::Sender<Msg>>,
+    ) -> Vec<(Bracha, Arc<Network>)> {
+        (0..n)
+            .map(|i| {
+                let bracha = Bracha::new(i as u32, n, t);
+                let net = Arc::new(Network {
+                    id: i as u32,
+                    senders: senders.clone(),
+                });
+                (bracha, net)
+            })
+            .collect()
+    }
 
-        // Spawn party runners
-        for i in 0..n {
-            let (bracha, net) = parties[i as usize].clone();
+    async fn spawn_party_runners(
+        parties: &[(Bracha, Arc<Network>)],
+        mut receivers: Vec<mpsc::Receiver<Msg>>,
+    ) {
+        for (bracha, net) in parties.iter().cloned() {
             let mut rx = receivers.remove(0);
             tokio::spawn(async move {
                 bracha.run_party(&mut rx, net).await;
             });
         }
+    }
+    #[tokio::test]
+    async fn test_bracha_rbc_basic() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+
+        // Set the parameters
+        let n = 4;
+        let t = 1;
+        let payload = b"Hello, MPC!".to_vec();
+        let session_id = 12;
+
+        let (senders, receivers) = setup_channels(n).await;
+        let parties = setup_parties(n, t, senders).await;
+        spawn_party_runners(&parties, receivers).await;
 
         // Party 0 initiates broadcast
         let (bracha0, net0) = &parties[0];
-        bracha0.init(payload.clone(), session_id, net0.clone()).await;
+        bracha0
+            .init(payload.clone(), session_id, net0.clone())
+            .await;
 
         // Give time for broadcast to propagate
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -304,11 +326,159 @@ mod tests {
         for (bracha, _) in &parties {
             let store = bracha.store.lock().await;
             let session_store = store.get(&session_id);
-            assert!(session_store.is_some(), "Party did not create session store");
+            assert!(
+                session_store.is_some(),
+                "Party did not create session store"
+            );
             let s = session_store.unwrap();
             assert!(s.ended, "Broadcast not completed for party {}", bracha.id);
-            assert_eq!(&s.output, &payload, "Incorrect payload at party {}", bracha.id);
+            assert_eq!(
+                &s.output, &payload,
+                "Incorrect payload at party {}",
+                bracha.id
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_sessions() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+
+        let n = 4;
+        let t = 1;
+        let session_ids = vec![101, 202, 303];
+        let payloads = vec![
+            b"Payload A".to_vec(),
+            b"Payload B".to_vec(),
+            b"Payload C".to_vec(),
+        ];
+
+        let (senders, receivers) = setup_channels(n).await;
+        let parties = setup_parties(n, t, senders).await;
+        spawn_party_runners(&parties, receivers).await;
+
+        // Launch all sessions from party 0
+        let (bracha0, net0) = &parties[0];
+        for (i, sid) in session_ids.iter().enumerate() {
+            bracha0.init(payloads[i].clone(), *sid, net0.clone()).await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        for (bracha, _) in &parties {
+            let store = bracha.store.lock().await;
+            for (i, sid) in session_ids.iter().enumerate() {
+                let s = store.get(sid).expect("Missing session");
+                assert!(
+                    s.ended,
+                    "Session {} not completed at party {}",
+                    sid, bracha.id
+                );
+                assert_eq!(
+                    &s.output, &payloads[i],
+                    "Incorrect payload for session {}",
+                    sid
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn test_multiple_sessions_different_party() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+
+        let n = 4;
+        let t = 1;
+        let session_ids = vec![10, 20, 30, 40];
+        let payloads = vec![
+            b"From Party 0".to_vec(),
+            b"From Party 1".to_vec(),
+            b"From Party 2".to_vec(),
+            b"From Party 3".to_vec(),
+        ];
+
+        let (senders, receivers) = setup_channels(n).await;
+        let parties = setup_parties(n, t, senders).await;
+        spawn_party_runners(&parties, receivers).await;
+
+        // Each party initiates one session
+        for (i, (bracha, net)) in parties.iter().enumerate() {
+            bracha
+                .init(payloads[i].clone(), session_ids[i], net.clone())
+                .await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Validate all sessions completed successfully and consistently
+        for (bracha, _) in &parties {
+            let store = bracha.store.lock().await;
+            for (i, session_id) in session_ids.iter().enumerate() {
+                let s = store.get(session_id).expect("Missing session");
+                assert!(
+                    s.ended,
+                    "Session {} not completed at party {}",
+                    session_id, bracha.id
+                );
+                assert_eq!(
+                    &s.output, &payloads[i],
+                    "Incorrect output at party {} for session {}",
+                    bracha.id, session_id
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn test_out_of_order_delivery() {
+        let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+
+        let n = 4;
+        let t = 1;
+        let session_id = 11;
+        let payload = b"out-of-order".to_vec();
+
+        let (senders, receivers) = setup_channels(n).await;
+        let parties = setup_parties(n, t, senders.clone()).await;
+        spawn_party_runners(&parties, receivers).await;
+
+        // Simulate sending READY before ECHO and INIT
+        let sender_id = 1;
+        let ready_msg = Msg::new(sender_id, session_id, payload.clone(), "READY".to_string());
+        let echo_msg = Msg::new(sender_id, session_id, payload.clone(), "ECHO".to_string());
+
+        // Send READY first
+        senders[2].send(ready_msg).await.unwrap();
+
+        // Then ECHO
+        senders[3].send(echo_msg).await.unwrap();
+
         
+        // Party 0 initiates broadcast
+        let (bracha0, net0) = &parties[0];
+        bracha0
+            .init(payload.clone(), session_id, net0.clone())
+            .await;
+
+        // Allow time for processing
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Check if parties reached consensus
+        for (bracha, _) in &parties {
+            let store = bracha.store.lock().await;
+            if let Some(state) = store.get(&session_id) {
+                if state.ended {
+                    println!("Party {} ended with output: {:?}", bracha.id, state.output);
+                } else {
+                    println!("Party {} has not yet ended", bracha.id);
+                }
+            }
+        }
     }
 }
