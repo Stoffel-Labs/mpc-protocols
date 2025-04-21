@@ -1,6 +1,47 @@
 use std::collections::HashMap;
 
+///Generic message for rbc
+#[derive(Clone)]
+pub struct Msg{
+    pub sender_id : u32,
+    pub session_id :u32,
+    pub payload : Vec<u8>,
+    pub msg_type : String
+}
+
+impl Msg {
+
+    pub fn new(sender_id: u32, session_id: u32, payload: Vec<u8> ,msg_type : String) -> Self {
+        Msg {
+            sender_id,
+            session_id,
+            payload,
+            msg_type
+        }
+    }
+
+}
+///--------------------------Bracha RBC--------------------------
+#[derive(Debug, Clone)]
+pub enum MsgType {
+    Init,
+    Echo,
+    Ready,
+    Unknown(String),
+}
+
+impl From<String> for MsgType {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "INIT" => MsgType::Init,
+            "ECHO" => MsgType::Echo,
+            "READY" => MsgType::Ready,
+            _ => MsgType::Unknown(s),
+        }
+    }
+}
 ///Storage of message info for Bracha
+#[derive(Default)]
 pub struct BrachaStore {
     pub echo_senders: HashMap<u32, bool>, //senders => yes or no
     pub ready_senders: HashMap<u32, bool>,
