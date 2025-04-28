@@ -31,10 +31,10 @@ pub struct Network {
 ///--------------------------Bracha RBC--------------------------
 #[derive(Clone)]
 pub struct Bracha {
-    pub id: u32,                                      //Initiators ID
-    pub n: u32,                                       //Network size
-    pub t: u32,                                       //No. of malicious parties
-    pub store: Arc<Mutex<HashMap<u32, BrachaStore>>>, // <- wrap only this in a lock //Sessionid => store
+    pub id: u32,                                                  //Initiators ID
+    pub n: u32,                                                   //Network size
+    pub t: u32,                                                   //No. of malicious parties
+    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<BrachaStore>>>>>, // <- wrap only this in a lock //Sessionid => store
 }
 
 impl RBC for Bracha {
@@ -90,12 +90,19 @@ impl Bracha {
             msg_type = %msg.msg_type,
             "Handling INIT message"
         );
-        let mut store_lock = self.store.lock().await;
 
-        // Get or initialize the store entry for the session_id
-        let store = store_lock
-            .entry(msg.session_id)
-            .or_insert_with(BrachaStore::default);
+        // Lock the HashMap to access or insert the session entry
+        let session_store = {
+            let mut store = self.store.lock().await;
+
+            // Get or insert the Arc<Mutex<BrachaStore>> for the session
+            store
+                .entry(msg.session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
+                .clone()
+        };
+        //Locking specific session store
+        let mut store = session_store.lock().await;
 
         // Only broadcast if echo hasn't already been sent
         if !store.echo {
@@ -118,12 +125,18 @@ impl Bracha {
             msg_type = %msg.msg_type,
             "Handling ECHO message"
         );
-        let mut store_lock = self.store.lock().await;
+        // Lock the HashMap to access or insert the session entry
+        let session_store = {
+            let mut store = self.store.lock().await;
 
-        // Get or initialize the store entry for the session_id
-        let store = store_lock
-            .entry(msg.session_id)
-            .or_insert_with(BrachaStore::default);
+            // Get or insert the Arc<Mutex<BrachaStore>> for the session
+            store
+                .entry(msg.session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
+                .clone()
+        };
+        //Locking specific session store
+        let mut store = session_store.lock().await;
 
         // Ignore if session has already ended
         if store.ended {
@@ -183,12 +196,18 @@ impl Bracha {
             msg_type = %msg.msg_type,
             "Handling READY message"
         );
-        let mut store_lock = self.store.lock().await;
+         // Lock the HashMap to access or insert the session entry
+         let session_store = {
+            let mut store = self.store.lock().await;
 
-        // Get or initialize the store entry for the session_id
-        let store = store_lock
-            .entry(msg.session_id)
-            .or_insert_with(BrachaStore::default);
+            // Get or insert the Arc<Mutex<BrachaStore>> for the session
+            store
+                .entry(msg.session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
+                .clone()
+        };
+        //Locking specific session store
+        let mut store = session_store.lock().await;
 
         // Ignore if session has already ended
         if store.ended {
@@ -324,13 +343,17 @@ mod tests {
 
         // Check that all parties completed broadcast and agreed on output
         for (bracha, _) in &parties {
-            let store = bracha.store.lock().await;
-            let session_store = store.get(&session_id);
-            assert!(
-                session_store.is_some(),
-                "Party did not create session store"
-            );
-            let s = session_store.unwrap();
+            let session_store = {
+                let store_map = bracha.store.lock().await;
+                store_map
+                    .get(&session_id)
+                    .cloned()
+                    .expect(&format!("Party {} did not create session store", bracha.id))
+            };
+    
+            // Step 2: Lock the specific store for this session
+            let s = session_store.lock().await;
+
             assert!(s.ended, "Broadcast not completed for party {}", bracha.id);
             assert_eq!(
                 &s.output, &payload,
@@ -371,7 +394,9 @@ mod tests {
         for (bracha, _) in &parties {
             let store = bracha.store.lock().await;
             for (i, sid) in session_ids.iter().enumerate() {
-                let s = store.get(sid).expect("Missing session");
+                let store_arc = store.get(sid).expect("Missing session");
+                let s = store_arc.lock().await;
+
                 assert!(
                     s.ended,
                     "Session {} not completed at party {}",
@@ -418,7 +443,8 @@ mod tests {
         for (bracha, _) in &parties {
             let store = bracha.store.lock().await;
             for (i, session_id) in session_ids.iter().enumerate() {
-                let s = store.get(session_id).expect("Missing session");
+                let store_arc = store.get(session_id).expect("Missing session");
+                let s = store_arc.lock().await;
                 assert!(
                     s.ended,
                     "Session {} not completed at party {}",
@@ -435,9 +461,9 @@ mod tests {
     #[tokio::test]
     async fn test_out_of_order_delivery() {
         let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_test_writer()
-        .try_init();
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
 
         let n = 4;
         let t = 1;
@@ -459,7 +485,6 @@ mod tests {
         // Then ECHO
         senders[3].send(echo_msg).await.unwrap();
 
-        
         // Party 0 initiates broadcast
         let (bracha0, net0) = &parties[0];
         bracha0
@@ -473,11 +498,16 @@ mod tests {
         for (bracha, _) in &parties {
             let store = bracha.store.lock().await;
             if let Some(state) = store.get(&session_id) {
-                if state.ended {
-                    println!("Party {} ended with output: {:?}", bracha.id, state.output);
+                let s = state.lock().await;
+
+                if s.ended {
+                    println!("Party {} ended with output: {:?}", bracha.id, s.output);
                 } else {
                     println!("Party {} has not yet ended", bracha.id);
                 }
+            } else {
+                println!("Party {} has a missing session", bracha.id);
+
             }
         }
     }
