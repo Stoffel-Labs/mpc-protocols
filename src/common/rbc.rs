@@ -9,36 +9,34 @@ use tokio::sync::{
 };
 use tracing::{debug, info};
 
-/*
-/// CommonSubset is a subroutine used to implement many RBC protocols.
-/// It is used to determine which RBC instances have terminated.
-trait CommonSubset {}
-struct AVID {}
-impl RBC for AVID {
-    fn new(id: u32, n: u32, t: u32) -> self {}
-    async fn process(&mut self, msg: Msg) {}
-    async fn broadcast(msg: Msg) {}
-}
-*/
-
-//Mock a network for testing
+//Mock a network for testing purposed
 #[derive(Clone)]
 pub struct Network {
-    pub id: u32,
-    pub senders: Vec<Sender<Msg>>, // All party senders including self
+    pub id: u32,                   // The identifier of the current party in the network
+    pub senders: Vec<Sender<Msg>>, // List of all senders, including the current party itself
 }
 
 ///--------------------------Bracha RBC--------------------------
+/// Protocol works as follows(m is the message to broadcast) :
+/// 1. Initiator sends (INIT,m)
+/// 2. Party on recieveing (INIT,m) and haven't sent (ECHO,m), sends (ECHO,m)
+/// 3. Party on recieving 2t+1 (ECHO, m) and haven't sent :
+///     a. (ECHO,m) -> sends (ECHO,m)
+///     b. (READY,m) -> sends (READY, m)
+/// 4. Party on recieving t+1 (READY, m) and haven't sent :
+///     a. (ECHO,m) -> sends (ECHO,m)
+///     b. (READY,m) -> sends (READY, m)
+/// 4. Party on recieving 2t+1 (READY, m) output m and terminate
 #[derive(Clone)]
 pub struct Bracha {
-    pub id: u32,                                                  //Initiators ID
-    pub n: u32,                                                   //Network size
-    pub t: u32,                                                   //No. of malicious parties
-    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<BrachaStore>>>>>, // <- wrap only this in a lock //Sessionid => store
+    pub id: u32,                                                  // The ID of the initiator
+    pub n: u32, // Total number of parties in the network
+    pub t: u32, // Number of allowed malicious parties
+    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<BrachaStore>>>>>, // Stores the session state for each session
 }
 
 impl RBC for Bracha {
-    /// Creates a new Bracha instance
+    /// Creates a new Bracha instance with the given parameters.
     fn new(id: u32, n: u32, t: u32) -> Self {
         Bracha {
             id,
@@ -47,6 +45,7 @@ impl RBC for Bracha {
             store: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+    /// Processes incoming messages based on their type.
     async fn process(&self, msg: Msg, parties: Arc<Network>) {
         match MsgType::from(msg.msg_type.clone()) {
             MsgType::Init => self.init_handler(msg, parties).await,
@@ -57,11 +56,13 @@ impl RBC for Bracha {
             }
         }
     }
+    /// Broadcasts a message to all parties in the network.
     async fn broadcast(&self, msg: Msg, net: Arc<Network>) {
         for sender in &net.senders {
             let _ = sender.send(msg.clone()).await;
         }
     }
+    /// Runs the party logic, continuously receiving and processing messages.
     async fn run_party(&self, receiver: &mut Receiver<Msg>, parties: Arc<Network>) {
         while let Some(msg) = receiver.recv().await {
             self.process(msg, parties.clone()).await;
@@ -70,8 +71,10 @@ impl RBC for Bracha {
 }
 impl Bracha {
     /// Handlers
+
+    /// Handler for the "INIT" message type. This is the initial broadcast message in the Bracha protocol.
     pub async fn init(&self, payload: Vec<u8>, session_id: u32, parties: Arc<Network>) {
-        //Create message
+        // Create an INIT message with the given payload and session ID.
         let msg = Msg::new(self.id, session_id, payload, "INIT".to_string());
         info!(
             id = self.id,
@@ -81,7 +84,7 @@ impl Bracha {
         );
         Bracha::broadcast(&self, msg, parties).await;
     }
-
+    /// Handles the "INIT" message. Responds by broadcasting an "ECHO" message if necessary.
     pub async fn init_handler(&self, msg: Msg, parties: Arc<Network>) {
         info!(
             id = self.id,
@@ -91,23 +94,23 @@ impl Bracha {
             "Handling INIT message"
         );
 
-        // Lock the HashMap to access or insert the session entry
+        // Lock the session store to update the session state.
         let session_store = {
             let mut store = self.store.lock().await;
 
-            // Get or insert the Arc<Mutex<BrachaStore>> for the session
+            // Get or create the session state for the current session.
             store
                 .entry(msg.session_id)
                 .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
                 .clone()
         };
-        //Locking specific session store
+        // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
-        // Only broadcast if echo hasn't already been sent
+        // Only broadcast the ECHO if it hasn't already been sent.
         if !store.echo {
             let new_msg = Msg::new(self.id, msg.session_id, msg.payload, "ECHO".to_string());
-            store.mark_echo();
+            store.mark_echo(); // Mark that ECHO has been sent.
             info!(
                 id = self.id,
                 session_id = msg.session_id,
@@ -117,6 +120,7 @@ impl Bracha {
             Bracha::broadcast(&self, new_msg, parties).await;
         }
     }
+    /// Handles the "ECHO" message. If the threshold of echoes is met, a "READY" message is broadcast.
     pub async fn echo_handler(&self, msg: Msg, parties: Arc<Network>) {
         info!(
             id = self.id,
@@ -125,20 +129,20 @@ impl Bracha {
             msg_type = %msg.msg_type,
             "Handling ECHO message"
         );
-        // Lock the HashMap to access or insert the session entry
+        // Lock the session store to update the session state.
         let session_store = {
             let mut store = self.store.lock().await;
 
-            // Get or insert the Arc<Mutex<BrachaStore>> for the session
+            // Get or create the session state for the current session.
             store
                 .entry(msg.session_id)
                 .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
                 .clone()
         };
-        //Locking specific session store
+        // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
-        // Ignore if session has already ended
+        // Ignore the message if the session has already ended.
         if store.ended {
             debug!(
                 id = self.id,
@@ -148,15 +152,15 @@ impl Bracha {
             return;
         }
 
-        // If this sender hasn't already sent an echo
+        // If this sender has not already sent an ECHO, process it.
         if !store.has_echo(msg.sender_id) {
-            store.set_echo_sent(msg.sender_id);
-            store.increment_echo(&msg.payload);
+            store.set_echo_sent(msg.sender_id); // Mark this sender as having sent an ECHO.
+            store.increment_echo(&msg.payload); // Increment the count for the corresponding payload.
             let count = store.get_echo_count(&msg.payload);
-
+            // If the threshold for receiving echoes is met, broadcast the READY message.
             if count >= 2 * self.t + 1 {
                 if !store.ready {
-                    store.mark_ready();
+                    store.mark_ready(); // Mark the session as ready.
                     let new_msg = Msg::new(
                         self.id,
                         msg.session_id,
@@ -169,11 +173,11 @@ impl Bracha {
                         msg_type = "READY",
                         "Broadcasting READY after ECHO threshold met"
                     );
-                    Bracha::broadcast(&self, new_msg, parties.clone()).await;
+                    Bracha::broadcast(&self, new_msg, parties.clone()).await; // Broadcast the READY message.
                 }
-
+                // If ECHO hasn't been sent yet, broadcast the ECHO message.
                 if !store.echo {
-                    store.mark_echo();
+                    store.mark_echo(); // Mark ECHO as sent.
                     let new_msg =
                         Msg::new(self.id, msg.session_id, msg.payload, "ECHO".to_string());
                     info!(
@@ -188,6 +192,7 @@ impl Bracha {
             }
         }
     }
+    /// Handles the "READY" message. If the threshold is met, the session ends and the output is stored.
     pub async fn ready_handler(&self, msg: Msg, parties: Arc<Network>) {
         info!(
             id = self.id,
@@ -196,20 +201,20 @@ impl Bracha {
             msg_type = %msg.msg_type,
             "Handling READY message"
         );
-         // Lock the HashMap to access or insert the session entry
-         let session_store = {
+        // Lock the session store to update the session state.
+        let session_store = {
             let mut store = self.store.lock().await;
 
-            // Get or insert the Arc<Mutex<BrachaStore>> for the session
+            // Get or create the session state for the current session.
             store
                 .entry(msg.session_id)
                 .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
                 .clone()
         };
-        //Locking specific session store
+        // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
-        // Ignore if session has already ended
+        // Ignore the message if the session has already ended.
         if store.ended {
             debug!(
                 id = self.id,
@@ -219,15 +224,16 @@ impl Bracha {
             return;
         }
 
-        // Process only if this sender hasn't sent READY yet
+        // If this sender hasn't sent READY yet, process it.
         if !store.has_ready(msg.sender_id) {
-            store.set_ready_sent(msg.sender_id);
-            store.increment_ready(&msg.payload);
+            store.set_ready_sent(msg.sender_id); // Mark this sender as having sent READY.
+            store.increment_ready(&msg.payload); // Increment the count for the corresponding payload.
             let count = store.get_ready_count(&msg.payload);
 
+            // If the threshold for receiving READIES is met, finalize the session.
             if count >= self.t + 1 && count < 2 * self.t + 1 {
                 if !store.ready {
-                    store.mark_ready();
+                    store.mark_ready(); // Mark the session as ready.
                     let new_msg = Msg::new(
                         self.id,
                         msg.session_id,
@@ -242,9 +248,9 @@ impl Bracha {
                     );
                     Bracha::broadcast(&self, new_msg, parties.clone()).await;
                 }
-
+                // If ECHO hasn't been sent yet, broadcast it along with READY.
                 if !store.echo {
-                    store.mark_echo();
+                    store.mark_echo(); // Mark ECHO as sent.
                     let new_msg =
                         Msg::new(self.id, msg.session_id, msg.payload, "ECHO".to_string());
                     info!(
@@ -256,6 +262,7 @@ impl Bracha {
                     Bracha::broadcast(&self, new_msg, parties).await;
                 }
             } else if count >= 2 * self.t + 1 {
+                // If consensus is reached, mark the session as ended and store the output.
                 store.mark_ended();
                 store.set_output(msg.payload.clone());
                 info!(
@@ -276,17 +283,19 @@ mod tests {
     use tokio::sync::mpsc;
     use tracing_subscriber;
 
+    /// Helper function to set up message senders and receivers for the parties.
     async fn setup_channels(n: u32) -> (Vec<mpsc::Sender<Msg>>, Vec<mpsc::Receiver<Msg>>) {
         let mut senders = Vec::new();
         let mut receivers = Vec::new();
         for _ in 0..n {
-            let (tx, rx) = mpsc::channel(100);
+            let (tx, rx) = mpsc::channel(100); // Create a channel with capacity 100
             senders.push(tx);
             receivers.push(rx);
         }
         (senders, receivers)
     }
 
+    /// Helper function to set up parties with their respective Bracha instances.
     async fn setup_parties(
         n: u32,
         t: u32,
@@ -294,24 +303,24 @@ mod tests {
     ) -> Vec<(Bracha, Arc<Network>)> {
         (0..n)
             .map(|i| {
-                let bracha = Bracha::new(i as u32, n, t);
+                let bracha = Bracha::new(i as u32, n, t); // Create a new Bracha instance for each party
                 let net = Arc::new(Network {
                     id: i as u32,
-                    senders: senders.clone(),
+                    senders: senders.clone(), // Each party has the same senders
                 });
-                (bracha, net)
+                (bracha, net) // Return a tuple of Bracha instance and the network
             })
             .collect()
     }
-
+    /// Helper function to spawn tasks that will run the parties' logic concurrently.
     async fn spawn_party_runners(
         parties: &[(Bracha, Arc<Network>)],
         mut receivers: Vec<mpsc::Receiver<Msg>>,
     ) {
         for (bracha, net) in parties.iter().cloned() {
-            let mut rx = receivers.remove(0);
+            let mut rx = receivers.remove(0); // Get a receiver for the party
             tokio::spawn(async move {
-                bracha.run_party(&mut rx, net).await;
+                bracha.run_party(&mut rx, net).await; // Run the party logic
             });
         }
     }
@@ -350,8 +359,8 @@ mod tests {
                     .cloned()
                     .expect(&format!("Party {} did not create session store", bracha.id))
             };
-    
-            // Step 2: Lock the specific store for this session
+
+            // Lock the specific store for this session
             let s = session_store.lock().await;
 
             assert!(s.ended, "Broadcast not completed for party {}", bracha.id);
@@ -507,7 +516,6 @@ mod tests {
                 }
             } else {
                 println!("Party {} has a missing session", bracha.id);
-
             }
         }
     }

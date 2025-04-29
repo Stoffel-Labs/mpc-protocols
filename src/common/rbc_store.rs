@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 
-///Generic message for rbc
+/// Generic message type used in Reliable Broadcast (RBC) communication.
 #[derive(Clone)]
-pub struct Msg{
-    pub sender_id : u32,
-    pub session_id :u32,
-    pub payload : Vec<u8>,
-    pub msg_type : String
+pub struct Msg {
+    pub sender_id: u32,   // ID of the sender node
+    pub session_id: u32,  // Unique session ID for each broadcast instance
+    pub payload: Vec<u8>, // Actual data being broadcast (e.g., bytes of a secret or message)
+    pub msg_type: String, // Type of message like INIT, ECHO, or READY
 }
 
 impl Msg {
-
-    pub fn new(sender_id: u32, session_id: u32, payload: Vec<u8> ,msg_type : String) -> Self {
+    /// Constructor to create a new message.
+    pub fn new(sender_id: u32, session_id: u32, payload: Vec<u8>, msg_type: String) -> Self {
         Msg {
             sender_id,
             session_id,
@@ -19,9 +19,9 @@ impl Msg {
             msg_type
         }
     }
-
 }
 ///--------------------------Bracha RBC--------------------------
+/// Enum to interpret message types in Bracha's protocol.
 #[derive(Debug, Clone)]
 pub enum MsgType {
     Init,
@@ -40,21 +40,22 @@ impl From<String> for MsgType {
         }
     }
 }
-///Storage of message info for Bracha
+/// Stores the internal state for each RBC session at a party.
+/// Bracha's RBC involves thresholds for ECHO and READY messages to achieve consensus.
 #[derive(Default)]
 pub struct BrachaStore {
-    pub echo_senders: HashMap<u32, bool>, //senders => yes or no
-    pub ready_senders: HashMap<u32, bool>,
-    pub echo_count: HashMap<Vec<u8>, u32>, // value = count
-    pub ready_count: HashMap<Vec<u8>, u32>,
-    pub ended: bool,
-    pub echo: bool,  //Sent or not
-    pub ready: bool, //Sent or not
-    pub output : Vec<u8>,
+    pub echo_senders: HashMap<u32, bool>, // Which parties sent ECHO (sender_id -> true)
+    pub ready_senders: HashMap<u32, bool>, // Which parties sent READY (sender_id -> true)
+    pub echo_count: HashMap<Vec<u8>, u32>, // Count of ECHO messages per payload
+    pub ready_count: HashMap<Vec<u8>, u32>, // Count of READY messages per payload
+    pub ended: bool,                      // True if consensus is reached and protocol ended
+    pub echo: bool,                       // True if this party already sent an ECHO
+    pub ready: bool,                      // True if this party already sent a READY
+    pub output: Vec<u8>,                  // Agreed value after consensus
 }
 
 impl BrachaStore {
-    /// Creates a new BrachaStore with all maps empty and flags set to false.
+    /// Initializes an empty session store.
     pub fn new() -> Self {
         BrachaStore {
             echo_senders: HashMap::new(),
@@ -64,7 +65,7 @@ impl BrachaStore {
             ended: false,
             echo: false,
             ready: false,
-            output : Vec::new(),
+            output: Vec::new(),
         }
     }
     /// Returns true if the given sender_id has sent an echo (i.e., is set to true in echo_senders).
