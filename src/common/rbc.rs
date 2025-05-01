@@ -8,7 +8,7 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
     Mutex,
 };
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 //Mock a network for testing purposed
 #[derive(Clone)]
@@ -49,11 +49,11 @@ impl RBC for Bracha {
         }
     }
     /// Processes incoming messages based on their type.
-    async fn process(&self, msg: Msg, parties: Arc<Network>) {
+    async fn process(&self, msg: Msg, net: Arc<Network>) {
         match MsgType::from(msg.msg_type.clone()) {
-            MsgType::Init => self.init_handler(msg, parties).await,
-            MsgType::Echo => self.echo_handler(msg, parties).await,
-            MsgType::Ready => self.ready_handler(msg, parties).await,
+            MsgType::Init => self.init_handler(msg, net).await,
+            MsgType::Echo => self.echo_handler(msg, net).await,
+            MsgType::Ready => self.ready_handler(msg, net).await,
             MsgType::Unknown(t) => {
                 eprintln!("Bracha: Unknown message type: {}", t);
             }
@@ -70,17 +70,17 @@ impl RBC for Bracha {
         let _ = net.senders[recv as usize].send(msg).await;
     }
     /// Runs the party logic, continuously receiving and processing messages.
-    async fn run_party(&self, receiver: &mut Receiver<Msg>, parties: Arc<Network>) {
+    async fn run_party(&self, receiver: &mut Receiver<Msg>, net: Arc<Network>) {
         while let Some(msg) = receiver.recv().await {
-            self.process(msg, parties.clone()).await;
+            self.process(msg, net.clone()).await;
         }
     }
 }
 impl Bracha {
     /// Handlers
 
-    /// Handler for the "INIT" message type. This is the initial broadcast message in the Bracha protocol.
-    pub async fn init(&self, payload: Vec<u8>, session_id: u32, parties: Arc<Network>) {
+    /// This is the initial broadcast message in the Bracha protocol.
+    pub async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
         // Create an INIT message with the given payload and session ID.
         let msg = Msg::new(
             self.id,
@@ -96,10 +96,10 @@ impl Bracha {
             msg_type = "INIT",
             "Broadcasting INIT message"
         );
-        Bracha::broadcast(&self, msg, parties).await;
+        Bracha::broadcast(&self, msg, net).await;
     }
     /// Handles the "INIT" message. Responds by broadcasting an "ECHO" message if necessary.
-    pub async fn init_handler(&self, msg: Msg, parties: Arc<Network>) {
+    pub async fn init_handler(&self, msg: Msg, net: Arc<Network>) {
         info!(
             id = self.id,
             session_id = msg.session_id,
@@ -138,11 +138,11 @@ impl Bracha {
                 msg_type = "ECHO",
                 "Broadcasting ECHO in response to INIT"
             );
-            Bracha::broadcast(&self, new_msg, parties).await;
+            Bracha::broadcast(&self, new_msg, net).await;
         }
     }
     /// Handles the "ECHO" message. If the threshold of echoes is met, a "READY" message is broadcast.
-    pub async fn echo_handler(&self, msg: Msg, parties: Arc<Network>) {
+    pub async fn echo_handler(&self, msg: Msg, net: Arc<Network>) {
         info!(
             id = self.id,
             session_id = msg.session_id,
@@ -196,7 +196,7 @@ impl Bracha {
                         msg_type = "READY",
                         "Broadcasting READY after ECHO threshold met"
                     );
-                    Bracha::broadcast(&self, new_msg, parties.clone()).await; // Broadcast the READY message.
+                    Bracha::broadcast(&self, new_msg, net.clone()).await; // Broadcast the READY message.
                 }
                 // If ECHO hasn't been sent yet, broadcast the ECHO message.
                 if !store.echo {
@@ -216,13 +216,13 @@ impl Bracha {
                         "Re-broadcasting ECHO due to threshold"
                     );
 
-                    Bracha::broadcast(&self, new_msg, parties).await;
+                    Bracha::broadcast(&self, new_msg, net).await;
                 }
             }
         }
     }
     /// Handles the "READY" message. If the threshold is met, the session ends and the output is stored.
-    pub async fn ready_handler(&self, msg: Msg, parties: Arc<Network>) {
+    pub async fn ready_handler(&self, msg: Msg, net: Arc<Network>) {
         info!(
             id = self.id,
             session_id = msg.session_id,
@@ -277,7 +277,7 @@ impl Bracha {
                         msg_type = "READY",
                         "Broadcasting READY after t+1 threshold"
                     );
-                    Bracha::broadcast(&self, new_msg, parties.clone()).await;
+                    Bracha::broadcast(&self, new_msg, net.clone()).await;
                 }
                 // If ECHO hasn't been sent yet, broadcast it along with READY.
                 if !store.echo {
@@ -296,7 +296,7 @@ impl Bracha {
                         msg_type = "ECHO",
                         "Broadcasting ECHO along with READY"
                     );
-                    Bracha::broadcast(&self, new_msg, parties).await;
+                    Bracha::broadcast(&self, new_msg, net).await;
                 }
             } else if count >= 2 * self.t + 1 {
                 // If consensus is reached, mark the session as ended and store the output.
@@ -314,6 +314,9 @@ impl Bracha {
 }
 
 ///--------------------------AVID RBC--------------------------
+/// Protocol can be found here :
+/// https://homes.cs.washington.edu/~tessaro/papers/dds.pdf
+///
 #[derive(Clone)]
 pub struct Avid {
     pub id: u32,                                                //Initiators ID
@@ -323,7 +326,7 @@ pub struct Avid {
     pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AvidStore>>>>>, // <- wrap only this in a lock //Sessionid => store
 }
 impl RBC for Avid {
-    /// Creates a new Bracha instance
+    /// Creates a new Avid instance with the given parameters.
     fn new(id: u32, n: u32, t: u32, k: u32) -> Self {
         Avid {
             id,
@@ -333,33 +336,39 @@ impl RBC for Avid {
             store: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-    async fn process(&self, msg: Msg, parties: Arc<Network>) {
+    /// Processes incoming messages based on their type.
+    async fn process(&self, msg: Msg, net: Arc<Network>) {
         match MsgTypeAvid::from(msg.msg_type.clone()) {
-            MsgTypeAvid::Init => self.init_handler(msg, parties).await,
-            MsgTypeAvid::Echo => self.echo_handler(msg, parties).await,
-            MsgTypeAvid::Ready => self.ready_handler(msg, parties).await,
+            MsgTypeAvid::Send => self.send_handler(msg, net).await,
+            MsgTypeAvid::Echo => self.echo_handler(msg, net).await,
+            MsgTypeAvid::Ready => self.ready_handler(msg, net).await,
             MsgTypeAvid::Unknown(t) => {
                 eprintln!("Avid: Unknown message type: {}", t);
             }
         }
     }
+    /// Broadcasts a message to all parties in the network.
     async fn broadcast(&self, msg: Msg, net: Arc<Network>) {
         for sender in &net.senders {
             let _ = sender.send(msg.clone()).await;
         }
     }
+    /// Send a message to a party in the network.
     async fn send(&self, msg: Msg, net: Arc<Network>, recv: u32) {
         let _ = net.senders[recv as usize].send(msg).await;
     }
-    async fn run_party(&self, receiver: &mut Receiver<Msg>, parties: Arc<Network>) {
+    /// Runs the party logic, continuously receiving and processing messages.
+    async fn run_party(&self, receiver: &mut Receiver<Msg>, net: Arc<Network>) {
         while let Some(msg) = receiver.recv().await {
-            self.process(msg, parties.clone()).await;
+            self.process(msg, net.clone()).await;
         }
     }
 }
 
 impl Avid {
     /// Handlers
+
+    ///This is the initial broadcast message in the Avid protocol.
     pub async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
         info!(
             id = self.id,
@@ -368,44 +377,62 @@ impl Avid {
             "Sending INIT message for AVID"
         );
 
-        let shards = encode_rs(payload.clone(), self.k as usize, (self.n - self.k) as usize);
+        //Generating shards for the message to be broadcasted, here we are using Reed Solomon erasure coding
+        let shards_result = encode_rs(payload.clone(), self.k as usize, (self.n - self.k) as usize);
+        let shards = match shards_result {
+            // Handle potential error from encoding
+            Ok(shards) => shards,
+            Err(e) => {
+                error!(
+                    id = self.id,
+                    session_id = session_id,
+                    error = %e,
+                    "Error while generating shards at Init"
+                );
+                return;
+            }
+        };
+        //Generating the merkle tree out of the shards
         let tree = gen_merkletree(shards.clone());
 
         let root = match tree.root() {
             Some(r) => r,
             None => {
-                eprintln!("Error: Merkle tree root not found");
+                error!("Merkle tree root not found for session: {}", session_id);
                 return;
             }
         };
 
+        // Generating fingerprint for each server and sending it to them along with root and respective shard
         for i in 0..self.n {
-            let fingerprint = tree.proof(&[i as usize]).to_bytes();
+            let i_usize = i as usize;
+            let fingerprint = tree.proof(&[i_usize]).to_bytes();
             let mut fp = Vec::with_capacity(root.len() + fingerprint.len());
             fp.extend_from_slice(&root);
             fp.extend_from_slice(&fingerprint);
 
-            let shard = shards[i as usize].clone();
-
+            let shard = shards[i_usize].clone();
+            // Create an SEND message with the given fingerprint,root,shard and session ID.
             let msg = Msg::new(
                 self.id,
                 session_id,
                 shard,
-                fp,
-                "INIT".to_string(),
+                fp, // [root||fingerprint]
+                "SEND".to_string(),
                 payload.len(),
             );
 
             self.send(msg, net.clone(), i).await;
         }
     }
-    pub async fn init_handler(&self, msg: Msg, net: Arc<Network>) {
+    /// Handles the "SEND" message. Responds by broadcasting an "ECHO" message if necessary.
+    pub async fn send_handler(&self, msg: Msg, net: Arc<Network>) {
         info!(
             id = self.id,
             session_id = msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
-            "Handling INIT message"
+            "Handling SEND message"
         );
 
         // Lock the session store to update the session state.
@@ -423,36 +450,51 @@ impl Avid {
 
         // Only broadcast the ECHO if it hasn't already been sent.
         if !store.echo {
+            //Verify the merkle path(fingerprint) against shared root for the given shard
             match verify_merkle(self.id, self.n, msg.proof.clone(), msg.payload.clone()) {
                 Ok(true) => {
                     //Create echo message
                     let msg = Msg::new(
                         self.id,
                         msg.session_id,
-                        msg.payload.clone(),
+                        msg.payload,
                         msg.proof,
                         "ECHO".to_string(),
                         msg.msg_len,
                     );
-                    store.mark_echo(); // Mark that ECHO has been sent.
+                    store.mark_echo(); // Mark that ECHO has been sent to avoid resending it
                     info!(
                         id = self.id,
                         session_id = msg.session_id,
                         msg_type = "ECHO",
-                        "Sending ECHO in response to INIT"
+                        "Sending ECHO in response to SEND"
                     );
-                    //Send message
+                    //Send message to every party
                     Avid::broadcast(&self, msg, net).await;
                 }
                 Ok(false) => {
-                    eprintln!("Verification failed.");
+                    error!(
+                        id = self.id,
+                        session_id = msg.session_id,
+                        sender = msg.sender_id,
+                        "Merkle proof verification failed on SEND message"
+                    );
+                    return;
                 }
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    error!(
+                        id = self.id,
+                        session_id = msg.session_id,
+                        sender = msg.sender_id,
+                        error = %e,
+                        "Error during Merkle proof verification"
+                    );
+                    return;
                 }
             };
         }
     }
+    /// Handles the "ECHO" message. Might broadcast "READY" message .
     pub async fn echo_handler(&self, msg: Msg, net: Arc<Network>) {
         info!(
             id = self.id,
@@ -485,6 +527,9 @@ impl Avid {
         }
         // If this sender has not already sent an ECHO, process it.
         if !store.has_echo(msg.sender_id) {
+            let root = &msg.proof[0..32];
+            let proof_bytes = &msg.proof[32..];
+
             //Verify merkle proof
             match verify_merkle(
                 msg.sender_id,
@@ -494,114 +539,47 @@ impl Avid {
             ) {
                 Ok(true) => {
                     //Store fingerprint and shard
-                    store.insert_shard(
-                        msg.proof[0..32].to_vec(),
-                        msg.sender_id,
-                        msg.payload.clone(),
-                    );
-                    store.insert_fingerprint(
-                        msg.proof[0..32].to_vec(),
-                        msg.sender_id,
-                        msg.proof[32..].to_vec(),
-                    );
+                    store.insert_shard(root.to_vec(), msg.sender_id, msg.payload.clone());
+                    store.insert_fingerprint(root.to_vec(), msg.sender_id, proof_bytes.to_vec());
                     //Increment echo count
-                    store.increment_echo(&msg.proof[0..32].to_vec());
+                    store.increment_echo(root);
                     // Mark this sender as having sent an ECHO.
                     store.set_echo_sent(msg.sender_id);
 
-                    if store.get_echo_count(&msg.proof[0..32])
-                        == u32::max((self.n + self.t + 2) / 2, self.k) //compact way to compute ceil((n + t + 1) / 2) using integer arithmetic
-                        && store.get_ready_count(&msg.proof[0..32]) < self.k
-                    {
-                        let shards = decode_rs(
-                            store.get_shards_for_root(&msg.proof[0..32].to_vec()),
-                            self.k as usize,
-                            (self.n - self.k) as usize,
-                        );
-                        let payload = shards[self.id as usize].clone();
-                        let mut fingerprint: Vec<u8> = Vec::new();
-                        fingerprint.extend(msg.proof[0..32].to_vec());
-
-                        match generate_merkle_proofs_map(shards.clone(), self.n as usize) {
-                            //
-                            Ok(proof_list) => {
-                                //Get fingerprint for self, for creating message later
-                                let p = proof_list
-                                    .get(&(self.id as usize))
-                                    .cloned()
-                                    .unwrap_or_else(|| {
-                                        tracing::warn!(index = self.id, "Missing Merkle proof");
-                                        Vec::new()
-                                    });
-                                fingerprint.extend(p);
-                                //
-                                for (id, proof) in proof_list {
-                                    let mut root_fp = msg.proof[0..32].to_vec();
-                                    root_fp.extend(proof);
-                                    match verify_merkle(
-                                        id as u32,
-                                        self.n,
-                                        root_fp,
-                                        shards[id as usize].clone(),
-                                    ) {
-                                        Ok(true) => {
-                                            continue;
-                                        }
-                                        Ok(false) => {
-                                            tracing::error!(
-                                                    id = self.id,
-                                                    msg.session_id,
-                                                    "Aborting ECHO handler process due to Merkle proof generation failure"
-                                                );
-                                            return;
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                id = self.id,
-                                                msg.session_id,
-                                                error = %e,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    id = self.id,
-                                    msg.session_id,
-                                    error = %e,
-                                );
-                            }
-                        }
-
-                        //Create ready message
-                        let msg = Msg::new(
-                            self.id,
-                            msg.session_id,
-                            payload,
-                            fingerprint,
-                            "READY".to_string(),
-                            msg.msg_len,
-                        );
-                        info!(
-                            id = self.id,
-                            session_id = msg.session_id,
-                            msg_type = "READY",
-                            "Sending READY in response to ECHO"
-                        );
-                        //Send message
-                        Avid::broadcast(&self, msg, net).await;
+                    let echo_count = store.get_echo_count(root);
+                    let ready_count = store.get_ready_count(root);
+                    //compact way to compute ceil((n + t + 1) / 2) using integer arithmetic
+                    let threshold = u32::max((self.n + self.t + 2) / 2, self.k);
+                    // READY broadcast logic
+                    if echo_count == threshold && ready_count < self.k {
+                        //Send ready logic
+                        let shards_map = store.get_shards_for_root(&root.to_vec());
+                        self.send_ready(msg, shards_map, net).await;
                     }
                 }
                 Ok(false) => {
-                    eprintln!("Verification failed.");
+                    error!(
+                        id = self.id,
+                        session_id = msg.session_id,
+                        sender = msg.sender_id,
+                        "Merkle verification failed for ECHO"
+                    );
+                    return;
                 }
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    error!(
+                        id = self.id,
+                        session_id = msg.session_id,
+                        sender = msg.sender_id,
+                        error = %e,
+                        "Merkle verification threw error"
+                    );
+                    return;
                 }
             }
         }
     }
+    /// Handles the "READY" message. If the threshold is met, the session ends and the output is stored.
     pub async fn ready_handler(&self, msg: Msg, net: Arc<Network>) {
         info!(
             id = self.id,
@@ -634,6 +612,9 @@ impl Avid {
         }
         // If this sender has not already sent an READY, process it.
         if !store.has_ready(msg.sender_id) {
+            let root = &msg.proof[0..32];
+            let proof_bytes = &msg.proof[32..];
+
             //Verify merkle proof
             match verify_merkle(
                 msg.sender_id,
@@ -643,114 +624,68 @@ impl Avid {
             ) {
                 Ok(true) => {
                     //Store fingerprint and shard
-                    store.insert_shard(
-                        msg.proof[0..32].to_vec(),
-                        msg.sender_id,
-                        msg.payload.clone(),
-                    );
+                    store.insert_shard(root.to_vec(), msg.sender_id, msg.payload.clone());
                     store.insert_fingerprint(
                         msg.proof[0..32].to_vec(),
                         msg.sender_id,
-                        msg.proof[32..].to_vec(),
+                        proof_bytes.to_vec(),
                     );
                     //Increment ready count
-                    store.increment_ready(&msg.proof[0..32].to_vec());
+                    store.increment_ready(root);
                     // Mark this sender as having sent an READY.
                     store.set_ready_sent(msg.sender_id);
 
-                    if store.get_echo_count(&msg.proof[0..32])
-                        < u32::max((self.n + self.t + 2) / 2, self.k) //compact way to compute ceil((n + t + 1) / 2) using integer arithmetic
-                        && store.get_ready_count(&msg.proof[0..32]) == self.k
-                    {
-                        let shards = decode_rs(
-                            store.get_shards_for_root(&msg.proof[0..32].to_vec()),
+                    let echo_count = store.get_echo_count(root);
+                    let ready_count = store.get_ready_count(root);
+                    //compact way to compute ceil((n + t + 1) / 2) using integer arithmetic
+                    let threshold = u32::max((self.n + self.t + 2) / 2, self.k);
+
+                    // READY broadcast logic
+                    if echo_count < threshold && ready_count == self.k {
+                        //Send ready logic
+                        let shards_map = store.get_shards_for_root(&root.to_vec());
+                        self.send_ready(msg.clone(), shards_map, net).await;
+                    }
+
+                    // Final consensus stage: enough READY messages to reconstruct
+                    if ready_count == (self.k + self.t) {
+                        let shards_result = decode_rs(
+                            store.get_shards_for_root(&root.to_vec()),
                             self.k as usize,
                             (self.n - self.k) as usize,
                         );
-                        let payload = shards[self.id as usize].clone();
-                        let mut fingerprint: Vec<u8> = Vec::new();
-                        fingerprint.extend(msg.proof[0..32].to_vec());
-
-                        match generate_merkle_proofs_map(shards.clone(), self.n as usize) {
-                            //
-                            Ok(proof_list) => {
-                                //Get fingerprint for self, for creating message later
-                                let p = proof_list
-                                    .get(&(self.id as usize))
-                                    .cloned()
-                                    .unwrap_or_else(|| {
-                                        tracing::warn!(index = self.id, "Missing Merkle proof");
-                                        Vec::new()
-                                    });
-                                fingerprint.extend(p);
-                                //
-                                for (id, proof) in proof_list {
-                                    let mut root_fp = msg.proof[0..32].to_vec();
-                                    root_fp.extend(proof);
-                                    match verify_merkle(
-                                        id as u32,
-                                        self.n,
-                                        root_fp,
-                                        shards[id as usize].clone(),
-                                    ) {
-                                        Ok(true) => {
-                                            continue;
-                                        }
-                                        Ok(false) => {
-                                            tracing::error!(
-                                                    id = self.id,
-                                                    msg.session_id,
-                                                    "Aborting READY handler process due to Merkle proof generation failure"
-                                                );
-                                            return;
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                id = self.id,
-                                                msg.session_id,
-                                                error = %e,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
+                        let shards = match shards_result {
+                            // Handle potential error from decoding
+                            Ok(shards) => shards,
                             Err(e) => {
-                                tracing::error!(
+                                error!(
                                     id = self.id,
-                                    msg.session_id,
+                                    session_id = msg.session_id,
                                     error = %e,
+                                    "Error while decoding shards at ready handler"
                                 );
+                                return;
                             }
-                        }
+                        };
+                        //Reconstruct the original message to be broadcasted
+                        let output_result = reconstruct_payload(shards, msg.msg_len, self.k as usize);
+                        let output = match output_result {
+                            // Handle potential error from reconstructing
+                            Ok(output) => output,
+                            Err(e) => {
+                                error!(
+                                    id = self.id,
+                                    session_id = msg.session_id,
+                                    error = %e,
+                                    "Error while reconstructing payload "
+                                );
+                                return;
+                            }
+                        };
 
-                        //Create ready message
-                        let msg = Msg::new(
-                            self.id,
-                            msg.session_id,
-                            payload,
-                            fingerprint,
-                            "READY".to_string(),
-                            msg.msg_len,
-                        );
-                        info!(
-                            id = self.id,
-                            session_id = msg.session_id,
-                            msg_type = "READY",
-                            "Sending READY in response to READY"
-                        );
-                        //Send message
-                        Avid::broadcast(&self, msg, net).await;
-                    } else if store.get_ready_count(&msg.proof[0..32]) == (self.k + self.t) {
-                        let shards = decode_rs(
-                            store.get_shards_for_root(&msg.proof[0..32].to_vec()),
-                            self.k as usize,
-                            (self.n - self.k) as usize,
-                        );
+                        store.mark_ended(); //Terminate broadcast
+                        store.set_output(output.clone()); //store the output
 
-                        let output = reconstruct_payload(shards, msg.msg_len, self.k as usize);
-
-                        store.mark_ended();
-                        store.set_output(output.clone());
                         info!(
                             id = self.id,
                             session_id = msg.session_id,
@@ -760,13 +695,120 @@ impl Avid {
                     }
                 }
                 Ok(false) => {
-                    eprintln!("Verification failed.");
+                    error!(
+                        id = self.id,
+                        session_id = msg.session_id,
+                        sender = msg.sender_id,
+                        "Merkle verification failed in READY handler"
+                    );
+                    return;
                 }
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    error!(
+                        id = self.id,
+                        session_id = msg.session_id,
+                        sender = msg.sender_id,
+                        error = %e,
+                        "Error during Merkle verification in READY handler"
+                    );
+                    return;
                 }
             }
         }
+    }
+    //This the logic for sending a READY message in both the echo and ready handler
+    async fn send_ready(&self, msg: Msg, shards_map: HashMap<u32, Vec<u8>>, net: Arc<Network>) {
+        let root = &msg.proof[0..32];
+        let handler_type = msg.msg_type;
+        // Reconstruct all shards from existing shards
+        let shards_result = decode_rs(shards_map, self.k as usize, (self.n - self.k) as usize);
+        let shards = match shards_result {
+            // Handle potential error from decoding
+            Ok(shards) => shards,
+            Err(e) => {
+                error!(
+                    id = self.id,
+                    session_id = msg.session_id,
+                    error = %e,
+                    "Error while decoding shards at {handler_type} handler"
+                );
+                return;
+            }
+        };
+        //Setting up payload and fingerprint for creating a message later
+        let payload = shards[self.id as usize].clone();
+        let mut fingerprint = root.to_vec();
+
+        // When a server reconstructs a shard, it also reconstructs the corresponding
+        // hashes on the path from j to the root, and uses them for later verification
+        match generate_merkle_proofs_map(shards.clone(), self.n as usize) {
+            Ok(proof_map) => {
+                // Get fingerprint for self, for creating message later
+                let self_proof = proof_map
+                    .get(&(self.id as usize))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        tracing::warn!(index = self.id, "Missing Merkle proof");
+                        Vec::new()
+                    });
+                fingerprint.extend(self_proof);
+
+                // Verify each proof per shard reconstructed
+                for (id, proof) in proof_map {
+                    let mut fp = root.to_vec();
+                    fp.extend(proof);
+
+                    match verify_merkle(id as u32, self.n, fp, shards[id as usize].clone()) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            error!(
+                                id = self.id,
+                                session_id = msg.session_id,
+                                "Merkle proof generation failed in {handler_type} handler. Aborting."
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            error!(
+                                id = self.id,
+                                session_id = msg.session_id,
+                                error = %e,
+                                "Error during Merkle verification in {handler_type} handler"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!(
+                    id = self.id,
+                    session_id = msg.session_id,
+                    error = %e,
+                    "Failed to generate Merkle proof map in {handler_type} handler"
+                );
+                return;
+            }
+        }
+
+        // Create ready message
+        let ready_msg = Msg::new(
+            self.id,
+            msg.session_id,
+            payload,
+            fingerprint,
+            "READY".to_string(),
+            msg.msg_len,
+        );
+        info!(
+            id = self.id,
+            session_id = msg.session_id,
+            msg_type = "READY",
+            "Sending READY in response to a {handler_type}"
+        );
+
+        // Send message
+        Avid::broadcast(self, ready_msg, net).await;
     }
 }
 

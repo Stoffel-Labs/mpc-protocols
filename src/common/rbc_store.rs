@@ -5,7 +5,7 @@ use std::collections::HashMap;
 pub struct Msg {
     pub sender_id: u32,   // ID of the sender node
     pub session_id: u32,  // Unique session ID for each broadcast instance
-    pub payload: Vec<u8>, // Actual data being broadcast (e.g., bytes of a secret or message)
+    pub payload: Vec<u8>, // Actual data being broadcasted (e.g., bytes of a secret or message)
     pub proof: Vec<u8>,   // Proofs related to the message shared
     pub msg_type: String, // Type of message like INIT, ECHO, or READY
     pub msg_len: usize,   // length of the original message
@@ -139,9 +139,10 @@ impl BrachaStore {
 }
 
 ///--------------------------AVID RBC--------------------------
+/// Enum to interpret message types in AVID's protocol.
 #[derive(Debug, Clone)]
 pub enum MsgTypeAvid {
-    Init,
+    Send,
     Echo,
     Ready,
     Unknown(String),
@@ -150,7 +151,7 @@ pub enum MsgTypeAvid {
 impl From<String> for MsgTypeAvid {
     fn from(s: String) -> Self {
         match s.as_str() {
-            "INIT" => MsgTypeAvid::Init,
+            "SEND" => MsgTypeAvid::Send,
             "ECHO" => MsgTypeAvid::Echo,
             "READY" => MsgTypeAvid::Ready,
             _ => MsgTypeAvid::Unknown(s),
@@ -158,18 +159,18 @@ impl From<String> for MsgTypeAvid {
     }
 }
 
-///Storage of message info for Avid
+/// Stores the internal state for each RBC session at a party.
 #[derive(Default)]
 pub struct AvidStore {
-    pub shards: HashMap<Vec<u8>, HashMap<u32, Vec<u8>>>, // Root => (id => Shard)
-    pub fingerprint: HashMap<Vec<u8>, HashMap<u32, Vec<u8>>>, // Root => (id =>fingerprint)
-    pub echo_senders: HashMap<u32, bool>,                //senders => yes or no
-    pub ready_senders: HashMap<u32, bool>,
+    pub shards: HashMap<Vec<u8>, HashMap<u32, Vec<u8>>>, // Merkle root → (shard ID → shard data).
+    pub fingerprint: HashMap<Vec<u8>, HashMap<u32, Vec<u8>>>, // Merkle root → (shard ID → Merkle proof/fingerprint).
+    pub echo_senders: HashMap<u32, bool>, // Which parties sent ECHO (sender_id -> true)
+    pub ready_senders: HashMap<u32, bool>, // Which parties sent READY (sender_id -> true)
     pub echo_count: HashMap<Vec<u8>, u32>, // Count of ECHO messages per root
     pub ready_count: HashMap<Vec<u8>, u32>, // Count of READY messages per root
-    pub ended: bool,
-    pub echo: bool,  //Sent or not
-    pub output: Vec<u8>,
+    pub ended: bool,                      // True if consensus is reached and protocol ended
+    pub echo: bool,                       // True if this party already sent an ECHO
+    pub output: Vec<u8>,                  // Agreed value after consensus
 }
 impl AvidStore {
     /// Initializes an empty session store.
@@ -202,15 +203,11 @@ impl AvidStore {
     pub fn set_ready_sent(&mut self, node_id: u32) {
         self.ready_senders.insert(node_id, true);
     }
-    /// Sets echo flag to true
-    pub fn mark_echo(&mut self) {
-        self.echo = true;
-    }
-    /// Increments echo count for a given message
+    /// Increments echo count for a given root
     pub fn increment_echo(&mut self, root: &[u8]) {
         *self.echo_count.entry(root.to_vec()).or_insert(0) += 1;
     }
-    /// Increments ready count for a given message
+    /// Increments ready count for a given root
     pub fn increment_ready(&mut self, root: &[u8]) {
         *self.ready_count.entry(root.to_vec()).or_insert(0) += 1;
     }
@@ -221,6 +218,10 @@ impl AvidStore {
     /// Gets ready count for a root
     pub fn get_ready_count(&self, root: &[u8]) -> u32 {
         *self.ready_count.get(root).unwrap_or(&0)
+    }
+    /// Sets echo flag to true
+    pub fn mark_echo(&mut self) {
+        self.echo = true;
     }
     /// Sets ended flag to true
     pub fn mark_ended(&mut self) {
@@ -239,14 +240,14 @@ impl AvidStore {
             .insert(sender_id, shard);
     }
 
-    /// Inserts proof data for a given root and sender ID
+    /// Inserts fingerprint/merkle proof  for a given root and sender ID
     pub fn insert_fingerprint(&mut self, root: Vec<u8>, sender_id: u32, proof: Vec<u8>) {
         self.fingerprint
             .entry(root)
             .or_default()
             .insert(sender_id, proof);
     }
-
+    /// Returns the set of shards associated with a given Merkle root.
     pub fn get_shards_for_root(&self, root: &Vec<u8>) -> HashMap<u32, Vec<u8>> {
         self.shards.get(root).cloned().unwrap_or_else(HashMap::new)
     }
