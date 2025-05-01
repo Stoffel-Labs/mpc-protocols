@@ -31,13 +31,15 @@ trait Share {
 trait RBC {
 
     /// Creates a new instance
-    fn new(id: u32, n: u32, t: u32) -> Self;
+    fn new(id: u32, n: u32, t: u32,k:u32) -> Self;
     
     ///Processing messages sent by other nodes based on their type
     async fn process(&self,msg:Msg ,parties: Arc<Network>); 
 
     /// Broadcast messages to other nodes.
     async fn broadcast(&self,msg: Msg, parties: Arc<Network>);
+    /// Send to another node
+    async fn send(&self,msg: Msg, parties: Arc<Network>, recv : u32);
     ///Listen to messages
     async fn run_party(&self, receiver: &mut Receiver<Msg>, parties: Arc<Network>);
 }
