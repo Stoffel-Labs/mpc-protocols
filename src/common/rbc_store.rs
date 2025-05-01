@@ -6,17 +6,28 @@ pub struct Msg {
     pub sender_id: u32,   // ID of the sender node
     pub session_id: u32,  // Unique session ID for each broadcast instance
     pub payload: Vec<u8>, // Actual data being broadcast (e.g., bytes of a secret or message)
+    pub proof: Vec<u8>,   // Proofs related to the message shared
     pub msg_type: String, // Type of message like INIT, ECHO, or READY
+    pub msg_len: usize,   // length of the original message
 }
 
 impl Msg {
     /// Constructor to create a new message.
-    pub fn new(sender_id: u32, session_id: u32, payload: Vec<u8>, msg_type: String) -> Self {
+    pub fn new(
+        sender_id: u32,
+        session_id: u32,
+        payload: Vec<u8>,
+        proof: Vec<u8>,
+        msg_type: String,
+        msg_len: usize,
+    ) -> Self {
         Msg {
             sender_id,
             session_id,
             payload,
-            msg_type
+            proof,
+            msg_type,
+            msg_len,
         }
     }
 }
@@ -124,5 +135,119 @@ impl BrachaStore {
     /// Sets the output value.
     pub fn set_output(&mut self, value: Vec<u8>) {
         self.output = value;
+    }
+}
+
+///--------------------------AVID RBC--------------------------
+#[derive(Debug, Clone)]
+pub enum MsgTypeAvid {
+    Init,
+    Echo,
+    Ready,
+    Unknown(String),
+}
+
+impl From<String> for MsgTypeAvid {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "INIT" => MsgTypeAvid::Init,
+            "ECHO" => MsgTypeAvid::Echo,
+            "READY" => MsgTypeAvid::Ready,
+            _ => MsgTypeAvid::Unknown(s),
+        }
+    }
+}
+
+///Storage of message info for Avid
+#[derive(Default)]
+pub struct AvidStore {
+    pub shards: HashMap<Vec<u8>, HashMap<u32, Vec<u8>>>, // Root => (id => Shard)
+    pub fingerprint: HashMap<Vec<u8>, HashMap<u32, Vec<u8>>>, // Root => (id =>fingerprint)
+    pub echo_senders: HashMap<u32, bool>,                //senders => yes or no
+    pub ready_senders: HashMap<u32, bool>,
+    pub echo_count: HashMap<Vec<u8>, u32>, // Count of ECHO messages per root
+    pub ready_count: HashMap<Vec<u8>, u32>, // Count of READY messages per root
+    pub ended: bool,
+    pub echo: bool,  //Sent or not
+    pub output: Vec<u8>,
+}
+impl AvidStore {
+    /// Initializes an empty session store.
+    pub fn new() -> Self {
+        AvidStore {
+            shards: HashMap::new(),
+            fingerprint: HashMap::new(),
+            echo_senders: HashMap::new(),
+            ready_senders: HashMap::new(),
+            echo_count: HashMap::new(),
+            ready_count: HashMap::new(),
+            ended: false,
+            echo: false,
+            output: Vec::new(),
+        }
+    }
+    /// Returns true if the given sender_id has sent an echo (i.e., is set to true in echo_senders).
+    pub fn has_echo(&self, sender_id: u32) -> bool {
+        self.echo_senders.get(&sender_id).copied().unwrap_or(false)
+    }
+    /// Returns true if the given sender_id has sent an ready (i.e., is set to true in ready_senders).
+    pub fn has_ready(&self, sender_id: u32) -> bool {
+        self.ready_senders.get(&sender_id).copied().unwrap_or(false)
+    }
+    /// Marks that an echo was sent by a given node
+    pub fn set_echo_sent(&mut self, node_id: u32) {
+        self.echo_senders.insert(node_id, true);
+    }
+    /// Marks that an ready was sent by a given node
+    pub fn set_ready_sent(&mut self, node_id: u32) {
+        self.ready_senders.insert(node_id, true);
+    }
+    /// Sets echo flag to true
+    pub fn mark_echo(&mut self) {
+        self.echo = true;
+    }
+    /// Increments echo count for a given message
+    pub fn increment_echo(&mut self, root: &[u8]) {
+        *self.echo_count.entry(root.to_vec()).or_insert(0) += 1;
+    }
+    /// Increments ready count for a given message
+    pub fn increment_ready(&mut self, root: &[u8]) {
+        *self.ready_count.entry(root.to_vec()).or_insert(0) += 1;
+    }
+    /// Gets echo count for a root
+    pub fn get_echo_count(&self, root: &[u8]) -> u32 {
+        *self.echo_count.get(root).unwrap_or(&0)
+    }
+    /// Gets ready count for a root
+    pub fn get_ready_count(&self, root: &[u8]) -> u32 {
+        *self.ready_count.get(root).unwrap_or(&0)
+    }
+    /// Sets ended flag to true
+    pub fn mark_ended(&mut self) {
+        self.ended = true;
+    }
+    /// Sets the output value.
+    pub fn set_output(&mut self, value: Vec<u8>) {
+        self.output = value;
+    }
+
+    /// Inserts a shard for a given root and sender ID
+    pub fn insert_shard(&mut self, root: Vec<u8>, sender_id: u32, shard: Vec<u8>) {
+        self.shards
+            .entry(root)
+            .or_default()
+            .insert(sender_id, shard);
+    }
+
+    /// Inserts proof data for a given root and sender ID
+    pub fn insert_fingerprint(&mut self, root: Vec<u8>, sender_id: u32, proof: Vec<u8>) {
+        self.fingerprint
+            .entry(root)
+            .or_default()
+            .insert(sender_id, proof);
+    }
+
+    pub fn get_shards_for_root(&self, root: &Vec<u8>) -> HashMap<u32, Vec<u8>> {
+        self.shards.get(root).cloned().unwrap_or_else(HashMap::new)
     }
 }

@@ -1,6 +1,7 @@
 /// This file contains more common reliable broadcast protocols used in MPC.
 /// You can reuse them in your own custom MPC protocol implementations.
 use super::rbc_store::*;
+use super::utils::*;
 use crate::RBC;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{
@@ -32,16 +33,18 @@ pub struct Bracha {
     pub id: u32,                                                  // The ID of the initiator
     pub n: u32, // Total number of parties in the network
     pub t: u32, // Number of allowed malicious parties
+    pub k: u32, //threshold (Not really used in Bracha)
     pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<BrachaStore>>>>>, // Stores the session state for each session
 }
 
 impl RBC for Bracha {
     /// Creates a new Bracha instance with the given parameters.
-    fn new(id: u32, n: u32, t: u32) -> Self {
+    fn new(id: u32, n: u32, t: u32, k: u32) -> Self {
         Bracha {
             id,
             n,
             t,
+            k,
             store: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -62,6 +65,10 @@ impl RBC for Bracha {
             let _ = sender.send(msg.clone()).await;
         }
     }
+    /// Send a message to a party in the network.
+    async fn send(&self, msg: Msg, net: Arc<Network>, recv: u32) {
+        let _ = net.senders[recv as usize].send(msg).await;
+    }
     /// Runs the party logic, continuously receiving and processing messages.
     async fn run_party(&self, receiver: &mut Receiver<Msg>, parties: Arc<Network>) {
         while let Some(msg) = receiver.recv().await {
@@ -75,7 +82,14 @@ impl Bracha {
     /// Handler for the "INIT" message type. This is the initial broadcast message in the Bracha protocol.
     pub async fn init(&self, payload: Vec<u8>, session_id: u32, parties: Arc<Network>) {
         // Create an INIT message with the given payload and session ID.
-        let msg = Msg::new(self.id, session_id, payload, "INIT".to_string());
+        let msg = Msg::new(
+            self.id,
+            session_id,
+            payload.clone(),
+            vec![],
+            "INIT".to_string(),
+            payload.len(),
+        );
         info!(
             id = self.id,
             session_id,
@@ -109,7 +123,14 @@ impl Bracha {
 
         // Only broadcast the ECHO if it hasn't already been sent.
         if !store.echo {
-            let new_msg = Msg::new(self.id, msg.session_id, msg.payload, "ECHO".to_string());
+            let new_msg = Msg::new(
+                self.id,
+                msg.session_id,
+                msg.payload.clone(),
+                vec![],
+                "ECHO".to_string(),
+                msg.payload.len(),
+            );
             store.mark_echo(); // Mark that ECHO has been sent.
             info!(
                 id = self.id,
@@ -165,7 +186,9 @@ impl Bracha {
                         self.id,
                         msg.session_id,
                         msg.payload.clone(),
+                        vec![],
                         "READY".to_string(),
+                        msg.payload.clone().len(),
                     );
                     info!(
                         id = self.id,
@@ -178,8 +201,14 @@ impl Bracha {
                 // If ECHO hasn't been sent yet, broadcast the ECHO message.
                 if !store.echo {
                     store.mark_echo(); // Mark ECHO as sent.
-                    let new_msg =
-                        Msg::new(self.id, msg.session_id, msg.payload, "ECHO".to_string());
+                    let new_msg = Msg::new(
+                        self.id,
+                        msg.session_id,
+                        msg.payload.clone(),
+                        vec![],
+                        "ECHO".to_string(),
+                        msg.payload.len(),
+                    );
                     info!(
                         id = self.id,
                         session_id = msg.session_id,
@@ -238,7 +267,9 @@ impl Bracha {
                         self.id,
                         msg.session_id,
                         msg.payload.clone(),
+                        vec![],
                         "READY".to_string(),
+                        msg.payload.clone().len(),
                     );
                     info!(
                         id = self.id,
@@ -251,8 +282,14 @@ impl Bracha {
                 // If ECHO hasn't been sent yet, broadcast it along with READY.
                 if !store.echo {
                     store.mark_echo(); // Mark ECHO as sent.
-                    let new_msg =
-                        Msg::new(self.id, msg.session_id, msg.payload, "ECHO".to_string());
+                    let new_msg = Msg::new(
+                        self.id,
+                        msg.session_id,
+                        msg.payload.clone(),
+                        vec![],
+                        "ECHO".to_string(),
+                        msg.payload.len(),
+                    );
                     info!(
                         id = self.id,
                         session_id = msg.session_id,
@@ -271,6 +308,463 @@ impl Bracha {
                     output = ?msg.payload,
                     "Consensus achieved; RBC instance ended"
                 );
+            }
+        }
+    }
+}
+
+///--------------------------AVID RBC--------------------------
+#[derive(Clone)]
+pub struct Avid {
+    pub id: u32,                                                //Initiators ID
+    pub n: u32,                                                 //Network size
+    pub t: u32,                                                 //No. of malicious parties
+    pub k: u32,                                                 //Threshold
+    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AvidStore>>>>>, // <- wrap only this in a lock //Sessionid => store
+}
+impl RBC for Avid {
+    /// Creates a new Bracha instance
+    fn new(id: u32, n: u32, t: u32, k: u32) -> Self {
+        Avid {
+            id,
+            n,
+            t,
+            k,
+            store: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+    async fn process(&self, msg: Msg, parties: Arc<Network>) {
+        match MsgTypeAvid::from(msg.msg_type.clone()) {
+            MsgTypeAvid::Init => self.init_handler(msg, parties).await,
+            MsgTypeAvid::Echo => self.echo_handler(msg, parties).await,
+            MsgTypeAvid::Ready => self.ready_handler(msg, parties).await,
+            MsgTypeAvid::Unknown(t) => {
+                eprintln!("Avid: Unknown message type: {}", t);
+            }
+        }
+    }
+    async fn broadcast(&self, msg: Msg, net: Arc<Network>) {
+        for sender in &net.senders {
+            let _ = sender.send(msg.clone()).await;
+        }
+    }
+    async fn send(&self, msg: Msg, net: Arc<Network>, recv: u32) {
+        let _ = net.senders[recv as usize].send(msg).await;
+    }
+    async fn run_party(&self, receiver: &mut Receiver<Msg>, parties: Arc<Network>) {
+        while let Some(msg) = receiver.recv().await {
+            self.process(msg, parties.clone()).await;
+        }
+    }
+}
+
+impl Avid {
+    /// Handlers
+    pub async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
+        info!(
+            id = self.id,
+            session_id,
+            msg_type = "INIT",
+            "Sending INIT message for AVID"
+        );
+
+        let shards = encode_rs(payload.clone(), self.k as usize, (self.n - self.k) as usize);
+        let tree = gen_merkletree(shards.clone());
+
+        let root = match tree.root() {
+            Some(r) => r,
+            None => {
+                eprintln!("Error: Merkle tree root not found");
+                return;
+            }
+        };
+
+        for i in 0..self.n {
+            let fingerprint = tree.proof(&[i as usize]).to_bytes();
+            let mut fp = Vec::with_capacity(root.len() + fingerprint.len());
+            fp.extend_from_slice(&root);
+            fp.extend_from_slice(&fingerprint);
+
+            let shard = shards[i as usize].clone();
+
+            let msg = Msg::new(
+                self.id,
+                session_id,
+                shard,
+                fp,
+                "INIT".to_string(),
+                payload.len(),
+            );
+
+            self.send(msg, net.clone(), i).await;
+        }
+    }
+    pub async fn init_handler(&self, msg: Msg, net: Arc<Network>) {
+        info!(
+            id = self.id,
+            session_id = msg.session_id,
+            sender = msg.sender_id,
+            msg_type = %msg.msg_type,
+            "Handling INIT message"
+        );
+
+        // Lock the session store to update the session state.
+        let session_store = {
+            let mut store = self.store.lock().await;
+
+            // Get or create the session state for the current session.
+            store
+                .entry(msg.session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
+                .clone()
+        };
+        // Lock the session-specific store to access or update the session state.
+        let mut store = session_store.lock().await;
+
+        // Only broadcast the ECHO if it hasn't already been sent.
+        if !store.echo {
+            match verify_merkle(self.id, self.n, msg.proof.clone(), msg.payload.clone()) {
+                Ok(true) => {
+                    //Create echo message
+                    let msg = Msg::new(
+                        self.id,
+                        msg.session_id,
+                        msg.payload.clone(),
+                        msg.proof,
+                        "ECHO".to_string(),
+                        msg.msg_len,
+                    );
+                    store.mark_echo(); // Mark that ECHO has been sent.
+                    info!(
+                        id = self.id,
+                        session_id = msg.session_id,
+                        msg_type = "ECHO",
+                        "Sending ECHO in response to INIT"
+                    );
+                    //Send message
+                    Avid::broadcast(&self, msg, net).await;
+                }
+                Ok(false) => {
+                    eprintln!("Verification failed.");
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                }
+            };
+        }
+    }
+    pub async fn echo_handler(&self, msg: Msg, net: Arc<Network>) {
+        info!(
+            id = self.id,
+            session_id = msg.session_id,
+            sender = msg.sender_id,
+            msg_type = %msg.msg_type,
+            "Handling ECHO message"
+        );
+        // Lock the session store to update the session state.
+        let session_store = {
+            let mut store = self.store.lock().await;
+
+            // Get or create the session state for the current session.
+            store
+                .entry(msg.session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
+                .clone()
+        };
+        // Lock the session-specific store to access or update the session state.
+        let mut store = session_store.lock().await;
+
+        // Ignore the message if the session has already ended.
+        if store.ended {
+            debug!(
+                id = self.id,
+                session_id = msg.session_id,
+                "Session already ended, ignoring ECHO"
+            );
+            return;
+        }
+        // If this sender has not already sent an ECHO, process it.
+        if !store.has_echo(msg.sender_id) {
+            //Verify merkle proof
+            match verify_merkle(
+                msg.sender_id,
+                self.n,
+                msg.proof.clone(),
+                msg.payload.clone(),
+            ) {
+                Ok(true) => {
+                    //Store fingerprint and shard
+                    store.insert_shard(
+                        msg.proof[0..32].to_vec(),
+                        msg.sender_id,
+                        msg.payload.clone(),
+                    );
+                    store.insert_fingerprint(
+                        msg.proof[0..32].to_vec(),
+                        msg.sender_id,
+                        msg.proof[32..].to_vec(),
+                    );
+                    //Increment echo count
+                    store.increment_echo(&msg.proof[0..32].to_vec());
+                    // Mark this sender as having sent an ECHO.
+                    store.set_echo_sent(msg.sender_id);
+
+                    if store.get_echo_count(&msg.proof[0..32])
+                        == u32::max((self.n + self.t + 2) / 2, self.k) //compact way to compute ceil((n + t + 1) / 2) using integer arithmetic
+                        && store.get_ready_count(&msg.proof[0..32]) < self.k
+                    {
+                        let shards = decode_rs(
+                            store.get_shards_for_root(&msg.proof[0..32].to_vec()),
+                            self.k as usize,
+                            (self.n - self.k) as usize,
+                        );
+                        let payload = shards[self.id as usize].clone();
+                        let mut fingerprint: Vec<u8> = Vec::new();
+                        fingerprint.extend(msg.proof[0..32].to_vec());
+
+                        match generate_merkle_proofs_map(shards.clone(), self.n as usize) {
+                            //
+                            Ok(proof_list) => {
+                                //Get fingerprint for self, for creating message later
+                                let p = proof_list
+                                    .get(&(self.id as usize))
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        tracing::warn!(index = self.id, "Missing Merkle proof");
+                                        Vec::new()
+                                    });
+                                fingerprint.extend(p);
+                                //
+                                for (id, proof) in proof_list {
+                                    let mut root_fp = msg.proof[0..32].to_vec();
+                                    root_fp.extend(proof);
+                                    match verify_merkle(
+                                        id as u32,
+                                        self.n,
+                                        root_fp,
+                                        shards[id as usize].clone(),
+                                    ) {
+                                        Ok(true) => {
+                                            continue;
+                                        }
+                                        Ok(false) => {
+                                            tracing::error!(
+                                                    id = self.id,
+                                                    msg.session_id,
+                                                    "Aborting ECHO handler process due to Merkle proof generation failure"
+                                                );
+                                            return;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                id = self.id,
+                                                msg.session_id,
+                                                error = %e,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    id = self.id,
+                                    msg.session_id,
+                                    error = %e,
+                                );
+                            }
+                        }
+
+                        //Create ready message
+                        let msg = Msg::new(
+                            self.id,
+                            msg.session_id,
+                            payload,
+                            fingerprint,
+                            "READY".to_string(),
+                            msg.msg_len,
+                        );
+                        info!(
+                            id = self.id,
+                            session_id = msg.session_id,
+                            msg_type = "READY",
+                            "Sending READY in response to ECHO"
+                        );
+                        //Send message
+                        Avid::broadcast(&self, msg, net).await;
+                    }
+                }
+                Ok(false) => {
+                    eprintln!("Verification failed.");
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                }
+            }
+        }
+    }
+    pub async fn ready_handler(&self, msg: Msg, net: Arc<Network>) {
+        info!(
+            id = self.id,
+            session_id = msg.session_id,
+            sender = msg.sender_id,
+            msg_type = %msg.msg_type,
+            "Handling READY message"
+        );
+        // Lock the session store to update the session state.
+        let session_store = {
+            let mut store = self.store.lock().await;
+
+            // Get or create the session state for the current session.
+            store
+                .entry(msg.session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
+                .clone()
+        };
+        // Lock the session-specific store to access or update the session state.
+        let mut store = session_store.lock().await;
+
+        // Ignore the message if the session has already ended.
+        if store.ended {
+            debug!(
+                id = self.id,
+                session_id = msg.session_id,
+                "Session already ended, ignoring READY"
+            );
+            return;
+        }
+        // If this sender has not already sent an READY, process it.
+        if !store.has_ready(msg.sender_id) {
+            //Verify merkle proof
+            match verify_merkle(
+                msg.sender_id,
+                self.n,
+                msg.proof.clone(),
+                msg.payload.clone(),
+            ) {
+                Ok(true) => {
+                    //Store fingerprint and shard
+                    store.insert_shard(
+                        msg.proof[0..32].to_vec(),
+                        msg.sender_id,
+                        msg.payload.clone(),
+                    );
+                    store.insert_fingerprint(
+                        msg.proof[0..32].to_vec(),
+                        msg.sender_id,
+                        msg.proof[32..].to_vec(),
+                    );
+                    //Increment ready count
+                    store.increment_ready(&msg.proof[0..32].to_vec());
+                    // Mark this sender as having sent an READY.
+                    store.set_ready_sent(msg.sender_id);
+
+                    if store.get_echo_count(&msg.proof[0..32])
+                        < u32::max((self.n + self.t + 2) / 2, self.k) //compact way to compute ceil((n + t + 1) / 2) using integer arithmetic
+                        && store.get_ready_count(&msg.proof[0..32]) == self.k
+                    {
+                        let shards = decode_rs(
+                            store.get_shards_for_root(&msg.proof[0..32].to_vec()),
+                            self.k as usize,
+                            (self.n - self.k) as usize,
+                        );
+                        let payload = shards[self.id as usize].clone();
+                        let mut fingerprint: Vec<u8> = Vec::new();
+                        fingerprint.extend(msg.proof[0..32].to_vec());
+
+                        match generate_merkle_proofs_map(shards.clone(), self.n as usize) {
+                            //
+                            Ok(proof_list) => {
+                                //Get fingerprint for self, for creating message later
+                                let p = proof_list
+                                    .get(&(self.id as usize))
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        tracing::warn!(index = self.id, "Missing Merkle proof");
+                                        Vec::new()
+                                    });
+                                fingerprint.extend(p);
+                                //
+                                for (id, proof) in proof_list {
+                                    let mut root_fp = msg.proof[0..32].to_vec();
+                                    root_fp.extend(proof);
+                                    match verify_merkle(
+                                        id as u32,
+                                        self.n,
+                                        root_fp,
+                                        shards[id as usize].clone(),
+                                    ) {
+                                        Ok(true) => {
+                                            continue;
+                                        }
+                                        Ok(false) => {
+                                            tracing::error!(
+                                                    id = self.id,
+                                                    msg.session_id,
+                                                    "Aborting READY handler process due to Merkle proof generation failure"
+                                                );
+                                            return;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                id = self.id,
+                                                msg.session_id,
+                                                error = %e,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    id = self.id,
+                                    msg.session_id,
+                                    error = %e,
+                                );
+                            }
+                        }
+
+                        //Create ready message
+                        let msg = Msg::new(
+                            self.id,
+                            msg.session_id,
+                            payload,
+                            fingerprint,
+                            "READY".to_string(),
+                            msg.msg_len,
+                        );
+                        info!(
+                            id = self.id,
+                            session_id = msg.session_id,
+                            msg_type = "READY",
+                            "Sending READY in response to READY"
+                        );
+                        //Send message
+                        Avid::broadcast(&self, msg, net).await;
+                    } else if store.get_ready_count(&msg.proof[0..32]) == (self.k + self.t) {
+                        let shards = decode_rs(
+                            store.get_shards_for_root(&msg.proof[0..32].to_vec()),
+                            self.k as usize,
+                            (self.n - self.k) as usize,
+                        );
+
+                        let output = reconstruct_payload(shards, msg.msg_len, self.k as usize);
+
+                        store.mark_ended();
+                        store.set_output(output.clone());
+                        info!(
+                            id = self.id,
+                            session_id = msg.session_id,
+                            output = ?output,
+                            "Consensus achieved; AVID instance ended"
+                        );
+                    }
+                }
+                Ok(false) => {
+                    eprintln!("Verification failed.");
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                }
             }
         }
     }
@@ -299,11 +793,12 @@ mod tests {
     async fn setup_parties(
         n: u32,
         t: u32,
+        k: u32,
         senders: Vec<mpsc::Sender<Msg>>,
     ) -> Vec<(Bracha, Arc<Network>)> {
         (0..n)
             .map(|i| {
-                let bracha = Bracha::new(i as u32, n, t); // Create a new Bracha instance for each party
+                let bracha = Bracha::new(i as u32, n, t, k); // Create a new Bracha instance for each party
                 let net = Arc::new(Network {
                     id: i as u32,
                     senders: senders.clone(), // Each party has the same senders
@@ -338,7 +833,7 @@ mod tests {
         let session_id = 12;
 
         let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties(n, t, senders).await;
+        let parties = setup_parties(n, t, t + 1, senders).await;
         spawn_party_runners(&parties, receivers).await;
 
         // Party 0 initiates broadcast
@@ -389,7 +884,7 @@ mod tests {
         ];
 
         let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties(n, t, senders).await;
+        let parties = setup_parties(n, t, t + 1, senders).await;
         spawn_party_runners(&parties, receivers).await;
 
         // Launch all sessions from party 0
@@ -437,7 +932,7 @@ mod tests {
         ];
 
         let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties(n, t, senders).await;
+        let parties = setup_parties(n, t, t + 1, senders).await;
         spawn_party_runners(&parties, receivers).await;
 
         // Each party initiates one session
@@ -480,13 +975,27 @@ mod tests {
         let payload = b"out-of-order".to_vec();
 
         let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties(n, t, senders.clone()).await;
+        let parties = setup_parties(n, t, t + 1, senders.clone()).await;
         spawn_party_runners(&parties, receivers).await;
 
         // Simulate sending READY before ECHO and INIT
         let sender_id = 1;
-        let ready_msg = Msg::new(sender_id, session_id, payload.clone(), "READY".to_string());
-        let echo_msg = Msg::new(sender_id, session_id, payload.clone(), "ECHO".to_string());
+        let ready_msg = Msg::new(
+            sender_id,
+            session_id,
+            payload.clone(),
+            vec![],
+            "READY".to_string(),
+            payload.clone().len(),
+        );
+        let echo_msg = Msg::new(
+            sender_id,
+            session_id,
+            payload.clone(),
+            vec![],
+            "ECHO".to_string(),
+            payload.len(),
+        );
 
         // Send READY first
         senders[2].send(ready_msg).await.unwrap();
