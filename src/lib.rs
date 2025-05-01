@@ -32,10 +32,10 @@ trait RBC {
 
     /// Creates a new instance
     fn new(id: u32, n: u32, t: u32,k:u32) -> Self;
-    
+    /// Required for initiating the broadcast 
+    async fn init(&self, payload: Vec<u8>, session_id: u32, parties: Arc<Network>);
     ///Processing messages sent by other nodes based on their type
     async fn process(&self,msg:Msg ,parties: Arc<Network>); 
-
     /// Broadcast messages to other nodes.
     async fn broadcast(&self,msg: Msg, parties: Arc<Network>);
     /// Send to another node
