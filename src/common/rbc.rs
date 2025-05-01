@@ -48,6 +48,25 @@ impl RBC for Bracha {
             store: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+    /// This is the initial broadcast message in the Bracha protocol.
+    async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
+        // Create an INIT message with the given payload and session ID.
+        let msg = Msg::new(
+            self.id,
+            session_id,
+            payload.clone(),
+            vec![],
+            "INIT".to_string(),
+            payload.len(),
+        );
+        info!(
+            id = self.id,
+            session_id,
+            msg_type = "INIT",
+            "Broadcasting INIT message"
+        );
+        Bracha::broadcast(&self, msg, net).await;
+    }
     /// Processes incoming messages based on their type.
     async fn process(&self, msg: Msg, net: Arc<Network>) {
         match MsgType::from(msg.msg_type.clone()) {
@@ -78,26 +97,6 @@ impl RBC for Bracha {
 }
 impl Bracha {
     /// Handlers
-
-    /// This is the initial broadcast message in the Bracha protocol.
-    pub async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
-        // Create an INIT message with the given payload and session ID.
-        let msg = Msg::new(
-            self.id,
-            session_id,
-            payload.clone(),
-            vec![],
-            "INIT".to_string(),
-            payload.len(),
-        );
-        info!(
-            id = self.id,
-            session_id,
-            msg_type = "INIT",
-            "Broadcasting INIT message"
-        );
-        Bracha::broadcast(&self, msg, net).await;
-    }
     /// Handles the "INIT" message. Responds by broadcasting an "ECHO" message if necessary.
     pub async fn init_handler(&self, msg: Msg, net: Arc<Network>) {
         info!(
@@ -336,45 +335,13 @@ impl RBC for Avid {
             store: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-    /// Processes incoming messages based on their type.
-    async fn process(&self, msg: Msg, net: Arc<Network>) {
-        match MsgTypeAvid::from(msg.msg_type.clone()) {
-            MsgTypeAvid::Send => self.send_handler(msg, net).await,
-            MsgTypeAvid::Echo => self.echo_handler(msg, net).await,
-            MsgTypeAvid::Ready => self.ready_handler(msg, net).await,
-            MsgTypeAvid::Unknown(t) => {
-                eprintln!("Avid: Unknown message type: {}", t);
-            }
-        }
-    }
-    /// Broadcasts a message to all parties in the network.
-    async fn broadcast(&self, msg: Msg, net: Arc<Network>) {
-        for sender in &net.senders {
-            let _ = sender.send(msg.clone()).await;
-        }
-    }
-    /// Send a message to a party in the network.
-    async fn send(&self, msg: Msg, net: Arc<Network>, recv: u32) {
-        let _ = net.senders[recv as usize].send(msg).await;
-    }
-    /// Runs the party logic, continuously receiving and processing messages.
-    async fn run_party(&self, receiver: &mut Receiver<Msg>, net: Arc<Network>) {
-        while let Some(msg) = receiver.recv().await {
-            self.process(msg, net.clone()).await;
-        }
-    }
-}
-
-impl Avid {
-    /// Handlers
-
     ///This is the initial broadcast message in the Avid protocol.
-    pub async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
+    async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
         info!(
             id = self.id,
             session_id,
-            msg_type = "INIT",
-            "Sending INIT message for AVID"
+            msg_type = "SEND",
+            "Sending SEND message for AVID to all parties"
         );
 
         //Generating shards for the message to be broadcasted, here we are using Reed Solomon erasure coding
@@ -425,6 +392,38 @@ impl Avid {
             self.send(msg, net.clone(), i).await;
         }
     }
+    /// Processes incoming messages based on their type.
+    async fn process(&self, msg: Msg, net: Arc<Network>) {
+        match MsgTypeAvid::from(msg.msg_type.clone()) {
+            MsgTypeAvid::Send => self.send_handler(msg, net).await,
+            MsgTypeAvid::Echo => self.echo_handler(msg, net).await,
+            MsgTypeAvid::Ready => self.ready_handler(msg, net).await,
+            MsgTypeAvid::Unknown(t) => {
+                eprintln!("Avid: Unknown message type: {}", t);
+            }
+        }
+    }
+    /// Broadcasts a message to all parties in the network.
+    async fn broadcast(&self, msg: Msg, net: Arc<Network>) {
+        for sender in &net.senders {
+            let _ = sender.send(msg.clone()).await;
+        }
+    }
+    /// Send a message to a party in the network.
+    async fn send(&self, msg: Msg, net: Arc<Network>, recv: u32) {
+        let _ = net.senders[recv as usize].send(msg).await;
+    }
+    /// Runs the party logic, continuously receiving and processing messages.
+    async fn run_party(&self, receiver: &mut Receiver<Msg>, net: Arc<Network>) {
+        while let Some(msg) = receiver.recv().await {
+            self.process(msg, net.clone()).await;
+        }
+    }
+}
+
+impl Avid {
+    /// Handlers
+
     /// Handles the "SEND" message. Responds by broadcasting an "ECHO" message if necessary.
     pub async fn send_handler(&self, msg: Msg, net: Arc<Network>) {
         info!(
@@ -467,7 +466,7 @@ impl Avid {
                         id = self.id,
                         session_id = msg.session_id,
                         msg_type = "ECHO",
-                        "Sending ECHO in response to SEND"
+                        "Broadcasting ECHO in response to SEND"
                     );
                     //Send message to every party
                     Avid::broadcast(&self, msg, net).await;
@@ -668,7 +667,8 @@ impl Avid {
                             }
                         };
                         //Reconstruct the original message to be broadcasted
-                        let output_result = reconstruct_payload(shards, msg.msg_len, self.k as usize);
+                        let output_result =
+                            reconstruct_payload(shards, msg.msg_len, self.k as usize);
                         let output = match output_result {
                             // Handle potential error from reconstructing
                             Ok(output) => output,
@@ -804,7 +804,7 @@ impl Avid {
             id = self.id,
             session_id = msg.session_id,
             msg_type = "READY",
-            "Sending READY in response to a {handler_type}"
+            "Broadcasting READY in response to a {handler_type}"
         );
 
         // Send message
@@ -832,7 +832,7 @@ mod tests {
     }
 
     /// Helper function to set up parties with their respective Bracha instances.
-    async fn setup_parties(
+    async fn setup_parties_bracha(
         n: u32,
         t: u32,
         k: u32,
@@ -850,7 +850,7 @@ mod tests {
             .collect()
     }
     /// Helper function to spawn tasks that will run the parties' logic concurrently.
-    async fn spawn_party_runners(
+    async fn spawn_party_runners_bracha(
         parties: &[(Bracha, Arc<Network>)],
         mut receivers: Vec<mpsc::Receiver<Msg>>,
     ) {
@@ -875,8 +875,8 @@ mod tests {
         let session_id = 12;
 
         let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties(n, t, t + 1, senders).await;
-        spawn_party_runners(&parties, receivers).await;
+        let parties = setup_parties_bracha(n, t, t + 1, senders).await;
+        spawn_party_runners_bracha(&parties, receivers).await;
 
         // Party 0 initiates broadcast
         let (bracha0, net0) = &parties[0];
@@ -926,8 +926,8 @@ mod tests {
         ];
 
         let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties(n, t, t + 1, senders).await;
-        spawn_party_runners(&parties, receivers).await;
+        let parties = setup_parties_bracha(n, t, t + 1, senders).await;
+        spawn_party_runners_bracha(&parties, receivers).await;
 
         // Launch all sessions from party 0
         let (bracha0, net0) = &parties[0];
@@ -974,8 +974,8 @@ mod tests {
         ];
 
         let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties(n, t, t + 1, senders).await;
-        spawn_party_runners(&parties, receivers).await;
+        let parties = setup_parties_bracha(n, t, t + 1, senders).await;
+        spawn_party_runners_bracha(&parties, receivers).await;
 
         // Each party initiates one session
         for (i, (bracha, net)) in parties.iter().enumerate() {
@@ -1017,8 +1017,8 @@ mod tests {
         let payload = b"out-of-order".to_vec();
 
         let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties(n, t, t + 1, senders.clone()).await;
-        spawn_party_runners(&parties, receivers).await;
+        let parties = setup_parties_bracha(n, t, t + 1, senders.clone()).await;
+        spawn_party_runners_bracha(&parties, receivers).await;
 
         // Simulate sending READY before ECHO and INIT
         let sender_id = 1;
@@ -1068,6 +1068,82 @@ mod tests {
             } else {
                 println!("Party {} has a missing session", bracha.id);
             }
+        }
+    }
+
+    /// Helper function to set up parties with their respective Avid instances.
+    async fn setup_parties_avid(
+        n: u32,
+        t: u32,
+        k: u32,
+        senders: Vec<mpsc::Sender<Msg>>,
+    ) -> Vec<(Avid, Arc<Network>)> {
+        (0..n)
+            .map(|i| {
+                let avid = Avid::new(i as u32, n, t, k); // Create a new Avid instance for each party
+                let net = Arc::new(Network {
+                    id: i as u32,
+                    senders: senders.clone(), // Each party has the same senders
+                });
+                (avid, net) // Return a tuple of avid instance and the network
+            })
+            .collect()
+    }
+    /// Helper function to spawn tasks that will run the parties' logic concurrently.
+    async fn spawn_party_runners_avid(
+        parties: &[(Avid, Arc<Network>)],
+        mut receivers: Vec<mpsc::Receiver<Msg>>,
+    ) {
+        for (avid, net) in parties.iter().cloned() {
+            let mut rx = receivers.remove(0); // Get a receiver for the party
+            tokio::spawn(async move {
+                avid.run_party(&mut rx, net).await; // Run the party logic
+            });
+        }
+    }
+    #[tokio::test]
+    async fn test_avid_rbc_basic() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+
+        // Set the parameters
+        let n = 4;
+        let t = 1;
+        let payload = b"Hello, MPC!".to_vec();
+        let session_id = 12;
+
+        let (senders, receivers) = setup_channels(n).await;
+        let parties = setup_parties_avid(n, t, t + 1, senders).await;
+        spawn_party_runners_avid(&parties, receivers).await;
+
+        // Party 0 initiates broadcast
+        let (avid0, net0) = &parties[0];
+        avid0.init(payload.clone(), session_id, net0.clone()).await;
+
+        // Give time for broadcast to propagate
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Check that all parties completed broadcast and agreed on output
+        for (avid, _) in &parties {
+            let session_store = {
+                let store_map = avid.store.lock().await;
+                store_map
+                    .get(&session_id)
+                    .cloned()
+                    .expect(&format!("Party {} did not create session store", avid.id))
+            };
+
+            // Lock the specific store for this session
+            let s = session_store.lock().await;
+
+            assert!(s.ended, "Broadcast not completed for party {}", avid.id);
+            assert_eq!(
+                &s.output, &payload,
+                "Incorrect payload at party {}",
+                avid.id
+            );
         }
     }
 }
