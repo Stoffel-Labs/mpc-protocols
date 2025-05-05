@@ -21,9 +21,15 @@ pub fn encode_rs(
     // Fill data shards (pad last shard if needed)
     for i in 0..data_shards {
         let start = i * shard_size;
-        let end = usize::min(start + shard_size, payload.len());
-        let mut shard = payload[start..end].to_vec();
-        shard.resize(shard_size, 0); // pad with zeros
+
+        let shard = if start < payload.len() {
+            let end = usize::min(start + shard_size, payload.len());
+            let mut s = payload[start..end].to_vec();
+            s.resize(shard_size, 0); // pad if needed
+            s
+        } else {
+            vec![0u8; shard_size] // completely padded shard
+        };
         shards.push(shard);
     }
 
@@ -134,19 +140,14 @@ pub fn get_merkle_proof(proof: Vec<u8>) -> Result<MerkleProof<Sha256Algorithm>, 
         .map_err(|e| format!("Failed to parse Merkle proof: {:?}", e))
 }
 /// Verify a Merkle proof for a given shard and index.
-pub fn verify_merkle(
-    id: u32,
-    n: u32,
-    fingerprint: Vec<u8>,
-    shard: Vec<u8>,
-) -> Result<bool, String> {
-    if fingerprint.len() < 32 {
+pub fn verify_merkle(id: u32, n: u32, proof: Vec<u8>, shard: Vec<u8>) -> Result<bool, String> {
+    if proof.len() < 32 {
         return Err("Invalid fingerprint length".to_string());
     }
-    let root: [u8; 32] = fingerprint[0..32]
+    let root: [u8; 32] = proof[0..32]
         .try_into()
         .map_err(|_| format!("Failed to extract Merkle root"))?;
-    let proof = get_merkle_proof(fingerprint)?;
+    let proof = get_merkle_proof(proof)?;
     let leaf_hash = hash(shard.clone());
 
     Ok(proof.verify(root, &vec![id as usize], &[leaf_hash], n as usize))
@@ -171,4 +172,91 @@ pub fn generate_merkle_proofs_map(
     }
 
     Ok(proofs_map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_reed_solomon_encode_decode_roundtrip() {
+        let payload = b"Hello, world!".to_vec();
+        let data_shards = 4;
+        let parity_shards = 2;
+
+        // Encode
+        let shards = encode_rs(payload.clone(), data_shards, parity_shards)
+            .expect("Encoding should succeed");
+
+        // Drop one shard to simulate data loss
+        let mut shards_map = HashMap::new();
+        for (i, shard) in shards.iter().enumerate() {
+            if i != 1 {
+                // Drop shard 1
+                shards_map.insert(i as u32, shard.clone());
+            }
+        }
+
+        // Decode
+        let decoded_shards =
+            decode_rs(shards_map, data_shards, parity_shards).expect("Decoding should succeed");
+
+        // Reconstruct payload
+        let reconstructed = reconstruct_payload(decoded_shards, payload.len(), data_shards)
+            .expect("Reconstruction should succeed");
+
+        assert_eq!(payload, reconstructed);
+    }
+
+    #[test]
+    fn test_merkle_tree_and_proof_verification() {
+        let payload = b"Merkle tree test!".to_vec();
+        let data_shards = 4;
+        let parity_shards = 2;
+
+        // Encode and generate Merkle tree
+        let shards = encode_rs(payload.clone(), data_shards, parity_shards)
+            .expect("Encoding should succeed");
+        let tree = gen_merkletree(shards.clone());
+
+        // Generate proofs
+        let proofs_map = generate_merkle_proofs_map(shards.clone(), shards.len())
+            .expect("Proof generation should succeed");
+
+        for (i, shard) in shards.iter().enumerate() {
+            let mut proof_with_root = vec![];
+            proof_with_root.extend_from_slice(&tree.root().unwrap()); // prepend root
+            proof_with_root.extend_from_slice(&proofs_map[&i]);
+
+            let verified = verify_merkle(
+                i as u32,
+                shards.len() as u32,
+                proof_with_root,
+                shard.clone(),
+            )
+            .expect("Verification should succeed");
+
+            assert!(verified, "Merkle proof for shard {} failed", i);
+        }
+    }
+
+    #[test]
+    fn test_decode_failure_with_insufficient_data() {
+        let payload = b"Test failure!".to_vec();
+        let data_shards = 3;
+        let parity_shards = 2;
+
+        let shards = encode_rs(payload.clone(), data_shards, parity_shards)
+            .expect("Encoding should succeed");
+
+        // Only provide 2 shards (less than data_shards)
+        let mut shards_map = HashMap::new();
+        shards_map.insert(0, shards[0].clone());
+        shards_map.insert(1, shards[1].clone());
+
+        let result = decode_rs(shards_map, data_shards, parity_shards);
+        assert!(
+            result.is_err(),
+            "Decoding should fail due to insufficient data shards"
+        );
+    }
 }
