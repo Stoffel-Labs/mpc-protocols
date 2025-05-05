@@ -3,6 +3,7 @@
 use super::rbc_store::*;
 use super::utils::*;
 use crate::RBC;
+use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{
     mpsc::{Receiver, Sender},
@@ -10,7 +11,7 @@ use tokio::sync::{
 };
 use tracing::{debug, error, info};
 
-//Mock a network for testing purposed
+//Mock a network for testing purposes
 #[derive(Clone)]
 pub struct Network {
     pub id: u32,                   // The identifier of the current party in the network
@@ -36,17 +37,24 @@ pub struct Bracha {
     pub k: u32, //threshold (Not really used in Bracha)
     pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<BrachaStore>>>>>, // Stores the session state for each session
 }
-
+#[async_trait]
 impl RBC for Bracha {
     /// Creates a new Bracha instance with the given parameters.
-    fn new(id: u32, n: u32, t: u32, k: u32) -> Self {
-        Bracha {
+    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, String> {
+        if !(t < (n + 2) / 3) {
+            // ceil(n / 3)
+            return Err(format!(
+                "Invalid t: must satisfy 0 <= t < n / 3 (t={}, n={})",
+                t, n
+            ));
+        }
+        Ok(Bracha {
             id,
             n,
             t,
             k,
             store: Arc::new(Mutex::new(HashMap::new())),
-        }
+        })
     }
     /// This is the initial broadcast message in the Bracha protocol.
     async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
@@ -108,15 +116,7 @@ impl Bracha {
         );
 
         // Lock the session store to update the session state.
-        let session_store = {
-            let mut store = self.store.lock().await;
-
-            // Get or create the session state for the current session.
-            store
-                .entry(msg.session_id)
-                .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
-                .clone()
-        };
+        let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -150,15 +150,7 @@ impl Bracha {
             "Handling ECHO message"
         );
         // Lock the session store to update the session state.
-        let session_store = {
-            let mut store = self.store.lock().await;
-
-            // Get or create the session state for the current session.
-            store
-                .entry(msg.session_id)
-                .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
-                .clone()
-        };
+        let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -229,16 +221,9 @@ impl Bracha {
             msg_type = %msg.msg_type,
             "Handling READY message"
         );
-        // Lock the session store to update the session state.
-        let session_store = {
-            let mut store = self.store.lock().await;
 
-            // Get or create the session state for the current session.
-            store
-                .entry(msg.session_id)
-                .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
-                .clone()
-        };
+        // Lock the session store to update the session state.
+        let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -310,6 +295,14 @@ impl Bracha {
             }
         }
     }
+    async fn get_or_create_store(&self, session_id: u32) -> Arc<Mutex<BrachaStore>> {
+        let mut store = self.store.lock().await;
+        // Get or create the session state for the current session.
+        store
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
+            .clone()
+    }
 }
 
 ///--------------------------AVID RBC--------------------------
@@ -324,16 +317,31 @@ pub struct Avid {
     pub k: u32,                                                 //Threshold
     pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AvidStore>>>>>, // <- wrap only this in a lock //Sessionid => store
 }
+#[async_trait]
 impl RBC for Avid {
     /// Creates a new Avid instance with the given parameters.
-    fn new(id: u32, n: u32, t: u32, k: u32) -> Self {
-        Avid {
+    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, String> {
+        if !(t < (n + 2) / 3) {
+            // ceil(n / 3)
+            return Err(format!(
+                "Invalid t: must satisfy 0 <= t < n / 3 (t={}, n={})",
+                t, n
+            ));
+        }
+        if !(t + 1 <= k && k <= n - 2 * t) {
+            return Err(format!(
+                "Invalid k: must satisfy t + 1 <= k <= n - 2t (t={}, k={}, n={})",
+                t, k, n
+            ));
+        }
+
+        Ok(Avid {
             id,
             n,
             t,
             k,
             store: Arc::new(Mutex::new(HashMap::new())),
-        }
+        })
     }
     ///This is the initial broadcast message in the Avid protocol.
     async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
@@ -435,15 +443,7 @@ impl Avid {
         );
 
         // Lock the session store to update the session state.
-        let session_store = {
-            let mut store = self.store.lock().await;
-
-            // Get or create the session state for the current session.
-            store
-                .entry(msg.session_id)
-                .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
-                .clone()
-        };
+        let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -503,15 +503,7 @@ impl Avid {
             "Handling ECHO message"
         );
         // Lock the session store to update the session state.
-        let session_store = {
-            let mut store = self.store.lock().await;
-
-            // Get or create the session state for the current session.
-            store
-                .entry(msg.session_id)
-                .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
-                .clone()
-        };
+        let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -588,15 +580,7 @@ impl Avid {
             "Handling READY message"
         );
         // Lock the session store to update the session state.
-        let session_store = {
-            let mut store = self.store.lock().await;
-
-            // Get or create the session state for the current session.
-            store
-                .entry(msg.session_id)
-                .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
-                .clone()
-        };
+        let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -810,340 +794,123 @@ impl Avid {
         // Send message
         Avid::broadcast(self, ready_msg, net).await;
     }
+    async fn get_or_create_store(&self, session_id: u32) -> Arc<Mutex<AvidStore>> {
+        let mut store = self.store.lock().await;
+        // Get or create the session state for the current session.
+        store
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
+            .clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
-    use tokio::sync::mpsc;
-    use tracing_subscriber;
 
-    /// Helper function to set up message senders and receivers for the parties.
-    async fn setup_channels(n: u32) -> (Vec<mpsc::Sender<Msg>>, Vec<mpsc::Receiver<Msg>>) {
-        let mut senders = Vec::new();
-        let mut receivers = Vec::new();
-        for _ in 0..n {
-            let (tx, rx) = mpsc::channel(100); // Create a channel with capacity 100
-            senders.push(tx);
-            receivers.push(rx);
-        }
-        (senders, receivers)
-    }
-
-    /// Helper function to set up parties with their respective Bracha instances.
-    async fn setup_parties_bracha(
-        n: u32,
-        t: u32,
-        k: u32,
-        senders: Vec<mpsc::Sender<Msg>>,
-    ) -> Vec<(Bracha, Arc<Network>)> {
-        (0..n)
-            .map(|i| {
-                let bracha = Bracha::new(i as u32, n, t, k); // Create a new Bracha instance for each party
-                let net = Arc::new(Network {
-                    id: i as u32,
-                    senders: senders.clone(), // Each party has the same senders
-                });
-                (bracha, net) // Return a tuple of Bracha instance and the network
-            })
-            .collect()
-    }
-    /// Helper function to spawn tasks that will run the parties' logic concurrently.
-    async fn spawn_party_runners_bracha(
-        parties: &[(Bracha, Arc<Network>)],
-        mut receivers: Vec<mpsc::Receiver<Msg>>,
-    ) {
-        for (bracha, net) in parties.iter().cloned() {
-            let mut rx = receivers.remove(0); // Get a receiver for the party
-            tokio::spawn(async move {
-                bracha.run_party(&mut rx, net).await; // Run the party logic
-            });
-        }
-    }
-    #[tokio::test]
-    async fn test_bracha_rbc_basic() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
-
-        // Set the parameters
-        let n = 4;
-        let t = 1;
-        let payload = b"Hello, MPC!".to_vec();
-        let session_id = 12;
-
-        let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties_bracha(n, t, t + 1, senders).await;
-        spawn_party_runners_bracha(&parties, receivers).await;
-
-        // Party 0 initiates broadcast
-        let (bracha0, net0) = &parties[0];
-        bracha0
-            .init(payload.clone(), session_id, net0.clone())
-            .await;
-
-        // Give time for broadcast to propagate
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Check that all parties completed broadcast and agreed on output
-        for (bracha, _) in &parties {
-            let session_store = {
-                let store_map = bracha.store.lock().await;
-                store_map
-                    .get(&session_id)
-                    .cloned()
-                    .expect(&format!("Party {} did not create session store", bracha.id))
-            };
-
-            // Lock the specific store for this session
-            let s = session_store.lock().await;
-
-            assert!(s.ended, "Broadcast not completed for party {}", bracha.id);
-            assert_eq!(
-                &s.output, &payload,
-                "Incorrect payload at party {}",
-                bracha.id
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_multiple_sessions() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
-
-        let n = 4;
-        let t = 1;
-        let session_ids = vec![101, 202, 303];
-        let payloads = vec![
-            b"Payload A".to_vec(),
-            b"Payload B".to_vec(),
-            b"Payload C".to_vec(),
-        ];
-
-        let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties_bracha(n, t, t + 1, senders).await;
-        spawn_party_runners_bracha(&parties, receivers).await;
-
-        // Launch all sessions from party 0
-        let (bracha0, net0) = &parties[0];
-        for (i, sid) in session_ids.iter().enumerate() {
-            bracha0.init(payloads[i].clone(), *sid, net0.clone()).await;
-        }
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        for (bracha, _) in &parties {
-            let store = bracha.store.lock().await;
-            for (i, sid) in session_ids.iter().enumerate() {
-                let store_arc = store.get(sid).expect("Missing session");
-                let s = store_arc.lock().await;
-
-                assert!(
-                    s.ended,
-                    "Session {} not completed at party {}",
-                    sid, bracha.id
-                );
-                assert_eq!(
-                    &s.output, &payloads[i],
-                    "Incorrect payload for session {}",
-                    sid
-                );
-            }
-        }
-    }
-    #[tokio::test]
-    async fn test_multiple_sessions_different_party() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
-
-        let n = 4;
-        let t = 1;
-        let session_ids = vec![10, 20, 30, 40];
-        let payloads = vec![
-            b"From Party 0".to_vec(),
-            b"From Party 1".to_vec(),
-            b"From Party 2".to_vec(),
-            b"From Party 3".to_vec(),
-        ];
-
-        let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties_bracha(n, t, t + 1, senders).await;
-        spawn_party_runners_bracha(&parties, receivers).await;
-
-        // Each party initiates one session
-        for (i, (bracha, net)) in parties.iter().enumerate() {
-            bracha
-                .init(payloads[i].clone(), session_ids[i], net.clone())
-                .await;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        // Validate all sessions completed successfully and consistently
-        for (bracha, _) in &parties {
-            let store = bracha.store.lock().await;
-            for (i, session_id) in session_ids.iter().enumerate() {
-                let store_arc = store.get(session_id).expect("Missing session");
-                let s = store_arc.lock().await;
-                assert!(
-                    s.ended,
-                    "Session {} not completed at party {}",
-                    session_id, bracha.id
-                );
-                assert_eq!(
-                    &s.output, &payloads[i],
-                    "Incorrect output at party {} for session {}",
-                    bracha.id, session_id
-                );
-            }
-        }
-    }
-    #[tokio::test]
-    async fn test_out_of_order_delivery() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
-
-        let n = 4;
-        let t = 1;
-        let session_id = 11;
-        let payload = b"out-of-order".to_vec();
-
-        let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties_bracha(n, t, t + 1, senders.clone()).await;
-        spawn_party_runners_bracha(&parties, receivers).await;
-
-        // Simulate sending READY before ECHO and INIT
-        let sender_id = 1;
-        let ready_msg = Msg::new(
-            sender_id,
-            session_id,
-            payload.clone(),
-            vec![],
-            "READY".to_string(),
-            payload.clone().len(),
-        );
-        let echo_msg = Msg::new(
-            sender_id,
-            session_id,
-            payload.clone(),
-            vec![],
-            "ECHO".to_string(),
-            payload.len(),
+    #[test]
+    fn test_bracha_avid_valid_params() {
+        // Test for Bracha
+        let bracha = Bracha::new(0, 4, 1, 2);
+        assert!(
+            bracha.is_ok(),
+            "Expected valid parameters for Bracha to succeed"
         );
 
-        // Send READY first
-        senders[2].send(ready_msg).await.unwrap();
+        // Test for Avid
+        let avid = Avid::new(0, 6, 1, 2);
+        assert!(
+            avid.is_ok(),
+            "Expected valid parameters for Avid to succeed"
+        );
 
-        // Then ECHO
-        senders[3].send(echo_msg).await.unwrap();
-
-        // Party 0 initiates broadcast
-        let (bracha0, net0) = &parties[0];
-        bracha0
-            .init(payload.clone(), session_id, net0.clone())
-            .await;
-
-        // Allow time for processing
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // Check if parties reached consensus
-        for (bracha, _) in &parties {
-            let store = bracha.store.lock().await;
-            if let Some(state) = store.get(&session_id) {
-                let s = state.lock().await;
-
-                if s.ended {
-                    println!("Party {} ended with output: {:?}", bracha.id, s.output);
-                } else {
-                    println!("Party {} has not yet ended", bracha.id);
-                }
-            } else {
-                println!("Party {} has a missing session", bracha.id);
-            }
-        }
+        let avid = Avid::new(1, 9, 2, 4);
+        assert!(
+            avid.is_ok(),
+            "Expected valid parameters for Avid to succeed"
+        );
     }
 
-    /// Helper function to set up parties with their respective Avid instances.
-    async fn setup_parties_avid(
-        n: u32,
-        t: u32,
-        k: u32,
-        senders: Vec<mpsc::Sender<Msg>>,
-    ) -> Vec<(Avid, Arc<Network>)> {
-        (0..n)
-            .map(|i| {
-                let avid = Avid::new(i as u32, n, t, k); // Create a new Avid instance for each party
-                let net = Arc::new(Network {
-                    id: i as u32,
-                    senders: senders.clone(), // Each party has the same senders
-                });
-                (avid, net) // Return a tuple of avid instance and the network
-            })
-            .collect()
-    }
-    /// Helper function to spawn tasks that will run the parties' logic concurrently.
-    async fn spawn_party_runners_avid(
-        parties: &[(Avid, Arc<Network>)],
-        mut receivers: Vec<mpsc::Receiver<Msg>>,
-    ) {
-        for (avid, net) in parties.iter().cloned() {
-            let mut rx = receivers.remove(0); // Get a receiver for the party
-            tokio::spawn(async move {
-                avid.run_party(&mut rx, net).await; // Run the party logic
-            });
-        }
-    }
-    #[tokio::test]
-    async fn test_avid_rbc_basic() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
-
-        // Set the parameters
-        let n = 4;
-        let t = 1;
-        let payload = b"Hello, MPC!".to_vec();
-        let session_id = 12;
-
-        let (senders, receivers) = setup_channels(n).await;
-        let parties = setup_parties_avid(n, t, t + 1, senders).await;
-        spawn_party_runners_avid(&parties, receivers).await;
-
-        // Party 0 initiates broadcast
-        let (avid0, net0) = &parties[0];
-        avid0.init(payload.clone(), session_id, net0.clone()).await;
-
-        // Give time for broadcast to propagate
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Check that all parties completed broadcast and agreed on output
-        for (avid, _) in &parties {
-            let session_store = {
-                let store_map = avid.store.lock().await;
-                store_map
-                    .get(&session_id)
-                    .cloned()
-                    .expect(&format!("Party {} did not create session store", avid.id))
-            };
-
-            // Lock the specific store for this session
-            let s = session_store.lock().await;
-
-            assert!(s.ended, "Broadcast not completed for party {}", avid.id);
-            assert_eq!(
-                &s.output, &payload,
-                "Incorrect payload at party {}",
-                avid.id
+    #[test]
+    fn test_bracha_avid_invalid_t() {
+        // Test for Bracha
+        let bracha = Bracha::new(0, 4, 2, 2); // Invalid t
+        assert!(bracha.is_err(), "Expected invalid t to fail for Bracha");
+        if let Err(msg) = bracha {
+            assert!(
+                msg.contains("t"),
+                "Expected error message to mention t for Bracha"
             );
         }
+
+        // Test for Avid
+        let avid = Avid::new(0, 6, 2, 2); // Invalid t (t >= ceil(n / 3))
+        assert!(avid.is_err(), "Expected invalid t to fail for Avid");
+        if let Err(msg) = avid {
+            assert!(
+                msg.contains("t"),
+                "Expected error message to mention t for Avid"
+            );
+        }
+
+        let avid = Avid::new(1, 9, 4, 4); // Invalid t (t >= ceil(n / 3))
+        assert!(avid.is_err(), "Expected invalid t to fail for Avid");
+    }
+
+    #[test]
+    fn test_bracha_avid_invalid_k() {
+        // Test for Avid with invalid k
+        let avid = Avid::new(0, 6, 1, 0); // Invalid k (k < t + 1)
+        assert!(avid.is_err(), "Expected invalid k to fail for Avid");
+        if let Err(msg) = avid {
+            assert!(
+                msg.contains("k"),
+                "Expected error message to mention k for Avid"
+            );
+        }
+
+        let avid = Avid::new(1, 9, 2, 7); // Invalid k (k > n - 2t)
+        assert!(avid.is_err(), "Expected invalid k to fail for Avid");
+
+        // Test for Bracha with valid parameters
+        let bracha = Bracha::new(0, 5, 1, 3); // Valid k for Bracha
+        assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
+    }
+
+    #[test]
+    fn test_bracha_avid_edge_cases() {
+        // n = 5, t = 1, k = 2: valid case for both Bracha and Avid
+        let bracha = Bracha::new(0, 5, 1, 2);
+        assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
+        let avid = Avid::new(0, 5, 1, 2);
+        assert!(avid.is_ok(), "Expected valid parameters for Avid");
+
+        // n = 5, t = 2, k = 2: invalid for Avid as k cannot be n - 2 * t
+        let avid_invalid = Avid::new(0, 5, 2, 2);
+        assert!(avid_invalid.is_err(), "Expected invalid k to fail for Avid");
+
+        // n = 5, t = 2: invalid as t cannot be >= ceil(n / 3)
+        let bracha_invalid = Bracha::new(0, 5, 2, 2);
+        assert!(
+            bracha_invalid.is_err(),
+            "Expected invalid t to fail for Bracha"
+        );
+    }
+
+    #[test]
+    fn test_bracha_avid_zero_t() {
+        // t = 0 should always be valid for both Bracha and Avid as long as k >= 1
+        let bracha = Bracha::new(2, 3, 0, 1);
+        assert!(bracha.is_ok(), "Expected t = 0 to be valid for Bracha");
+
+        let avid = Avid::new(2, 5, 0, 1);
+        assert!(avid.is_ok(), "Expected t = 0 to be valid for Avid");
+
+        // n = 3, t = 0, k = 2: valid for both Bracha and Avid
+        let bracha = Bracha::new(2, 3, 0, 2);
+        assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
+
+        let avid = Avid::new(3, 3, 0, 2);
+        assert!(avid.is_ok(), "Expected valid parameters for Avid");
     }
 }
