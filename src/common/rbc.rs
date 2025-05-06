@@ -9,7 +9,7 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
     Mutex,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 //Mock a network for testing purposes
 #[derive(Clone)]
@@ -64,7 +64,7 @@ impl RBC for Bracha {
             session_id,
             payload.clone(),
             vec![],
-            "INIT".to_string(),
+            GenericMsgType::Bracha(MsgType::Init),
             payload.len(),
         );
         info!(
@@ -77,12 +77,17 @@ impl RBC for Bracha {
     }
     /// Processes incoming messages based on their type.
     async fn process(&self, msg: Msg, net: Arc<Network>) {
-        match MsgType::from(msg.msg_type.clone()) {
-            MsgType::Init => self.init_handler(msg, net).await,
-            MsgType::Echo => self.echo_handler(msg, net).await,
-            MsgType::Ready => self.ready_handler(msg, net).await,
-            MsgType::Unknown(t) => {
-                eprintln!("Bracha: Unknown message type: {}", t);
+        match &msg.msg_type {
+            GenericMsgType::Bracha(msg_type) => match msg_type {
+                MsgType::Init => self.init_handler(msg, net).await,
+                MsgType::Echo => self.echo_handler(msg, net).await,
+                MsgType::Ready => self.ready_handler(msg, net).await,
+                MsgType::Unknown(t) => {
+                    warn!("Avid: Unknown message type: {}", t);
+                }
+            },
+            _ => {
+                warn!("process: received non-Bracha message");
             }
         }
     }
@@ -127,7 +132,7 @@ impl Bracha {
                 msg.session_id,
                 msg.payload.clone(),
                 vec![],
-                "ECHO".to_string(),
+                GenericMsgType::Bracha(MsgType::Echo),
                 msg.payload.len(),
             );
             store.mark_echo(); // Mark that ECHO has been sent.
@@ -178,7 +183,7 @@ impl Bracha {
                         msg.session_id,
                         msg.payload.clone(),
                         vec![],
-                        "READY".to_string(),
+                        GenericMsgType::Bracha(MsgType::Ready),
                         msg.payload.clone().len(),
                     );
                     info!(
@@ -197,7 +202,7 @@ impl Bracha {
                         msg.session_id,
                         msg.payload.clone(),
                         vec![],
-                        "ECHO".to_string(),
+                        GenericMsgType::Bracha(MsgType::Echo),
                         msg.payload.len(),
                     );
                     info!(
@@ -252,7 +257,7 @@ impl Bracha {
                         msg.session_id,
                         msg.payload.clone(),
                         vec![],
-                        "READY".to_string(),
+                        GenericMsgType::Bracha(MsgType::Ready),
                         msg.payload.clone().len(),
                     );
                     info!(
@@ -271,7 +276,7 @@ impl Bracha {
                         msg.session_id,
                         msg.payload.clone(),
                         vec![],
-                        "ECHO".to_string(),
+                        GenericMsgType::Bracha(MsgType::Echo),
                         msg.payload.len(),
                     );
                     info!(
@@ -393,7 +398,7 @@ impl RBC for Avid {
                 session_id,
                 shard,
                 fp, // [root||fingerprint]
-                "SEND".to_string(),
+                GenericMsgType::Avid(MsgTypeAvid::Send),
                 payload.len(),
             );
 
@@ -402,12 +407,17 @@ impl RBC for Avid {
     }
     /// Processes incoming messages based on their type.
     async fn process(&self, msg: Msg, net: Arc<Network>) {
-        match MsgTypeAvid::from(msg.msg_type.clone()) {
-            MsgTypeAvid::Send => self.send_handler(msg, net).await,
-            MsgTypeAvid::Echo => self.echo_handler(msg, net).await,
-            MsgTypeAvid::Ready => self.ready_handler(msg, net).await,
-            MsgTypeAvid::Unknown(t) => {
-                eprintln!("Avid: Unknown message type: {}", t);
+        match &msg.msg_type {
+            GenericMsgType::Avid(msg_type) => match msg_type {
+                MsgTypeAvid::Send => self.send_handler(msg, net).await,
+                MsgTypeAvid::Echo => self.echo_handler(msg, net).await,
+                MsgTypeAvid::Ready => self.ready_handler(msg, net).await,
+                MsgTypeAvid::Unknown(t) => {
+                    warn!("Avid: Unknown message type: {}", t);
+                }
+            },
+            _ => {
+                warn!("process: received non-AVID message");
             }
         }
     }
@@ -458,7 +468,7 @@ impl Avid {
                         msg.session_id,
                         msg.payload,
                         msg.proof,
-                        "ECHO".to_string(),
+                        GenericMsgType::Avid(MsgTypeAvid::Echo),
                         msg.msg_len,
                     );
                     store.mark_echo(); // Mark that ECHO has been sent to avoid resending it
@@ -549,7 +559,7 @@ impl Avid {
                     }
                 }
                 Ok(false) => {
-                    error!(
+                    warn!(
                         id = self.id,
                         session_id = msg.session_id,
                         sender = msg.sender_id,
@@ -558,7 +568,7 @@ impl Avid {
                     return;
                 }
                 Err(e) => {
-                    error!(
+                    warn!(
                         id = self.id,
                         session_id = msg.session_id,
                         sender = msg.sender_id,
@@ -679,7 +689,7 @@ impl Avid {
                     }
                 }
                 Ok(false) => {
-                    error!(
+                    warn!(
                         id = self.id,
                         session_id = msg.session_id,
                         sender = msg.sender_id,
@@ -688,7 +698,7 @@ impl Avid {
                     return;
                 }
                 Err(e) => {
-                    error!(
+                    warn!(
                         id = self.id,
                         session_id = msg.session_id,
                         sender = msg.sender_id,
@@ -781,7 +791,7 @@ impl Avid {
             msg.session_id,
             payload,
             fingerprint,
-            "READY".to_string(),
+            GenericMsgType::Avid(MsgTypeAvid::Ready),
             msg.msg_len,
         );
         info!(
