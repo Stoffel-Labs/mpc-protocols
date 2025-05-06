@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use mpc::common::rbc_store::{GenericMsgType, MsgType, MsgTypeAvid};
     use mpc::common::{rbc::*, rbc_store::Msg};
     use mpc::RBC;
     use std::sync::Arc;
@@ -225,7 +226,7 @@ mod tests {
             session_id,
             payload.clone(),
             vec![],
-            "READY".to_string(),
+            GenericMsgType::Bracha(MsgType::Ready),
             payload.clone().len(),
         );
         let echo_msg = Msg::new(
@@ -233,7 +234,7 @@ mod tests {
             session_id,
             payload.clone(),
             vec![],
-            "ECHO".to_string(),
+            GenericMsgType::Bracha(MsgType::Echo),
             payload.len(),
         );
 
@@ -324,6 +325,8 @@ mod tests {
             (5, 1, 3), // valid: n=5, t=1, k in [2,3]
             (7, 2, 3), // valid: n=7, t=2, k in [3, 3]
             (20, 5, 8),
+            (20, 6, 7),
+            (20, 6, 8),
         ];
 
         for (_, &(n, t, k)) in test_cases.iter().enumerate() {
@@ -409,7 +412,7 @@ mod tests {
             session_id,
             payload.clone(),
             vec![],
-            "READY".to_string(),
+            GenericMsgType::Avid(MsgTypeAvid::Ready),
             payload.clone().len(),
         );
         let echo_msg = Msg::new(
@@ -417,7 +420,7 @@ mod tests {
             session_id,
             payload.clone(),
             vec![],
-            "ECHO".to_string(),
+            GenericMsgType::Avid(MsgTypeAvid::Echo),
             payload.len(),
         );
 
@@ -448,6 +451,134 @@ mod tests {
             } else {
                 println!("Party {} has a missing session", avid.id);
             }
+        }
+    }
+    #[tokio::test]
+    async fn test_bracha_rbc_faulty_nodes() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+
+        let n = 7;
+        let t = 2;
+        let payload = b"crash fault test".to_vec();
+        let session_id = 2025;
+
+        let (senders, receivers) = setup_channels(n).await;
+        let parties = setup_parties::<Bracha>(n, t, t + 1, senders)
+            .await
+            .expect("Failed to set up parties");
+
+        // Simulate t=2 faulty nodes (e.g., parties 0 and 1) by not spawning them
+        let honest_parties = &parties[t as usize..]; // parties 2 to 6
+        let honest_receivers = receivers.into_iter().skip(t as usize).collect::<Vec<_>>();
+
+        // Spawn only honest nodes
+        spawn_parties(honest_parties, honest_receivers).await;
+
+        // One honest party initiates the broadcast
+        let (initiator_rbc, initiator_net) = &honest_parties[0];
+        initiator_rbc
+            .init(payload.clone(), session_id, initiator_net.clone())
+            .await;
+
+        // Give protocol time to complete
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Check agreement and completion among honest nodes
+        for (rbc, _) in honest_parties {
+            let session_store = {
+                let store_map = rbc.store.lock().await;
+                store_map
+                    .get(&session_id)
+                    .cloned()
+                    .expect(&format!("Party {} did not create session store", rbc.id))
+            };
+
+            let s = session_store.lock().await;
+
+            assert!(s.ended, "Broadcast not completed for party {}", rbc.id);
+            assert_eq!(&s.output, &payload, "Incorrect payload at party {}", rbc.id);
+        }
+    }
+    async fn test_avid_rbc_with_faulty_nodes(
+        n: u32,
+        t: u32,
+        k: u32,
+        session_id: u32,
+        payload: Vec<u8>,
+    ) {
+        println!(
+            "Running AVID RBC with crash faults: n={}, t={}, k={}",
+            n, t, k
+        );
+
+        let (senders, receivers) = setup_channels(n).await;
+        let parties = setup_parties::<Avid>(n, t, k, senders)
+            .await
+            .expect("Failed to set up parties");
+
+        // Simulate t crash-faulty nodes: parties 0 to t-1 do nothing
+        let honest_parties = &parties[t as usize..];
+        let honest_receivers = receivers.into_iter().skip(t as usize).collect::<Vec<_>>();
+
+        // Spawn only honest nodes
+        spawn_parties(honest_parties, honest_receivers).await;
+
+        // Initiate broadcast from one honest node
+        let (initiator, initiator_net) = &honest_parties[0];
+        initiator
+            .init(payload.clone(), session_id, initiator_net.clone())
+            .await;
+
+        // Allow time for propagation
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        for (avid, _) in honest_parties {
+            let session_store = {
+                let store_map = avid.store.lock().await;
+                store_map
+                    .get(&session_id)
+                    .cloned()
+                    .expect(&format!("Party {} did not create session store", avid.id))
+            };
+
+            let s = session_store.lock().await;
+
+            assert!(
+                s.ended,
+                "Broadcast not completed for party {} (n={}, t={}, k={})",
+                avid.id, n, t, k
+            );
+            assert_eq!(
+                &s.output, &payload,
+                "Incorrect payload at party {} (n={}, t={}, k={})",
+                avid.id, n, t, k
+            );
+        }
+    }
+    #[tokio::test]
+    async fn test_avid_rbc_crash_faults_varied_parameters() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_test_writer()
+            .try_init();
+
+        let payload = b"AVID crash fault test".to_vec();
+
+        // (n, t, k) test configurations
+        let test_cases = vec![
+            (4, 1, 2),
+            (5, 1, 3),
+            (7, 2, 3),
+            (20, 5, 8),
+            (20, 6, 8),
+        ];
+
+        for (i, &(n, t, k)) in test_cases.iter().enumerate() {
+            println!("--- Test case {} ---", i + 1);
+            test_avid_rbc_with_faulty_nodes(n, t, k, 100 + i as u32, payload.clone()).await;
         }
     }
 }
