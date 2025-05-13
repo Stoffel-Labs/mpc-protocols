@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 fn hash_message(message: &[u8]) -> Vec<u8> {
@@ -12,7 +12,7 @@ pub struct Msg {
     pub sender_id: u32,           // ID of the sender node
     pub session_id: u32,          // Unique session ID for each broadcast instance
     pub payload: Vec<u8>, // Actual data being broadcasted (e.g., bytes of a secret or message)
-    pub proof: Vec<u8>,   // Proofs related to the message shared
+    pub metadata: Vec<u8>, // info related to the message shared
     pub msg_type: GenericMsgType, // Type of message like INIT, ECHO, or READY
     pub msg_len: usize,   // length of the original message
 }
@@ -23,7 +23,7 @@ impl Msg {
         sender_id: u32,
         session_id: u32,
         payload: Vec<u8>,
-        proof: Vec<u8>,
+        metadata: Vec<u8>,
         msg_type: GenericMsgType,
         msg_len: usize,
     ) -> Self {
@@ -31,7 +31,7 @@ impl Msg {
             sender_id,
             session_id,
             payload,
-            proof,
+            metadata,
             msg_type,
             msg_len,
         }
@@ -41,6 +41,7 @@ impl Msg {
 pub enum GenericMsgType {
     Bracha(MsgType),
     Avid(MsgTypeAvid),
+    ABA(MsgTypeAba),
 }
 // Implement Display for GenericMsgType
 impl fmt::Display for GenericMsgType {
@@ -48,6 +49,7 @@ impl fmt::Display for GenericMsgType {
         match *self {
             GenericMsgType::Bracha(ref msg) => write!(f, "Bracha({})", msg),
             GenericMsgType::Avid(ref msg) => write!(f, "Avid({})", msg),
+            GenericMsgType::ABA(ref msg) => write!(f, "ABA({})", msg),
         }
     }
 }
@@ -275,5 +277,130 @@ impl AvidStore {
     /// Returns the set of shards associated with a given Merkle root.
     pub fn get_shards_for_root(&self, root: &Vec<u8>) -> HashMap<u32, Vec<u8>> {
         self.shards.get(root).cloned().unwrap_or_else(HashMap::new)
+    }
+}
+
+///--------------------------ABA--------------------------
+/// Enum to interpret message types in ABA protocol.
+#[derive(Debug, Clone)]
+pub enum MsgTypeAba {
+    Est,
+    Aux,
+    Unknown(String),
+}
+// Implement Display for MsgType
+impl fmt::Display for MsgTypeAba {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            MsgTypeAba::Est => write!(f, "Est"),
+            MsgTypeAba::Aux => write!(f, "Aux"),
+            MsgTypeAba::Unknown(ref s) => write!(f, "Unknown({})", s),
+        }
+    }
+}
+
+/// Stores the internal state for each ABA session at a party.
+#[derive(Default)]
+pub struct AbaStore {
+    pub est_senders: HashMap<u32, HashMap<u32, bool>>, //  roundid => Sender => bool
+    pub aux_senders: HashMap<u32, HashMap<u32, bool>>, //  roundid => Sender => bool
+    pub aux_count: HashMap<u32, u32>,                  // roundid => aux message count
+    pub est_count: HashMap<u32, [u32; 2]>,             // roundid => value count[0 count ,1 count]
+    pub est: HashMap<u32, bool>,                       // roundid => bool
+    pub values: HashMap<u32, HashSet<bool>>,           // roundid => {bool}
+    pub bin_values: HashMap<u32, HashSet<bool>>,       // roundid => {bool}
+    pub ended: bool,
+    pub output: bool, // Agreed value after consensus
+}
+
+impl AbaStore {
+    /// Set the estimate value for a given round id
+    pub fn mark_est(&mut self, round: u32, value: bool) {
+        self.est.insert(round, value);
+    }
+    /// Get the estimate value for a given round id, defaulting to `false` if not set
+    pub fn get_est(&self, round: u32) -> bool {
+        self.est.get(&round).copied().unwrap_or(false)
+    }
+
+    /// Check if a sender has already sent an estimate in a given round
+    pub fn has_sent_est(&self, round: u32, sender: u32) -> bool {
+        self.est_senders
+            .get(&round)
+            .and_then(|senders| senders.get(&sender))
+            .copied()
+            .unwrap_or(false)
+    }
+    /// Check if a sender has already sent an aux in a given round
+    pub fn has_sent_aux(&self, round: u32, sender: u32) -> bool {
+        self.aux_senders
+            .get(&round)
+            .and_then(|senders| senders.get(&sender))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Mark a sender as having sent an estimate in a given round
+    pub fn set_est_sent(&mut self, round: u32, sender: u32) {
+        self.est_senders
+            .entry(round)
+            .or_default()
+            .insert(sender, true);
+    }
+    /// Mark a sender as having sent an estimate in a given round
+    pub fn set_aux_sent(&mut self, round: u32, sender: u32) {
+        self.aux_senders
+            .entry(round)
+            .or_default()
+            .insert(sender, true);
+    }
+    /// Increase the count of 0s or 1s received in a round
+    pub fn increment_est(&mut self, round: u32, value: bool) {
+        let counts = self.est_count.entry(round).or_insert([0, 0]);
+        if value {
+            counts[1] += 1;
+        } else {
+            counts[0] += 1;
+        }
+    }
+    /// Increase the count of aux values received in a round
+    pub fn increment_aux(&mut self, round: u32) {
+        *self.aux_count.entry(round).or_insert(0) += 1;
+    }
+
+    /// Get the current estimate count [0s, 1s] for a round
+    pub fn get_est_count(&self, round: u32) -> [u32; 2] {
+        self.est_count.get(&round).copied().unwrap_or([0, 0])
+    }
+    /// Get the current aux count for a round
+    pub fn get_aux_count(&self, round: u32) -> u32 {
+        self.aux_count.get(&round).copied().unwrap_or(0)
+    }
+    /// Insert a boolean value into the bin_values set for a given round ID
+    pub fn insert_bin_value(&mut self, round: u32, value: bool) {
+        self.bin_values
+            .entry(round)
+            .or_insert_with(HashSet::new)
+            .insert(value);
+    }
+    /// Insert a boolean value into the values set for a given round ID
+    pub fn insert_values(&mut self, round: u32, value: bool) {
+        self.bin_values
+            .entry(round)
+            .or_insert_with(HashSet::new)
+            .insert(value);
+    }
+    /// Get the number of unique boolean values in `values` for a given round
+    pub fn get_values_len(&self, round: u32) -> usize {
+        self.values.get(&round).map_or(0, |set| set.len())
+    }
+
+    /// Sets ended flag to true
+    pub fn mark_ended(&mut self) {
+        self.ended = true;
+    }
+    /// Sets the output value.
+    pub fn set_output(&mut self, value: bool) {
+        self.output = value;
     }
 }
