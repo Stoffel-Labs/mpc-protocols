@@ -460,14 +460,14 @@ impl Avid {
         // Only broadcast the ECHO if it hasn't already been sent.
         if !store.echo {
             //Verify the merkle path(fingerprint) against shared root for the given shard
-            match verify_merkle(self.id, self.n, msg.proof.clone(), msg.payload.clone()) {
+            match verify_merkle(self.id, self.n, msg.metadata.clone(), msg.payload.clone()) {
                 Ok(true) => {
                     //Create echo message
                     let msg = Msg::new(
                         self.id,
                         msg.session_id,
                         msg.payload,
-                        msg.proof,
+                        msg.metadata,
                         GenericMsgType::Avid(MsgTypeAvid::Echo),
                         msg.msg_len,
                     );
@@ -528,14 +528,14 @@ impl Avid {
         }
         // If this sender has not already sent an ECHO, process it.
         if !store.has_echo(msg.sender_id) {
-            let root = &msg.proof[0..32];
-            let proof_bytes = &msg.proof[32..];
+            let root = &&msg.metadata[0..32];
+            let proof_bytes = &msg.metadata[32..];
 
             //Verify merkle proof
             match verify_merkle(
                 msg.sender_id,
                 self.n,
-                msg.proof.clone(),
+                msg.metadata.clone(),
                 msg.payload.clone(),
             ) {
                 Ok(true) => {
@@ -605,21 +605,21 @@ impl Avid {
         }
         // If this sender has not already sent an READY, process it.
         if !store.has_ready(msg.sender_id) {
-            let root = &msg.proof[0..32];
-            let proof_bytes = &msg.proof[32..];
+            let root = &msg.metadata[0..32];
+            let proof_bytes = &msg.metadata[32..];
 
             //Verify merkle proof
             match verify_merkle(
                 msg.sender_id,
                 self.n,
-                msg.proof.clone(),
+                msg.metadata.clone(),
                 msg.payload.clone(),
             ) {
                 Ok(true) => {
                     //Store fingerprint and shard
                     store.insert_shard(root.to_vec(), msg.sender_id, msg.payload.clone());
                     store.insert_fingerprint(
-                        msg.proof[0..32].to_vec(),
+                        msg.metadata[0..32].to_vec(),
                         msg.sender_id,
                         proof_bytes.to_vec(),
                     );
@@ -712,7 +712,7 @@ impl Avid {
     }
     //This the logic for sending a READY message in both the echo and ready handler
     async fn send_ready(&self, msg: Msg, shards_map: HashMap<u32, Vec<u8>>, net: Arc<Network>) {
-        let root = &msg.proof[0..32];
+        let root = &msg.metadata[0..32];
         let handler_type = msg.msg_type;
         // Reconstruct all shards from existing shards
         let shards_result = decode_rs(shards_map, self.k as usize, (self.n - self.k) as usize);
@@ -811,6 +811,277 @@ impl Avid {
             .entry(session_id)
             .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
             .clone()
+    }
+}
+
+/// Common subset is a sub-protocol used to agree on the termination of rbcs
+/// Common subset based on https://eprint.iacr.org/2016/199.pdf works in the following steps :
+/// 1. RBCs of proposed values
+/// 2. Asynchronous Binary agreement(ABA) protocol to agree on the RBCs
+pub struct ABA {
+    pub id: u32,                                               // The ID of the initiator
+    pub n: u32, // Total number of parties in the network
+    pub t: u32, // Number of allowed malicious parties
+    pub k: u32, //threshold
+    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AbaStore>>>>>, // Stores the session state for each session
+}
+#[async_trait]
+impl RBC for ABA {
+    /// Creates a new ABA instance with the given parameters.
+    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, String> {
+        if !(t < (n + 2) / 3) {
+            // ceil(n / 3)
+            return Err(format!(
+                "Invalid t: must satisfy 0 <= t < n / 3 (t={}, n={})",
+                t, n
+            ));
+        }
+        Ok(ABA {
+            id,
+            n,
+            t,
+            k,
+            store: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+    /// This is the initial broadcast message in the ABA protocol.
+    async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
+        let v_r = match get_value_round(&payload) {
+            Some(r) => r,
+            None => {
+                error!(
+                    id = self.id,
+                    session_id = session_id,
+                    "Error while getting roundid at init"
+                );
+                return;
+            }
+        };
+        // Create an est message with the given value and round id for a specific session ID.
+        let msg = Msg::new(
+            self.id,
+            session_id,
+            vec![v_r.0 as u8],            // [value]
+            v_r.1.to_le_bytes().to_vec(), //[round ID]
+            GenericMsgType::ABA(MsgTypeAba::Est),
+            payload.len(),
+        );
+        info!(
+            id = self.id,
+            session_id,
+            msg_type = "EST",
+            "Broadcasting EST message"
+        );
+        ABA::broadcast(&self, msg, net).await;
+    }
+    /// Processes incoming messages based on their type.
+    async fn process(&self, msg: Msg, net: Arc<Network>) {
+        match &msg.msg_type {
+            GenericMsgType::ABA(msg_type) => match msg_type {
+                MsgTypeAba::Est => self.est_handler(msg, net).await,
+                MsgTypeAba::Aux => self.aux_handler(msg, net).await,
+                MsgTypeAba::Unknown(t) => {
+                    warn!("Aba: Unknown message type: {}", t);
+                }
+            },
+            _ => {
+                warn!("process: received non-ABA message");
+            }
+        }
+    }
+    /// Broadcasts a message to all parties in the network.
+    async fn broadcast(&self, msg: Msg, net: Arc<Network>) {
+        for sender in &net.senders {
+            let _ = sender.send(msg.clone()).await;
+        }
+    }
+    /// Send a message to a party in the network.
+    async fn send(&self, msg: Msg, net: Arc<Network>, recv: u32) {
+        let _ = net.senders[recv as usize].send(msg).await;
+    }
+    /// Runs the party logic, continuously receiving and processing messages.
+    async fn run_party(&self, receiver: &mut Receiver<Msg>, net: Arc<Network>) {
+        while let Some(msg) = receiver.recv().await {
+            self.process(msg, net.clone()).await;
+        }
+    }
+}
+impl ABA {
+    ///Handlers
+    /// Handles the estimate value, Responds by broadcasting an aux message if necessary.
+    pub async fn est_handler(&self, msg: Msg, net: Arc<Network>) {
+        info!(
+            id = self.id,
+            session_id = msg.session_id,
+            sender = msg.sender_id,
+            msg_type = %msg.msg_type,
+            "Handling EST for round message"
+        );
+
+        // Lock the session store to update the session state.
+        let session_store = self.get_or_create_store(msg.session_id).await;
+        // Lock the session-specific store to access or update the session state.
+        let mut store = session_store.lock().await;
+
+        // Ignore the message if the session has already ended.
+        if store.ended {
+            debug!(
+                id = self.id,
+                session_id = msg.session_id,
+                "Session already ended, ignoring est"
+            );
+            return;
+        }
+
+        let round = match get_round(&msg.metadata) {
+            Some(r) => r,
+            None => {
+                error!(
+                    id = self.id,
+                    session_id = msg.session_id,
+                    "Error while getting roundid at est handler"
+                );
+                return;
+            }
+        };
+        let value = match get_value(&msg.payload) {
+            Some(v) => v,
+            None => {
+                error!(
+                    id = self.id,
+                    session_id = msg.session_id,
+                    "Error while getting value at est handler"
+                );
+                return;
+            }
+        };
+        if !store.has_sent_est(round, msg.sender_id) {
+            store.set_est_sent(round, msg.sender_id);
+            store.increment_est(round, value);
+            let count = store.get_est_count(round)[value as usize];
+            if count >= self.t + 1 && !store.get_est(round) {
+                store.mark_est(round, value);
+                let new_msg = Msg::new(
+                    self.id,
+                    msg.session_id,
+                    msg.payload.clone(),
+                    msg.metadata.clone(),
+                    GenericMsgType::ABA(MsgTypeAba::Est),
+                    msg.msg_len,
+                );
+                ABA::broadcast(&self, new_msg, net.clone()).await;
+            }
+            if count == 2 * self.t + 1 {
+                store.insert_bin_value(round, value);
+                let new_msg = Msg::new(
+                    self.id,
+                    msg.session_id,
+                    msg.payload,
+                    msg.metadata,
+                    GenericMsgType::ABA(MsgTypeAba::Aux),
+                    msg.msg_len,
+                );
+                ABA::broadcast(&self, new_msg, net).await;
+            }
+        }
+    }
+    /// Handles the aux value and sends a new est message or terminates.
+    pub async fn aux_handler(&self, msg: Msg, net: Arc<Network>) {
+        info!(
+            id = self.id,
+            session_id = msg.session_id,
+            sender = msg.sender_id,
+            msg_type = %msg.msg_type,
+            "Handling AUX for round message"
+        );
+
+        // Lock the session store to update the session state.
+        let session_store = self.get_or_create_store(msg.session_id).await;
+        // Lock the session-specific store to access or update the session state.
+        let mut store = session_store.lock().await;
+
+        let round = match get_round(&msg.metadata) {
+            Some(r) => r,
+            None => {
+                error!(
+                    id = self.id,
+                    session_id = msg.session_id,
+                    "Error while getting roundid at est handler"
+                );
+                return;
+            }
+        };
+        let value = match get_value(&msg.payload) {
+            Some(v) => v,
+            None => {
+                error!(
+                    id = self.id,
+                    session_id = msg.session_id,
+                    "Error while getting value at est handler"
+                );
+                return;
+            }
+        };
+        // Ignore the message if the session has already ended.
+        if store.ended {
+            debug!(
+                id = self.id,
+                session_id = msg.session_id,
+                "Session already ended, ignoring aux"
+            );
+            return;
+        }
+
+        if !store.has_sent_aux(round, msg.sender_id) {
+            store.set_aux_sent(round, msg.sender_id);
+            store.increment_aux(round);
+            store.insert_values(round, value);
+            let count = store.get_aux_count(round);
+            if count == self.n - self.t {
+                let s = {
+                    true /*Common coin to be implemented*/
+                };
+                if store.get_values_len(round) == 1 {
+                    if value == s {
+                        // If agreement is reached, mark the session as ended and store the output.
+                        store.mark_ended();
+                        store.set_output(value);
+                        info!(
+                            id = self.id,
+                            session_id = msg.session_id,
+                            output = ?msg.payload,
+                            "Binary agreement achieved; ABA instance ended"
+                        );
+                    } else {
+                        self.send_est_for_next_round(&msg, round + 1, value, net)
+                            .await;
+                    }
+                } else {
+                    self.send_est_for_next_round(&msg, round + 1, s, net).await;
+                }
+            }
+        }
+    }
+    async fn get_or_create_store(&self, session_id: u32) -> Arc<Mutex<AbaStore>> {
+        let mut store = self.store.lock().await;
+        // Get or create the session state for the current session.
+        store
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(Mutex::new(AbaStore::default())))
+            .clone()
+    }
+    async fn send_est_for_next_round(&self, msg: &Msg, round: u32, value: bool, net: Arc<Network>) {
+        let payload = vec![value as u8];
+        let metadata = round.to_le_bytes().to_vec();
+        let msg = Msg::new(
+            msg.sender_id,
+            msg.session_id,
+            payload,
+            metadata,
+            GenericMsgType::ABA(MsgTypeAba::Est),
+            msg.msg_len,
+        );
+        ABA::broadcast(self, msg, net).await;
     }
 }
 
