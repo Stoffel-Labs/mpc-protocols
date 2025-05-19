@@ -200,11 +200,6 @@ pub fn get_value_round(data: &[u8]) -> Option<(bool, u32)> {
 
     Some((bit, number))
 }
-
-pub fn get_round(bytes: &[u8]) -> Option<u32> {
-    let bytes_array = bytes.try_into().ok()?;
-    Some(u32::from_le_bytes(bytes_array))
-}
 /// Extracts the least significant bit from the first byte as a boolean.
 pub fn get_value(data: &[u8]) -> Option<bool> {
     data.get(0).map(|byte| byte & 1 != 0)

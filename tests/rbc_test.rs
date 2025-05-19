@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use mpc::common::rbc_store::{GenericMsgType, MsgType, MsgTypeAvid};
+    use mpc::common::rbc_store::{GenericMsgType, MsgType, MsgTypeAba, MsgTypeAvid};
+    use mpc::common::utils::set_value_round;
     use mpc::common::{rbc::*, rbc_store::Msg};
     use mpc::RBC;
     use std::sync::Arc;
@@ -223,6 +224,7 @@ mod tests {
         let sender_id = 1;
         let ready_msg = Msg::new(
             sender_id,
+            0,
             session_id,
             payload.clone(),
             vec![],
@@ -232,6 +234,7 @@ mod tests {
         let echo_msg = Msg::new(
             sender_id,
             session_id,
+            0,
             payload.clone(),
             vec![],
             GenericMsgType::Bracha(MsgType::Echo),
@@ -410,6 +413,7 @@ mod tests {
         let ready_msg = Msg::new(
             sender_id,
             session_id,
+            0,
             payload.clone(),
             vec![],
             GenericMsgType::Avid(MsgTypeAvid::Ready),
@@ -418,6 +422,7 @@ mod tests {
         let echo_msg = Msg::new(
             sender_id,
             session_id,
+            0,
             payload.clone(),
             vec![],
             GenericMsgType::Avid(MsgTypeAvid::Echo),
@@ -568,17 +573,190 @@ mod tests {
         let payload = b"AVID crash fault test".to_vec();
 
         // (n, t, k) test configurations
-        let test_cases = vec![
-            (4, 1, 2),
-            (5, 1, 3),
-            (7, 2, 3),
-            (20, 5, 8),
-            (20, 6, 8),
-        ];
+        let test_cases = vec![(4, 1, 2), (5, 1, 3), (7, 2, 3), (20, 5, 8), (20, 6, 8)];
 
         for (i, &(n, t, k)) in test_cases.iter().enumerate() {
             println!("--- Test case {} ---", i + 1);
             test_avid_rbc_with_faulty_nodes(n, t, k, 100 + i as u32, payload.clone()).await;
         }
+    }
+
+    #[tokio::test]
+    async fn test_common_coin() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+
+        let n = 4;
+        let t = 1;
+        let k = t + 1;
+        let session_id = 99;
+        let round_id = 0;
+
+        // Setup network
+        let (senders, receivers) = setup_channels(n).await;
+        // Setup ABA parties
+        let parties = setup_parties::<ABA>(n, t, k, senders.clone())
+            .await
+            .expect("Failed to set up ABA parties");
+        // Spawn their run loops
+        spawn_parties(&parties, receivers).await;
+
+        // Setup dealer and run key distribution
+        let dealer = Dealer::new(n, t);
+        let dealer_msg = Msg::new(
+            0,
+            session_id,
+            round_id,
+            vec![],
+            vec![],
+            GenericMsgType::ABA(MsgTypeAba::Key),
+            0,
+        );
+        dealer
+            .distribute_keys(
+                dealer_msg,
+                Arc::new(Network {
+                    id: 0,
+                    senders: senders.clone(),
+                }),
+            )
+            .await;
+
+        // Wait for keys to propagate and be set
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Trigger coin generation on all parties
+        for (aba, net) in &parties {
+            let coin_msg = Msg::new(
+                aba.id,
+                session_id,
+                round_id,
+                vec![],
+                vec![],
+                GenericMsgType::ABA(MsgTypeAba::Coin),
+                0,
+            );
+            aba.init_coin(coin_msg, net.clone()).await;
+        }
+
+        // Wait for coin signatures and combination
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify that each party has the coin
+        let mut coin_value: Option<bool> = None;
+        for (aba, _) in &parties {
+            let coin_store_map = aba.coin.lock().await;
+            let coin_store = coin_store_map
+                .get(&session_id)
+                .expect("Missing coin store")
+                .clone();
+            let store = coin_store.lock().await;
+
+            let coin = store
+                .coin(round_id)
+                .unwrap_or_else(|| panic!("Party {} has not generated coin", aba.id));
+
+            match coin_value {
+                None => coin_value = Some(coin),
+                Some(prev) => assert_eq!(
+                    prev, coin,
+                    "Mismatch in coin value at party {}: expected {}, got {}",
+                    aba.id, prev, coin
+                ),
+            }
+        }
+
+        println!(
+            "All parties successfully agreed on common coin: {:?}",
+            coin_value
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aba_agreement() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+
+        // === Parameters ===
+        let n = 4;
+        let t = 1;
+        let k = t + 1;
+        let session_id = 42;
+        let round_id = 0;
+
+        // === Setup Channels ===
+        let (senders, receivers) = setup_channels(n).await;
+
+        // === Setup ABA Parties ===
+        let parties = setup_parties::<ABA>(n, t, k, senders.clone())
+            .await
+            .expect("Failed to set up ABA parties");
+
+        // === Spawn Each Party ===
+        spawn_parties(&parties, receivers).await;
+
+        // === Dealer Distributes Keys ===
+        let dealer = Dealer::new(n, t);
+        let key_dist_msg = Msg::new(
+            0,
+            session_id,
+            round_id,
+            vec![],
+            vec![],
+            GenericMsgType::ABA(MsgTypeAba::Key),
+            0,
+        );
+        dealer
+            .distribute_keys(
+                key_dist_msg,
+                Arc::new(Network {
+                    id: 0,
+                    senders: senders.clone(),
+                }),
+            )
+            .await;
+
+        // Wait for keys to be received
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // === Trigger ABA with diverse inputs ===
+        for (i, (aba, net)) in parties.iter().enumerate() {
+            let input = i % 2 == 0; // Alternate between true and false
+            let payload = set_value_round(input, round_id);
+            aba.init(payload, session_id, net.clone()).await;
+        }
+        // Allow the protocol to run
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // === Check Agreement Across All Parties ===
+        let mut agreed_value: Option<bool> = None;
+
+        for (aba, _) in &parties {
+            let session_store = {
+                let map = aba.store.lock().await;
+                map.get(&session_id)
+                    .cloned()
+                    .expect(&format!("Party {} has no session store", aba.id))
+            };
+            let store = session_store.lock().await;
+
+            assert!(store.ended, "ABA session not ended for party {}", aba.id);
+
+            let output = store.output;
+            match agreed_value {
+                None => agreed_value = Some(output),
+                Some(expected) => assert_eq!(
+                    output, expected,
+                    "Mismatch in ABA output at party {}",
+                    aba.id
+                ),
+            }
+        }
+
+        println!("✅ All parties agreed on value: {}", agreed_value.unwrap());
     }
 }
