@@ -4,6 +4,12 @@
 /// a certain number of shares can reconstruct a secret.
 /// When wanting to implement your own custom MPC protocols that can plug 
 /// into the StoffelVM, you must implement the Share type.
+pub mod common;
+use crate::common::{rbc_store::Msg,rbc::Network};
+use std::sync::Arc;
+use tokio::sync::mpsc::Receiver;
+
+
 trait Share {
     /// The underlying secret that this share represents.
     type UnderlyingSecret;
@@ -24,8 +30,16 @@ trait Share {
 /// When implementing your own custom MPC protocols, you must implement the RBC trait.
 trait RBC {
 
+    /// Creates a new instance
+    fn new(id: u32, n: u32, t: u32) -> Self;
+    
+    ///Processing messages sent by other nodes based on their type
+    async fn process(&self,msg:Msg ,parties: Arc<Network>); 
+
     /// Broadcast messages to other nodes.
-    fn broadcast();
+    async fn broadcast(&self,msg: Msg, parties: Arc<Network>);
+    ///Listen to messages
+    async fn run_party(&self, receiver: &mut Receiver<Msg>, parties: Arc<Network>);
 }
 
 /// Now, it's time to define the MPC Protocol trait.

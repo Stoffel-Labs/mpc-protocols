@@ -2,7 +2,7 @@
 /// You can reuse them for the MPC protocols that you aim to implement.
 /// 
 
-use ark_ff:{FiniteField};
+use ark_ff::{FiniteField};
 
 struct ShamirSecretSharing {
 
