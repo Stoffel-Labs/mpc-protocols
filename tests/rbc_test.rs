@@ -8,6 +8,7 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tracing_subscriber;
+    use rand::Rng;
 
     /// Helper function to set up message senders and receivers for the parties.
     async fn setup_channels(n: u32) -> (Vec<mpsc::Sender<Msg>>, Vec<mpsc::Receiver<Msg>>) {
@@ -723,14 +724,17 @@ mod tests {
         // Wait for keys to be received
         tokio::time::sleep(Duration::from_millis(100)).await;
 
+
         // === Trigger ABA with diverse inputs ===
+        let mut rng = rand::thread_rng();
         for (i, (aba, net)) in parties.iter().enumerate() {
-            let input = i % 2 == 0; // Alternate between true and false
+            let input = rng.gen_bool(0.5); // Randomly true or false
+            tracing::info!("Party {} input: {}", i, input);
             let payload = set_value_round(input, round_id);
             aba.init(payload, session_id, net.clone()).await;
         }
         // Allow the protocol to run
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // === Check Agreement Across All Parties ===
         let mut agreed_value: Option<bool> = None;
@@ -808,9 +812,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // === Trigger multiple ABA sessions per party ===
+        let mut rng = rand::thread_rng();
         for session_id in &session_ids {
             for (i, (aba, net)) in parties.iter().enumerate() {
-                let input = (i + *session_id as usize) % 2 == 0; // Vary inputs per session
+                let input = rng.gen_bool(0.5); // Randomly true or false
+                tracing::info!("Party {} input: {}", i, input);
                 let payload = set_value_round(input, 0);
                 aba.init(payload, *session_id as u32, net.clone()).await;
             }
@@ -818,7 +824,7 @@ mod tests {
         }
 
         // Allow the protocol to run
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
         // === Validate ABA Output Agreement per session ===
         for session_id in session_ids {

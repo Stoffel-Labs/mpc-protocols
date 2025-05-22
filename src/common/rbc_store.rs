@@ -318,6 +318,7 @@ pub struct AbaStore {
     pub aux_senders: HashMap<u32, HashMap<u32, [bool; 2]>>,
     pub est_count: HashMap<u32, [u32; 2]>, // roundid => est value count[0 count ,1 count]
     pub est: HashMap<u32, [bool; 2]>,      // roundid => [sent 0 value , sent 1 value]
+    pub aux: HashMap<u32, [bool; 2]>,      // roundid => aux value
     // roundid => Sender => [bool,bool] , set of values shared by sender
     pub values: HashMap<u32, HashMap<u32, HashSet<bool>>>,
     pub bin_values: HashMap<u32, HashSet<bool>>, // roundid => {bool}
@@ -336,6 +337,18 @@ impl AbaStore {
     /// Get the estimate value for a given round id, defaulting to `false` if not set
     pub fn get_est(&self, round: u32, value: bool) -> bool {
         self.est
+            .get(&round)
+            .map(|arr| arr[value as usize])
+            .unwrap_or(false)
+    }
+    /// Mark the aux value for a given round id
+    pub fn mark_aux(&mut self, round: u32, value: bool) {
+        let aux_arr = self.aux.entry(round).or_insert([false; 2]);
+        aux_arr[value as usize] = true;
+    }
+    /// Get the aux value for a given round id, defaulting to `false` if not set
+    pub fn get_aux(&self, round: u32, value: bool) -> bool {
+        self.aux
             .get(&round)
             .map(|arr| arr[value as usize])
             .unwrap_or(false)
