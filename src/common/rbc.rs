@@ -948,8 +948,8 @@ impl ABA {
     /// Handles the estimate value, Responds by broadcasting an aux message if necessary.
     pub async fn est_handler(&self, msg: Msg, net: Arc<Network>) {
         info!(
-            id = self.id,
             session_id = msg.session_id,
+            id = self.id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling EST message for round {}",msg.round_id,
@@ -1070,7 +1070,7 @@ impl ABA {
             //Get values set
             let values = store.get_all_values(msg.round_id);
             //protocol logic for starting next or termination
-            if count == self.n - self.t && values.is_subset(&bin_val) {
+            if count >= self.n - self.t && values.is_subset(&bin_val) {
                 // Call coin generation, return if already started
                 {
                     let coin_store = self.get_or_create_coinstore(msg.session_id).await;
@@ -1089,7 +1089,7 @@ impl ABA {
 
                 tokio::spawn(async move {
                     let coin_opt = cloned_self
-                        .wait_for_coin(cloned_msg.session_id, cloned_msg.round_id, 300)
+                        .wait_for_coin(cloned_msg.session_id, cloned_msg.round_id, 500)
                         .await;
 
                     let coin_value = match coin_opt {
@@ -1314,8 +1314,8 @@ impl ABA {
             msg.msg_len,
         );
         info!(
-            id = self.id,
             session_id = msg.session_id,
+            id = self.id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Broadcasting signature shares"
@@ -1326,8 +1326,8 @@ impl ABA {
     //Collect the signature share and generate the common coin
     async fn coin_handler(&self, msg: Msg) {
         info!(
-            id = self.id,
             session_id = msg.session_id,
+            id = self.id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "At coin handler"
@@ -1421,6 +1421,7 @@ impl ABA {
 
                                 store.set_coin(msg.round_id, coin_bit);
                                 info!(
+                                    session_id = msg.session_id,
                                     id = self.id,
                                     "Successfully combined and verified signature for round {}",
                                     msg.round_id
@@ -1475,6 +1476,190 @@ impl Dealer {
 
             let _ = net.senders[i as usize].send(key_msg).await;
         }
+    }
+}
+/// -----------------------COMMON SUBSET------------------------------
+#[derive(Clone)]
+pub struct ACS {
+    pub id: u32,                     // The ID of the initiator
+    pub n: u32,                      // Total number of parties in the network
+    pub t: u32,                      // Number of allowed malicious parties
+    pub k: u32,                      //threshold
+    pub store: Arc<Mutex<AcsStore>>, // Stores the ACS session state for each session
+    pub aba: ABA,
+}
+
+impl ACS {
+    /// Creates a new ACS instance with the given parameters.
+    pub fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, String> {
+        if !(t < (n + 2) / 3) {
+            // ceil(n / 3)
+            return Err(format!(
+                "Invalid t: must satisfy 0 <= t < n / 3 (t={}, n={})",
+                t, n
+            ));
+        }
+        let aba = ABA::new(id, n, t, k)?;
+        Ok(ACS {
+            id,
+            n,
+            t,
+            k,
+            store: Arc::new(Mutex::new(AcsStore::default())),
+            aba: aba,
+        })
+    }
+
+    //Initialies the ABA protocol, called when an RBC terminates
+    pub async fn init(&self, msg: Msg, net: Arc<Network>) {
+        info!(
+            id = self.id,
+            session_id = msg.session_id,
+            sender = msg.sender_id,
+            msg_type = %msg.msg_type,
+            "Initiating common subset"
+        );
+
+        let mut store = self.store.lock().await;
+
+        if !store.has_aba_input(msg.session_id) {
+            store.set_aba_input(msg.session_id, true);
+            store.set_rbc_output(msg.session_id, msg.payload);
+
+            //Initiate aba for session id
+            let payload = set_value_round(true, 0);
+            self.aba.init(payload, msg.session_id, net.clone()).await;
+
+            // Spawn task to watch for ABA completion
+            let aba_store = self.aba.get_or_create_store(msg.session_id).await;
+            let aba_store_clone = aba_store.clone();
+            let self_clone = self.clone();
+            let net_clone = net.clone();
+            let store_clone = self.store.clone();
+
+            tokio::spawn(async move {
+                let notify = {
+                    let aba = aba_store_clone.lock().await;
+                    aba.notify.clone()
+                };
+
+                notify.notified().await;
+
+                let output: bool = {
+                    let aba = aba_store_clone.lock().await;
+                    aba.output
+                };
+
+                // Store ABA output
+                let mut store = store_clone.lock().await;
+                store.set_aba_output(msg.session_id, output);
+
+                // Check if enough parties agreed with output 1
+                let true_count = store.get_aba_output_one_count();
+                info!(id = self_clone.id, "Outside n-t");
+                if true_count >= self_clone.n - self_clone.t {
+                    // For any party that hasn't provided input yet, provide input 0
+                    //We assume the session ID is of some form (broadcasterID||... ),
+                    //for now we can assume session ID is just the broadcasters ID
+                    let uninitiated = (0..self_clone.n)
+                        .filter(|sid| !store.has_aba_input(*sid))
+                        .collect::<Vec<_>>();
+                    info!(id = self_clone.id, "Inside n-t {}", uninitiated.len());
+                    if uninitiated.len() == 0 {
+                        let store_clone2 = store_clone.clone();
+                        let self_clone2 = self_clone.clone();
+                        tokio::spawn(async move {
+                            self_clone2.check_and_finalize_output(store_clone2).await;
+                        });
+                        return;
+                    } else {
+                        for sid in uninitiated {
+                            let payload = set_value_round(false, 0);
+                            self_clone.aba.init(payload, sid, net_clone.clone()).await;
+                            store.set_aba_input(sid, false);
+
+                            // Spawn task for ABA completion of each uninitiated session
+                            let aba_store = self_clone.aba.get_or_create_store(sid).await;
+                            let aba_store_clone = aba_store.clone();
+                            let self_clone2 = self_clone.clone();
+                            let store_clone2 = store_clone.clone();
+                            info!(id = self_clone.id, "Inside uninitiated");
+
+                            tokio::spawn(async move {
+                                let notify = {
+                                    let aba = aba_store_clone.lock().await;
+                                    aba.notify.clone()
+                                };
+
+                                notify.notified().await;
+
+                                let output = {
+                                    let aba = aba_store_clone.lock().await;
+                                    aba.output
+                                };
+
+                                {
+                                    let mut store = self_clone2.store.lock().await;
+                                    store.set_aba_output(sid, output);
+                                }
+
+                                self_clone2.check_and_finalize_output(store_clone2).await;
+                            });
+                        }
+                    }
+                }
+            });
+        } else if store.get_rbc_output(msg.session_id).is_none() {
+            // RBC finished *after* ABA started
+            store.set_rbc_output(msg.session_id, msg.payload);
+
+            // Now try finalizing in case all ABA + RBC outputs are ready
+            let store_clone = self.store.clone();
+            let self_clone = self.clone();
+            info!(id = self.id, "Collect rbc");
+            tokio::spawn(async move {
+                self_clone.check_and_finalize_output(store_clone).await;
+            });
+        }
+    }
+    async fn check_and_finalize_output(&self, session_store: Arc<Mutex<AcsStore>>) {
+        let mut store = session_store.lock().await;
+        // If not all ABA instances have outputs, return early
+        if store.aba_output.len() < self.n as usize {
+            return;
+        }
+
+        // Gather indices where ABA output is 1
+        let mut consensus_indices: Vec<u32> = store
+            .aba_output
+            .iter()
+            .filter(|(_, &v)| v)
+            .map(|(&id, _)| id)
+            .collect();
+
+        consensus_indices.sort(); // Sort the indices
+
+        // Wait until RBC output is available for all j in C
+        let mut values = Vec::new();
+        for &j in &consensus_indices {
+            if let Some(value) = store.get_rbc_output(j) {
+                values.push(value.clone());
+            } else {
+                // If even one is missing, wait and try later
+                return;
+            }
+        }
+
+        // Output the union of all values from parties in C
+        info!(
+            id = self.id,
+            "ACS output finalized with {} values from {:?}",
+            values.len(),
+            consensus_indices
+        );
+
+        store.set_acs(values);
+        store.mark_ended();
     }
 }
 

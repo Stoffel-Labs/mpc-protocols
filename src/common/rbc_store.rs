@@ -46,6 +46,7 @@ pub enum GenericMsgType {
     Bracha(MsgType),
     Avid(MsgTypeAvid),
     ABA(MsgTypeAba),
+    Acs(MsgTypeAcs),
 }
 // Implement Display for GenericMsgType
 impl fmt::Display for GenericMsgType {
@@ -54,6 +55,7 @@ impl fmt::Display for GenericMsgType {
             GenericMsgType::Bracha(ref msg) => write!(f, "Bracha({})", msg),
             GenericMsgType::Avid(ref msg) => write!(f, "Avid({})", msg),
             GenericMsgType::ABA(ref msg) => write!(f, "ABA({})", msg),
+            GenericMsgType::Acs(ref msg) => write!(f, "ACS({})", msg),
         }
     }
 }
@@ -321,6 +323,7 @@ pub struct AbaStore {
     pub bin_values: HashMap<u32, HashSet<bool>>, // roundid => {bool}
     pub ended: bool,                             //ABA session ended or not
     pub output: bool,                            // Agreed value after consensus
+    pub notify: Arc<Notify>,
 }
 
 impl AbaStore {
@@ -435,6 +438,7 @@ impl AbaStore {
     /// Sets ended flag to true
     pub fn mark_ended(&mut self) {
         self.ended = true;
+        self.notify.notify_waiters();
     }
 
     /// Sets the output value.
@@ -505,7 +509,7 @@ impl CoinStore {
     pub fn coin(&self, round: u32) -> Option<bool> {
         self.coins.get(&round).copied()
     }
-    
+
     //Marks the start of common coin generation
     pub fn set_start(&mut self, round_id: u32) {
         self.start.insert(round_id, true);
@@ -514,5 +518,70 @@ impl CoinStore {
     //Checks if common coin generation has started
     pub fn get_start(&self, round: u32) -> bool {
         *self.start.get(&round).unwrap_or(&false)
+    }
+}
+
+/// Stores the internal state for each ACS session at a party.
+#[derive(Debug, Clone)]
+pub enum MsgTypeAcs {
+    Acs,
+    Unknown(String),
+}
+// Implement Display for MsgType
+impl fmt::Display for MsgTypeAcs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            MsgTypeAcs::Acs => write!(f, "Acs"),
+            MsgTypeAcs::Unknown(ref s) => write!(f, "Unknown({})", s),
+        }
+    }
+}
+#[derive(Default, Clone)]
+pub struct AcsStore {
+    pub aba_input: HashMap<u32, bool>,     //Session id => aba input
+    pub aba_output: HashMap<u32, bool>,    //Session id => aba output
+    pub rbc_output: HashMap<u32, Vec<u8>>, //Session id => rbc output
+    pub ended: bool,
+    pub commonsubset: Vec<Vec<u8>>,
+}
+
+impl AcsStore {
+    /// Checks if ABA input is stored for the given session ID.
+    pub fn has_aba_input(&self, session_id: u32) -> bool {
+        self.aba_input.contains_key(&session_id)
+    }
+    /// Sets the ABA input for a given session ID.
+    pub fn set_aba_input(&mut self, session_id: u32, value: bool) {
+        self.aba_input.insert(session_id, value);
+    }
+    /// Sets the ABA output for a given session ID.
+    pub fn set_aba_output(&mut self, session_id: u32, value: bool) {
+        self.aba_output.insert(session_id, value);
+    }
+    /// Get the ABA output 1 count
+    pub fn get_aba_output_one_count(&mut self) -> u32 {
+        self.aba_output.iter().filter(|&(_, &val)| val).count() as u32
+    }
+    /// Checks if RBC output is stored for the given session ID.
+    pub fn has_rbc_output(&self, session_id: u32) -> bool {
+        self.rbc_output.contains_key(&session_id)
+    }
+    /// Sets the RBC output for a given session ID.
+    pub fn set_rbc_output(&mut self, session_id: u32, output: Vec<u8>) {
+        self.rbc_output.insert(session_id, output);
+    }
+    /// Get the RBC output for a given session ID.
+    pub fn get_rbc_output(&mut self, session_id: u32) -> Option<&Vec<u8>> {
+        self.rbc_output.get(&session_id)
+    }
+
+    ///Set the common subset
+    pub fn set_acs(&mut self, set: Vec<Vec<u8>>) {
+        self.commonsubset = set;
+    }
+
+    /// Sets ended flag to true
+    pub fn mark_ended(&mut self) {
+        self.ended = true;
     }
 }

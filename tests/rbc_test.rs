@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use mpc::common::rbc_store::{GenericMsgType, MsgType, MsgTypeAba, MsgTypeAvid};
+    use mpc::common::rbc_store::{GenericMsgType, MsgType, MsgTypeAba, MsgTypeAcs, MsgTypeAvid};
     use mpc::common::utils::set_value_round;
     use mpc::common::{rbc::*, rbc_store::Msg};
     use mpc::RBC;
@@ -14,7 +14,7 @@ mod tests {
         let mut senders = Vec::new();
         let mut receivers = Vec::new();
         for _ in 0..n {
-            let (tx, rx) = mpsc::channel(100); // Create a channel with capacity 100
+            let (tx, rx) = mpsc::channel(500); // Create a channel with capacity 500
             senders.push(tx);
             receivers.push(rx);
         }
@@ -759,4 +759,376 @@ mod tests {
 
         println!("✅ All parties agreed on value: {}", agreed_value.unwrap());
     }
+
+    #[tokio::test]
+    async fn test_multiple_aba_sessions() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+
+        // === Parameters ===
+        let n = 4;
+        let t = 1;
+        let k = t + 1;
+        let session_ids: Vec<u32> = vec![100, 101, 102, 103]; // One session per party
+
+        // === Setup Channels ===
+        let (senders, receivers) = setup_channels(n).await;
+
+        // === Setup ABA Parties ===
+        let parties = setup_parties::<ABA>(n, t, k, senders.clone())
+            .await
+            .expect("Failed to set up ABA parties");
+
+        // === Spawn Each Party ===
+        spawn_parties(&parties, receivers).await;
+
+        // === Dealer Distributes Keys ===
+        let dealer = Dealer::new(n, t);
+        let key_dist_msg = Msg::new(
+            0,
+            0,
+            0,
+            vec![],
+            vec![],
+            GenericMsgType::ABA(MsgTypeAba::Key),
+            0,
+        );
+        dealer
+            .distribute_keys(
+                key_dist_msg,
+                Arc::new(Network {
+                    id: 0,
+                    senders: senders.clone(),
+                }),
+            )
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // === Trigger multiple ABA sessions per party ===
+        for session_id in &session_ids {
+            for (i, (aba, net)) in parties.iter().enumerate() {
+                let input = (i + *session_id as usize) % 2 == 0; // Vary inputs per session
+                let payload = set_value_round(input, 0);
+                aba.init(payload, *session_id as u32, net.clone()).await;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Allow the protocol to run
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // === Validate ABA Output Agreement per session ===
+        for session_id in session_ids {
+            let mut agreed_value: Option<bool> = None;
+
+            for (aba, _) in &parties {
+                let session_store = {
+                    let map = aba.store.lock().await;
+                    map.get(&session_id).cloned().expect(&format!(
+                        "Party {} missing ABA session {}",
+                        aba.id, session_id
+                    ))
+                };
+                let store = session_store.lock().await;
+
+                assert!(
+                    store.ended,
+                    "ABA session {} not ended at party {}",
+                    session_id, aba.id
+                );
+
+                let output = store.output;
+                match agreed_value {
+                    None => agreed_value = Some(output),
+                    Some(expected) => assert_eq!(
+                        output, expected,
+                        "Mismatch in ABA output at party {} for session {}",
+                        aba.id, session_id
+                    ),
+                }
+            }
+
+            println!(
+                "✅ Session {}: All parties agreed on value: {}",
+                session_id,
+                agreed_value.unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_acs_with_simulated_rbc_outputs() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+
+        let n = 4;
+        let t = 1;
+        let k = 2;
+
+        // === Setup Channels for ACS ===
+        let (senders, receivers) = setup_channels(n).await;
+
+        // === Create ACS instances for each party ===
+        let mut acs_instances = Vec::new();
+        let mut acs_parties = Vec::new();
+
+        for i in 0..n {
+            let acs = ACS::new(i as u32, n as u32, t as u32, k as u32)
+                .expect("Failed to create ACS instance");
+            let net = Arc::new(Network {
+                id: i,
+                senders: senders.clone(),
+            });
+
+            acs_parties.push((acs.aba.clone(), net.clone()));
+            acs_instances.push(acs);
+        }
+
+        // === Spawn ACS protocol handlers ===
+        spawn_parties(&acs_parties, receivers).await;
+
+        // === Dealer distributes keys ===
+        let dealer = Dealer::new(n, t);
+        let key_msg = Msg::new(
+            0,
+            0,
+            0,
+            vec![],
+            vec![],
+            GenericMsgType::ABA(MsgTypeAba::Key),
+            0,
+        );
+        dealer
+            .distribute_keys(
+                key_msg,
+                Arc::new(Network {
+                    id: 0,
+                    senders: senders.clone(),
+                }),
+            )
+            .await;
+
+        // Wait briefly for keys to be received
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // === Simulate RBC output payloads ===
+        let fake_rbc_outputs = vec![
+            b"Message from Party 0".to_vec(),
+            b"Message from Party 1".to_vec(),
+            b"Message from Party 2".to_vec(),
+            b"Message from Party 3".to_vec(),
+        ];
+
+        // === Feed RBC outputs into each party's ACS instance ===
+        for (session_id, payload) in fake_rbc_outputs.iter().enumerate() {
+            for (i, (_, net)) in acs_parties.iter().enumerate() {
+                let msg = Msg {
+                    sender_id: i as u32,
+                    session_id: session_id as u32,
+                    round_id: 0,
+                    msg_type: GenericMsgType::Acs(MsgTypeAcs::Acs),
+                    payload: payload.clone(),
+                    metadata: vec![],
+                    msg_len: payload.len(),
+                };
+
+                acs_instances[i as usize]
+                    .init(msg, net.clone())
+                    .await;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Wait for ACS to complete
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        // === Validate ACS Outputs ===
+        let mut commonsubsets = Vec::new();
+        for i in 0..n {
+            let mut store = acs_instances[i as usize].store.lock().await;
+
+            assert!(store.ended, "Party {}: ACS has not terminated", i);
+
+            assert!(
+                store.get_aba_output_one_count() >= n - t,
+                "Party {}: insufficient ACS outputs",
+                i
+            );
+
+            commonsubsets.push(store.commonsubset.clone());
+        }
+
+        // All parties must agree on the same common subset
+        for i in 1..n {
+            assert_eq!(
+                commonsubsets[0], commonsubsets[i as usize],
+                "Mismatch in ACS outputs between party 0 and party {}",
+                i
+            );
+        }
+    }
+    // #[tokio::test]
+    // async fn test_commonsubset() {
+    //     let _ = tracing_subscriber::fmt()
+    //         .with_max_level(tracing::Level::DEBUG)
+    //         .with_test_writer()
+    //         .try_init();
+
+    //     let n = 4;
+    //     let t = 1;
+    //     let k = 2;
+
+    //     let session_ids = vec![0, 1, 2, 3];
+    //     let payloads = vec![
+    //         b"From Party 0".to_vec(),
+    //         b"From Party 1".to_vec(),
+    //         b"From Party 2".to_vec(),
+    //         b"From Party 3".to_vec(),
+    //     ];
+    //     //--------------------------------------------------RBC--------------------------------------------------
+    //     let (senders, receivers) = setup_channels(n).await;
+    //     let parties = setup_parties::<Avid>(n, t, k, senders)
+    //         .await
+    //         .expect("Failed to set up parties");
+
+    //     spawn_parties(&parties, receivers).await;
+
+    //     // Each party initiates one RBC session
+    //     for (i, (avid, net)) in parties.iter().enumerate() {
+    //         avid.init(payloads[i].clone(), session_ids[i], net.clone())
+    //             .await;
+    //     }
+
+    //     // Wait for all RBC instances to terminate
+    //     tokio::time::sleep(Duration::from_secs(1)).await;
+
+    //     //--------------------------------------------------ACS--------------------------------------------------
+
+    //     // === Setup Channels for ACS ===
+    //     let (senders1, receivers1) = setup_channels(n).await;
+
+    //     // Create ACS instances for each party
+    //     let mut acs_instances = Vec::new();
+    //     let mut acs_parties = Vec::with_capacity(n as usize);
+    //     for i in 0..n {
+    //         let acs = ACS::new(i as u32, n as u32, t as u32, k as u32)
+    //             .expect("Failed to create ACS instance");
+    //         let net = Arc::new(Network {
+    //             id: i,
+    //             senders: senders1.clone(), // Each party has the same senders
+    //         });
+    //         acs_parties.push((acs.aba.clone(), net));
+    //         acs_instances.push(acs);
+    //     }
+
+    //     // === Spawn Each Party for ACS===
+    //     spawn_parties(&acs_parties, receivers1).await;
+
+    //     // === Dealer Distributes Keys ===
+    //     let dealer = Dealer::new(n, t);
+    //     let key_dist_msg = Msg::new(
+    //         0,
+    //         0,
+    //         0,
+    //         vec![],
+    //         vec![],
+    //         GenericMsgType::ABA(MsgTypeAba::Key),
+    //         0,
+    //     );
+    //     dealer
+    //         .distribute_keys(
+    //             key_dist_msg,
+    //             Arc::new(Network {
+    //                 id: 0,
+    //                 senders: senders1.clone(),
+    //             }),
+    //         )
+    //         .await;
+    //     // Wait for keys to be received
+    //     tokio::time::sleep(Duration::from_millis(100)).await;
+
+    //     // -------------------------------Verify RBC termination and initiate ACS-------------------------------
+    //     for (i, (avid, _)) in parties.iter().enumerate() {
+    //         let store = avid.store.lock().await;
+
+    //         for session_id in &session_ids {
+    //             // Check if RBC has terminated for this session
+    //             let session_store = store
+    //                 .get(session_id)
+    //                 .expect(&format!("Party {} missing RBC session {}", i, session_id));
+    //             let session = session_store.lock().await;
+
+    //             // Check if this RBC has successfully terminated with output
+    //             assert!(
+    //                 session.ended,
+    //                 "RBC has not terminated yet at {}",
+    //                 session_id
+    //             );
+
+    //             println!(
+    //                 "Party {} received RBC output for session {}: {:?}",
+    //                 i, session_id, session.output
+    //             );
+
+    //             // Now initiate ACS with the RBC output
+    //             let msg = Msg {
+    //                 sender_id: i as u32,
+    //                 session_id: *session_id,
+    //                 round_id: 0,
+    //                 msg_type: GenericMsgType::Acs(MsgTypeAcs::Acs),
+    //                 payload: session.output.clone(),
+    //                 metadata: vec![],
+    //                 msg_len: session.output.len(),
+    //             };
+
+    //             // Initiate ACS for this party with the RBC result
+    //             acs_instances[i].init(msg, acs_parties[i].1.clone()).await;
+    //         }
+    //     }
+
+    //     // Allow time for ACS to complete
+    //     tokio::time::sleep(Duration::from_secs(4)).await;
+
+    //     // -------------------------------------------Validate ACS-------------------------------------------
+    //     for i in 0..n {
+    //         let mut store_lock = acs_instances[i as usize].store.lock().await;
+    //         // Check if ACS has values
+    //         assert!(
+    //             store_lock.ended,
+    //             "ACS has not terminated yet at {} party",
+    //             i
+    //         );
+    //         // Verify ACS contains at least n-t values
+    //         assert!(
+    //             store_lock.get_aba_output_one_count() >= (n - t),
+    //             "Party {} ACS should contain at least {} values, got {}",
+    //             i,
+    //             n - t,
+    //             store_lock.get_aba_output_one_count()
+    //         );
+    //     }
+
+    //     // Cross-check consistency between parties
+    //     let mut outputs = Vec::new();
+
+    //     for i in 0..n {
+    //         let store_lock = acs_instances[i as usize].store.lock().await;
+    //         let output = &store_lock.commonsubset;
+    //         outputs.push(output.clone());
+    //     }
+
+    //     // Check all parties have same output for this session
+    //     for i in 1..n {
+    //         assert_eq!(
+    //             outputs[0], outputs[i as usize],
+    //             "ACS output differs between parties 0 and {}",
+    //             i
+    //         );
+    //     }
+    // }
 }
