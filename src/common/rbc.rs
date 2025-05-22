@@ -26,6 +26,7 @@ pub struct Network {
 }
 
 ///--------------------------Bracha RBC--------------------------
+///
 /// Protocol works as follows(m is the message to broadcast) :
 /// 1. Initiator sends (INIT,m)
 /// 2. Party on recieveing (INIT,m) and haven't sent (ECHO,m), sends (ECHO,m)
@@ -42,7 +43,7 @@ pub struct Bracha {
     pub n: u32, // Total number of parties in the network
     pub t: u32, // Number of allowed malicious parties
     pub k: u32, //threshold (Not really used in Bracha)
-    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<BrachaStore>>>>>, // Stores the session state for each session
+    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<BrachaStore>>>>>, // Stores the session state 
 }
 #[async_trait]
 impl RBC for Bracha {
@@ -117,7 +118,7 @@ impl RBC for Bracha {
     }
 }
 impl Bracha {
-    /// Handlers
+    // Handlers
     /// Handles the "INIT" message. Responds by broadcasting an "ECHO" message if necessary.
     pub async fn init_handler(&self, msg: Msg, net: Arc<Network>) {
         info!(
@@ -324,6 +325,7 @@ impl Bracha {
 }
 
 ///--------------------------AVID RBC--------------------------
+///
 /// Protocol can be found here :
 /// https://homes.cs.washington.edu/~tessaro/papers/dds.pdf
 ///
@@ -333,7 +335,7 @@ pub struct Avid {
     pub n: u32,                                                 //Network size
     pub t: u32,                                                 //No. of malicious parties
     pub k: u32,                                                 //Threshold
-    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AvidStore>>>>>, // <- wrap only this in a lock //Sessionid => store
+    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
 }
 #[async_trait]
 impl RBC for Avid {
@@ -361,7 +363,7 @@ impl RBC for Avid {
             store: Arc::new(Mutex::new(HashMap::new())),
         })
     }
-    ///This is initiates the Avid protocol.
+    ///This initiates the Avid protocol.
     async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
         info!(
             id = self.id,
@@ -454,7 +456,7 @@ impl RBC for Avid {
 }
 
 impl Avid {
-    /// Handlers
+    // Handlers
 
     /// Handles the "SEND" message. Responds by broadcasting an "ECHO" message if necessary.
     pub async fn send_handler(&self, msg: Msg, net: Arc<Network>) {
@@ -830,11 +832,39 @@ impl Avid {
     }
 }
 
-/// Common subset is a sub-protocol used to agree on the termination of rbcs
-/// Common subset based on https://eprint.iacr.org/2016/199.pdf works in the following steps :
-/// 1. RBCs of proposed values
-/// 2. Asynchronous Binary agreement(ABA) protocol to agree on the RBCs
-/// -----------------------ABA------------------------------
+///------------------------------ABA------------------------------
+///
+/// Algorithm: Binary Agreement (BA) for party P_i :
+///
+/// Upon receiving input `b_input`, set `est_0 := b_input` and enter the epoch loop.
+/// Loop: for increasing round labels `r`:
+/// 1. Multicast `BVAL_r(est_r)`
+///
+/// 2. Initialize: `bin_values_r := ∅`
+///
+/// 3. Upon receiving `BVAL_r(b)` messages from `f + 1` distinct nodes:
+///    - If `BVAL_r(b)` has not yet been sent, multicast `BVAL_r(b)`
+///
+/// 4. Upon receiving `BVAL_r(b)` messages from `2f + 1` distinct nodes:
+///    - Add `b` to `bin_values_r`: `bin_values_r := bin_values_r ∪ {b}`
+///
+/// 5. Wait until `bin_values_r ≠ ∅`, then:
+///    - Multicast `AUX_r(w)`, where `w ∈ bin_values_r`
+///
+/// 6. Wait until at least `(N - f)` `AUX_r` messages are received
+///    - Let `vals` be the set of values contained in these `AUX_r` messages
+///    - Condition: `vals ⊆ bin_values_r`
+///      (Note: `bin_values_r` may still be changing)
+///      This condition can be satisfied after receiving either `AUX_r` or `BVAL_r` messages
+///
+/// 7. Sample common coin for round `r`: `s ← Coin_r.GetCoin()`
+///
+/// 8. Decision logic:
+///    - If `vals == {b}` (singleton set):
+///        * Set `est_{r+1} := b`
+///        * If `b == (s % 2)`, then output `b`
+///    - Else (i.e., `vals` contain
+
 #[derive(Clone)]
 pub struct ABA {
     pub id: u32,                                               // The ID of the initiator
@@ -843,8 +873,8 @@ pub struct ABA {
     pub k: u32,                          //threshold
     pub skshare: Arc<OnceCell<Vec<u8>>>, //Secret key share
     pub pkset: Arc<OnceCell<Vec<u8>>>,   //Public key set
-    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AbaStore>>>>>, // Stores the ABA session state for each session
-    pub coin: Arc<Mutex<HashMap<u32, Arc<Mutex<CoinStore>>>>>, // Stores the common coin session state for each session
+    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AbaStore>>>>>, // Stores the ABA session state
+    pub coin: Arc<Mutex<HashMap<u32, Arc<Mutex<CoinStore>>>>>, // Stores the common coin session state
 }
 #[async_trait]
 impl RBC for ABA {
@@ -944,7 +974,8 @@ impl RBC for ABA {
     }
 }
 impl ABA {
-    ///Handlers
+    //Handlers
+
     /// Handles the estimate value, Responds by broadcasting an aux message if necessary.
     pub async fn est_handler(&self, msg: Msg, net: Arc<Network>) {
         info!(
@@ -1004,18 +1035,21 @@ impl ABA {
             }
 
             //protocol logic for sending aux value
-            if count == 2 * self.t + 1 {
+            if count >= 2 * self.t + 1 {
                 store.insert_bin_value(msg.round_id, value);
-                let new_msg = Msg::new(
-                    self.id,
-                    msg.session_id,
-                    msg.round_id,
-                    msg.payload,
-                    msg.metadata,
-                    GenericMsgType::ABA(MsgTypeAba::Aux),
-                    msg.msg_len,
-                );
-                ABA::broadcast(&self, new_msg, net).await;
+                if !store.get_aux(msg.round_id, value) {
+                    store.mark_aux(msg.round_id, value); // Mark as having sent aux value
+                    let new_msg = Msg::new(
+                        self.id,
+                        msg.session_id,
+                        msg.round_id,
+                        msg.payload,
+                        msg.metadata,
+                        GenericMsgType::ABA(MsgTypeAba::Aux),
+                        msg.msg_len,
+                    );
+                    ABA::broadcast(&self, new_msg, net).await;
+                }
             }
         }
     }
@@ -1055,6 +1089,12 @@ impl ABA {
                 session_id = msg.session_id,
                 "Session already ended, ignoring aux"
             );
+            return;
+        }
+        let bin_val = store.get_bin_values(msg.round_id);
+
+        if !bin_val.contains(&value) {
+            // Don't accept AUX messages for values not in bin_values
             return;
         }
 
@@ -1303,7 +1343,7 @@ impl ABA {
         };
 
         //Sign the session id with the secret key share and broadcast to others
-        let signshare = skshare.sign(msg.session_id.to_be_bytes());
+        let signshare = skshare.sign(msg.round_id.to_be_bytes());
         let new_msg = Msg::new(
             self.id,
             msg.session_id,
@@ -1384,7 +1424,7 @@ impl ABA {
             //Verfiy the signature share
             if !pkset
                 .public_key_share(msg.sender_id as i32)
-                .verify(&sigshare, msg.session_id.to_be_bytes())
+                .verify(&sigshare, msg.round_id.to_be_bytes())
             {
                 warn!("Invalid signature share from {}", msg.sender_id);
                 return;
@@ -1414,7 +1454,7 @@ impl ABA {
                         Ok(signature) => {
                             if pkset
                                 .public_key()
-                                .verify(&signature, msg.session_id.to_be_bytes())
+                                .verify(&signature, msg.round_id.to_be_bytes())
                             {
                                 // Convert the final signature to a coin value (e.g., bool)
                                 let coin_bit = signature.to_bytes()[0] & 1 == 1;
@@ -1424,7 +1464,7 @@ impl ABA {
                                     session_id = msg.session_id,
                                     id = self.id,
                                     "Successfully combined and verified signature for round {}",
-                                    msg.round_id
+                                    msg.round_id,
                                 );
                             } else {
                                 warn!("Combined signature failed verification");
@@ -1440,9 +1480,9 @@ impl ABA {
     }
 }
 
-///Mock trusted dealer for testing
-/// Might replace with a DKG
-/// Replace threshold signature crate with a more reliable option or build from scratch
+/// Mock trusted dealer for testing.
+/// Might replace with a DKG.
+///To do: Replace threshold signature crate with a more reliable option or build from scratch
 pub struct Dealer {
     n: u32,
     t: u32,
@@ -1478,15 +1518,22 @@ impl Dealer {
         }
     }
 }
-/// -----------------------COMMON SUBSET------------------------------
+
+/// ------------------------------ASYNCHRONOUS COMMON SUBSET------------------------------
+///
+/// Common subset is a sub-protocol used to agree on the termination of RBCs
+/// Common subset based on https://eprint.iacr.org/2016/199.pdf works in the following steps :
+/// 1. n RBCs of proposed values
+/// 2. Run n Asynchronous Binary agreement(ABA) protocol per RBC to decide whether that RBC should be part of
+/// the common subset
 #[derive(Clone)]
 pub struct ACS {
     pub id: u32,                     // The ID of the initiator
     pub n: u32,                      // Total number of parties in the network
     pub t: u32,                      // Number of allowed malicious parties
-    pub k: u32,                      //threshold
-    pub store: Arc<Mutex<AcsStore>>, // Stores the ACS session state for each session
-    pub aba: ABA,
+    pub k: u32,                      // threshold
+    pub store: Arc<Mutex<AcsStore>>, // Stores the ACS session state
+    pub aba: ABA,                    //ABA instance for the common subset
 }
 
 impl ACS {
@@ -1510,7 +1557,7 @@ impl ACS {
         })
     }
 
-    //Initialies the ABA protocol, called when an RBC terminates
+    ///Initialies the ABA protocol, called when an RBC terminates
     pub async fn init(&self, msg: Msg, net: Arc<Network>) {
         info!(
             id = self.id,
@@ -1536,7 +1583,7 @@ impl ACS {
             let self_clone = self.clone();
             let net_clone = net.clone();
             let store_clone = self.store.clone();
-
+            drop(store);
             tokio::spawn(async move {
                 let notify = {
                     let aba = aba_store_clone.lock().await;
@@ -1556,7 +1603,6 @@ impl ACS {
 
                 // Check if enough parties agreed with output 1
                 let true_count = store.get_aba_output_one_count();
-                info!(id = self_clone.id, "Outside n-t");
                 if true_count >= self_clone.n - self_clone.t {
                     // For any party that hasn't provided input yet, provide input 0
                     //We assume the session ID is of some form (broadcasterID||... ),
@@ -1564,7 +1610,6 @@ impl ACS {
                     let uninitiated = (0..self_clone.n)
                         .filter(|sid| !store.has_aba_input(*sid))
                         .collect::<Vec<_>>();
-                    info!(id = self_clone.id, "Inside n-t {}", uninitiated.len());
                     if uninitiated.len() == 0 {
                         let store_clone2 = store_clone.clone();
                         let self_clone2 = self_clone.clone();
@@ -1583,7 +1628,6 @@ impl ACS {
                             let aba_store_clone = aba_store.clone();
                             let self_clone2 = self_clone.clone();
                             let store_clone2 = store_clone.clone();
-                            info!(id = self_clone.id, "Inside uninitiated");
 
                             tokio::spawn(async move {
                                 let notify = {
@@ -1616,6 +1660,7 @@ impl ACS {
             // Now try finalizing in case all ABA + RBC outputs are ready
             let store_clone = self.store.clone();
             let self_clone = self.clone();
+            drop(store);
             info!(id = self.id, "Collect rbc");
             tokio::spawn(async move {
                 self_clone.check_and_finalize_output(store_clone).await;
