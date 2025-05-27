@@ -43,7 +43,7 @@ pub struct Bracha {
     pub n: u32, // Total number of parties in the network
     pub t: u32, // Number of allowed malicious parties
     pub k: u32, //threshold (Not really used in Bracha)
-    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<BrachaStore>>>>>, // Stores the session state 
+    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
 }
 #[async_trait]
 impl RBC for Bracha {
@@ -152,6 +152,7 @@ impl Bracha {
                 msg_type = "ECHO",
                 "Broadcasting ECHO in response to INIT"
             );
+            drop(store);
             Bracha::broadcast(&self, new_msg, net).await;
         }
     }
@@ -495,6 +496,7 @@ impl Avid {
                         msg_type = "ECHO",
                         "Broadcasting ECHO in response to SEND"
                     );
+                    drop(store);
                     //Send message to every party
                     Avid::broadcast(&self, msg, net).await;
                 }
@@ -572,6 +574,7 @@ impl Avid {
                     if echo_count == threshold && ready_count < self.k {
                         //Send ready logic
                         let shards_map = store.get_shards_for_root(&root.to_vec());
+                        drop(store);
                         self.send_ready(msg, shards_map, net).await;
                     }
                 }
@@ -935,7 +938,7 @@ impl RBC for ABA {
         let mut store = session_store.lock().await;
         //Mark as having sent est value for round id
         store.mark_est(msg.round_id, v_r.0);
-
+        drop(store);
         ABA::broadcast(&self, msg, net).await;
     }
 
@@ -1048,6 +1051,7 @@ impl ABA {
                         GenericMsgType::ABA(MsgTypeAba::Aux),
                         msg.msg_len,
                     );
+                    drop(store);
                     ABA::broadcast(&self, new_msg, net).await;
                 }
             }
@@ -1109,6 +1113,7 @@ impl ABA {
             let bin_val = store.get_bin_values(msg.round_id);
             //Get values set
             let values = store.get_all_values(msg.round_id);
+            drop(store);
             //protocol logic for starting next or termination
             if count >= self.n - self.t && values.is_subset(&bin_val) {
                 // Call coin generation, return if already started
