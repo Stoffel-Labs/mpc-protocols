@@ -56,7 +56,7 @@ impl RBC for Bracha {
             store: Arc::new(Mutex::new(HashMap::new())),
         })
     }
-    /// This is the initial broadcast message in the Bracha protocol.
+    /// This initiates the Bracha protocol.
     async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
         // Create an INIT message with the given payload and session ID.
         let msg = Msg::new(
@@ -311,16 +311,84 @@ impl Bracha {
 }
 
 ///--------------------------AVID RBC--------------------------
-/// Protocol can be found here :
+/// 
 /// https://homes.cs.washington.edu/~tessaro/papers/dds.pdf
+/// 
+/// Assumptions:
+/// - n parties: P1, P2, ..., Pn
+/// - t < n / 3 Byzantine faults
+/// - H: collision-resistant hash function
 ///
+///------------------------------------------------------------
+/// Dealer Protocol (Sender)
+/// 
+/// 1. Encode message m as a polynomial f(x) of degree ≤ k - 1.
+/// 2. Compute n shares: Fj := f(j) for j ∈ [1, n].
+/// 3. Build Merkle tree (binary hash tree) over [F1, ..., Fn]:
+///     Leaf i: val(i) := H(Fi)
+///     Internal node v: val(v) := H(val(left), val(right))
+/// 4. Compute root hash hr := val(root).
+/// 5. For each j ∈ [1, n]:
+///     Compute fingerprint FP(j): the sibling hashes along path from j to root.
+///     Send message: (ID, send, hr, FP(j), Fj) to server Pj.
+/// 
+///------------------------------------------------------------
+/// Server Protocol (Executed by Pi)
+/// 
+/// Initialization for each root hash hr:
+/// - A_hr := ∅        // set of accepted (index, share)
+/// - e_hr := 0        // echo counter
+/// - r_hr := 0        // ready counter
+/// 
+/// On receiving (ID, send, hr, FP(i), Fi):
+/// - If verify(i, Fi, FP(i), hr):
+///     - Send (ID, echo, hr, FP(i), Fi) to all servers.
+/// 
+/// On receiving (ID, echo, hr, FP(m), Fm) from Pm:
+/// - If verify(m, Fm, FP(m), hr) and first from Pm:
+///     - Add (m, Fm) to A_hr.
+///     - Increment e_hr.
+/// - If e_hr ≥ max((n + t + 1)/2, k) and r_hr < k:
+///     - Interpolate polynomial f̄(x) from points in A_hr.
+///     - Compute F̄j := f̄(j) for all j ∈ [1, n].
+///     - Compute fingerprints FP(j) from Merkle tree.
+///     - If verify(j, F̄j, FP(j), hr) for all j:
+///         - Send (ID, ready, hr, FP(i), F̄i) to all servers.
+///     - Else:
+///         - Output (ID, out, abort).
+/// 
+/// On receiving (ID, ready, hr, FP(m), Fm) from Pm:
+/// - If verify(m, Fm, FP(m), hr) and first from Pm:
+///     - Add (m, Fm) to A_hr.
+///     - Increment r_hr.
+/// - If r_hr = k and e_hr < max((n + t + 1)/2, k):
+///     - Interpolate f̄(x) from A_hr.
+///     - Compute F̄j := f̄(j) for all j ∈ [1, n].
+///     - Compute fingerprints FP(j) from Merkle tree.
+///     - If verify(j, F̄j, FP(j), hr) for all j:
+///         - Send (ID, ready, hr, FP(i), F̄i) to all servers.
+///     - Else:
+///         - Output (ID, out, abort).
+/// - Else if r_hr = k + t:
+///     - Output (ID, out, [F̄1, ..., F̄k]) as the delivered broadcast message m₀.
+/// 
+///------------------------------------------------------------
+/// Verification Function
+/// verify(i, Fi, FP, hr) -> bool:
+/// - h := H(Fi)
+/// - For j = l down to 1:
+///     - Use sibling hash FP[j-1] and path direction (left/right) to compute:
+///         h := H(h, FP[j-1]) or H(FP[j-1], h)
+/// - Return (h == hr)
+
+
 #[derive(Clone)]
 pub struct Avid {
     pub id: u32,                                                //Initiators ID
     pub n: u32,                                                 //Network size
     pub t: u32,                                                 //No. of malicious parties
     pub k: u32,                                                 //Threshold
-    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AvidStore>>>>>, // <- wrap only this in a lock //Sessionid => store
+    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AvidStore>>>>>, //Sessionid => store
 }
 #[async_trait]
 impl RBC for Avid {
@@ -348,7 +416,7 @@ impl RBC for Avid {
             store: Arc::new(Mutex::new(HashMap::new())),
         })
     }
-    ///This is the initial broadcast message in the Avid protocol.
+    ///This initiates the Avid protocol.
     async fn init(&self, payload: Vec<u8>, session_id: u32, net: Arc<Network>) {
         info!(
             id = self.id,
