@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use mpc::common::rbc_store::{GenericMsgType, MsgType, MsgTypeAba, MsgTypeAcs, MsgTypeAvid};
-    use mpc::common::utils::set_value_round;
-    use mpc::common::{rbc::*, rbc_store::Msg};
-    use mpc::RBC;
+    use stoffelmpc::common::rbc_store::{GenericMsgType, MsgType, MsgTypeAba, MsgTypeAcs, MsgTypeAvid};
+    use stoffelmpc::common::utils::set_value_round;
+    use stoffelmpc::common::{rbc::*, rbc_store::Msg};
+    use stoffelmpc::RBC;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::mpsc;
