@@ -1,9 +1,10 @@
 use ark_ff::{FftField, Zero};
 use ark_poly::{
-    univariate::{DenseOrSparsePolynomial, DensePolynomial}, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain,
-    Polynomial,
+    univariate::{DenseOrSparsePolynomial, DensePolynomial},
+    DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain, Polynomial,
 };
 use std::collections::HashSet;
+
 /// Computes the formal derivative of a polynomial.
 fn poly_derivative<F: FftField>(poly: &DensePolynomial<F>) -> DensePolynomial<F> {
     if poly.coeffs.len() <= 1 {
@@ -30,7 +31,7 @@ pub fn robust_interpolate_fnt<F: FftField>(
     }
 
     let domain = GeneralEvaluationDomain::<F>::new(n)?;
-    let subset = &shares[..=2 * t];
+    let subset = &shares[..=t];
     let xs: Vec<F> = subset.iter().map(|(i, _)| domain.element(*i)).collect();
     let ys: Vec<F> = subset.iter().map(|(_, y)| *y).collect();
 
@@ -63,10 +64,10 @@ pub fn robust_interpolate_fnt<F: FftField>(
     }
 
     // Step 4: Verify agreement
-    let valid_count = xs
+    let valid_count = shares
         .iter()
-        .zip(ys.iter())
-        .filter(|(x, y)| interpolated.evaluate(x) == **y)
+        .map(|(i, y)| (domain.element(*i), *y))
+        .filter(|(x, y)| interpolated.evaluate(x) == *y)
         .count();
 
     if valid_count >= 2 * t + 1 {
@@ -81,7 +82,9 @@ fn div_with_remainder<F: FftField>(
 ) -> (DensePolynomial<F>, DensePolynomial<F>) {
     let a = DenseOrSparsePolynomial::from(numerator.clone());
     let b = DenseOrSparsePolynomial::from(denominator.clone());
-    let (q, r) = a.divide_with_q_and_r(&b).expect("Polynomial division failed");
+    let (q, r) = a
+        .divide_with_q_and_r(&b)
+        .expect("Polynomial division failed");
     (DensePolynomial::from(q), DensePolynomial::from(r))
 }
 
@@ -320,17 +323,17 @@ mod tests {
     fn test_robust_interpolate_fnt_optimistic_case() {
         use ark_bls12_381::Fr;
         use ark_poly::univariate::DensePolynomial;
-        use ark_poly::Polynomial;
 
         let n = 16;
-        let t = 2;
+        let t = 2; // max error and degree tolerated
+
         let domain = GeneralEvaluationDomain::<Fr>::new(n).unwrap();
 
-        // Message polynomial: f(x) = 5x^3 + 3x + 7
-        let coeffs = vec![Fr::from(7u32), Fr::from(3u32), Fr::zero(), Fr::from(5u32)];
+        // Polynomial degree ≤ t (2), e.g., f(x) = 7 + 3x + 5x^2
+        let coeffs = vec![Fr::from(7u32), Fr::from(3u32), Fr::from(5u32)];
         let poly = DensePolynomial::from_coefficients_vec(coeffs);
 
-        // Evaluate over the domain
+        // Evaluate over domain
         let shares: Vec<(usize, Fr)> = (0..n)
             .map(|i| {
                 let x = domain.element(i);
@@ -339,7 +342,7 @@ mod tests {
             })
             .collect();
 
-        // Only use 2t+1 = 5 shares for optimistic interpolation
+        // Use 2t + 1 shares for interpolation, here 5 shares
         let used_shares = shares[..(2 * t + 1)].to_vec();
 
         let result = robust_interpolate_fnt(t, n, &used_shares);
@@ -438,5 +441,46 @@ mod tests {
             recovered_zero, message[0],
             "Recovered polynomial does not evaluate to the original message at 0"
         );
+    }
+    #[test]
+    fn test_robust_interpolate_full() {
+        use ark_bls12_381::Fr;
+        use ark_ff::UniformRand;
+        use ark_std::test_rng;
+
+        let mut rng = test_rng();
+        let k = 4;
+        let d = k - 1;
+        let t = 2;
+        let n = 8;
+
+        // Generate random message and encode it
+        let message: Vec<Fr> = (0..k).map(|_| Fr::rand(&mut rng)).collect();
+        let codeword = gao_rs_encode(&message, n);
+
+        // Create shares as (index, value)
+        let mut shares: Vec<(usize, Fr)> =
+            codeword.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+
+        // Corrupt up to t shares
+        let corruption_indices = [1, 4];
+        for &i in &corruption_indices {
+            shares[i].1 += Fr::from(7u64);
+        }
+
+        // Attempt robust interpolation
+        let result = robust_interpolate(n, t, d, shares.clone());
+        assert!(
+            result.is_some(),
+            "robust_interpolate failed despite valid parameters"
+        );
+
+        let (recovered_poly, val_at_zero) = result.unwrap();
+        let expected_poly = DensePolynomial::from_coefficients_slice(&message.clone());
+        assert_eq!(
+            recovered_poly, expected_poly,
+            "Recovered polynomial does not match original"
+        );
+        assert_eq!(val_at_zero, message[0], "Evaluation at zero incorrect");
     }
 }
