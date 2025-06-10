@@ -3,6 +3,7 @@ use ark_poly::{
     univariate::{DenseOrSparsePolynomial, DensePolynomial},
     DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain, Polynomial,
 };
+use ark_std::rand::RngCore;
 use std::collections::HashSet;
 
 /// Computes the formal derivative of a polynomial.
@@ -21,15 +22,24 @@ fn poly_derivative<F: FftField>(poly: &DensePolynomial<F>) -> DensePolynomial<F>
 
     DensePolynomial::from_coefficients_vec(derived_coeffs)
 }
-pub fn robust_interpolate_fnt<F: FftField>(
+
+fn div_with_remainder<F: FftField>(
+    numerator: &DensePolynomial<F>,
+    denominator: &DensePolynomial<F>,
+) -> (DensePolynomial<F>, DensePolynomial<F>) {
+    let a = DenseOrSparsePolynomial::from(numerator.clone());
+    let b = DenseOrSparsePolynomial::from(denominator.clone());
+    let (q, r) = a
+        .divide_with_q_and_r(&b)
+        .expect("Polynomial division failed");
+    (DensePolynomial::from(q), DensePolynomial::from(r))
+}
+
+fn robust_interpolate_fnt<F: FftField>(
     t: usize,
     n: usize,
     shares: &[(usize, F)],
 ) -> Option<DensePolynomial<F>> {
-    if shares.len() < 2 * t + 1 {
-        return None;
-    }
-
     let domain = GeneralEvaluationDomain::<F>::new(n)?;
     let subset = &shares[..=t];
     let xs: Vec<F> = subset.iter().map(|(i, _)| domain.element(*i)).collect();
@@ -76,47 +86,37 @@ pub fn robust_interpolate_fnt<F: FftField>(
         None
     }
 }
-fn div_with_remainder<F: FftField>(
-    numerator: &DensePolynomial<F>,
-    denominator: &DensePolynomial<F>,
-) -> (DensePolynomial<F>, DensePolynomial<F>) {
-    let a = DenseOrSparsePolynomial::from(numerator.clone());
-    let b = DenseOrSparsePolynomial::from(denominator.clone());
-    let (q, r) = a
-        .divide_with_q_and_r(&b)
-        .expect("Polynomial division failed");
-    (DensePolynomial::from(q), DensePolynomial::from(r))
-}
 
 /// Encodes a message into a Reed-Solomon codeword.
+pub fn gen_shares<F: FftField, R: RngCore>(value: F, n: usize, t: usize, rng: &mut R) -> Vec<F> {
+    assert!(n > t, "Number of shares must be greater than threshold");
+
+    let domain = GeneralEvaluationDomain::<F>::new(n).expect("No suitable evaluation domain found");
+
+    // Polynomial with constant term `value`, and t random coefficients
+    let mut coeffs = vec![value];
+    for _ in 0..t {
+        coeffs.push(F::rand(rng));
+    }
+
+    let f = DensePolynomial::from_coefficients_slice(&coeffs);
+    domain.fft(&f)
+}
+/// Decodes a Reed-Solomon codeword with known erasure positions using Gao's algorithm.
 ///
 /// https://www.math.clemson.edu/~sgao/papers/RS.pdf
 /// # Arguments
-/// * message - Slice of message field elements (length k)
-/// * n - Codeword length (must satisfy n ≥ k and n is power of 2 for FFT)
-pub fn gao_rs_encode<F: FftField>(message: &[F], n: usize) -> Vec<F> {
-    assert!(n >= message.len(), "n must be ≥ message length");
-    let domain = GeneralEvaluationDomain::<F>::new(n).expect("No suitable evaluation domain found");
-
-    let f = DensePolynomial::from_coefficients_slice(message);
-    domain.fft(&f)
-}
-
-/// Decodes a Reed-Solomon codeword with known erasure positions using Gao's algorithm.
-///
-/// # Arguments
-/// * `received` - Slice of received field elements (length n)
-/// * `k` - Original message length
-/// * `n` - Codeword length
+/// * `received` - Shares
+/// * `k` - Original message length in paper but for our usecase (t+1) i.e number of coefficients
+/// * `n` - Codeword length or number of parties
 /// * `erasure_positions` - Indices of erasures in the received vector
 ///
 /// # Returns
 /// * Some(Vec<F>) if decoding succeeds, or None if it fails
-pub fn gao_rs_decode<F: FftField>(
+fn gao_rs_decode<F: FftField>(
     received: &[F],
     k: usize,
     n: usize,
-    t: usize,
     erasure_positions: &[usize],
 ) -> Option<Vec<F>> {
     assert!(k <= n, "k must be <= n");
@@ -124,12 +124,7 @@ pub fn gao_rs_decode<F: FftField>(
 
     let s_set: HashSet<usize> = erasure_positions.iter().copied().collect();
     let s = s_set.len();
-    let d = n - k + 1;
 
-    if 2 * t + s >= d {
-        // Error-erasure decoding bound violated
-        return None;
-    }
     // Construct the erasure locator polynomial: s(x) = ∏ (x - a_i)
     let s_poly = s_set.iter().fold(
         DensePolynomial::from_coefficients_slice(&[F::one()]),
@@ -227,16 +222,14 @@ fn lagrange_interpolate<F: FftField>(x_vals: &[F], y_vals: &[F]) -> DensePolynom
 /// https://eprint.iacr.org/2012/517.pdf
 /// # Arguments
 /// * n - total number of shares
-/// * d - Degree of the original polynomial
 /// * t - Maximum number of corrupted shares
 /// * mut shares - List of (index, value) pairs representing received shares vi = v(αi)
 ///
 /// # Returns
 /// * Some((polynomial, value_at_0)) if successful
 /// * None if decoding fails
-pub fn oec_decode<F: FftField>(
+fn oec_decode<F: FftField>(
     n: usize,
-    d: usize,
     t: usize,
     mut shares: Vec<(usize, F)>, //to do : Replace this with a store that is constantly updating
 ) -> Option<(DensePolynomial<F>, F)> {
@@ -244,7 +237,7 @@ pub fn oec_decode<F: FftField>(
     let domain = GeneralEvaluationDomain::<F>::new(n).expect("invalid domain");
 
     for r in 0..=t {
-        let required = d + t + 1 + r;
+        let required = 2 * t + 1 + r;
         if shares.len() < required {
             continue;
         }
@@ -261,7 +254,7 @@ pub fn oec_decode<F: FftField>(
             }
         }
 
-        if let Some(coeffs) = gao_rs_decode(&received, d + 1, n, t, &erasures) {
+        if let Some(coeffs) = gao_rs_decode(&received, t + 1, n, &erasures) {
             let poly = DensePolynomial::from_coefficients_vec(coeffs);
 
             let matched = subset
@@ -269,12 +262,11 @@ pub fn oec_decode<F: FftField>(
                 .filter(|(i, v)| poly.evaluate(&domain.element(*i)) == *v)
                 .count();
 
-            if matched >= d + t + 1 {
+            if matched >= 2 * t + 1 {
                 return Some((poly.clone(), poly.evaluate(&F::zero())));
             }
         }
     }
-
     None
 }
 /// Full robust interpolation combining optimistic decoding and error correction
@@ -290,26 +282,27 @@ pub fn oec_decode<F: FftField>(
 pub fn robust_interpolate<F: FftField>(
     n: usize,
     t: usize,
-    d: usize,
     mut shares: Vec<(usize, F)>,
 ) -> Option<(DensePolynomial<F>, F)> {
     shares.sort_by_key(|(i, _)| *i); // ensure deterministic ordering
 
+    if shares.len() < 2 * t + 1 {
+        return None;
+    }
     // === Step 1: Optimistic decoding attempt ===
     if let Some(poly) = robust_interpolate_fnt(t, n, &shares[..2 * t + 1]) {
         return Some((poly.clone(), poly.evaluate(&F::zero())));
     }
-
     // === Step 2: Fall back to online error correction ===
-    oec_decode(n, d, t, shares)
+    oec_decode(n, t, shares)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ark_bls12_381::Fr;
-    use ark_ff::UniformRand;
     use ark_std::test_rng;
+
     #[test]
     fn test_poly_derivative() {
         let coeffs = vec![Fr::from(3), Fr::from(2), Fr::from(1)]; // 3 + 2x + x^2
@@ -359,128 +352,114 @@ mod tests {
     #[test]
     fn test_reed_solomon_erasure() {
         let mut rng = test_rng();
-        let k = 4;
+        let t = 2;
         let n = 8;
 
-        let message: Vec<Fr> = (0..k).map(|_| Fr::rand(&mut rng)).collect();
-        let codeword = gao_rs_encode(&message, n);
+        let secret = Fr::from(42u32);
+        let shares = gen_shares(secret, n, t, &mut rng);
 
         // === Case 1: Erasure-only decoding ===
-        let mut erased = codeword.clone();
+        let mut erased = shares.clone();
         let erasures = vec![1, 2];
         for &i in &erasures {
             erased[i] = Fr::zero();
         }
-        let decoded_erasure = gao_rs_decode(&erased, k, n, 0, &erasures);
+        let decoded_erasure = gao_rs_decode(&erased, t + 1, n, &erasures);
+        let recovered_secret = decoded_erasure.unwrap()[0];
         assert_eq!(
-            decoded_erasure,
-            Some(message.clone()),
+            recovered_secret, secret,
             "Failed to decode with known erasures"
         );
     }
     #[test]
     fn test_reed_solomon_error() {
         let mut rng = test_rng();
-        let k = 4;
+        let t = 2;
         let n = 8;
-
-        let message: Vec<Fr> = (0..k).map(|_| Fr::rand(&mut rng)).collect();
-        let codeword = gao_rs_encode(&message, n);
+        let secret = Fr::from(42u32);
+        let shares = gen_shares(secret, n, t, &mut rng);
 
         // === Case 2: Error-only decoding ===
-        let mut corrupted = codeword.clone();
+        let mut corrupted = shares.clone();
         corrupted[2] += Fr::from(5u64);
         corrupted[4] += Fr::from(3u64);
 
         // No erasure information provided
-        let decoded = gao_rs_decode(&corrupted, k, n, 2, &[]);
-        assert_eq!(decoded, Some(message.clone()));
+        let decoded = gao_rs_decode(&corrupted, t + 1, n, &[]);
+
+        let recovered_secret = decoded.unwrap()[0];
+        assert_eq!(
+            recovered_secret, secret,
+            "Failed to decode with known erasures"
+        );
     }
     #[test]
     fn test_oec_protocol() {
         use ark_bls12_381::Fr;
-        use ark_ff::UniformRand;
         use ark_std::test_rng;
 
         let mut rng = test_rng();
-        let k = 4;
-        let d = k - 1;
         let t = 2;
         let n = 8;
 
-        assert!(n >= k + 2 * t, "n must be ≥ k + 2t for OEC to succeed");
-
         // Step 1: Create random message and encode it
-        let message: Vec<Fr> = (0..k).map(|_| Fr::rand(&mut rng)).collect();
-        let codeword = gao_rs_encode(&message, n);
+        let secret = Fr::from(42u32);
+        let shares = gen_shares(secret, n, t, &mut rng);
 
         // Step 2: Create shares as (index, value)
-        let mut shares: Vec<(usize, Fr)> =
-            codeword.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        let mut shares_list: Vec<(usize, Fr)> =
+            shares.iter().enumerate().map(|(i, &v)| (i, v)).collect();
 
         // Step 3: Corrupt up to t shares
-        shares[2].1 += Fr::from(3u64);
-        shares[5].1 += Fr::from(1u64);
+        shares_list[2].1 += Fr::from(3u64);
+        shares_list[5].1 += Fr::from(1u64);
 
         // Step 4: Attempt OEC decode
-        let result = oec_decode(n, d, t, shares.clone());
+        let result = oec_decode(n, t, shares_list.clone());
 
         assert!(
             result.is_some(),
             "Decoding failed despite sufficient honest shares"
         );
 
-        let (recovered_poly, recovered_zero) = result.unwrap();
-        let expected_poly = DensePolynomial::from_coefficients_vec(message.clone());
+        let (_, recovered_zero) = result.unwrap();
 
         assert_eq!(
-            recovered_poly, expected_poly,
+            recovered_zero, secret,
             "Recovered polynomial does not match the original"
-        );
-        assert_eq!(
-            recovered_zero, message[0],
-            "Recovered polynomial does not evaluate to the original message at 0"
         );
     }
     #[test]
     fn test_robust_interpolate_full() {
         use ark_bls12_381::Fr;
-        use ark_ff::UniformRand;
         use ark_std::test_rng;
 
         let mut rng = test_rng();
-        let k = 4;
-        let d = k - 1;
         let t = 2;
         let n = 8;
 
         // Generate random message and encode it
-        let message: Vec<Fr> = (0..k).map(|_| Fr::rand(&mut rng)).collect();
-        let codeword = gao_rs_encode(&message, n);
+        let secret = Fr::from(42u32);
+        let shares = gen_shares(secret, n, t, &mut rng);
 
         // Create shares as (index, value)
-        let mut shares: Vec<(usize, Fr)> =
-            codeword.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        let mut shares_list: Vec<(usize, Fr)> =
+            shares.iter().enumerate().map(|(i, &v)| (i, v)).collect();
 
         // Corrupt up to t shares
         let corruption_indices = [1, 4];
         for &i in &corruption_indices {
-            shares[i].1 += Fr::from(7u64);
+            shares_list[i].1 += Fr::from(7u64);
         }
-
         // Attempt robust interpolation
-        let result = robust_interpolate(n, t, d, shares.clone());
+        let result = robust_interpolate(n, t, shares_list.clone());
         assert!(
             result.is_some(),
             "robust_interpolate failed despite valid parameters"
         );
 
-        let (recovered_poly, val_at_zero) = result.unwrap();
-        let expected_poly = DensePolynomial::from_coefficients_slice(&message.clone());
-        assert_eq!(
-            recovered_poly, expected_poly,
-            "Recovered polynomial does not match original"
-        );
-        assert_eq!(val_at_zero, message[0], "Evaluation at zero incorrect");
+        let (_, val_at_zero) = result.unwrap();
+
+        assert_eq!(val_at_zero, secret, "Evaluation at zero incorrect");
     }
 }
