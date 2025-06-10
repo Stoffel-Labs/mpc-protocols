@@ -8,13 +8,17 @@ pub mod common;
 use crate::common::{rbc::Network, rbc_store::Msg};
 use async_trait::async_trait;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
-trait Share {
+trait Share: Sized {
     /// The underlying secret that this share represents.
     type UnderlyingSecret;
     /// You can add shares together locally
-    fn add();
+    fn add(&self, other: &Self) -> Result<Self, ShareError>;
+
+    /// You can multiply a scalar to a share locally
+    fn scalar_mul(&self, scalar: &Self::UnderlyingSecret) -> Self;
 
     /// You can multiply shares together with other parties
     fn mul();
@@ -22,6 +26,16 @@ trait Share {
     /// You can reveal shares together with other parties
     /// Reveal a share means that you are revealing the underlying secret
     fn reveal();
+}
+
+#[derive(Debug, Error)]
+pub enum ShareError {
+    #[error("insufficient shares to reconstruct the secret")]
+    InsufficientShares,
+    #[error("mismatch degree between shares")]
+    DegreeMismatch,
+    #[error("mismatch index between shares")]
+    IdMismatch,
 }
 
 /// In MPC, there needs to be a way for a dealer and the nodes to broadcast messages
