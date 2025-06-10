@@ -174,6 +174,38 @@ pub fn generate_merkle_proofs_map(
     Ok(proofs_map)
 }
 
+//Set value||roundid
+pub fn set_value_round(bit: bool, number: u32) -> Vec<u8> {
+    let mut vec = Vec::with_capacity(5);
+
+    // Store the bit in the least significant bit of the first byte
+    let first_byte = if bit { 1u8 } else { 0u8 };
+    vec.push(first_byte);
+
+    // Store the u32 number in little-endian order
+    vec.extend_from_slice(&number.to_le_bytes());
+
+    vec
+}
+//Get round id and value
+pub fn get_value_round(data: &[u8]) -> Option<(bool, u32)> {
+    if data.len() < 5 {
+        return None;
+    }
+
+    let bit = data[0] & 1 != 0;
+
+    let number_bytes = &data[1..5];
+    let number = u32::from_le_bytes(number_bytes.try_into().ok()?);
+
+    Some((bit, number))
+}
+/// Extracts the least significant bit from the first byte as a boolean.
+pub fn get_value(data: &[u8]) -> Option<bool> {
+    data.get(0).map(|byte| byte & 1 != 0)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
