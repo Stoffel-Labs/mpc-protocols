@@ -19,3 +19,5 @@ tracing-subscriber.workspace = true
 reed-solomon-erasure.workspace = true
 rand.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+ark-serialize.workspace = true

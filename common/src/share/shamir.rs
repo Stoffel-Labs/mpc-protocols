@@ -1,9 +1,10 @@
 use crate::share::{Share, ShareError};
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, CanonicalDeserialize, CanonicalSerialize)]
 pub struct ShamirSecretSharing<F: FftField> {
     pub share: F,
     pub id: F,

@@ -1,8 +1,9 @@
 pub mod shamir;
 
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use thiserror::Error;
 
-trait Share: Sized {
+trait Share: Sized + CanonicalDeserialize + CanonicalSerialize {
     /// The underlying secret that this share represents.
     type UnderlyingSecret;
     /// You can add shares together locally

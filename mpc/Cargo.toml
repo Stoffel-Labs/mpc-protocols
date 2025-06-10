@@ -5,5 +5,8 @@ edition.workspace = true
 
 [dependencies]
 tracing-subscriber.workspace = true
-stoffelmpc-common = { path = "../common" }
+stoffelmpc-common = { path = "../common/" }
+stoffelmpc-network = { path = "../network/"}
 ark-ff.workspace = true
+serde.workspace = true
+ark-serialize.workspace = true
