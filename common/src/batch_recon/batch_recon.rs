@@ -1,4 +1,4 @@
-use super::reed_solomon::robust_interpolate;
+use crate::reed_solomon::robust_interpolate;
 use ark_ff::FftField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use tokio::sync::mpsc::Sender;
@@ -211,7 +211,7 @@ mod tests {
         let t = 1;
         let n = 4;
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(4u64)];
-        assert_eq!(secrets.len(),t+1);
+        assert_eq!(secrets.len(), t + 1);
 
         // Step 0: Generate shares
         let shares = generate_independent_shares(&secrets, t, n);
@@ -274,7 +274,7 @@ mod tests {
             }
         }
 
-        assert_eq!(recovered_all.len(),n,"Share reconstruction failed");
+        assert_eq!(recovered_all.len(), n, "Share reconstruction failed");
         // === Check all recovered results match the original secrets
         for recovered in recovered_all {
             assert_eq!(recovered[..secrets.len()], secrets[..]);
@@ -349,3 +349,4 @@ mod tests {
         }
     }
 }
+

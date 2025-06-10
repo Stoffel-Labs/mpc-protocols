@@ -1,0 +1,20 @@
+[package]
+name = "stoffelmpc-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ark-poly.workspace = true 
+ark-ff.workspace = true 
+ark-std.workspace = true 
+async-trait.workspace = true
+tokio.workspace = true 
+bincode.workspace = true
+threshold_crypto.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+rs_merkle.workspace = true
+ark-bls12-381.workspace = true
+tracing-subscriber.workspace = true
+reed-solomon-erasure.workspace = true
+rand.workspace = true

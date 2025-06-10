@@ -1,13 +1,8 @@
 [package]
-name = "mpc"
-version = "0.1.0"
-edition = "2021"
+name = "stoffelmpc-mpc"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-ark-poly = "0.5.0"
-ark-ff = "0.5.0"
-ark-bls12-381 = "0.5"
-ark-std = "0.5"
-tokio = { version = "1.38", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber.workspace = true
+
