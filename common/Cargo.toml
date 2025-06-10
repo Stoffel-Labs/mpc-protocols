@@ -18,3 +18,4 @@ ark-bls12-381.workspace = true
 tracing-subscriber.workspace = true
 reed-solomon-erasure.workspace = true
 rand.workspace = true
+thiserror.workspace = true

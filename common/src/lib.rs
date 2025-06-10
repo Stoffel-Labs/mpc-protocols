@@ -1,12 +1,13 @@
-mod batch_recon;
-mod rbc;
+pub mod batch_recon;
+pub mod rbc;
 /// In MPC, the most fundamental underlying type is called a share.
 /// Think of a share as a piece of a secret that has been split among a set of parties.
 /// As such, on its own, you don't derive any information. But when combined with other parties,
 /// a certain number of shares can reconstruct a secret.
 /// When wanting to implement your own custom MPC protocols that can plug
 /// into the StoffelVM, you must implement the Share type.
-mod reed_solomon;
+pub mod reed_solomon;
+pub mod share;
 
 use crate::{rbc::rbc::Network, rbc::rbc_store::Msg};
 use async_trait::async_trait;
