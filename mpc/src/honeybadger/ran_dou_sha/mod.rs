@@ -1,16 +1,15 @@
 mod messages;
 
+use crate::honeybadger::batch_recon::batch_recon::{apply_vandermonde, make_vandermonde};
 use ark_ff::FftField;
-use messages::{InitMessage, OutputMessage, ReconstructionMessage};
+use messages::{InitMessage, OutputMessage, RanDouShaMessage, ReconstructionMessage};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
-use stoffelmpc_common::{
-    batch_recon::batch_recon::{apply_vandermonde, make_vandermonde},
-    share::shamir::ShamirSecretSharing,
-};
-use stoffelmpc_network::{Network, NetworkError, PartyId};
+use stoffelmpc_common::share::shamir::ShamirSecretSharing;
+
+use stoffelmpc_network::{Network, NetworkError, Node, PartyId};
 
 /// Storage for the Random Double Sharing protocol.
 pub struct RanDouShaStore<F: FftField> {
@@ -67,12 +66,16 @@ where
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
-    fn init_handler(
+    fn init_handler<N, P>(
         &mut self,
         init_msg: &InitMessage<F>,
         params: &RanDouShaParams,
-        network: &impl Network,
-    ) -> Result<(), NetworkError> {
+        network: N,
+    ) -> Result<(), NetworkError>
+    where
+        N: Network<P>,
+        P: Node,
+    {
         // Creates a store for the node.
         let store = Arc::new(Mutex::new(RanDouShaStore::<F>::empty()));
         self.store = store;
@@ -97,20 +100,20 @@ where
 
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
-        for party_id in network.party_ids() {
+        for party in network.parties() {
             let share_deg_t = ShamirSecretSharing::new(
-                r_deg_t[*party_id],
+                r_deg_t[party.id()],
                 F::from(self.id as u64),
                 params.threshold,
             );
             let share_deg_2t = ShamirSecretSharing::new(
-                r_deg_2t[*party_id],
+                r_deg_2t[party.id()],
                 F::from(self.id as u64),
                 2 * params.threshold,
             );
 
             let reconst_message = ReconstructionMessage::new(share_deg_t, share_deg_2t);
-            network.send(*party_id, reconst_message)?;
+            network.send(party.id(), reconst_message)?;
         }
         Ok(())
     }
@@ -120,12 +123,16 @@ where
     /// On receiving shares of r_i from each parties of degree t and 2t, the protocol privately reconstructs r_i for both degrees
     /// and checks that both shares are of the correct degree, and that their 0-evaluation is the same.
     /// Broadcast OK if the verification succeeds, ABORT otherwise
-    fn reconstruction_handler(
+    fn reconstruction_handler<N, P>(
         &mut self,
         rec_msg: &ReconstructionMessage<F>,
         params: &RanDouShaParams,
-        network: &impl Network,
-    ) -> Result<(), NetworkError> {
+        network: N,
+    ) -> Result<(), NetworkError>
+    where
+        N: Network<P>,
+        P: Node,
+    {
         // --- Step (3) Implementation ---
         // (1) Store the received shares.
         // Each party receives a ReconstructionMessage. This message contains two ShamirSecretSharing objects:
@@ -136,13 +143,13 @@ where
 
         // NOTE: Here we are assuming that the id will fit into the usize type
         // converting from F to usize
-        let sender_id: usize = rec_msg.r_deg_t.id.try_into().unwrap();
+        let sender_id: usize = rec_msg.r_share_deg_t.id.try_into().unwrap();
         store
             .r_shares_degree_t
-            .insert(sender_id, rec_msg.r_deg_t.clone());
+            .insert(sender_id, rec_msg.r_share_deg_t.clone());
         store
             .r_shares_degree_2t
-            .insert(sender_id, rec_msg.r_deg_2t.clone());
+            .insert(sender_id, rec_msg.r_share_deg_2t.clone());
 
         // (2) Check if this party (self.id) is one of the designated checking parties.
         // Condition from the protocol: `t + 1 < i <= n`
@@ -193,5 +200,21 @@ where
 
     fn output_handler() {
         todo!()
+    }
+
+    fn process(&self, message: &RanDouShaMessage) {
+        match message.msg_type {
+            messages::RanDouShaMessageType::InitMessage => {
+                // TODO: Deserialize payload, construct InitMessage instance, and call init
+                // handler.
+                todo!()
+            }
+            messages::RanDouShaMessageType::OutputMessage => {
+                todo!()
+            }
+            messages::RanDouShaMessageType::ReconstructMessage => {
+                todo!()
+            }
+        }
     }
 }
