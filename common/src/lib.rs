@@ -1,4 +1,3 @@
-pub mod batch_recon;
 pub mod rbc;
 /// In MPC, the most fundamental underlying type is called a share.
 /// Think of a share as a piece of a secret that has been split among a set of parties.
@@ -17,6 +16,7 @@ use tokio::sync::mpsc::Receiver;
 trait Share {
     /// The underlying secret that this share represents.
     type UnderlyingSecret;
+
     /// You can add shares together locally
     fn add();
 
