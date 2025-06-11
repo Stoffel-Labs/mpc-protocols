@@ -23,8 +23,8 @@ impl Message for RanDouShaMessage {}
 /// the parties first receive shares of `r` to be able to reconstruct the value of r.
 #[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct ReconstructionMessage<F: FftField> {
-    pub r_deg_t: ShamirSecretSharing<F>,
-    pub r_deg_2t: ShamirSecretSharing<F>,
+    pub r_share_deg_t: ShamirSecretSharing<F>,
+    pub r_share_deg_2t: ShamirSecretSharing<F>,
 }
 
 impl<F> ReconstructionMessage<F>
@@ -33,7 +33,10 @@ where
 {
     /// Creates a message for the reconstruction phase.
     pub fn new(r_deg_t: ShamirSecretSharing<F>, r_deg_2t: ShamirSecretSharing<F>) -> Self {
-        Self { r_deg_t, r_deg_2t }
+        Self {
+            r_share_deg_t: r_deg_t,
+            r_share_deg_2t: r_deg_2t,
+        }
     }
 }
 

@@ -14,6 +14,9 @@ pub enum NetworkError {
 /// Type to identify a party in a protocol.
 pub type PartyId = usize;
 
+/// Type to identify a session.
+pub type SessionId = usize;
+
 /// Trait for messages sent in a protocol.
 pub trait Message {}
 
