@@ -18,8 +18,8 @@ impl<F> Message for InitMessage<F> where F: FftField {}
 /// the parties first receive shares of `r` to be able to reconstruct the value of r.
 #[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct ReconstructionMessage<F: FftField> {
-    r_deg_t: ShamirSecretSharing<F>,
-    r_deg_2t: ShamirSecretSharing<F>,
+    pub(crate) r_deg_t: ShamirSecretSharing<F>,
+    pub(crate) r_deg_2t: ShamirSecretSharing<F>,
 }
 
 impl<F> Message for ReconstructionMessage<F> where F: FftField {}
@@ -31,5 +31,20 @@ where
     /// Creates a message for the reconstruction phase.
     pub fn new(r_deg_t: ShamirSecretSharing<F>, r_deg_2t: ShamirSecretSharing<F>) -> Self {
         Self { r_deg_t, r_deg_2t }
+    }
+}
+
+/// Output message
+/// false for ABORT, True for OK
+#[derive(Debug, Clone, CanonicalDeserialize, CanonicalSerialize)]
+pub struct OutputMessage {
+    pub id: usize,
+    pub msg: bool,
+}
+impl Message for OutputMessage {}
+
+impl OutputMessage {
+    pub fn new(id: usize, msg: bool) -> Self {
+        Self { id, msg }
     }
 }

@@ -1,7 +1,7 @@
 mod messages;
 
 use ark_ff::FftField;
-use messages::{InitMessage, ReconstructionMessage};
+use messages::{InitMessage, OutputMessage, ReconstructionMessage};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -52,6 +52,7 @@ pub struct RanDouShaNode<F: FftField> {
 impl<F> RanDouShaNode<F>
 where
     F: FftField,
+    usize: From<F>,
 {
     /// Implements the initialization phase of the Random double share protocol. In particular,
     /// this method implements from Step (1) to Step (3) before the reconstruction of the shares
@@ -114,8 +115,80 @@ where
         Ok(())
     }
 
-    fn reconstruction_handler() {
-        todo!()
+    /// Implements step (3) of Protocol RanDouSha
+    /// https://eprint.iacr.org/2019/883.pdf
+    /// On receiving shares of r_i from each parties of degree t and 2t, the protocol privately reconstructs r_i for both degrees
+    /// and checks that both shares are of the correct degree, and that their 0-evaluation is the same.
+    /// Broadcast OK if the verification succeeds, ABORT otherwise
+    fn reconstruction_handler(
+        &mut self,
+        rec_msg: &ReconstructionMessage<F>,
+        params: &RanDouShaParams,
+        network: &impl Network,
+    ) -> Result<(), NetworkError> {
+        // --- Step (3) Implementation ---
+        // (1) Store the received shares.
+        // Each party receives a ReconstructionMessage. This message contains two ShamirSecretSharing objects:
+        // one for degree t and one for degree 2t.
+        // These shares originate from the *sender* of the message, but they are components of the 'r_j'
+
+        let mut store = self.store.lock().unwrap();
+
+        // NOTE: Here we are assuming that the id will fit into the usize type
+        // converting from F to usize
+        let sender_id: usize = rec_msg.r_deg_t.id.try_into().unwrap();
+        store
+            .r_shares_degree_t
+            .insert(sender_id, rec_msg.r_deg_t.clone());
+        store
+            .r_shares_degree_2t
+            .insert(sender_id, rec_msg.r_deg_2t.clone());
+
+        // (2) Check if this party (self.id) is one of the designated checking parties.
+        // Condition from the protocol: `t + 1 < i <= n`
+        if self.id > params.threshold + 1 && self.id <= params.n_parties {
+            // (3) Check if enough shares have been received to reconstruct.
+            // To reconstruct a (t) degree polynomial, you need t+1 distinct shares.
+            // To reconstruct a (2t) degree polynomial, you need 2t+1 distinct shares.
+
+            //TODO: do we need to wait for all n shares?
+            if store.r_shares_degree_t.len() >= params.threshold + 1
+                && store.r_shares_degree_2t.len() >= 2 * params.threshold + 1
+            {
+                let mut shares_t_for_recon: Vec<ShamirSecretSharing<F>> = Vec::new();
+                let mut shares_2t_for_recon: Vec<ShamirSecretSharing<F>> = Vec::new();
+
+                for (_, share) in store.r_shares_degree_t.iter() {
+                    shares_t_for_recon.push(share.clone());
+                }
+                for (_, share) in store.r_shares_degree_2t.iter() {
+                    shares_2t_for_recon.push(share.clone());
+                }
+
+                // (5) Perform reconstruction for both degrees.
+                // ShamirSecretSharing::reconstruct expects a vector of shares.
+                let reconstructed_r_t = ShamirSecretSharing::recover_secret(&shares_t_for_recon);
+                let reconstructed_r_2t = ShamirSecretSharing::recover_secret(&shares_2t_for_recon);
+
+                // if the reconstruction fails, broadcast false
+                if reconstructed_r_t.is_err() || reconstructed_r_2t.is_err() {
+                    network.broadcast(OutputMessage::new(self.id, false))?;
+                }
+                // (6) Check that their 0-evaluation is the same.
+                // This means checking if the reconstructed values are equal.
+                let verify = reconstructed_r_t.unwrap() == reconstructed_r_2t.unwrap();
+
+                if !verify {
+                    // if the verification fails, broadcast false(aka. Abort)
+                    network.broadcast(OutputMessage::new(self.id, false))?;
+                }
+
+                // if the verification succeeds, broadcast true(aka. OK)
+                network.broadcast(OutputMessage::new(self.id, true))?;
+            }
+        }
+
+        Ok(())
     }
 
     fn output_handler() {

@@ -205,7 +205,6 @@ pub fn get_value(data: &[u8]) -> Option<bool> {
     data.get(0).map(|byte| byte & 1 != 0)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
