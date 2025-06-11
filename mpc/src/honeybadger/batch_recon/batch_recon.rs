@@ -1,6 +1,6 @@
-use crate::reed_solomon::robust_interpolate;
 use ark_ff::FftField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+use stoffelmpc_common::reed_solomon::robust_interpolate;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, info, warn};
 
@@ -349,4 +349,3 @@ mod tests {
         }
     }
 }
-

@@ -1,12 +1,10 @@
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-fn hash_message(message: &[u8]) -> Vec<u8> {
-    Sha256::digest(message).to_vec()
-}
 use std::sync::Arc;
 
 use tokio::sync::Notify;
+
 /// Generic message type used in Reliable Broadcast (RBC) communication.
 #[derive(Clone)]
 pub struct Msg {
@@ -17,6 +15,10 @@ pub struct Msg {
     pub metadata: Vec<u8>, // info related to the message shared
     pub msg_type: GenericMsgType, // Type of message like INIT, ECHO, or READY
     pub msg_len: usize,   // length of the original message
+}
+
+fn hash_message(message: &[u8]) -> Vec<u8> {
+    Sha256::digest(message).to_vec()
 }
 
 impl Msg {

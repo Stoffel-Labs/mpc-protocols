@@ -1,10 +1,14 @@
 pub mod shamir;
 
+use ark_ff::Field;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-trait Share: Sized {
+trait Share: Sized + CanonicalSerialize + CanonicalDeserialize {
     /// The underlying secret that this share represents.
-    type UnderlyingSecret;
+    type UnderlyingSecret: Field;
+
     /// You can add shares together locally
     fn add(&self, other: &Self) -> Result<Self, ShareError>;
 
