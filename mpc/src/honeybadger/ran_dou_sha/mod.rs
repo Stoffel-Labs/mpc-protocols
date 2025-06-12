@@ -8,8 +8,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 use stoffelmpc_common::share::shamir::ShamirSecretSharing;
-
 use stoffelmpc_network::{Network, NetworkError, Node, PartyId, SessionId};
+use thiserror::Error;
 
 /// Storage for the Random Double Sharing protocol.
 #[derive(Clone)]
@@ -20,6 +20,8 @@ pub struct RanDouShaStore<F: FftField> {
     pub received_r_shares_degree_2t: HashMap<PartyId, ShamirSecretSharing<F>>,
     pub computed_r_shares_degree_t: Vec<ShamirSecretSharing<F>>,
     pub computed_r_shares_degree_2t: Vec<ShamirSecretSharing<F>>,
+    /// Vector that stores the nodes who have sent the output ok msg.
+    pub received_ok_msg: Vec<usize>,
 }
 
 impl<F> RanDouShaStore<F>
@@ -33,6 +35,7 @@ where
             received_r_shares_degree_2t: HashMap::new(),
             computed_r_shares_degree_t: Vec::new(),
             computed_r_shares_degree_2t: Vec::new(),
+            received_ok_msg: Vec::new(),
         }
     }
 }
@@ -53,6 +56,15 @@ pub struct RanDouShaNode<F: FftField> {
     pub id: PartyId,
     /// Storage of the node.
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
+}
+
+/// Error type for randousha.
+#[derive(Error, Debug)]
+pub enum RanDouShaError {
+    #[error("received abort singal")]
+    Abort,
+    #[error("waiting for more confirmations")]
+    WaitForOk,
 }
 
 impl<F> RanDouShaNode<F>
@@ -161,7 +173,7 @@ where
     /// On receiving shares of r_i from each parties of degree t and 2t, the protocol privately reconstructs r_i for both degrees
     /// and checks that both shares are of the correct degree, and that their 0-evaluation is the same.
     /// Broadcast OK if the verification succeeds, ABORT otherwise
-    /// 
+    ///
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
@@ -241,8 +253,47 @@ where
         Ok(())
     }
 
-    fn output_handler() {
-        todo!()
+    /// Implements step (4) (5) of Protocol RanDouSha
+    /// Wait to receive broadcast of output message from other party.
+    /// Return [r_1]_t ... [r_t+1]_t & [r_1]_2t ... [r_t+1]_2t only if one receives more than
+    /// (n - (t+1)) Ok message.
+    fn output_handler(
+        &mut self,
+        params: &RanDouShaParams,
+        msg: OutputMessage,
+    ) -> Result<(Vec<ShamirSecretSharing<F>>, Vec<ShamirSecretSharing<F>>), RanDouShaError> {
+        // abort randousha once received the abort message
+        if msg.msg == false {
+            return Err(RanDouShaError::Abort);
+        }
+        let binding = self.get_or_create_store(params);
+        let mut store = binding.lock().unwrap();
+        // sender already exists, wait for more messages
+        if store.received_ok_msg.contains(&msg.id) {
+            return Err(RanDouShaError::WaitForOk);
+        }
+        store.received_ok_msg.push(msg.id);
+        // wait for (n-(t+1)) Ok messages
+        if store.received_ok_msg.len() < params.n_parties - (params.threshold + 1) {
+            return Err(RanDouShaError::WaitForOk);
+        }
+
+        // create vector for share [r_1]_t ... [r_t+1]_t
+        let output_r_t = store
+            .computed_r_shares_degree_t
+            .iter()
+            .copied()
+            .filter(|share| share.id <= F::from((params.threshold + 1) as u64))
+            .collect::<Vec<_>>();
+        // create vector for share [r_1]_2t ... [r_t+1]_2t
+        let output_r_2t = store
+            .computed_r_shares_degree_2t
+            .iter()
+            .copied()
+            .filter(|share| share.id <= F::from((params.threshold + 1) as u64))
+            .collect::<Vec<_>>();
+
+        return Ok((output_r_t, output_r_2t));
     }
 
     fn process(&self, message: &RanDouShaMessage) {
