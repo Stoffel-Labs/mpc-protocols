@@ -2,14 +2,27 @@ mod messages;
 
 use crate::honeybadger::batch_recon::batch_recon::{apply_vandermonde, make_vandermonde};
 use ark_ff::FftField;
+use ark_serialize::{CanonicalDeserialize, SerializationError};
 use messages::{InitMessage, OutputMessage, RanDouShaMessage, ReconstructionMessage};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 use stoffelmpc_common::share::shamir::ShamirSecretSharing;
+use thiserror::Error;
 
 use stoffelmpc_network::{Network, NetworkError, Node, PartyId, SessionId};
+
+/// Error that occurs during the execution of the Random Double Share Error.
+#[derive(Debug, Error)]
+pub enum RanDouShaError {
+    /// The error occurs when communicating using the network.
+    #[error("there was an error in the network: {0:?}")]
+    NetworkError(NetworkError),
+    /// The error occurs while serializing/deserializing an object comming from the network.
+    #[error("error while serializing/deserializing an object: {0:?}")]
+    SerializationFailure(SerializationError),
+}
 
 /// Storage for the Random Double Sharing protocol.
 #[derive(Clone)]
@@ -18,7 +31,11 @@ pub struct RanDouShaStore<F: FftField> {
     pub received_r_shares_degree_t: HashMap<PartyId, ShamirSecretSharing<F>>,
     /// Vector that stores the received degree 2t shares of r.
     pub received_r_shares_degree_2t: HashMap<PartyId, ShamirSecretSharing<F>>,
+    /// Vector of r shares of degree t computed as a result of multiplying the Vandermonde matrix
+    /// with the shares of s.
     pub computed_r_shares_degree_t: Vec<ShamirSecretSharing<F>>,
+    /// Vector of r shares of degree 2t computed as a result of multiplying the Vandermonde matrix
+    /// with the shares of s.
     pub computed_r_shares_degree_2t: Vec<ShamirSecretSharing<F>>,
 }
 
@@ -58,7 +75,6 @@ pub struct RanDouShaNode<F: FftField> {
 impl<F> RanDouShaNode<F>
 where
     F: FftField,
-    usize: From<F>,
 {
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
@@ -87,7 +103,7 @@ where
         &mut self,
         init_msg: &InitMessage<F>,
         params: &RanDouShaParams,
-        network: N,
+        network: &N,
     ) -> Result<(), NetworkError>
     where
         N: Network<P>,
@@ -149,19 +165,20 @@ where
                     2 * params.threshold,
                 );
 
-                let reconst_message = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+                let reconst_message =
+                    ReconstructionMessage::new(self.id, share_deg_t, share_deg_2t);
                 network.send(party.id(), reconst_message)?;
             }
         }
         Ok(())
     }
 
-    /// Implements step (3) Reconstruction of shares of RanDouSha Protocol
-    /// https://eprint.iacr.org/2019/883.pdf
+    /// Implements Step (3) Reconstruction of shares of RanDouSha Protocol
+    /// https://eprint.iacr.org/2019/883.pdf.
     /// On receiving shares of r_i from each parties of degree t and 2t, the protocol privately reconstructs r_i for both degrees
     /// and checks that both shares are of the correct degree, and that their 0-evaluation is the same.
     /// Broadcast OK if the verification succeeds, ABORT otherwise
-    /// 
+    ///
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
@@ -169,7 +186,7 @@ where
         &mut self,
         rec_msg: &ReconstructionMessage<F>,
         params: &RanDouShaParams,
-        network: N,
+        network: &N,
     ) -> Result<(), NetworkError>
     where
         N: Network<P>,
@@ -186,7 +203,7 @@ where
 
         // NOTE: Here we are assuming that the id will fit into the usize type
         // converting from F to usize
-        let sender_id: usize = rec_msg.r_share_deg_t.id.try_into().unwrap();
+        let sender_id = rec_msg.sender_id;
         store
             .received_r_shares_degree_t
             .insert(sender_id, rec_msg.r_share_deg_t.clone());
@@ -241,23 +258,53 @@ where
         Ok(())
     }
 
-    fn output_handler() {
+    fn output_handler<N, P>(
+        &self,
+        message: &OutputMessage,
+        params: &RanDouShaParams,
+        network: &N,
+    ) -> Result<(), NetworkError>
+    where
+        N: Network<P>,
+        P: Node,
+    {
         todo!()
     }
 
-    fn process(&self, message: &RanDouShaMessage) {
+    fn process<N, P>(
+        &mut self,
+        message: &RanDouShaMessage,
+        params: &RanDouShaParams,
+        network: &N,
+    ) -> Result<(), RanDouShaError>
+    where
+        N: Network<P>,
+        P: Node,
+    {
         match message.msg_type {
             messages::RanDouShaMessageType::InitMessage => {
-                // TODO: Deserialize payload, construct InitMessage instance, and call init
-                // handler.
-                todo!()
+                let init_message =
+                    InitMessage::<F>::deserialize_uncompressed(message.payload.as_slice())
+                        .map_err(RanDouShaError::SerializationFailure)?;
+                self.init_handler(&init_message, params, network)
+                    .map_err(RanDouShaError::NetworkError)?;
             }
             messages::RanDouShaMessageType::OutputMessage => {
-                todo!()
+                let output_message =
+                    OutputMessage::deserialize_uncompressed(message.payload.as_slice())
+                        .map_err(RanDouShaError::SerializationFailure)?;
+                self.output_handler(&output_message, params, network)
+                    .map_err(RanDouShaError::NetworkError)?;
             }
             messages::RanDouShaMessageType::ReconstructMessage => {
-                todo!()
+                let reconstr_message = ReconstructionMessage::<F>::deserialize_uncompressed(
+                    message.payload.as_slice(),
+                )
+                .map_err(RanDouShaError::SerializationFailure)?;
+                self.reconstruction_handler(&reconstr_message, params, network)
+                    .map_err(RanDouShaError::NetworkError)?;
             }
         }
+        Ok(())
     }
 }

@@ -15,3 +15,5 @@ tracing.workspace = true
 ark-poly.workspace = true
 ark-std.workspace = true
 ark-bls12-381.workspace = true
+bincode.workspace = true
+thiserror.workspace = true

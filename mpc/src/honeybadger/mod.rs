@@ -1,2 +1,9 @@
+/// This module contains the implementation of the Batch Reconstruction protocol presented in
+/// Figure 2 in the paper "HoneyBadgerMPC and AsynchroMix: Practical AsynchronousMPC and its
+/// Application to Anonymous Communication".
 mod batch_recon;
+
+/// This module contains the implementation of the Batch Reconstruction protocol presented in
+/// Figure 3 in the paper "HoneyBadgerMPC and AsynchroMix: Practical AsynchronousMPC and its
+/// Application to Anonymous Communication".
 mod ran_dou_sha;
