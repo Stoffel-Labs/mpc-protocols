@@ -62,4 +62,3 @@ impl OutputMessage {
         Self { id, msg }
     }
 }
-
