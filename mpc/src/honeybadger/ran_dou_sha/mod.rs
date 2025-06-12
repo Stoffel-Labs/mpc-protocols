@@ -12,7 +12,6 @@ use stoffelmpc_common::share::shamir::ShamirSecretSharing;
 use thiserror::Error;
 
 use stoffelmpc_network::{Network, NetworkError, Node, PartyId, SessionId};
-use thiserror::Error;
 
 /// Error that occurs during the execution of the Random Double Share Error.
 #[derive(Debug, Error)]
@@ -138,8 +137,9 @@ where
         let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &share_values_deg_2t);
 
         // Save the shares of r of degree t and 2t into the storage.
-        let store = self.get_or_create_store(params);
-        store.lock().unwrap().computed_r_shares_degree_t = r_deg_t
+        let bind_store = self.get_or_create_store(params);
+        let mut store = bind_store.lock().unwrap();
+        store.computed_r_shares_degree_t = r_deg_t
             .iter()
             .map(|share_value| {
                 ShamirSecretSharing::new(
@@ -149,7 +149,7 @@ where
                 )
             })
             .collect();
-        store.lock().unwrap().computed_r_shares_degree_2t = r_deg_2t
+        store.computed_r_shares_degree_2t = r_deg_2t
             .iter()
             .map(|share_value| {
                 ShamirSecretSharing::new(
@@ -276,16 +276,16 @@ where
         params: &RanDouShaParams,
     ) -> Result<(Vec<ShamirSecretSharing<F>>, Vec<ShamirSecretSharing<F>>), RanDouShaError> {
         // abort randousha once received the abort message
-        if msg.msg == false {
+        if message.msg == false {
             return Err(RanDouShaError::Abort);
         }
         let binding = self.get_or_create_store(params);
         let mut store = binding.lock().unwrap();
         // sender already exists, wait for more messages
-        if store.received_ok_msg.contains(&msg.id) {
+        if store.received_ok_msg.contains(&message.sender_id) {
             return Err(RanDouShaError::WaitForOk);
         }
-        store.received_ok_msg.push(msg.id);
+        store.received_ok_msg.push(message.sender_id);
         // wait for (n-(t+1)) Ok messages
         if store.received_ok_msg.len() < params.n_parties - (params.threshold + 1) {
             return Err(RanDouShaError::WaitForOk);
@@ -331,7 +331,7 @@ where
                 let output_message =
                     OutputMessage::deserialize_uncompressed(message.payload.as_slice())
                         .map_err(RanDouShaError::SerializationFailure)?;
-                self.output_handler(&output_message, params)?
+                self.output_handler(&output_message, params)?;
             }
             messages::RanDouShaMessageType::ReconstructMessage => {
                 let reconstr_message = ReconstructionMessage::<F>::deserialize_uncompressed(
