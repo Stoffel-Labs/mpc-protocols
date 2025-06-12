@@ -47,3 +47,18 @@ pub struct InitMessage<F: FftField> {
     pub s_shares_deg_t: Vec<ShamirSecretSharing<F>>,
     pub s_shares_deg_2t: Vec<ShamirSecretSharing<F>>,
 }
+
+/// Output message
+/// false for ABORT, True for OK
+#[derive(Debug, Clone, CanonicalDeserialize, CanonicalSerialize)]
+pub struct OutputMessage {
+    pub id: usize,
+    pub msg: bool,
+}
+impl Message for OutputMessage {}
+
+impl OutputMessage {
+    pub fn new(id: usize, msg: bool) -> Self {
+        Self { id, msg }
+    }
+}
