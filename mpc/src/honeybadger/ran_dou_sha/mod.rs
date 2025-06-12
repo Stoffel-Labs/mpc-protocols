@@ -156,11 +156,15 @@ where
         Ok(())
     }
 
-    /// Implements step (3) of Protocol RanDouSha
+    /// Implements step (3) Reconstruction of shares of RanDouSha Protocol
     /// https://eprint.iacr.org/2019/883.pdf
     /// On receiving shares of r_i from each parties of degree t and 2t, the protocol privately reconstructs r_i for both degrees
     /// and checks that both shares are of the correct degree, and that their 0-evaluation is the same.
     /// Broadcast OK if the verification succeeds, ABORT otherwise
+    /// 
+    /// # Errors
+    ///
+    /// If sending the shares through the network fails, the function returns a [`NetworkError`].
     fn reconstruction_handler<N, P>(
         &mut self,
         rec_msg: &ReconstructionMessage<F>,
@@ -177,16 +181,17 @@ where
         // one for degree t and one for degree 2t.
         // These shares originate from the *sender* of the message, but they are components of the 'r_j'
 
-        let mut store = self.store.lock().unwrap();
+        let binding = self.get_or_create_store(params);
+        let mut store = binding.lock().unwrap();
 
         // NOTE: Here we are assuming that the id will fit into the usize type
         // converting from F to usize
         let sender_id: usize = rec_msg.r_share_deg_t.id.try_into().unwrap();
         store
-            .r_shares_degree_t
+            .received_r_shares_degree_t
             .insert(sender_id, rec_msg.r_share_deg_t.clone());
         store
-            .r_shares_degree_2t
+            .received_r_shares_degree_2t
             .insert(sender_id, rec_msg.r_share_deg_2t.clone());
 
         // (2) Check if this party (self.id) is one of the designated checking parties.
@@ -197,16 +202,16 @@ where
             // To reconstruct a (2t) degree polynomial, you need 2t+1 distinct shares.
 
             //TODO: do we need to wait for all n shares?
-            if store.r_shares_degree_t.len() >= params.threshold + 1
-                && store.r_shares_degree_2t.len() >= 2 * params.threshold + 1
+            if store.received_r_shares_degree_t.len() >= params.threshold + 1
+                && store.received_r_shares_degree_2t.len() >= 2 * params.threshold + 1
             {
                 let mut shares_t_for_recon: Vec<ShamirSecretSharing<F>> = Vec::new();
                 let mut shares_2t_for_recon: Vec<ShamirSecretSharing<F>> = Vec::new();
 
-                for (_, share) in store.r_shares_degree_t.iter() {
+                for (_, share) in store.received_r_shares_degree_t.iter() {
                     shares_t_for_recon.push(share.clone());
                 }
-                for (_, share) in store.r_shares_degree_2t.iter() {
+                for (_, share) in store.received_r_shares_degree_2t.iter() {
                     shares_2t_for_recon.push(share.clone());
                 }
 
