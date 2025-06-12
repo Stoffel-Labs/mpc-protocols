@@ -12,6 +12,7 @@ use stoffelmpc_common::share::shamir::ShamirSecretSharing;
 use thiserror::Error;
 
 use stoffelmpc_network::{Network, NetworkError, Node, PartyId, SessionId};
+use thiserror::Error;
 
 /// Error that occurs during the execution of the Random Double Share Error.
 #[derive(Debug, Error)]
@@ -22,6 +23,12 @@ pub enum RanDouShaError {
     /// The error occurs while serializing/deserializing an object comming from the network.
     #[error("error while serializing/deserializing an object: {0:?}")]
     SerializationFailure(SerializationError),
+    /// The protocol received an abort signal.
+    #[error("received abort singal")]
+    Abort,
+    /// The party is waiting for confirmations.
+    #[error("waiting for more confirmations")]
+    WaitForOk,
 }
 
 /// Storage for the Random Double Sharing protocol.
@@ -37,6 +44,8 @@ pub struct RanDouShaStore<F: FftField> {
     /// Vector of r shares of degree 2t computed as a result of multiplying the Vandermonde matrix
     /// with the shares of s.
     pub computed_r_shares_degree_2t: Vec<ShamirSecretSharing<F>>,
+    /// Vector that stores the nodes who have sent the output ok msg.
+    pub received_ok_msg: Vec<usize>,
 }
 
 impl<F> RanDouShaStore<F>
@@ -50,6 +59,7 @@ where
             received_r_shares_degree_2t: HashMap::new(),
             computed_r_shares_degree_t: Vec::new(),
             computed_r_shares_degree_2t: Vec::new(),
+            received_ok_msg: Vec::new(),
         }
     }
 }
@@ -201,8 +211,6 @@ where
         let binding = self.get_or_create_store(params);
         let mut store = binding.lock().unwrap();
 
-        // NOTE: Here we are assuming that the id will fit into the usize type
-        // converting from F to usize
         let sender_id = rec_msg.sender_id;
         store
             .received_r_shares_degree_t
@@ -258,17 +266,47 @@ where
         Ok(())
     }
 
-    fn output_handler<N, P>(
-        &self,
+    /// Implements step (4) (5) of Protocol RanDouSha
+    /// Wait to receive broadcast of output message from other party.
+    /// Return [r_1]_t ... [r_t+1]_t & [r_1]_2t ... [r_t+1]_2t only if one receives more than
+    /// (n - (t+1)) Ok message.
+    fn output_handler(
+        &mut self,
         message: &OutputMessage,
         params: &RanDouShaParams,
-        network: &N,
-    ) -> Result<(), NetworkError>
-    where
-        N: Network<P>,
-        P: Node,
-    {
-        todo!()
+    ) -> Result<(Vec<ShamirSecretSharing<F>>, Vec<ShamirSecretSharing<F>>), RanDouShaError> {
+        // abort randousha once received the abort message
+        if msg.msg == false {
+            return Err(RanDouShaError::Abort);
+        }
+        let binding = self.get_or_create_store(params);
+        let mut store = binding.lock().unwrap();
+        // sender already exists, wait for more messages
+        if store.received_ok_msg.contains(&msg.id) {
+            return Err(RanDouShaError::WaitForOk);
+        }
+        store.received_ok_msg.push(msg.id);
+        // wait for (n-(t+1)) Ok messages
+        if store.received_ok_msg.len() < params.n_parties - (params.threshold + 1) {
+            return Err(RanDouShaError::WaitForOk);
+        }
+
+        // create vector for share [r_1]_t ... [r_t+1]_t
+        let output_r_t = store
+            .computed_r_shares_degree_t
+            .iter()
+            .copied()
+            .filter(|share| share.id <= F::from((params.threshold + 1) as u64))
+            .collect::<Vec<_>>();
+        // create vector for share [r_1]_2t ... [r_t+1]_2t
+        let output_r_2t = store
+            .computed_r_shares_degree_2t
+            .iter()
+            .copied()
+            .filter(|share| share.id <= F::from((params.threshold + 1) as u64))
+            .collect::<Vec<_>>();
+
+        return Ok((output_r_t, output_r_2t));
     }
 
     fn process<N, P>(
@@ -293,8 +331,7 @@ where
                 let output_message =
                     OutputMessage::deserialize_uncompressed(message.payload.as_slice())
                         .map_err(RanDouShaError::SerializationFailure)?;
-                self.output_handler(&output_message, params, network)
-                    .map_err(RanDouShaError::NetworkError)?;
+                self.output_handler(&output_message, params)?
             }
             messages::RanDouShaMessageType::ReconstructMessage => {
                 let reconstr_message = ReconstructionMessage::<F>::deserialize_uncompressed(
