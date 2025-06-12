@@ -1,45 +1,194 @@
-use super::reed_solomon::robust_interpolate;
+use super::robust_interpolate::*;
 use ark_ff::FftField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, info, warn};
 
-//Mocked for testing
+/// Mocked for testing purposes.
+/// Represents messages exchanged between network nodes during the batch reconstruction protocol.
 #[derive(Debug, Clone)]
 pub enum Msg<F: FftField> {
-    Eval(usize, F),   // (sender_id, share of y_j)
-    Reveal(usize, F), // y_j revealed in round 2
+    Eval(usize, F),   // (sender_id, share of y_j) - sent in the first round
+    Reveal(usize, F), // (sender_id, y_j value) - sent in the second round
 }
-
+/// Mocked for testing purposes.
+/// Represents a network interface for a node, allowing it to send messages to other nodes.
 #[derive(Clone)]
 pub struct Network<F: FftField> {
     pub id: usize,
     pub senders: Vec<Sender<Msg<F>>>,
 }
-
 impl<F: FftField> Network<F> {
     pub async fn broadcast(&self, msg: Msg<F>) {
         for sender in &self.senders {
             let _ = sender.send(msg.clone()).await;
         }
     }
-
     pub async fn send(&self, target: usize, msg: Msg<F>) {
         let _ = self.senders[target].send(msg).await;
     }
 }
+
+/// --------------------------BatchRecPub--------------------------
+///
+/// Goal: Publicly reconstruct t+1 secret-shared values [x₁, ..., x_{t+1}]
+///       in a robust way, tolerating up to t faulty parties.
+///
+/// 1. Encode the secret shares into n public shares [y₁, ..., yₙ]
+///    using a Vandermonde matrix.
+///
+/// 2. Each party sends its share yᵢ to all others (Round 1).
+///
+/// 3. Parties robustly interpolate the received y-values
+///    to reconstruct the clear yᵢ, then broadcast them (Round 2).
+///
+/// 4. Using the reconstructed y-values, parties robustly
+///    interpolate to recover the original secrets [x₁, ..., x_{t+1}].
+
 #[derive(Clone)]
-pub struct Node<F: FftField> {
-    pub id: usize,
-    pub n: usize,
-    pub t: usize,
-    pub evals_received: Vec<(usize, F)>,
-    pub reveals_received: Vec<(usize, F)>,
-    pub y_j: Option<F>,
-    pub secrets: Option<Vec<F>>,
+pub struct BatchReconNode<F: FftField> {
+    pub id: usize,                         // This node's unique identifier
+    pub n: usize,                          // Total number of nodes/shares
+    pub t: usize,                          // Number of malicious parties
+    pub evals_received: Vec<(usize, F)>,   // Stores (sender_id, eval_share) messages
+    pub reveals_received: Vec<(usize, F)>, // Stores (sender_id, y_j_value) messages
+    pub y_j: Option<F>,                    // The interpolated y_j value for this node's index
+    pub secrets: Option<Vec<F>>, // The finally reconstructed original secrets (polynomial coefficients)
 }
-/// Vandermonde matrix creation
-pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Vec<Vec<F>> {
+
+impl<F: FftField> BatchReconNode<F> {
+    /// Creates a new `Node` instance.
+    pub fn new(id: usize, n: usize, t: usize) -> Result<Self, String> {
+        if !(t < (n + 2) / 3) {
+            // ceil(n / 3)
+            return Err(format!(
+                "Invalid t: must satisfy 0 <= t < n / 3 (t={}, n={})",
+                t, n
+            ));
+        }
+        Ok(Self {
+            id,
+            n,
+            t,
+            evals_received: vec![],
+            reveals_received: vec![],
+            y_j: None,
+            secrets: None,
+        })
+    }
+
+    /// Initiates the batch reconstruction protocol for a given node.
+    ///
+    /// Each party computes its `y_j_share` for all `j` and sends it to party `P_j`.
+    pub async fn init_batch_reconstruct(
+        &self,
+        shares: &[F], // this party's shares of x_0 to x_t
+        net: &Network<F>,
+    ) {
+        assert!(
+            shares.len() >= self.t + 1,
+            "Too little shares to start batch reconstruct"
+        );
+        let vandermonde = make_vandermonde::<F>(self.n, self.t);
+        let y_shares = apply_vandermonde(&vandermonde, &shares[..(self.t + 1)]);
+
+        info!(
+            id = net.id,
+            "Initialized batch reconstruction with Vandermonde transform"
+        );
+
+        for (j, y_j_share) in y_shares.into_iter().enumerate() {
+            info!(from = net.id, to = j, "Sending y_j shares ");
+            net.send(j, Msg::Eval(net.id, y_j_share)).await;
+        }
+    }
+
+    /// Handles incoming `Msg`s for the batch reconstruction protocol.
+    ///
+    /// This function processes `Eval` messages (first round) and `Reveal` messages (second round)
+    /// to collectively reconstruct the original secrets.
+    pub async fn batch_recon_handler(&mut self, msg: Msg<F>, net: Network<F>) {
+        match msg {
+            Msg::Eval(sender_id, val) => {
+                debug!(
+                    self_id = self.id,
+                    from = sender_id,
+                    ?val,
+                    "Received Eval message"
+                );
+
+                // Store the received evaluation share if it's from a new sender.
+                if !self.evals_received.iter().any(|(id, _)| *id == sender_id) {
+                    self.evals_received.push((sender_id, val));
+                }
+                // Check if we have enough evaluation shares and haven't already computed our `y_j`.
+                if self.evals_received.len() >= 2 * self.t + 1 && self.y_j.is_none() {
+                    info!(
+                        self_id = self.id,
+                        "Enough Evals collected, interpolating y_j"
+                    );
+
+                    // Attempt to interpolate the polynomial and get our specific `y_j` value.
+                    match robust_interpolate(self.n, self.t, self.evals_received.clone()) {
+                        Ok((_, value)) => {
+                            self.y_j = Some(value);
+                            info!(node = self.id, "Broadcasting y_j value: {:?}", value);
+                            // Broadcast our computed `y_j` to all other parties.
+                            net.broadcast(Msg::Reveal(self.id, value)).await;
+                        }
+                        Err(e) => {
+                            warn!(self_id = self.id, "Interpolation of y_j failed — {e}");
+                        }
+                    }
+                }
+            }
+            Msg::Reveal(sender_id, y_j) => {
+                debug!(
+                    self_id = self.id,
+                    from = sender_id,
+                    ?y_j,
+                    "Received Reveal message"
+                );
+                // Store the received revealed `y_j` value if it's from a new sender.
+                if !self.reveals_received.iter().any(|(id, _)| *id == sender_id) {
+                    self.reveals_received.push((sender_id, y_j));
+                }
+                // Check if we have enough revealed `y_j` values and haven't already reconstructed the secrets.
+                if self.reveals_received.len() >= 2 * self.t + 1 && self.secrets.is_none() {
+                    info!(
+                        self_id = self.id,
+                        "Enough Reveals collected, interpolating secrets"
+                    );
+
+                    // Attempt to interpolate the polynomial whose coefficients are the original secrets.
+                    match robust_interpolate(self.n, self.t, self.reveals_received.clone()) {
+                        Ok((poly, _)) => {
+                            let mut result = poly.coeffs;
+                            // Resize the coefficient vector to `t + 1` to get all secrets.
+                            result.resize(self.t + 1, F::zero());
+                            self.secrets = Some(result);
+                            info!(self_id = self.id, "Secrets successfully reconstructed");
+                        }
+                        Err(e) => {
+                            warn!(
+                                self_id = self.id,
+                                "Final secrets interpolation failed — {e}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Creates a Vandermonde matrix `V` of size `n x (t+1)`.
+/// Each row `j` contains powers of `domain.element(j)`: `[1, alpha_j, alpha_j^2, ..., alpha_j^t]`.
+fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Vec<Vec<F>> {
+    assert!(
+        n > t,
+        "Incorrect parameters for vandermonde matrix creation"
+    );
     let domain = GeneralEvaluationDomain::<F>::new(n).unwrap();
     let mut matrix = vec![vec![F::zero(); t + 1]; n];
 
@@ -55,114 +204,18 @@ pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Vec<Vec<F>> {
     matrix
 }
 
-///  Matrix-vector product: V * shares => y values
-pub fn apply_vandermonde<F: FftField>(vandermonde: &[Vec<F>], shares: &[F]) -> Vec<F> {
+/// Computes the matrix-vector product: `V * shares`.
+/// This effectively evaluates a polynomial (defined by `shares` as coefficients)
+/// at the domain elements corresponding to the Vandermonde matrix rows.
+fn apply_vandermonde<F: FftField>(vandermonde: &[Vec<F>], shares: &[F]) -> Vec<F> {
+    let share_len = shares.len();
+    for (_, row) in vandermonde.iter().enumerate() {
+        assert!(row.len() == share_len, "Incorrect matrix length",);
+    }
     vandermonde
         .iter()
         .map(|row| row.iter().zip(shares.iter()).map(|(a, b)| *a * *b).sum())
         .collect()
-}
-
-///  Each party computes y_j_share for all j and sends to P_j
-pub async fn init_batch_reconstruct<F: FftField>(
-    shares: &[F], // this party's shares of x_0 to x_t
-    n: usize,
-    net: &Network<F>,
-) {
-    let vandermonde = make_vandermonde::<F>(n, shares.len() - 1);
-    let y_shares = apply_vandermonde(&vandermonde, shares);
-
-    info!(
-        id = net.id,
-        "Initialized batch reconstruction with Vandermonde transform"
-    );
-
-    for (j, y_j_share) in y_shares.into_iter().enumerate() {
-        info!(from = net.id, to = j, "Sending y_j shares ");
-        net.send(j, Msg::Eval(net.id, y_j_share)).await;
-    }
-}
-
-impl<F: FftField> Node<F> {
-    pub fn new(id: usize, n: usize, t: usize) -> Self {
-        Self {
-            id,
-            n,
-            t,
-            evals_received: vec![],
-            reveals_received: vec![],
-            y_j: None,
-            secrets: None,
-        }
-    }
-
-    pub async fn batch_recon_handler(&mut self, msg: Msg<F>, net: Network<F>) {
-        match msg {
-            Msg::Eval(sender_id, val) => {
-                debug!(
-                    self_id = self.id,
-                    from = sender_id,
-                    ?val,
-                    "Received Eval message"
-                );
-                if !self.evals_received.iter().any(|(id, _)| *id == sender_id) {
-                    self.evals_received.push((sender_id, val));
-                }
-                if self.evals_received.len() >= 2 * self.t + 1 && self.y_j.is_none() {
-                    info!(
-                        self_id = self.id,
-                        "Enough Evals collected, interpolating y_j"
-                    );
-
-                    match robust_interpolate(self.n, self.t, self.evals_received.clone()) {
-                        Some((_, value)) => {
-                            self.y_j = Some(value);
-                            info!(node = self.id, "Broadcasting y_j value: {:?}", value);
-                            net.broadcast(Msg::Reveal(self.id, value)).await;
-                        }
-                        None => {
-                            warn!(
-                                self_id = self.id,
-                                "Interpolation of y_j failed — possibly too many errors or bad data"
-                            );
-                        }
-                    }
-                }
-            }
-            Msg::Reveal(sender_id, y_j) => {
-                debug!(
-                    self_id = self.id,
-                    from = sender_id,
-                    ?y_j,
-                    "Received Reveal message"
-                );
-                if !self.reveals_received.iter().any(|(id, _)| *id == sender_id) {
-                    self.reveals_received.push((sender_id, y_j));
-                }
-                if self.reveals_received.len() >= 2 * self.t + 1 && self.secrets.is_none() {
-                    info!(
-                        self_id = self.id,
-                        "Enough Reveals collected, interpolating secrets"
-                    );
-
-                    match robust_interpolate(self.n, self.t, self.reveals_received.clone()) {
-                        Some((poly, _)) => {
-                            let mut result = poly.coeffs;
-                            result.resize(self.t + 1, F::zero());
-                            self.secrets = Some(result);
-                            info!(self_id = self.id, "Secrets successfully reconstructed");
-                        }
-                        None => {
-                            warn!(
-                                self_id = self.id,
-                                "Final secrets interpolation failed — possibly too many incorrect y_j"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -171,8 +224,7 @@ mod tests {
 
     use super::*;
     use ark_bls12_381::Fr;
-    use ark_ff::Zero;
-    use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
+    use ark_ff::{Field, One, Zero};
     use ark_std::test_rng;
     use tokio::time::timeout;
 
@@ -185,21 +237,13 @@ mod tests {
     ) -> Vec<Vec<F>> {
         let mut rng = test_rng();
         let mut shares = vec![vec![F::zero(); secrets.len()]; n];
-        let domain = GeneralEvaluationDomain::<F>::new(n).expect("No suitable evaluation domain");
-
         for (j, secret) in secrets.iter().enumerate() {
-            // Construct polynomial f_j(x) = secret + a1*x + ... + at*x^t
-            let mut coeffs = vec![*secret];
-            for _ in 0..t {
-                coeffs.push(F::rand(&mut rng));
-            }
-            let poly = DensePolynomial::from_coefficients_slice(&coeffs);
-
-            // Evaluate on the FFT domain directly (Gao-style encoding)
-            let evals = domain.fft(&poly);
-
-            for i in 0..n {
-                shares[i][j] = evals[i]; // Party i receives evaluation of f_j at α_i
+            // Call gen_shares to create 'n' shares for the current 'secret'
+            let secret_shares = gen_shares(*secret, n, t, &mut rng);
+            if let Ok(s) = secret_shares {
+                for i in 0..n {
+                    shares[i][j] = s[i]; // Party i receives evaluation of f_j at α_i
+                }
             }
         }
 
@@ -207,11 +251,95 @@ mod tests {
     }
 
     #[test]
+    fn test_make_vandermonde_basic() {
+        let n = 4;
+        let t = 2; // Matrix will have t+1 columns
+        let vandermonde = make_vandermonde::<Fr>(n, t);
+
+        // Verify dimensions
+        assert_eq!(
+            vandermonde.len(),
+            n,
+            "Vandermonde matrix should have 'n' rows"
+        );
+        for row in &vandermonde {
+            assert_eq!(row.len(), t + 1, "Each row should have 't+1' columns");
+        }
+
+        let domain =
+            GeneralEvaluationDomain::<Fr>::new(n).expect("Failed to create evaluation domain");
+
+        // Verify specific elements based on the domain elements
+        // Row 0: [1, 1, 1] since domain.element(0) is always 1
+        assert_eq!(vandermonde[0][0], Fr::one());
+        assert_eq!(vandermonde[0][1], Fr::one());
+        assert_eq!(vandermonde[0][2], Fr::one());
+
+        // Row 1: [1, alpha_1, alpha_1^2]
+        let alpha_1 = domain.element(1);
+        assert_eq!(vandermonde[1][0], Fr::one());
+        assert_eq!(vandermonde[1][1], alpha_1);
+        assert_eq!(vandermonde[1][2], alpha_1 * alpha_1);
+
+        // Verify a general element: matrix[j][k] should be (domain.element(j))^k
+        let j_test = 2;
+        let k_test = 1;
+        let alpha_j_test = domain.element(j_test);
+        assert_eq!(
+            vandermonde[j_test][k_test],
+            alpha_j_test.pow([k_test as u64]),
+            "Mismatch at matrix[{j_test}][{k_test}]"
+        );
+
+        let j_test_2 = 3;
+        let k_test_2 = 2;
+        let alpha_j_test_2 = domain.element(j_test_2);
+        assert_eq!(
+            vandermonde[j_test_2][k_test_2],
+            alpha_j_test_2.pow([k_test_2 as u64]),
+            "Mismatch at matrix[{j_test_2}][{k_test_2}]"
+        );
+    }
+
+    #[test]
+    fn test_apply_vandermonde_basic() {
+        let n = 4;
+        let t = 2;
+        let vandermonde = make_vandermonde::<Fr>(n, t);
+        // Shares represent coefficients [c0, c1, c2] for a polynomial c0 + c1*x + c2*x^2
+        let shares = vec![Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)]; // t+1 shares/coefficients
+
+        let y_values = apply_vandermonde(&vandermonde, &shares);
+        assert_eq!(
+            y_values.len(),
+            n,
+            "Output y_values should have 'n' elements"
+        );
+
+        let domain =
+            GeneralEvaluationDomain::<Fr>::new(n).expect("Failed to create evaluation domain");
+
+        // Expected y_values[j] = sum(shares[k] * alpha_j^k)
+        // This is equivalent to evaluating the polynomial represented by 'shares' at alpha_j
+        for j in 0..n {
+            let alpha_j = domain.element(j);
+            let expected_y_j = shares[0] * alpha_j.pow([0]) // shares[0] * 1
+                             + shares[1] * alpha_j.pow([1]) // shares[1] * alpha_j
+                             + shares[2] * alpha_j.pow([2]); // shares[2] * alpha_j^2
+            assert_eq!(
+                y_values[j], expected_y_j,
+                "Mismatch for y_values at index {}",
+                j
+            );
+        }
+    }
+
+    #[test]
     fn test_batch_reconstruct_sequential() {
         let t = 1;
         let n = 4;
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(4u64)];
-        assert_eq!(secrets.len(),t+1);
+        assert_eq!(secrets.len(), t + 1);
 
         // Step 0: Generate shares
         let shares = generate_independent_shares(&secrets, t, n);
@@ -245,7 +373,7 @@ mod tests {
                 }
             }
 
-            if let Some((_, value)) = robust_interpolate(n, t, received) {
+            if let Ok((_, value)) = robust_interpolate(n, t, received) {
                 reveals[j] = Some(value);
             }
         }
@@ -266,7 +394,7 @@ mod tests {
                     }
                 }
             }
-            if let Some((poly, _)) = robust_interpolate(n, t, y_values) {
+            if let Ok((poly, _)) = robust_interpolate(n, t, y_values) {
                 //  Extract original secrets (coefficients) x_1 .. x_{t+1}
                 let mut result = poly.coeffs;
                 result.resize(t + 1, Fr::zero());
@@ -274,7 +402,7 @@ mod tests {
             }
         }
 
-        assert_eq!(recovered_all.len(),n,"Share reconstruction failed");
+        assert_eq!(recovered_all.len(), n, "Share reconstruction failed");
         // === Check all recovered results match the original secrets
         for recovered in recovered_all {
             assert_eq!(recovered[..secrets.len()], secrets[..]);
@@ -313,13 +441,13 @@ mod tests {
                 id: i,
                 senders: node_senders,
             };
-            let mut node = Node::<Fr>::new(i, n, t);
+            let mut node = BatchReconNode::<Fr>::new(i, n, t).expect("Incorrect n or t");
             let mut rx = receivers.remove(0); // each node gets its own receiver
             let my_shares = shares[i].clone();
 
             let handle = tokio::spawn(async move {
                 // Step 4: Start the protocol
-                init_batch_reconstruct(&my_shares, n, &net).await;
+                node.init_batch_reconstruct(&my_shares, &net).await;
 
                 // Step 5: Process incoming messages
                 while node.secrets.is_none() {

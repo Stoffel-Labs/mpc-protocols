@@ -11,3 +11,4 @@ ark-std = "0.5"
 tokio = { version = "1.38", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+thiserror = "2.0.12"
