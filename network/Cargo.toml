@@ -7,3 +7,4 @@ edition.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 ark-serialize.workspace = true
+ark-ff.workspace = true

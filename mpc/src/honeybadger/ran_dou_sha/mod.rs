@@ -2,8 +2,11 @@ mod messages;
 
 use crate::honeybadger::batch_recon::batch_recon::{apply_vandermonde, make_vandermonde};
 use ark_ff::FftField;
-use ark_serialize::{CanonicalDeserialize, SerializationError};
-use messages::{InitMessage, OutputMessage, RanDouShaMessage, ReconstructionMessage};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
+use bincode::ErrorKind;
+use messages::{
+    InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
+};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -19,9 +22,12 @@ pub enum RanDouShaError {
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(NetworkError),
-    /// The error occurs while serializing/deserializing an object comming from the network.
-    #[error("error while serializing/deserializing an object: {0:?}")]
-    SerializationFailure(SerializationError),
+    #[error("error while serializing an arkworks object: {0:?}")]
+    ArkSerialization(SerializationError),
+    #[error("error while serializing an arkworks object: {0:?}")]
+    ArkDeserialization(SerializationError),
+    #[error("error while serializing the object into bytes: {0:?}")]
+    SerializationError(Box<ErrorKind>),
     /// The protocol received an abort signal.
     #[error("received abort singal")]
     Abort,
@@ -108,15 +114,14 @@ where
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
-    fn init_handler<N, P>(
+    fn init_handler<N>(
         &mut self,
         init_msg: &InitMessage<F>,
         params: &RanDouShaParams,
         network: &N,
-    ) -> Result<(), NetworkError>
+    ) -> Result<(), RanDouShaError>
     where
-        N: Network<P>,
-        P: Node,
+        N: Network,
     {
         let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties);
         let share_values_deg_t: Vec<F> = init_msg
@@ -177,7 +182,24 @@ where
 
                 let reconst_message =
                     ReconstructionMessage::new(self.id, share_deg_t, share_deg_2t);
-                network.send(party.id(), reconst_message)?;
+
+                // Serializing the reconstruction message and wrapping it into a generic message.
+                let mut bytes_rec_message = Vec::new();
+                reconst_message
+                    .serialize_compressed(&mut bytes_rec_message)
+                    .map_err(RanDouShaError::ArkSerialization)?;
+                let generic_message = RanDouShaMessage::new(
+                    self.id,
+                    RanDouShaMessageType::ReconstructMessage,
+                    &bytes_rec_message,
+                );
+                let bytes_generic_message = bincode::serialize(&generic_message)
+                    .map_err(RanDouShaError::SerializationError)?;
+
+                // Sending the generic message to the network.
+                network
+                    .send(party.id(), &bytes_generic_message)
+                    .map_err(RanDouShaError::NetworkError)?;
             }
         }
         Ok(())
@@ -192,15 +214,14 @@ where
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
-    fn reconstruction_handler<N, P>(
+    fn reconstruction_handler<N>(
         &mut self,
         rec_msg: &ReconstructionMessage<F>,
         params: &RanDouShaParams,
         network: &N,
-    ) -> Result<(), NetworkError>
+    ) -> Result<(), RanDouShaError>
     where
-        N: Network<P>,
-        P: Node,
+        N: Network,
     {
         // --- Step (3) Implementation ---
         // (1) Store the received shares.
@@ -246,8 +267,10 @@ where
                 let reconstructed_r_2t = ShamirSecretSharing::recover_secret(&shares_2t_for_recon);
 
                 // if the reconstruction fails, broadcast false
+                let mut output_message = OutputMessage::new(self.id, true);
+
                 if reconstructed_r_t.is_err() || reconstructed_r_2t.is_err() {
-                    network.broadcast(OutputMessage::new(self.id, false))?;
+                    output_message = OutputMessage::new(self.id, false);
                 }
                 // (6) Check that their 0-evaluation is the same.
                 // This means checking if the reconstructed values are equal.
@@ -255,11 +278,26 @@ where
 
                 if !verify {
                     // if the verification fails, broadcast false(aka. Abort)
-                    network.broadcast(OutputMessage::new(self.id, false))?;
+                    output_message = OutputMessage::new(self.id, false);
                 }
 
+                // Serializing the output message and wrapping it into a generic message.
+                let mut bytes_out_message = Vec::new();
+                output_message
+                    .serialize_compressed(&mut bytes_out_message)
+                    .map_err(RanDouShaError::ArkSerialization)?;
+                let generic_message = RanDouShaMessage::new(
+                    self.id,
+                    RanDouShaMessageType::ReconstructMessage,
+                    &bytes_out_message,
+                );
+                let bytes_generic_message = bincode::serialize(&generic_message)
+                    .map_err(RanDouShaError::SerializationError)?;
+
                 // if the verification succeeds, broadcast true(aka. OK)
-                network.broadcast(OutputMessage::new(self.id, true))?;
+                network
+                    .broadcast(&bytes_generic_message)
+                    .map_err(RanDouShaError::NetworkError)?;
             }
         }
 
@@ -309,37 +347,34 @@ where
         return Ok((output_r_t, output_r_2t));
     }
 
-    fn process<N, P>(
+    fn process<N>(
         &mut self,
         message: &RanDouShaMessage,
         params: &RanDouShaParams,
         network: &N,
     ) -> Result<(), RanDouShaError>
     where
-        N: Network<P>,
-        P: Node,
+        N: Network,
     {
         match message.msg_type {
             messages::RanDouShaMessageType::InitMessage => {
                 let init_message =
                     InitMessage::<F>::deserialize_uncompressed(message.payload.as_slice())
-                        .map_err(RanDouShaError::SerializationFailure)?;
-                self.init_handler(&init_message, params, network)
-                    .map_err(RanDouShaError::NetworkError)?;
+                        .map_err(RanDouShaError::ArkDeserialization)?;
+                self.init_handler(&init_message, params, network)?
             }
             messages::RanDouShaMessageType::OutputMessage => {
                 let output_message =
                     OutputMessage::deserialize_uncompressed(message.payload.as_slice())
-                        .map_err(RanDouShaError::SerializationFailure)?;
+                        .map_err(RanDouShaError::ArkDeserialization)?;
                 self.output_handler(&output_message, params)?;
             }
             messages::RanDouShaMessageType::ReconstructMessage => {
                 let reconstr_message = ReconstructionMessage::<F>::deserialize_uncompressed(
                     message.payload.as_slice(),
                 )
-                .map_err(RanDouShaError::SerializationFailure)?;
-                self.reconstruction_handler(&reconstr_message, params, network)
-                    .map_err(RanDouShaError::NetworkError)?;
+                .map_err(RanDouShaError::ArkDeserialization)?;
+                self.reconstruction_handler(&reconstr_message, params, network)?;
             }
         }
         Ok(())
