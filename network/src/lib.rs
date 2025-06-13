@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Error type for network related issues.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum NetworkError {
     #[error("The message was not sent correctly")]
     SendError,

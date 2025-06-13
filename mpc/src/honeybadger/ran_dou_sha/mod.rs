@@ -359,18 +359,18 @@ where
         match message.msg_type {
             messages::RanDouShaMessageType::InitMessage => {
                 let init_message =
-                    InitMessage::<F>::deserialize_uncompressed(message.payload.as_slice())
+                    InitMessage::<F>::deserialize_compressed(message.payload.as_slice())
                         .map_err(RanDouShaError::ArkDeserialization)?;
                 self.init_handler(&init_message, params, network)?
             }
             messages::RanDouShaMessageType::OutputMessage => {
                 let output_message =
-                    OutputMessage::deserialize_uncompressed(message.payload.as_slice())
+                    OutputMessage::deserialize_compressed(message.payload.as_slice())
                         .map_err(RanDouShaError::ArkDeserialization)?;
                 self.output_handler(&output_message, params)?;
             }
             messages::RanDouShaMessageType::ReconstructMessage => {
-                let reconstr_message = ReconstructionMessage::<F>::deserialize_uncompressed(
+                let reconstr_message = ReconstructionMessage::<F>::deserialize_compressed(
                     message.payload.as_slice(),
                 )
                 .map_err(RanDouShaError::ArkDeserialization)?;

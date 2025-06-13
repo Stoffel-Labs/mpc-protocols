@@ -38,9 +38,13 @@ impl Network for FakeNetwork {
     type NetworkConfig = FakeNetworkConfig;
 
     fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
-        self.node_channels
-            .get(&recipient)
-            .unwrap()
+        let node = self.node_channels.get(&recipient);
+
+        if node.is_none() {
+            return Err(NetworkError::PartyNotFound(recipient));
+        }
+
+        node.unwrap()
             .send(message.to_vec())
             .map_err(|_| NetworkError::SendError)?;
         Ok(message.len())
@@ -96,3 +100,114 @@ impl Node for FakeNode {
 }
 
 pub struct FakeNetworkConfig;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Network;
+
+    #[test]
+    fn test_fake_network_new() {
+        let n_nodes = 5;
+        let network = FakeNetwork::new(n_nodes);
+
+        assert_eq!(network.nodes.len(), n_nodes);
+        assert_eq!(network.node_channels.len(), n_nodes);
+
+        for i in 0..n_nodes {
+            assert!(network.node_channels.contains_key(&i));
+            assert!(network.node(i).is_some());
+            assert_eq!(network.node(i).unwrap().id(), i);
+        }
+    }
+
+    #[test]
+    fn test_fake_network_send_and_receive() {
+        let n_nodes = 3;
+        let network = FakeNetwork::new(n_nodes);
+
+        let sender_id = 0;
+        let recipient_id = 1;
+        let message = b"hello";
+
+        // Send a message from the perspective of the network
+        let send_result = network.send(recipient_id, message);
+        assert!(send_result.is_ok());
+        assert_eq!(send_result.unwrap(), message.len());
+
+        // Get the recipient node and try to receive the message
+        let recipient_node = network.node(recipient_id).unwrap();
+        let received_message_result = recipient_node.receiver_channel.try_recv();
+
+        assert!(received_message_result.is_ok());
+        assert_eq!(received_message_result.unwrap(), message.to_vec());
+
+        // Ensure the other node didn't receive the message
+        let other_node1 = network.node(sender_id).unwrap();
+        let other_received_message_result = other_node1.receiver_channel.try_recv();
+        assert!(other_received_message_result.is_err()); // Should be empty
+
+        let other_node2 = network.node(2).unwrap();
+        let other_received_message_result = other_node2.receiver_channel.try_recv();
+        assert!(other_received_message_result.is_err()); // Should be empty
+    }
+
+    #[test]
+    fn test_fake_network_broadcast() {
+        let n_nodes = 3;
+        let network = FakeNetwork::new(n_nodes);
+        let message = b"broadcast";
+
+        let broadcast_result = network.broadcast(message);
+        assert!(broadcast_result.is_ok());
+        assert_eq!(broadcast_result.unwrap(), message.len());
+
+        // Verify all nodes received the message
+        for i in 0..n_nodes {
+            let node = network.node(i).unwrap();
+            let received_message_result = node.receiver_channel.try_recv();
+            assert!(received_message_result.is_ok());
+            assert_eq!(received_message_result.unwrap(), message.to_vec());
+        }
+    }
+
+    #[test]
+    fn test_fake_node_id_and_scalar_id() {
+        use ark_bls12_381::Fr;
+
+        let (sender, receiver) = mpsc::channel();
+        let node_id = 123;
+        let node = FakeNode::new(node_id, receiver);
+
+        assert_eq!(node.id(), node_id);
+        let scalar_id: Fr = node.scalar_id();
+        assert_eq!(scalar_id, Fr::from(node_id as u64));
+        drop(sender);
+    }
+
+    #[test]
+    fn test_network_error_on_send_failure() {
+        let n_nodes = 2;
+        // The network needs to be mutable to modify its `node_channels` HashMap
+        let mut network = FakeNetwork::new(n_nodes);
+
+        let recipient_id = 1;
+        let message = b"test";
+
+        // To simulate a send failure with an unbounded mpsc channel:
+        // The most direct way is to remove the recipient from the network's map.
+        let removed_recipient = network.node_channels.remove(&recipient_id);
+        assert!(removed_recipient.is_some(), "should exist for recipient_id");
+
+        // Now that the recipient is removed, the send should fail
+        let send_result = network.send(recipient_id, message);
+        assert!(
+            send_result.is_err(),
+            "Send should fail after sender is removed."
+        );
+        assert_eq!(
+            send_result.unwrap_err(),
+            NetworkError::PartyNotFound(recipient_id)
+        );
+    }
+}
