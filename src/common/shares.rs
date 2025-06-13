@@ -1,7 +1,7 @@
 /// This file contains the more common secret sharing protocols used in MPC.
 /// You can reuse them for the MPC protocols that you aim to implement.
 ///
-use crate::{Share, ShareError};
+use crate::{SecretSharing, Share, ShareError};
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_std::rand::Rng;
@@ -18,15 +18,20 @@ impl<F: FftField> ShamirSecretSharing<F> {
     pub fn new(share: F, id: usize, degree: usize) -> Self {
         Self { share, id, degree }
     }
+}
+
+impl<F: FftField> SecretSharing for ShamirSecretSharing<F> {
+    type UnderlyingSecret = F;
+    type SecretSharingPolynomial = DensePolynomial<F>;
 
     // compute the shamir shares of all ids for a secret
-    pub fn compute_shares(
-        secret: F,
+    fn compute_shares(
+        secret: Self::UnderlyingSecret,
         degree: usize,
         ids: &[usize],
         rng: &mut impl Rng,
-    ) -> (Vec<Self>, DensePolynomial<F>) {
-        let mut poly = DensePolynomial::<F>::rand(degree, rng);
+    ) -> (Vec<Self>, Self::SecretSharingPolynomial) {
+        let mut poly = Self::SecretSharingPolynomial::rand(degree, rng);
         poly[0] = secret;
 
         let shares = ids
@@ -37,7 +42,7 @@ impl<F: FftField> ShamirSecretSharing<F> {
     }
 
     // recover the secret of the input shares
-    pub fn recover_secret(shares: &[Self]) -> Result<F, ShareError> {
+    fn recover_secret(shares: &[Self]) -> Result<Self::UnderlyingSecret, ShareError> {
         let deg = shares[0].degree;
         if !shares.iter().all(|share| share.degree == deg) {
             return Err(ShareError::DegreeMismatch);

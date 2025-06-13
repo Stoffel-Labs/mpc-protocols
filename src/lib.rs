@@ -6,6 +6,7 @@
 /// into the StoffelVM, you must implement the Share type.
 pub mod common;
 use crate::common::{rbc::Network, rbc_store::Msg};
+use ark_std::rand::Rng;
 use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
@@ -26,6 +27,25 @@ trait Share: Sized {
     /// You can reveal shares together with other parties
     /// Reveal a share means that you are revealing the underlying secret
     fn reveal();
+}
+
+trait SecretSharing: Sized {
+    /// The underlying secret that this share represents.
+    type UnderlyingSecret;
+    /// The polynomial type used for the secret sharing
+    type SecretSharingPolynomial;
+
+    /// compute the shares of all ids for a secret
+    /// returns a vec of shares and the underlying polynomial
+    fn compute_shares(
+        secret: Self::UnderlyingSecret,
+        degree: usize,
+        ids: &[usize],
+        rng: &mut impl Rng,
+    ) -> (Vec<Self>, Self::SecretSharingPolynomial);
+
+    /// recover the secret of the input shares
+    fn recover_secret(shares: &[Self]) -> Result<Self::UnderlyingSecret, ShareError>;
 }
 
 #[derive(Debug, Error)]
