@@ -5,7 +5,7 @@ use stoffelmpc_common::share::shamir::ShamirSecretSharing;
 use stoffelmpc_network::{Message, PartyId};
 
 /// Types for the all the possible messages sent during the Random Double Sharing protocol.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq)]
 pub enum RanDouShaMessageType {
     /// Tag for the message received by the initialization handler.
     InitMessage,

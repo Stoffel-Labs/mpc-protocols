@@ -5,23 +5,23 @@ use std::{
 
 use crate::{Network, NetworkError, Node, PartyId};
 
-pub struct FakeNetwork {
+pub struct FakeNetwork<N: Node> {
     /// Fake nodes channels to send information to the network
     node_channels: HashMap<PartyId, Sender<Vec<u8>>>,
     /// Configuration of the network.
     config: FakeNetworkConfig,
     /// Fake nodes connected to the network
-    nodes: Vec<FakeNode>,
+    nodes: Vec<N>,
 }
 
-impl FakeNetwork {
+impl<N: Node> FakeNetwork<N> {
     pub fn new(n_nodes: usize) -> Self {
         let mut node_channels = HashMap::new();
         let mut nodes = Vec::new();
         for id in 0..n_nodes {
             let (sender, receiver) = mpsc::channel();
             node_channels.insert(id, sender);
-            let node = FakeNode::new(id, receiver);
+            let node = N::new(id, receiver);
             nodes.push(node);
         }
         let config = FakeNetworkConfig;
@@ -33,8 +33,8 @@ impl FakeNetwork {
     }
 }
 
-impl Network for FakeNetwork {
-    type NodeType = FakeNode;
+impl<N: Node> Network for FakeNetwork<N> {
+    type NodeType = N;
     type NetworkConfig = FakeNetworkConfig;
 
     fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
@@ -51,7 +51,7 @@ impl Network for FakeNetwork {
     }
 
     fn node(&self, id: PartyId) -> Option<&Self::NodeType> {
-        self.nodes.iter().find(|node| node.id == id)
+        self.nodes.iter().find(|node| node.id() == id)
     }
 
     fn broadcast(&self, message: &[u8]) -> Result<usize, NetworkError> {
@@ -97,6 +97,13 @@ impl Node for FakeNode {
     fn scalar_id<F: ark_ff::Field>(&self) -> F {
         F::from(self.id as u64)
     }
+
+    fn new(id: PartyId, receiver: Receiver<Vec<u8>>) -> Self {
+        Self {
+            id,
+            receiver_channel: receiver,
+        }
+    }
 }
 
 pub struct FakeNetworkConfig;
@@ -109,7 +116,7 @@ mod tests {
     #[test]
     fn test_fake_network_new() {
         let n_nodes = 5;
-        let network = FakeNetwork::new(n_nodes);
+        let network: FakeNetwork<FakeNode> = FakeNetwork::new(n_nodes);
 
         assert_eq!(network.nodes.len(), n_nodes);
         assert_eq!(network.node_channels.len(), n_nodes);
@@ -124,7 +131,7 @@ mod tests {
     #[test]
     fn test_fake_network_send_and_receive() {
         let n_nodes = 3;
-        let network = FakeNetwork::new(n_nodes);
+        let network: FakeNetwork<FakeNode> = FakeNetwork::new(n_nodes);
 
         let sender_id = 0;
         let recipient_id = 1;
@@ -155,7 +162,7 @@ mod tests {
     #[test]
     fn test_fake_network_broadcast() {
         let n_nodes = 3;
-        let network = FakeNetwork::new(n_nodes);
+        let network: FakeNetwork<FakeNode> = FakeNetwork::new(n_nodes);
         let message = b"broadcast";
 
         let broadcast_result = network.broadcast(message);
@@ -189,7 +196,7 @@ mod tests {
     fn test_network_error_on_send_failure() {
         let n_nodes = 2;
         // The network needs to be mutable to modify its `node_channels` HashMap
-        let mut network = FakeNetwork::new(n_nodes);
+        let mut network: FakeNetwork<FakeNode> = FakeNetwork::new(n_nodes);
 
         let recipient_id = 1;
         let message = b"test";

@@ -1,8 +1,8 @@
-mod fake_network;
+pub mod fake_network;
 
 use ark_ff::Field;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use serde::{Deserialize, Serialize};
+use std::sync::mpsc::Receiver;
 use thiserror::Error;
 
 /// Error type for network related issues.
@@ -63,4 +63,6 @@ pub trait Node {
     fn id(&self) -> PartyId;
     /// Returns the ID of this node as a field element for protocol specific usage.
     fn scalar_id<F: Field>(&self) -> F;
+
+    fn new(id: PartyId, receiver: Receiver<Vec<u8>>) -> Self;
 }

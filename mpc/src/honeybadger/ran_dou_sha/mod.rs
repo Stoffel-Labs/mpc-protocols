@@ -1,4 +1,4 @@
-mod messages;
+pub mod messages;
 
 use crate::honeybadger::batch_recon::batch_recon::{apply_vandermonde, make_vandermonde};
 use ark_ff::FftField;
@@ -9,7 +9,7 @@ use messages::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{mpsc::Receiver, Arc, Mutex},
 };
 use stoffelmpc_common::share::shamir::ShamirSecretSharing;
 use thiserror::Error;
@@ -85,6 +85,9 @@ pub struct RanDouShaNode<F: FftField> {
     pub id: PartyId,
     /// Storage of the node.
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
+
+    /// Receiver channel for the node.
+    pub receiver_channel: Receiver<Vec<u8>>,
 }
 
 impl<F> RanDouShaNode<F>
@@ -114,7 +117,7 @@ where
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
-    fn init_handler<N>(
+    pub fn init_handler<N>(
         &mut self,
         init_msg: &InitMessage<F>,
         params: &RanDouShaParams,
@@ -214,7 +217,7 @@ where
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
-    fn reconstruction_handler<N>(
+    pub fn reconstruction_handler<N>(
         &mut self,
         rec_msg: &ReconstructionMessage<F>,
         params: &RanDouShaParams,
@@ -308,7 +311,7 @@ where
     /// Wait to receive broadcast of output message from other party.
     /// Return [r_1]_t ... [r_t+1]_t & [r_1]_2t ... [r_t+1]_2t only if one receives more than
     /// (n - (t+1)) Ok message.
-    fn output_handler(
+    pub fn output_handler(
         &mut self,
         message: &OutputMessage,
         params: &RanDouShaParams,
@@ -347,7 +350,7 @@ where
         return Ok((output_r_t, output_r_2t));
     }
 
-    fn process<N>(
+    pub fn process<N>(
         &mut self,
         message: &RanDouShaMessage,
         params: &RanDouShaParams,
@@ -370,13 +373,31 @@ where
                 self.output_handler(&output_message, params)?;
             }
             messages::RanDouShaMessageType::ReconstructMessage => {
-                let reconstr_message = ReconstructionMessage::<F>::deserialize_compressed(
-                    message.payload.as_slice(),
-                )
-                .map_err(RanDouShaError::ArkDeserialization)?;
+                let reconstr_message =
+                    ReconstructionMessage::<F>::deserialize_compressed(message.payload.as_slice())
+                        .map_err(RanDouShaError::ArkDeserialization)?;
                 self.reconstruction_handler(&reconstr_message, params, network)?;
             }
         }
         Ok(())
+    }
+}
+
+use ark_bls12_381::Fr;
+impl Node for RanDouShaNode<Fr> {
+    fn id(&self) -> PartyId {
+        self.id
+    }
+
+    fn scalar_id<F: ark_ff::Field>(&self) -> F {
+        F::from(self.id as u64)
+    }
+
+    fn new(id: PartyId, receiver: Receiver<Vec<u8>>) -> Self {
+        Self {
+            id,
+            receiver_channel: receiver,
+            store: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
