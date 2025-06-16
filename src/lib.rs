@@ -32,17 +32,15 @@ trait Share: Sized {
 trait SecretSharing: Sized {
     /// The underlying secret that this share represents.
     type UnderlyingSecret;
-    /// The polynomial type used for the secret sharing
-    type SecretSharingPolynomial;
 
     /// compute the shares of all ids for a secret
-    /// returns a vec of shares and the underlying polynomial
+    /// returns a vec of shares
     fn compute_shares(
         secret: Self::UnderlyingSecret,
         degree: usize,
         ids: &[usize],
         rng: &mut impl Rng,
-    ) -> (Vec<Self>, Self::SecretSharingPolynomial);
+    ) -> Vec<Self>;
 
     /// recover the secret of the input shares
     fn recover_secret(shares: &[Self]) -> Result<Self::UnderlyingSecret, ShareError>;

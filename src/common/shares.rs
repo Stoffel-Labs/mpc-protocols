@@ -22,7 +22,6 @@ impl<F: FftField> ShamirSecretSharing<F> {
 
 impl<F: FftField> SecretSharing for ShamirSecretSharing<F> {
     type UnderlyingSecret = F;
-    type SecretSharingPolynomial = DensePolynomial<F>;
 
     // compute the shamir shares of all ids for a secret
     fn compute_shares(
@@ -30,15 +29,15 @@ impl<F: FftField> SecretSharing for ShamirSecretSharing<F> {
         degree: usize,
         ids: &[usize],
         rng: &mut impl Rng,
-    ) -> (Vec<Self>, Self::SecretSharingPolynomial) {
-        let mut poly = Self::SecretSharingPolynomial::rand(degree, rng);
+    ) -> Vec<Self> {
+        let mut poly = DensePolynomial::rand(degree, rng);
         poly[0] = secret;
 
         let shares = ids
             .iter()
             .map(|id| Self::new(poly.evaluate(&F::from(*id as u64)), *id, degree))
             .collect();
-        (shares, poly)
+        shares
     }
 
     // recover the secret of the input shares
@@ -139,7 +138,7 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let (shares, _) = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
+        let shares = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
         let recovered_secret = ShamirSecretSharing::recover_secret(&shares).unwrap();
         assert!(recovered_secret == secret);
     }
@@ -150,8 +149,8 @@ mod test {
         let secret2 = Fr::from(20);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let (shares_1, _) = ShamirSecretSharing::compute_shares(secret1, 5, ids, &mut rng);
-        let (shares_2, _) = ShamirSecretSharing::compute_shares(secret2, 5, ids, &mut rng);
+        let shares_1 = ShamirSecretSharing::compute_shares(secret1, 5, ids, &mut rng);
+        let shares_2 = ShamirSecretSharing::compute_shares(secret2, 5, ids, &mut rng);
 
         let added_shares = zip(shares_1, shares_2)
             .map(|(a, b)| a.add(&b).unwrap())
@@ -165,7 +164,7 @@ mod test {
         let secret = Fr::from(55);
         let ids = &[1, 2, 3, 4, 5, 6, 7, 20];
         let mut rng = test_rng();
-        let (shares, _) = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
+        let shares = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
         let tripled_shares = shares
             .iter()
             .map(|share| share.scalar_mul(&Fr::from(3)))
@@ -179,7 +178,7 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let (mut shares, _) = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
+        let mut shares = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
 
         shares[2].degree = 4;
         let recovered_secret = ShamirSecretSharing::recover_secret(&shares).unwrap_err();
@@ -195,7 +194,7 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3];
         let mut rng = test_rng();
-        let (shares, _) = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
+        let shares = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
         let recovered_secret = ShamirSecretSharing::recover_secret(&shares).unwrap_err();
         match recovered_secret {
             ShareError::InsufficientShares => (),
@@ -211,8 +210,8 @@ mod test {
         let ids1 = &[1, 2, 3, 4, 5, 6];
         let ids2 = &[7, 8, 9, 4, 5, 6];
         let mut rng = test_rng();
-        let (shares_1, _) = ShamirSecretSharing::compute_shares(secret1, 5, ids1, &mut rng);
-        let (shares_2, _) = ShamirSecretSharing::compute_shares(secret2, 5, ids2, &mut rng);
+        let shares_1 = ShamirSecretSharing::compute_shares(secret1, 5, ids1, &mut rng);
+        let shares_2 = ShamirSecretSharing::compute_shares(secret2, 5, ids2, &mut rng);
 
         let err = shares_1[0].add(&shares_2[0]).unwrap_err();
         match err {
