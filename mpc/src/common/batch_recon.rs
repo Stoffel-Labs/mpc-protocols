@@ -4,27 +4,43 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, info, warn};
 
-/// Mocked for testing purposes.
-/// Represents messages exchanged between network nodes during the batch reconstruction protocol.
-#[derive(Debug, Clone)]
-pub enum Msg<F: FftField> {
-    Eval(usize, F),   // (sender_id, share of y_j) - sent in the first round
-    Reveal(usize, F), // (sender_id, y_j value) - sent in the second round
+/// Represents message type exchanged between network nodes during the batch reconstruction protocol.
+#[derive(Clone)]
+pub enum BatchReconMsgType {
+    Eval,   // sent in the first round
+    Reveal, // sent in the second round
 }
+///Message exchanged between network nodes during the batch reconstruction protocol.
+#[derive(Clone)]
+pub struct BatchReconMsg {
+    pub sender_id: usize,            //Sender id
+    pub msg_type: BatchReconMsgType, //Message type
+    pub payload: Vec<u8>,            //field element
+}
+impl BatchReconMsg {
+    pub fn new(sender_id: usize, msg_type: BatchReconMsgType, payload: Vec<u8>) -> Self {
+        BatchReconMsg {
+            sender_id,
+            msg_type,
+            payload,
+        }
+    }
+}
+
 /// Mocked for testing purposes.
 /// Represents a network interface for a node, allowing it to send messages to other nodes.
 #[derive(Clone)]
-pub struct Network<F: FftField> {
+pub struct Network {
     pub id: usize,
-    pub senders: Vec<Sender<Msg<F>>>,
+    pub senders: Vec<Sender<BatchReconMsg>>,
 }
-impl<F: FftField> Network<F> {
-    pub async fn broadcast(&self, msg: Msg<F>) {
+impl Network {
+    pub async fn broadcast(&self, msg: BatchReconMsg) {
         for sender in &self.senders {
             let _ = sender.send(msg.clone()).await;
         }
     }
-    pub async fn send(&self, target: usize, msg: Msg<F>) {
+    pub async fn send(&self, target: usize, msg: BatchReconMsg) {
         let _ = self.senders[target].send(msg).await;
     }
 }
@@ -83,7 +99,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn init_batch_reconstruct(
         &self,
         shares: &[F], // this party's shares of x_0 to x_t
-        net: &Network<F>,
+        net: Network,
     ) {
         assert!(
             shares.len() >= self.t + 1,
@@ -99,7 +115,14 @@ impl<F: FftField> BatchReconNode<F> {
 
         for (j, y_j_share) in y_shares.into_iter().enumerate() {
             info!(from = net.id, to = j, "Sending y_j shares ");
-            net.send(j, Msg::Eval(net.id, y_j_share)).await;
+
+            let mut payload = Vec::new();
+            y_j_share
+                .serialize_compressed(&mut payload)
+                .expect("serialization should not fail");
+            let msg = BatchReconMsg::new(self.id, BatchReconMsgType::Eval, payload);
+
+            net.send(j, msg).await;
         }
     }
 
@@ -107,15 +130,17 @@ impl<F: FftField> BatchReconNode<F> {
     ///
     /// This function processes `Eval` messages (first round) and `Reveal` messages (second round)
     /// to collectively reconstruct the original secrets.
-    pub async fn batch_recon_handler(&mut self, msg: Msg<F>, net: Network<F>) {
-        match msg {
-            Msg::Eval(sender_id, val) => {
+    pub async fn batch_recon_handler(&mut self, msg: BatchReconMsg, net: Network) {
+        match msg.msg_type {
+            BatchReconMsgType::Eval => {
                 debug!(
                     self_id = self.id,
-                    from = sender_id,
-                    ?val,
+                    from = msg.sender_id,
                     "Received Eval message"
                 );
+                let sender_id = msg.sender_id;
+                let val = F::deserialize_compressed(msg.payload.as_slice())
+                    .expect("deserialization should not fail");
 
                 // Store the received evaluation share if it's from a new sender.
                 if !self.evals_received.iter().any(|(id, _)| *id == sender_id) {
@@ -133,22 +158,33 @@ impl<F: FftField> BatchReconNode<F> {
                         Ok((_, value)) => {
                             self.y_j = Some(value);
                             info!(node = self.id, "Broadcasting y_j value: {:?}", value);
+
+                            let mut payload = Vec::new();
+                            value
+                                .serialize_compressed(&mut payload)
+                                .expect("serialization should not fail");
+                            let msg =
+                                BatchReconMsg::new(self.id, BatchReconMsgType::Reveal, payload);
+
                             // Broadcast our computed `y_j` to all other parties.
-                            net.broadcast(Msg::Reveal(self.id, value)).await;
+                            net.broadcast(msg).await;
                         }
                         Err(e) => {
-                            warn!(self_id = self.id, "Interpolation of y_j failed — {e}");
+                            warn!(self_id = self.id, error = ?e, "Interpolation of y_j failed");
                         }
                     }
                 }
             }
-            Msg::Reveal(sender_id, y_j) => {
+            BatchReconMsgType::Reveal => {
                 debug!(
                     self_id = self.id,
-                    from = sender_id,
-                    ?y_j,
+                    from = msg.sender_id,
                     "Received Reveal message"
                 );
+                let sender_id = msg.sender_id;
+                let y_j = F::deserialize_compressed(msg.payload.as_slice())
+                    .expect("deserialization should not fail");
+
                 // Store the received revealed `y_j` value if it's from a new sender.
                 if !self.reveals_received.iter().any(|(id, _)| *id == sender_id) {
                     self.reveals_received.push((sender_id, y_j));
@@ -171,8 +207,8 @@ impl<F: FftField> BatchReconNode<F> {
                         }
                         Err(e) => {
                             warn!(
-                                self_id = self.id,
-                                "Final secrets interpolation failed — {e}"
+                                self_id = self.id, error = ?e,
+                                "Final secrets interpolation failed "
                             );
                         }
                     }
@@ -225,6 +261,7 @@ mod tests {
     use super::*;
     use ark_bls12_381::Fr;
     use ark_ff::{Field, One, Zero};
+    use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
     use ark_std::test_rng;
     use tokio::time::timeout;
 
@@ -345,14 +382,20 @@ mod tests {
         let shares = generate_independent_shares(&secrets, t, n);
 
         // Simulate network inboxes: inboxes[j] = list of Msgs received by party j
-        let mut inboxes: Vec<Vec<Msg<Fr>>> = vec![vec![]; n];
+        let mut inboxes: Vec<Vec<BatchReconMsg>> = vec![vec![]; n];
 
         // === Step 1: Each party computes y_j_share for all j and sends to P_j
         let vandermonde = make_vandermonde::<Fr>(n, t);
         for i in 0..n {
             let y_shares = apply_vandermonde(&vandermonde, &shares[i]);
             for j in 0..n {
-                inboxes[j].push(Msg::Eval(i, y_shares[j]));
+                let mut payload = Vec::new();
+                y_shares[j]
+                    .serialize_compressed(&mut payload)
+                    .expect("serialization should not fail");
+                let msg = BatchReconMsg::new(i, BatchReconMsgType::Eval, payload);
+
+                inboxes[j].push(msg);
             }
         }
 
@@ -363,9 +406,13 @@ mod tests {
             let mut seen = std::collections::HashSet::new();
 
             for msg in &inboxes[j] {
-                if let Msg::Eval(i, val) = msg {
-                    if seen.insert(*i) {
-                        received.push((*i, *val));
+                if let BatchReconMsgType::Eval = msg.msg_type {
+                    let i = msg.sender_id;
+                    let val = Fr::deserialize_compressed(msg.payload.as_slice())
+                        .expect("deserialization should not fail");
+
+                    if seen.insert(i) {
+                        received.push((i, val));
                         if received.len() == 2 * t + 1 {
                             break;
                         }
@@ -447,7 +494,7 @@ mod tests {
 
             let handle = tokio::spawn(async move {
                 // Step 4: Start the protocol
-                node.init_batch_reconstruct(&my_shares, &net).await;
+                node.init_batch_reconstruct(&my_shares, net.clone()).await;
 
                 // Step 5: Process incoming messages
                 while node.secrets.is_none() {
