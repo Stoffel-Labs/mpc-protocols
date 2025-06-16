@@ -173,12 +173,12 @@ where
         for party in network.parties() {
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
                 let share_deg_t = ShamirSecretSharing::new(
-                    r_deg_t[party.id()],
+                    r_deg_t[party.id() - 1],
                     F::from(self.id as u64),
                     params.threshold,
                 );
                 let share_deg_2t = ShamirSecretSharing::new(
-                    r_deg_2t[party.id()],
+                    r_deg_2t[party.id() - 1],
                     F::from(self.id as u64),
                     2 * params.threshold,
                 );

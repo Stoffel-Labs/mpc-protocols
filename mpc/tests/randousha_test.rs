@@ -23,7 +23,7 @@ mod tests {
 
         let mut network: FakeNetwork<RanDouShaNode<Fr>> = FakeNetwork::new(n_parties);
         let ids: Vec<Fr> = network.parties().iter().map(|p| p.scalar_id()).collect();
-        let sender_id = 0;
+        let sender_id = 1;
         let params = RanDouShaParams {
             session_id,
             n_parties,

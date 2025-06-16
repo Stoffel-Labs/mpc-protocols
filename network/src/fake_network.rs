@@ -18,7 +18,7 @@ impl<N: Node> FakeNetwork<N> {
     pub fn new(n_nodes: usize) -> Self {
         let mut node_channels = HashMap::new();
         let mut nodes = Vec::new();
-        for id in 0..n_nodes {
+        for id in 1..n_nodes + 1 {
             let (sender, receiver) = mpsc::channel();
             node_channels.insert(id, sender);
             let node = N::new(id, receiver);
