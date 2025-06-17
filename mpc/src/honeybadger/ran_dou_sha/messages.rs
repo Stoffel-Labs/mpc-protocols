@@ -18,16 +18,37 @@ pub enum RanDouShaMessageType {
 /// Message sent in the Random Double Sharing protocol.
 #[derive(Serialize, Deserialize)]
 pub struct RanDouShaMessage {
+    /// ID of the sender of the message.
+    pub sender_id: PartyId,
     /// Type of the message according to the handler.
     pub msg_type: RanDouShaMessageType,
     /// Contents of the message in bytes.
     pub payload: Vec<u8>,
 }
 
-impl Message for RanDouShaMessage {}
+impl RanDouShaMessage {
+    pub fn new(sender_id: PartyId, msg_type: RanDouShaMessageType, message_bytes: &[u8]) -> Self {
+        Self {
+            sender_id,
+            msg_type,
+            payload: message_bytes.to_vec(),
+        }
+    }
+}
+
+impl Message for RanDouShaMessage {
+    fn sender_id(&self) -> PartyId {
+        self.sender_id
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.payload
+    }
+}
 
 /// Message that arrives at the beginning of the reconstruction phase. In the reconstruction phase,
-/// the parties first receive shares of `r` to be able to reconstruct the value of r.
+/// the parties first receive shares of `r` to be able to reconstruct the value of r. This message
+/// represents the payload of a Reconstruction message.
 #[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct ReconstructionMessage<F: FftField> {
     /// ID of the sender of the message.
@@ -56,9 +77,8 @@ where
     }
 }
 
-impl<F> Message for ReconstructionMessage<F> where F: FftField {}
-
-/// Message that represent the initialization message in the Random Double Sharing protocol.
+/// Message that represent the initialization message in the Random Double Sharing protocol. This
+/// message represents a payload for the Initialization message.
 #[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct InitMessage<F: FftField> {
     /// ID of the sender of the message.
@@ -71,7 +91,7 @@ pub struct InitMessage<F: FftField> {
 
 /// This struct represents an output message in the Random Double Sharing protocol.
 /// The message contains a boolean that is `false` if the protocol abors and `true` if the
-/// protocol finishes correctly.
+/// protocol finishes correctly. This message represents a payload for the Output message.
 #[derive(Debug, Clone, CanonicalDeserialize, CanonicalSerialize)]
 pub struct OutputMessage {
     /// ID of the sender of the message.
@@ -80,8 +100,6 @@ pub struct OutputMessage {
     /// otherwise, the this field will have the value `true`.
     pub msg: bool,
 }
-
-impl Message for OutputMessage {}
 
 impl OutputMessage {
     /// Constructs a new output message.

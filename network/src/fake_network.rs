@@ -1,21 +1,273 @@
-use crate::{Network, Node};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
-pub struct FakeNetwork;
+use tokio::{
+    sync::mpsc::{self, Receiver, Sender},
+    task::JoinSet,
+};
 
-impl<N: Node> Network<N> for FakeNetwork {
-    fn send(
-        &self,
-        recipient: crate::PartyId,
-        message: impl crate::Message,
-    ) -> Result<usize, crate::NetworkError> {
-        todo!()
+use crate::{Network, NetworkError, Node, PartyId};
+
+/// Simulates a network for testing purposes. The channels for the network are simulated as `tokio`
+/// channels.
+pub struct FakeNetwork {
+    /// Fake nodes channels to send information to the network
+    node_channels: Arc<Mutex<HashMap<PartyId, Arc<Sender<Vec<u8>>>>>>,
+    /// Configuration of the network.
+    config: FakeNetworkConfig,
+    /// Fake nodes connected to the network
+    nodes: Vec<FakeNode>,
+}
+
+impl FakeNetwork {
+    /// Creates a new fake network for testing using the given number of nodes and configuration.
+    pub fn new(n_nodes: usize, config: FakeNetworkConfig) -> Self {
+        let mut node_channels = HashMap::new();
+        let mut nodes = Vec::new();
+        for id in 0..n_nodes {
+            let (sender, receiver) = mpsc::channel(config.channel_buff_size);
+            node_channels.insert(id, Arc::new(sender));
+            let node = FakeNode::new(id, receiver);
+            nodes.push(node);
+        }
+        Self {
+            node_channels: Arc::new(Mutex::new(node_channels)),
+            config,
+            nodes,
+        }
+    }
+}
+
+impl Network for FakeNetwork {
+    type NodeType = FakeNode;
+    type NetworkConfig = FakeNetworkConfig;
+
+    async fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
+        let channels = self.node_channels.lock().unwrap();
+        let node = channels.get(&recipient);
+
+        if node.is_none() {
+            return Err(NetworkError::PartyNotFound(recipient));
+        }
+
+        node.unwrap()
+            .send(message.to_vec())
+            .await
+            .map_err(|_| NetworkError::SendError)?;
+        Ok(message.len())
     }
 
-    fn broadcast(&self, message: impl crate::Message) -> Result<usize, crate::NetworkError> {
-        todo!()
+    fn node(&self, id: PartyId) -> Option<&Self::NodeType> {
+        self.nodes.iter().find(|node| node.id == id)
     }
 
-    fn parties(&self) -> Vec<N> {
-        todo!()
+    fn node_mut(&mut self, id: PartyId) -> Option<&mut Self::NodeType> {
+        self.nodes.iter_mut().find(|node| node.id == id)
+    }
+
+    async fn broadcast(&self, message: &[u8]) -> Result<usize, NetworkError> {
+        let mut send_tasks = JoinSet::new();
+        let message_bytes = message.to_vec();
+        let channels = self.node_channels.lock().unwrap();
+
+        for sender in channels.values() {
+            let bytes = message_bytes.clone();
+            let sender_clone = Arc::clone(sender);
+            send_tasks.spawn(async move { sender_clone.send(bytes).await });
+        }
+
+        send_tasks
+            .join_all()
+            .await
+            .into_iter()
+            .map(|result| result.map_err(|_| NetworkError::SendError))
+            .collect::<Result<Vec<()>, NetworkError>>()?;
+
+        Ok(message.len())
+    }
+
+    fn parties(&self) -> Vec<&Self::NodeType> {
+        self.nodes.iter().collect()
+    }
+
+    fn parties_mut(&mut self) -> Vec<&mut Self::NodeType> {
+        self.nodes.iter_mut().collect()
+    }
+
+    fn config(&self) -> &Self::NetworkConfig {
+        &self.config
+    }
+}
+
+/// Represents a node in the FakeNetwork.
+pub struct FakeNode {
+    /// The id of the node.
+    id: PartyId,
+    /// The channel in which the party receives the messages.
+    receiver_channel: Receiver<Vec<u8>>,
+}
+
+impl FakeNode {
+    /// Creates a new fake node.
+    pub fn new(id: PartyId, receiver: Receiver<Vec<u8>>) -> Self {
+        Self {
+            id,
+            receiver_channel: receiver,
+        }
+    }
+}
+
+impl Node for FakeNode {
+    fn id(&self) -> crate::PartyId {
+        self.id
+    }
+
+    fn scalar_id<F: ark_ff::Field>(&self) -> F {
+        F::from(self.id as u64)
+    }
+}
+
+/// Configuration for the fake network.
+pub struct FakeNetworkConfig {
+    /// Size of the buffer for the channels in the fake network.
+    pub channel_buff_size: usize,
+}
+
+impl FakeNetworkConfig {
+    /// Creates a new configuration for the fake network.
+    pub fn new(channel_buff_size: usize) -> Self {
+        Self { channel_buff_size }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::Mutex;
+
+    use super::*;
+    use crate::Network;
+
+    #[test]
+    fn test_fake_network_new() {
+        let n_nodes = 5;
+        let config = FakeNetworkConfig::new(100);
+        let network = FakeNetwork::new(n_nodes, config);
+
+        let channels = network.node_channels.lock().unwrap();
+
+        assert_eq!(network.nodes.len(), n_nodes);
+        assert_eq!(channels.len(), n_nodes);
+
+        for i in 0..n_nodes {
+            assert!(channels.contains_key(&i));
+            assert!(network.node(i).is_some());
+            assert_eq!(network.node(i).unwrap().id(), i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fake_network_send_and_receive() {
+        let n_nodes = 3;
+        let config = FakeNetworkConfig::new(100);
+        let mut network = FakeNetwork::new(n_nodes, config);
+
+        let sender_id = 0;
+        let recipient_id = 1;
+        let message = b"hello";
+
+        // Send a message from the perspective of the network
+        let send_result = network.send(recipient_id, message).await;
+        assert!(send_result.is_ok());
+        assert_eq!(send_result.unwrap(), message.len());
+
+        // Get the recipient node and try to receive the message
+        let recipient_node = network.node_mut(recipient_id).unwrap();
+        let received_message_result = recipient_node.receiver_channel.try_recv();
+
+        assert!(received_message_result.is_ok());
+        assert_eq!(received_message_result.unwrap(), message.to_vec());
+
+        // Ensure the other node didn't receive the message
+        let other_node1 = network.node_mut(sender_id).unwrap();
+        let other_received_message_result = other_node1.receiver_channel.try_recv();
+        assert!(other_received_message_result.is_err()); // Should be empty
+
+        let other_node2 = network.node_mut(2).unwrap();
+        let other_received_message_result = other_node2.receiver_channel.try_recv();
+        assert!(other_received_message_result.is_err()); // Should be empty
+    }
+
+    #[tokio::test]
+    async fn test_fake_network_broadcast() {
+        let n_nodes = 3;
+        let config = FakeNetworkConfig::new(100);
+        let network = Arc::new(Mutex::new(FakeNetwork::new(n_nodes, config)));
+
+        let message = b"broadcast";
+
+        let mut network = network.lock().await;
+        let broadcast_result = network.broadcast(message).await;
+        assert!(broadcast_result.is_ok());
+        assert_eq!(broadcast_result.unwrap(), message.len());
+
+        // Verify all nodes received the message
+        for i in 0..n_nodes {
+            let node = network.node_mut(i).unwrap();
+            let received_message_result = node.receiver_channel.try_recv();
+            assert!(received_message_result.is_ok());
+            assert_eq!(received_message_result.unwrap(), message.to_vec());
+        }
+    }
+
+    #[test]
+    fn test_fake_node_id_and_scalar_id() {
+        use ark_bls12_381::Fr;
+
+        let (sender, receiver) = mpsc::channel(100);
+        let node_id = 123;
+        let node = FakeNode::new(node_id, receiver);
+
+        assert_eq!(node.id(), node_id);
+        let scalar_id: Fr = node.scalar_id();
+        assert_eq!(scalar_id, Fr::from(node_id as u64));
+        drop(sender);
+    }
+
+    #[tokio::test]
+    async fn test_network_error_on_send_failure() {
+        let n_nodes = 2;
+        let config = FakeNetworkConfig::new(100);
+        // The network needs to be mutable to modify its `node_channels` HashMap
+        let network = Arc::new(Mutex::new(FakeNetwork::new(n_nodes, config)));
+
+        let recipient_id = 1;
+        let message = b"test";
+
+        // To simulate a send failure with an unbounded mpsc channel:
+        // The most direct way is to remove the recipient from the network's map.
+        let network = network.lock().await;
+
+        // This scope is necessary so that the variable channels is dropped and network is accessed again later
+        // without blocking the thread.
+        {
+            let mut channels = network.node_channels.lock().unwrap();
+            let removed_recipient = channels.remove(&recipient_id);
+            assert!(removed_recipient.is_some(), "should exist for recipient_id");
+        }
+
+        // Now that the recipient is removed, the send should fail
+        let send_result = network.send(recipient_id, message).await;
+        assert!(
+            send_result.is_err(),
+            "Send should fail after sender is removed."
+        );
+        assert_eq!(
+            send_result.unwrap_err(),
+            NetworkError::PartyNotFound(recipient_id)
+        );
     }
 }
