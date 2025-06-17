@@ -288,7 +288,7 @@ where
                     .map_err(RanDouShaError::ArkSerialization)?;
                 let generic_message = RanDouShaMessage::new(
                     self.id,
-                    RanDouShaMessageType::ReconstructMessage,
+                    RanDouShaMessageType::OutputMessage,
                     &bytes_out_message,
                 );
                 let bytes_generic_message = bincode::serialize(&generic_message)
