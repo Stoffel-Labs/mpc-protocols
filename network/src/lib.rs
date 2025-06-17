@@ -63,6 +63,4 @@ pub trait Node {
     fn id(&self) -> PartyId;
     /// Returns the ID of this node as a field element for protocol specific usage.
     fn scalar_id<F: Field>(&self) -> F;
-
-    fn new(id: PartyId, receiver: Receiver<Vec<u8>>) -> Self;
 }

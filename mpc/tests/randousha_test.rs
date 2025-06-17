@@ -3,10 +3,12 @@ mod tests {
 
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+    use std::vec;
 
     use ark_bls12_381::Fr;
+    use ark_ff::UniformRand;
     use ark_std::test_rng;
-    use stoffelmpc_common::share::shamir;
+    use stoffelmpc_common::share::shamir::{self, ShamirSecretSharing};
     use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
         InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
     };
@@ -14,30 +16,52 @@ mod tests {
     use stoffelmpc_network::fake_network::FakeNetwork;
     use stoffelmpc_network::{Network, Node};
 
+    fn test_setup(n: usize, t: usize, session_id: usize) -> (RanDouShaParams, FakeNetwork) {
+        let network: FakeNetwork = FakeNetwork::new(n);
+        let params = RanDouShaParams {
+            session_id,
+            n_parties: n,
+            threshold: t,
+        };
+        (params, network)
+    }
+
+    fn construct_input(
+        n: usize,
+        degree_t: usize,
+    ) -> (
+        Fr,
+        Vec<ShamirSecretSharing<Fr>>,
+        Vec<ShamirSecretSharing<Fr>>,
+    ) {
+        let mut rng = test_rng();
+        let secret = Fr::rand(&mut rng);
+        let ids: Vec<Fr> = (1..=n).map(|i| Fr::from(i as u64)).collect();
+        let (shares_si_t, _) =
+            shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
+        let (shares_si_2t, _) =
+            shamir::ShamirSecretSharing::compute_shares(secret, degree_t * 2, &ids, &mut rng);
+        (secret, shares_si_t, shares_si_2t)
+    }
+
+    fn initialize_node(node_id: usize) -> RanDouShaNode<Fr> {
+        RanDouShaNode {
+            id: node_id,
+            store: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
     #[test]
     fn test_init_reconstruct_flow() {
         let n_parties = 10;
         let threshold = 3;
         let session_id = 1111;
-
-        let secret = Fr::from(1234);
         let degree_t = 3;
-        let degree_2t = 6;
 
-        let network: FakeNetwork = FakeNetwork::new(n_parties);
-        let ids: Vec<Fr> = network.parties().iter().map(|p| p.scalar_id()).collect();
+        let (params, network) = test_setup(n_parties, threshold, session_id);
+        let (_, shares_si_t, shares_si_2t) = construct_input(n_parties, degree_t);
+
         let sender_id = 1;
-        let params = RanDouShaParams {
-            session_id,
-            n_parties,
-            threshold,
-        };
-
-        let mut rng = test_rng();
-        let (shares_si_t, _) =
-            shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
-        let (shares_si_2t, _) =
-            shamir::ShamirSecretSharing::compute_shares(secret, degree_2t, &ids, &mut rng);
 
         let init_msg = InitMessage {
             sender_id: sender_id,
@@ -45,27 +69,14 @@ mod tests {
             s_shares_deg_2t: shares_si_2t.clone(),
         };
 
-        // This is done because of the following error:
-        // error[E0502]: cannot borrow *network_mut as immutable because it is also borrowed as mutable
-        // let node_ptr: *mut RanDouShaNode<Fr> = {
-        //     let parties = network.parties_mut();
-        //     parties.into_iter().find(|n| n.id == sender_id).unwrap() as *mut _
-        // };
+        // create randousha nodes
+        let mut randousha_nodes = vec![];
+        for i in 0..n_parties {
+            randousha_nodes.push(initialize_node(i + 1));
+        }
 
-        // SAFETY:ensure no aliasing occurs by not using `network.parties_mut()` again.
-        // let sender_node = unsafe { &mut *node_ptr };
-        // sender_node
-        //     .init_handler(&init_msg, &params, &network)
-        //     .unwrap();
-
-        // create randousha node
-        let mut randousha_node: RanDouShaNode<Fr> = RanDouShaNode {
-            id: sender_id,
-            store: Arc::new(Mutex::new(HashMap::new())),
-        };
-        randousha_node
-            .init_handler(&init_msg, &params, &network)
-            .unwrap();
+        let mut sender = randousha_nodes.get(sender_id - 1).unwrap().clone();
+        sender.init_handler(&init_msg, &params, &network).unwrap();
 
         for party in network.parties() {
             // check only designated parties are receiving messages
@@ -88,6 +99,31 @@ mod tests {
             else {
                 assert!(party.receiver_channel.try_recv().is_err());
             }
+
+            // check all stores should be empty except for the sender's store
+            let store = randousha_nodes
+                .get(party.id - 1)
+                .unwrap()
+                .clone()
+                .get_or_create_store(&params)
+                .lock()
+                .unwrap()
+                .clone();
+            if party.id != sender_id {
+                assert!(store.computed_r_shares_degree_t.len() == 0);
+                assert!(store.computed_r_shares_degree_2t.len() == 0);
+                assert!(store.received_r_shares_degree_t.len() == 0);
+                assert!(store.received_r_shares_degree_2t.len() == 0);
+                assert!(store.received_ok_msg.len() == 0);
+            }
+
+            if party.id == sender_id {
+                assert!(store.computed_r_shares_degree_t.len() == n_parties);
+                assert!(store.computed_r_shares_degree_2t.len() == n_parties);
+                assert!(store.received_r_shares_degree_t.len() == 0);
+                assert!(store.received_r_shares_degree_2t.len() == 0);
+                assert!(store.received_ok_msg.len() == 0);
+            }
         }
     }
 
@@ -96,34 +132,23 @@ mod tests {
         let n_parties = 10;
         let threshold = 3;
         let session_id = 1111;
-
-        let secret = Fr::from(1234);
         let degree_t = 3;
-        let degree_2t = 6;
 
-        let network = FakeNetwork::new(n_parties);
-        let ids: Vec<Fr> = network.parties().iter().map(|p| p.scalar_id()).collect();
-        // receiver id receives recconstruct messages from other party
+        let (params, network) = test_setup(n_parties, threshold, session_id);
+        let (_, shares_ri_t, shares_ri_2t) = construct_input(n_parties, degree_t);
+
+        // initialize RanDouShaNode
+        let mut randousha_nodes = vec![];
+        for i in 0..n_parties {
+            randousha_nodes.push(initialize_node(i + 1));
+        }
+
+        // receiver id receives reconstruct messages from other party
         let receiver_id = threshold + 2;
-        let params = RanDouShaParams {
-            session_id,
-            n_parties,
-            threshold,
-        };
 
-        let mut rng = test_rng();
-        // ri_t created by each party i
-        let (shares_ri_t, _) =
-            shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
-        // ri_2t created by each party i
-        let (shares_ri_2t, _) =
-            shamir::ShamirSecretSharing::compute_shares(secret, degree_2t, &ids, &mut rng);
+        // receiver randousha node
+        let mut randousha_node = randousha_nodes.get(receiver_id - 1).unwrap().clone();
 
-        // create receiver randousha node
-        let mut randousha_node: RanDouShaNode<Fr> = RanDouShaNode {
-            id: receiver_id,
-            store: Arc::new(Mutex::new(HashMap::new())),
-        };
         // receiver nodes received t+1 ReconstructionMessage
         for i in 0..2 * threshold + 1 {
             let rec_msg = ReconstructionMessage::new(i + 1, shares_ri_t[i], shares_ri_2t[i]);
@@ -148,6 +173,16 @@ mod tests {
             assert!(reconstruct_msg.sender_id == receiver_id);
             assert!(reconstruct_msg.msg);
         }
+
+        // check the store
+        let store = randousha_node
+            .get_or_create_store(&params)
+            .lock()
+            .unwrap()
+            .clone();
+        assert!(store.received_r_shares_degree_t.len() == 2 * threshold + 1);
+        assert!(store.received_r_shares_degree_2t.len() == 2 * threshold + 1);
+        assert!(store.received_ok_msg.len() == 0);
     }
 
     #[test]
@@ -156,20 +191,15 @@ mod tests {
         let threshold = 3;
         let session_id = 1111;
 
+        let (params, network) = test_setup(n_parties, threshold, session_id);
         let secret = Fr::from(1234);
         let secret_2t = Fr::from(4321);
         let degree_t = 3;
         let degree_2t = 6;
 
-        let network = FakeNetwork::new(n_parties);
         let ids: Vec<Fr> = network.parties().iter().map(|p| p.scalar_id()).collect();
         // receiver id receives recconstruct messages from other party
         let receiver_id = threshold + 2;
-        let params = RanDouShaParams {
-            session_id,
-            n_parties,
-            threshold,
-        };
 
         let mut rng = test_rng();
         // ri_t created by each party i
@@ -209,5 +239,15 @@ mod tests {
             // msg should be false causing by mismatch randoms
             assert!(reconstruct_msg.msg == false);
         }
+
+        // check the store
+        let store = randousha_node
+            .get_or_create_store(&params)
+            .lock()
+            .unwrap()
+            .clone();
+        assert!(store.received_r_shares_degree_t.len() == 2 * threshold + 1);
+        assert!(store.received_r_shares_degree_2t.len() == 2 * threshold + 1);
+        assert!(store.received_ok_msg.len() == 0);
     }
 }

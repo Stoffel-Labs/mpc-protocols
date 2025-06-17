@@ -97,13 +97,6 @@ impl Node for FakeNode {
     fn scalar_id<F: ark_ff::Field>(&self) -> F {
         F::from(self.id as u64)
     }
-
-    fn new(id: PartyId, receiver: Receiver<Vec<u8>>) -> Self {
-        Self {
-            id,
-            receiver_channel: receiver,
-        }
-    }
 }
 
 pub struct FakeNetworkConfig;
@@ -122,9 +115,9 @@ mod tests {
         assert_eq!(network.node_channels.len(), n_nodes);
 
         for i in 0..n_nodes {
-            assert!(network.node_channels.contains_key(&i));
-            assert!(network.node(i).is_some());
-            assert_eq!(network.node(i).unwrap().id(), i);
+            assert!(network.node_channels.contains_key(&(i + 1)));
+            assert!(network.node(i + 1).is_some());
+            assert_eq!(network.node(i + 1).unwrap().id(), i + 1);
         }
     }
 
@@ -133,8 +126,8 @@ mod tests {
         let n_nodes = 3;
         let network: FakeNetwork = FakeNetwork::new(n_nodes);
 
-        let sender_id = 0;
-        let recipient_id = 1;
+        let sender_id = 1;
+        let recipient_id = 2;
         let message = b"hello";
 
         // Send a message from the perspective of the network
@@ -154,7 +147,7 @@ mod tests {
         let other_received_message_result = other_node1.receiver_channel.try_recv();
         assert!(other_received_message_result.is_err()); // Should be empty
 
-        let other_node2 = network.node(2).unwrap();
+        let other_node2 = network.node(3).unwrap();
         let other_received_message_result = other_node2.receiver_channel.try_recv();
         assert!(other_received_message_result.is_err()); // Should be empty
     }
@@ -171,7 +164,7 @@ mod tests {
 
         // Verify all nodes received the message
         for i in 0..n_nodes {
-            let node = network.node(i).unwrap();
+            let node = network.node(i + 1).unwrap();
             let received_message_result = node.receiver_channel.try_recv();
             assert!(received_message_result.is_ok());
             assert_eq!(received_message_result.unwrap(), message.to_vec());

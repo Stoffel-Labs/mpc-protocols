@@ -80,6 +80,7 @@ pub struct RanDouShaParams {
 }
 
 /// Node representation for the Random Double Share protocol.
+#[derive(Clone)]
 pub struct RanDouShaNode<F: FftField> {
     /// ID of the node.
     pub id: PartyId,
@@ -93,7 +94,10 @@ where
 {
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
-    fn get_or_create_store(&mut self, params: &RanDouShaParams) -> Arc<Mutex<RanDouShaStore<F>>> {
+    pub fn get_or_create_store(
+        &mut self,
+        params: &RanDouShaParams,
+    ) -> Arc<Mutex<RanDouShaStore<F>>> {
         let mut storage = self.store.lock().unwrap();
         storage
             .entry(params.session_id)
@@ -384,22 +388,3 @@ where
         Ok(())
     }
 }
-
-// use ark_bls12_381::Fr;
-// impl Node for RanDouShaNode<Fr> {
-//     fn id(&self) -> PartyId {
-//         self.id
-//     }
-
-//     fn scalar_id<F: ark_ff::Field>(&self) -> F {
-//         F::from(self.id as u64)
-//     }
-
-//     fn new(id: PartyId, receiver: Receiver<Vec<u8>>) -> Self {
-//         Self {
-//             id,
-//             receiver_channel: receiver,
-//             store: Arc::new(Mutex::new(HashMap::new())),
-//         }
-//     }
-// }
