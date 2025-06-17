@@ -118,11 +118,11 @@ where
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
-    async fn init_handler<N>(
+    pub async fn init_handler<N>(
         &mut self,
         init_msg: &InitMessage<F>,
         params: &RanDouShaParams,
-        network: Arc<N>,
+        network: Arc<Mutex<N>>,
     ) -> Result<(), RanDouShaError>
     where
         N: Network,
@@ -171,7 +171,8 @@ where
 
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
-        for party in network.parties() {
+        let network_locked = network.lock().unwrap();
+        for party in network_locked.parties() {
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
                 let share_deg_t = ShamirSecretSharing::new(
                     r_deg_t[party.id() - 1],
@@ -201,7 +202,7 @@ where
                     .map_err(RanDouShaError::SerializationError)?;
 
                 // Sending the generic message to the network.
-                network
+                network_locked
                     .send(party.id(), &bytes_generic_message)
                     .await
                     .map_err(RanDouShaError::NetworkError)?;
@@ -219,11 +220,11 @@ where
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
-    async fn reconstruction_handler<N>(
+    pub async fn reconstruction_handler<N>(
         &mut self,
         rec_msg: &ReconstructionMessage<F>,
         params: &RanDouShaParams,
-        network: Arc<N>,
+        network: Arc<Mutex<N>>,
     ) -> Result<(), RanDouShaError>
     where
         N: Network,
@@ -301,6 +302,8 @@ where
 
                 // if the verification succeeds, broadcast true (aka. OK)
                 network
+                    .lock()
+                    .unwrap()
                     .broadcast(&bytes_generic_message)
                     .await
                     .map_err(RanDouShaError::NetworkError)?;
@@ -314,7 +317,7 @@ where
     /// Wait to receive broadcast of output message from other party.
     /// Return [r_1]_t ... [r_t+1]_t & [r_1]_2t ... [r_t+1]_2t only if one receives more than
     /// (n - (t+1)) Ok message.
-    async fn output_handler(
+    pub async fn output_handler(
         &mut self,
         message: &OutputMessage,
         params: &RanDouShaParams,
@@ -353,11 +356,11 @@ where
         Ok((output_r_t, output_r_2t))
     }
 
-    async fn process<N>(
+    pub async fn process<N>(
         &mut self,
         message: &RanDouShaMessage,
         params: &RanDouShaParams,
-        network: Arc<N>,
+        network: Arc<Mutex<N>>,
     ) -> Result<(), RanDouShaError>
     where
         N: Network,

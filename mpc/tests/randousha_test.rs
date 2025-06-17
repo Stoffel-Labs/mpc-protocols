@@ -13,11 +13,16 @@ mod tests {
         InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
     };
     use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaNode, RanDouShaParams};
-    use stoffelmpc_network::fake_network::FakeNetwork;
+    use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
     use stoffelmpc_network::{Network, Node};
 
-    fn test_setup(n: usize, t: usize, session_id: usize) -> (RanDouShaParams, FakeNetwork) {
-        let network: FakeNetwork = FakeNetwork::new(n);
+    fn test_setup(
+        n: usize,
+        t: usize,
+        session_id: usize,
+    ) -> (RanDouShaParams, Arc<Mutex<FakeNetwork>>) {
+        let config = FakeNetworkConfig::new(100);
+        let network = Arc::new(Mutex::new(FakeNetwork::new(n, config)));
         let params = RanDouShaParams {
             session_id,
             n_parties: n,
@@ -51,8 +56,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_init_reconstruct_flow() {
+    #[tokio::test]
+    async fn test_init_reconstruct_flow() {
         let n_parties = 10;
         let threshold = 3;
         let session_id = 1111;
@@ -76,9 +81,13 @@ mod tests {
         }
 
         let mut sender = randousha_nodes.get(sender_id - 1).unwrap().clone();
-        sender.init_handler(&init_msg, &params, &network).unwrap();
 
-        for party in network.parties() {
+        sender
+            .init_handler(&init_msg, &params, Arc::clone(&network))
+            .await
+            .unwrap();
+
+        for party in network.lock().unwrap().parties_mut() {
             // check only designated parties are receiving messages
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
                 let received_message = party.receiver_channel.try_recv().unwrap();
@@ -127,8 +136,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_reconstruct_handler() {
+    #[tokio::test]
+    async fn test_reconstruct_handler() {
         let n_parties = 10;
         let threshold = 3;
         let session_id = 1111;
@@ -153,12 +162,13 @@ mod tests {
         for i in 0..2 * threshold + 1 {
             let rec_msg = ReconstructionMessage::new(i + 1, shares_ri_t[i], shares_ri_2t[i]);
             randousha_node
-                .reconstruction_handler(&rec_msg, &params, &network)
+                .reconstruction_handler(&rec_msg, &params, Arc::clone(&network))
+                .await
                 .unwrap();
         }
 
         // check all parties received OutputMessage Ok sent by the receiver of the ReconstructionMessage
-        for party in network.parties() {
+        for party in network.lock().unwrap().parties_mut() {
             let received_message = party.receiver_channel.try_recv().unwrap();
             let deseralized_msg: RanDouShaMessage =
                 bincode::deserialize(received_message.as_slice()).unwrap();
@@ -185,8 +195,8 @@ mod tests {
         assert!(store.received_ok_msg.len() == 0);
     }
 
-    #[test]
-    fn test_reconstruct_handler_mismatch_r_t_2t() {
+    #[tokio::test]
+    async fn test_reconstruct_handler_mismatch_r_t_2t() {
         let n_parties = 10;
         let threshold = 3;
         let session_id = 1111;
@@ -197,7 +207,13 @@ mod tests {
         let degree_t = 3;
         let degree_2t = 6;
 
-        let ids: Vec<Fr> = network.parties().iter().map(|p| p.scalar_id()).collect();
+        let ids: Vec<Fr> = network
+            .lock()
+            .unwrap()
+            .parties()
+            .iter()
+            .map(|p| p.scalar_id())
+            .collect();
         // receiver id receives recconstruct messages from other party
         let receiver_id = threshold + 2;
 
@@ -218,12 +234,13 @@ mod tests {
         for i in 0..2 * threshold + 1 {
             let rec_msg = ReconstructionMessage::new(i + 1, shares_ri_t[i], shares_ri_2t[i]);
             randousha_node
-                .reconstruction_handler(&rec_msg, &params, &network)
+                .reconstruction_handler(&rec_msg, &params, Arc::clone(&network))
+                .await
                 .unwrap();
         }
 
         // check all parties received OutputMessage Ok sent by the receiver of the ReconstructionMessage
-        for party in network.parties() {
+        for party in network.lock().unwrap().parties_mut() {
             let received_message = party.receiver_channel.try_recv().unwrap();
             let deseralized_msg: RanDouShaMessage =
                 bincode::deserialize(received_message.as_slice()).unwrap();

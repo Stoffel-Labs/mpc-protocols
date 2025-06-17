@@ -26,7 +26,7 @@ impl FakeNetwork {
     pub fn new(n_nodes: usize, config: FakeNetworkConfig) -> Self {
         let mut node_channels = HashMap::new();
         let mut nodes = Vec::new();
-        for id in 0..n_nodes {
+        for id in 1..n_nodes + 1 {
             let (sender, receiver) = mpsc::channel(config.channel_buff_size);
             node_channels.insert(id, Arc::new(sender));
             let node = FakeNode::new(id, receiver);
@@ -104,9 +104,9 @@ impl Network for FakeNetwork {
 /// Represents a node in the FakeNetwork.
 pub struct FakeNode {
     /// The id of the node.
-    id: PartyId,
+    pub id: PartyId,
     /// The channel in which the party receives the messages.
-    receiver_channel: Receiver<Vec<u8>>,
+    pub receiver_channel: Receiver<Vec<u8>>,
 }
 
 impl FakeNode {
@@ -162,7 +162,7 @@ mod tests {
         assert_eq!(network.nodes.len(), n_nodes);
         assert_eq!(channels.len(), n_nodes);
 
-        for i in 0..n_nodes {
+        for i in 1..n_nodes + 1 {
             assert!(channels.contains_key(&i));
             assert!(network.node(i).is_some());
             assert_eq!(network.node(i).unwrap().id(), i);
@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(broadcast_result.unwrap(), message.len());
 
         // Verify all nodes received the message
-        for i in 0..n_nodes {
+        for i in 1..n_nodes + 1 {
             let node = network.node_mut(i).unwrap();
             let received_message_result = node.receiver_channel.try_recv();
             assert!(received_message_result.is_ok());
