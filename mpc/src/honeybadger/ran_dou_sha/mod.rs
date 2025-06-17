@@ -121,7 +121,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
-        N: Network + Sync + Send + 'static,
+        N: Network,
     {
         let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties);
         let share_values_deg_t: Vec<F> = init_msg
@@ -222,7 +222,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
-        N: Network + Sync + Send + 'static,
+        N: Network,
     {
         // --- Step (3) Implementation ---
         // (1) Store the received shares.
@@ -356,7 +356,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
-        N: Network + Sync + Send + 'static,
+        N: Network,
     {
         match message.msg_type {
             messages::RanDouShaMessageType::InitMessage => {
