@@ -1,7 +1,6 @@
 mod fake_network;
 
 use ark_ff::Field;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -27,7 +26,7 @@ pub type SessionId = usize;
 pub type Timeout = usize;
 
 /// Trait for messages sent in a protocol.
-pub trait Message: Serialize + for<'a> Deserialize<'a> + Sized + 'static {
+pub trait Message: Serialize + for<'a> Deserialize<'a> + Sized {
     /// Returns the ID of the sender of the message.
     fn sender_id(&self) -> PartyId;
     /// Returns the message as little endiand bytes.
@@ -43,10 +42,10 @@ pub trait Network {
     type NetworkConfig;
     /// Send a message through the network to the given party. The function returns the number of
     /// bytes sent to the recipient.
-    fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError>;
+    async fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError>;
     /// Broadcasts a message to all the parties connected to the network. The function returns the
     /// number of bytes broadcasted to the network.
-    fn broadcast(&self, message: &[u8]) -> Result<usize, NetworkError>;
+    async fn broadcast(&self, message: &[u8]) -> Result<usize, NetworkError>;
     /// Returns the participants connected to this network.
     fn parties(&self) -> Vec<&Self::NodeType>;
     /// Returns mutable references to the participants connected to this network.
@@ -55,6 +54,8 @@ pub trait Network {
     fn config(&self) -> &Self::NetworkConfig;
     /// Returns the node with the given ID.
     fn node(&self, id: PartyId) -> Option<&Self::NodeType>;
+    /// Returns a mutable reference of the node with the given ID.
+    fn node_mut(&mut self, id: PartyId) -> Option<&mut Self::NodeType>;
 }
 
 /// Participant of an MPC protocol.
