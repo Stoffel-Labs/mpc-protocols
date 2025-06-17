@@ -9,7 +9,7 @@ use messages::{
 };
 use std::{
     collections::HashMap,
-    sync::{mpsc::Receiver, Arc, Mutex},
+    sync::{Arc, Mutex},
 };
 use stoffelmpc_common::share::shamir::ShamirSecretSharing;
 use thiserror::Error;
@@ -85,9 +85,6 @@ pub struct RanDouShaNode<F: FftField> {
     pub id: PartyId,
     /// Storage of the node.
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
-
-    /// Receiver channel for the node.
-    pub receiver_channel: Receiver<Vec<u8>>,
 }
 
 impl<F> RanDouShaNode<F>
@@ -383,21 +380,21 @@ where
     }
 }
 
-use ark_bls12_381::Fr;
-impl Node for RanDouShaNode<Fr> {
-    fn id(&self) -> PartyId {
-        self.id
-    }
+// use ark_bls12_381::Fr;
+// impl Node for RanDouShaNode<Fr> {
+//     fn id(&self) -> PartyId {
+//         self.id
+//     }
 
-    fn scalar_id<F: ark_ff::Field>(&self) -> F {
-        F::from(self.id as u64)
-    }
+//     fn scalar_id<F: ark_ff::Field>(&self) -> F {
+//         F::from(self.id as u64)
+//     }
 
-    fn new(id: PartyId, receiver: Receiver<Vec<u8>>) -> Self {
-        Self {
-            id,
-            receiver_channel: receiver,
-            store: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-}
+//     fn new(id: PartyId, receiver: Receiver<Vec<u8>>) -> Self {
+//         Self {
+//             id,
+//             receiver_channel: receiver,
+//             store: Arc::new(Mutex::new(HashMap::new())),
+//         }
+//     }
+// }

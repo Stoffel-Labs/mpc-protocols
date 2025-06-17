@@ -1,6 +1,11 @@
 #[cfg(test)]
 mod tests {
 
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+
     use ark_bls12_381::Fr;
     use ark_std::test_rng;
     use stoffelmpc_common::share::shamir;
@@ -21,7 +26,7 @@ mod tests {
         let degree_t = 3;
         let degree_2t = 6;
 
-        let mut network: FakeNetwork<RanDouShaNode<Fr>> = FakeNetwork::new(n_parties);
+        let network: FakeNetwork = FakeNetwork::new(n_parties);
         let ids: Vec<Fr> = network.parties().iter().map(|p| p.scalar_id()).collect();
         let sender_id = 1;
         let params = RanDouShaParams {
@@ -44,14 +49,23 @@ mod tests {
 
         // This is done because of the following error:
         // error[E0502]: cannot borrow *network_mut as immutable because it is also borrowed as mutable
-        let node_ptr: *mut RanDouShaNode<Fr> = {
-            let parties = network.parties_mut();
-            parties.into_iter().find(|n| n.id == sender_id).unwrap() as *mut _
-        };
+        // let node_ptr: *mut RanDouShaNode<Fr> = {
+        //     let parties = network.parties_mut();
+        //     parties.into_iter().find(|n| n.id == sender_id).unwrap() as *mut _
+        // };
 
         // SAFETY:ensure no aliasing occurs by not using `network.parties_mut()` again.
-        let sender_node = unsafe { &mut *node_ptr };
-        sender_node
+        // let sender_node = unsafe { &mut *node_ptr };
+        // sender_node
+        //     .init_handler(&init_msg, &params, &network)
+        //     .unwrap();
+
+        // create randousha node
+        let mut randousha_node: RanDouShaNode<Fr> = RanDouShaNode {
+            id: sender_id,
+            store: Arc::new(Mutex::new(HashMap::new())),
+        };
+        randousha_node
             .init_handler(&init_msg, &params, &network)
             .unwrap();
 
