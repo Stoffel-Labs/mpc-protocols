@@ -8,6 +8,8 @@ thiserror.workspace = true
 serde.workspace = true
 ark-serialize.workspace = true
 ark-ff.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 ark-bls12-381.workspace = true

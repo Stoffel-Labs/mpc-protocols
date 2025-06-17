@@ -118,11 +118,11 @@ where
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
-    pub fn init_handler<N>(
+    async fn init_handler<N>(
         &mut self,
         init_msg: &InitMessage<F>,
         params: &RanDouShaParams,
-        network: &N,
+        network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
         N: Network,
@@ -203,6 +203,7 @@ where
                 // Sending the generic message to the network.
                 network
                     .send(party.id(), &bytes_generic_message)
+                    .await
                     .map_err(RanDouShaError::NetworkError)?;
             }
         }
@@ -218,11 +219,11 @@ where
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
-    pub fn reconstruction_handler<N>(
+    async fn reconstruction_handler<N>(
         &mut self,
         rec_msg: &ReconstructionMessage<F>,
         params: &RanDouShaParams,
-        network: &N,
+        network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
         N: Network,
@@ -251,7 +252,7 @@ where
             // To reconstruct a (t) degree polynomial, you need t+1 distinct shares.
             // To reconstruct a (2t) degree polynomial, you need 2t+1 distinct shares.
 
-            //TODO: do we need to wait for all n shares?
+            // TODO: do we need to wait for all n shares?
             if store.received_r_shares_degree_t.len() >= params.threshold + 1
                 && store.received_r_shares_degree_2t.len() >= 2 * params.threshold + 1
             {
@@ -298,9 +299,10 @@ where
                 let bytes_generic_message = bincode::serialize(&generic_message)
                     .map_err(RanDouShaError::SerializationError)?;
 
-                // if the verification succeeds, broadcast true(aka. OK)
+                // if the verification succeeds, broadcast true (aka. OK)
                 network
                     .broadcast(&bytes_generic_message)
+                    .await
                     .map_err(RanDouShaError::NetworkError)?;
             }
         }
@@ -312,7 +314,7 @@ where
     /// Wait to receive broadcast of output message from other party.
     /// Return [r_1]_t ... [r_t+1]_t & [r_1]_2t ... [r_t+1]_2t only if one receives more than
     /// (n - (t+1)) Ok message.
-    pub fn output_handler(
+    async fn output_handler(
         &mut self,
         message: &OutputMessage,
         params: &RanDouShaParams,
@@ -348,19 +350,14 @@ where
             .filter(|share| share.id <= F::from((params.threshold + 1) as u64))
             .collect::<Vec<_>>();
 
-        // should output t+1 random shares
-        if output_r_t.len() != params.threshold + 1 && output_r_2t.len() != params.threshold + 1 {
-            return Err(RanDouShaError::Abort);
-        }
-
-        return Ok((output_r_t, output_r_2t));
+        Ok((output_r_t, output_r_2t))
     }
 
-    pub fn process<N>(
+    async fn process<N>(
         &mut self,
         message: &RanDouShaMessage,
         params: &RanDouShaParams,
-        network: &N,
+        network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
         N: Network,
@@ -370,19 +367,20 @@ where
                 let init_message =
                     InitMessage::<F>::deserialize_compressed(message.payload.as_slice())
                         .map_err(RanDouShaError::ArkDeserialization)?;
-                self.init_handler(&init_message, params, network)?
+                self.init_handler(&init_message, params, network).await?
             }
             messages::RanDouShaMessageType::OutputMessage => {
                 let output_message =
                     OutputMessage::deserialize_compressed(message.payload.as_slice())
                         .map_err(RanDouShaError::ArkDeserialization)?;
-                self.output_handler(&output_message, params)?;
+                self.output_handler(&output_message, params).await?;
             }
             messages::RanDouShaMessageType::ReconstructMessage => {
                 let reconstr_message =
                     ReconstructionMessage::<F>::deserialize_compressed(message.payload.as_slice())
                         .map_err(RanDouShaError::ArkDeserialization)?;
-                self.reconstruction_handler(&reconstr_message, params, network)?;
+                self.reconstruction_handler(&reconstr_message, params, network)
+                    .await?;
             }
         }
         Ok(())
