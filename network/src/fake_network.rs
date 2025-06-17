@@ -10,6 +10,8 @@ use tokio::{
 
 use crate::{Network, NetworkError, Node, PartyId};
 
+/// Simulates a network for testing purposes. The channels for the network are simulated as `tokio`
+/// channels.
 pub struct FakeNetwork {
     /// Fake nodes channels to send information to the network
     node_channels: Arc<Mutex<HashMap<PartyId, Arc<Sender<Vec<u8>>>>>>,
@@ -20,6 +22,7 @@ pub struct FakeNetwork {
 }
 
 impl FakeNetwork {
+    /// Creates a new fake network for testing using the given number of nodes and configuration.
     pub fn new(n_nodes: usize, config: FakeNetworkConfig) -> Self {
         let mut node_channels = HashMap::new();
         let mut nodes = Vec::new();
@@ -98,12 +101,16 @@ impl Network for FakeNetwork {
     }
 }
 
+/// Represents a node in the FakeNetwork.
 pub struct FakeNode {
+    /// The id of the node.
     id: PartyId,
+    /// The channel in which the party receives the messages.
     receiver_channel: Receiver<Vec<u8>>,
 }
 
 impl FakeNode {
+    /// Creates a new fake node.
     pub fn new(id: PartyId, receiver: Receiver<Vec<u8>>) -> Self {
         Self {
             id,
@@ -122,11 +129,14 @@ impl Node for FakeNode {
     }
 }
 
+/// Configuration for the fake network.
 pub struct FakeNetworkConfig {
+    /// Size of the buffer for the channels in the fake network.
     pub channel_buff_size: usize,
 }
 
 impl FakeNetworkConfig {
+    /// Creates a new configuration for the fake network.
     pub fn new(channel_buff_size: usize) -> Self {
         Self { channel_buff_size }
     }

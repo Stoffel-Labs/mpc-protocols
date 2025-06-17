@@ -12,6 +12,7 @@ pub enum NetworkError {
     /// The request reached a time out.
     #[error("timeout reached.")]
     Timeout,
+    /// The party is not found in the network.
     #[error("the party with ID {0:?} is not in the network")]
     PartyNotFound(PartyId),
 }
