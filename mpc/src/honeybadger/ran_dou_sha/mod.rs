@@ -344,6 +344,11 @@ where
             .filter(|share| share.id <= F::from((params.threshold + 1) as u64))
             .collect::<Vec<_>>();
 
+        // should output t+1 random shares
+        if output_r_t.len() != params.threshold + 1 && output_r_2t.len() != params.threshold + 1 {
+            return Err(RanDouShaError::Abort);
+        }
+
         return Ok((output_r_t, output_r_2t));
     }
 
