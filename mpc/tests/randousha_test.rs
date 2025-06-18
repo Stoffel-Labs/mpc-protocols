@@ -17,8 +17,9 @@ mod tests {
     };
     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
     use stoffelmpc_network::{Network, Node};
-    use tokio::sync::mpsc::Receiver;
+    use tokio::sync::mpsc::{self, Receiver};
     use tokio::sync::Mutex;
+    use tokio::task::JoinSet;
 
     fn test_setup(
         n: usize,
@@ -29,7 +30,7 @@ mod tests {
         Arc<Mutex<FakeNetwork>>,
         Vec<Receiver<Vec<u8>>>,
     ) {
-        let config = FakeNetworkConfig::new(100);
+        let config = FakeNetworkConfig::new(500);
         let (network, receivers) = FakeNetwork::new(n, config);
         let network = Arc::new(Mutex::new(network));
         let params = RanDouShaParams {
@@ -68,9 +69,15 @@ mod tests {
     ) {
         let mut n_shares_t = vec![vec![]; n];
         let mut n_shares_2t = vec![vec![]; n];
+        let mut rng = test_rng();
+        let ids: Vec<Fr> = (1..=n).map(|i| Fr::from(i as u64)).collect();
 
         for _ in 0..n {
-            let (_, shares_si_t, shares_si_2t) = construct_input(n, degree_t);
+            let secret = Fr::rand(&mut rng);
+            let (shares_si_t, _) =
+                shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
+            let (shares_si_2t, _) =
+                shamir::ShamirSecretSharing::compute_shares(secret, degree_t * 2, &ids, &mut rng);
             for j in 0..n {
                 n_shares_t[j].push(shares_si_t[j]);
                 n_shares_2t[j].push(shares_si_2t[j]);
@@ -407,14 +414,20 @@ mod tests {
         for i in 1..=n_parties {
             randousha_nodes.push(Arc::new(Mutex::new(initialize_node(i))));
         }
-
+        let mut set: JoinSet<_> = JoinSet::new();
+        let (fin_send, mut fin_recv) = mpsc::channel::<(
+            usize,
+            (Vec<ShamirSecretSharing<Fr>>, Vec<ShamirSecretSharing<Fr>>),
+        )>(100);
         // spawn tasks to process received messages
         for i in 1..=n_parties {
             let randosha_node = Arc::clone(&randousha_nodes[i - 1]);
             let network = Arc::clone(&network);
             let mut receiver = receivers.remove(0);
-            tokio::spawn(async move {
+            let fin_send = fin_send.clone();
+            set.spawn(async move {
                 loop {
+                    // println!("get_msg: {}", randosha_node.lock().await.id);
                     let msg = receiver.recv().await.unwrap();
                     let deseralized_msg: RanDouShaMessage =
                         bincode::deserialize(msg.as_slice()).unwrap();
@@ -424,7 +437,15 @@ mod tests {
                         .process(&deseralized_msg, &params, Arc::clone(&network))
                         .await;
                     match process_result {
-                        Ok(_) => (),
+                        Ok(r) => match r {
+                            Some(final_shares) => {
+                                fin_send
+                                    .send((randosha_node.lock().await.id, final_shares))
+                                    .await
+                                    .unwrap();
+                            }
+                            None => continue,
+                        },
                         Err(e) => match e {
                             RanDouShaError::NetworkError(network_error) => {
                                 panic!("NetWork Error: {}", network_error)
@@ -460,6 +481,25 @@ mod tests {
                 .init_handler(&init_msg, &params, Arc::clone(&network))
                 .await
                 .unwrap();
+        }
+        let mut final_results =
+            HashMap::<usize, (Vec<ShamirSecretSharing<Fr>>, Vec<ShamirSecretSharing<Fr>>)>::new();
+        while let Some((id, final_shares)) = fin_recv.recv().await {
+            final_results.insert(id, final_shares);
+            if final_results.len() == 10 {
+                // println!("result: {:?}", final_results);
+
+                // check final_shares consist of correct shares
+                for (id, (shares_t, shares_2t)) in final_results {
+                    let _ = shares_t.iter().zip(shares_2t).map(|(s_t, s_2t)| {
+                        assert_eq!(s_t.degree, params.threshold);
+                        assert_eq!(s_2t.degree, 2 * params.threshold);
+                        assert_eq!(s_t.id, Fr::from(id as u64));
+                        assert_eq!(s_2t.id, Fr::from(id as u64));
+                    });
+                }
+                break;
+            }
         }
     }
 }

@@ -25,7 +25,7 @@ impl FakeNetwork {
         let mut node_channels = HashMap::new();
         let mut nodes = Vec::new();
         let mut receivers = Vec::new();
-        for id in 1..n_nodes + 1 {
+        for id in 1..=n_nodes {
             let (sender, receiver) = mpsc::channel(config.channel_buff_size);
             node_channels.insert(id, Arc::new(sender));
             let node = FakeNode::new(id);

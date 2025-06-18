@@ -208,6 +208,27 @@ where
                     .map_err(RanDouShaError::NetworkError)?;
             }
         }
+        // if self is not a checking party and has already received enough (n-(t+1)) Ok, jump to output
+        if self.id <= params.threshold + 1
+            && (store.received_ok_msg.len() >= params.n_parties - (params.threshold + 1))
+        {
+            let output_msg = OutputMessage::new(self.id, true);
+            let mut bytes_out_message = Vec::new();
+            output_msg
+                .serialize_compressed(&mut bytes_out_message)
+                .map_err(RanDouShaError::ArkSerialization)?;
+            let generic_message = RanDouShaMessage::new(
+                self.id,
+                RanDouShaMessageType::OutputMessage,
+                &bytes_out_message,
+            );
+            let bytes_generic_message =
+                bincode::serialize(&generic_message).map_err(RanDouShaError::SerializationError)?;
+            network_locked
+                .send(self.id, &bytes_generic_message)
+                .await
+                .map_err(RanDouShaError::NetworkError)?;
+        }
         Ok(())
     }
 
@@ -322,19 +343,26 @@ where
         message: &OutputMessage,
         params: &RanDouShaParams,
     ) -> Result<(Vec<ShamirSecretSharing<F>>, Vec<ShamirSecretSharing<F>>), RanDouShaError> {
+        // todo - add randousha status so we can omit output_handler
         // abort randousha once received the abort message
         if message.msg == false {
             return Err(RanDouShaError::Abort);
         }
         let binding = self.get_or_create_store(params).await;
         let mut store = binding.lock().await;
-        // sender already exists, wait for more messages
-        if store.received_ok_msg.contains(&message.sender_id) {
-            return Err(RanDouShaError::WaitForOk);
+        // push to received_ok_msg if sender doesn't exist
+        if !store.received_ok_msg.contains(&message.sender_id) {
+            store.received_ok_msg.push(message.sender_id);
         }
-        store.received_ok_msg.push(message.sender_id);
         // wait for (n-(t+1)) Ok messages
         if store.received_ok_msg.len() < params.n_parties - (params.threshold + 1) {
+            return Err(RanDouShaError::WaitForOk);
+        }
+
+        if store.computed_r_shares_degree_t.len() < params.threshold + 1
+            && store.computed_r_shares_degree_2t.len() < params.threshold + 1
+        {
+            // waiting for self.init
             return Err(RanDouShaError::WaitForOk);
         }
 
@@ -342,7 +370,6 @@ where
         let output_r_t = store.computed_r_shares_degree_t[0..params.threshold + 1].to_vec();
         // create vector for share [r_1]_2t ... [r_t+1]_2t
         let output_r_2t = store.computed_r_shares_degree_2t[0..params.threshold + 1].to_vec();
-
         Ok((output_r_t, output_r_2t))
     }
 
@@ -351,7 +378,7 @@ where
         message: &RanDouShaMessage,
         params: &RanDouShaParams,
         network: Arc<Mutex<N>>,
-    ) -> Result<(), RanDouShaError>
+    ) -> Result<Option<(Vec<ShamirSecretSharing<F>>, Vec<ShamirSecretSharing<F>>)>, RanDouShaError>
     where
         N: Network,
     {
@@ -360,13 +387,15 @@ where
                 let init_message =
                     InitMessage::<F>::deserialize_compressed(message.payload.as_slice())
                         .map_err(RanDouShaError::ArkDeserialization)?;
-                self.init_handler(&init_message, params, network).await?
+                self.init_handler(&init_message, params, network).await?;
+                return Ok(None);
             }
             messages::RanDouShaMessageType::OutputMessage => {
                 let output_message =
                     OutputMessage::deserialize_compressed(message.payload.as_slice())
                         .map_err(RanDouShaError::ArkDeserialization)?;
-                self.output_handler(&output_message, params).await?;
+                let result = self.output_handler(&output_message, params).await?;
+                return Ok(Some(result));
             }
             messages::RanDouShaMessageType::ReconstructMessage => {
                 let reconstr_message = ark_serialize::CanonicalDeserialize::deserialize_compressed(
@@ -375,8 +404,8 @@ where
                 .map_err(RanDouShaError::ArkDeserialization)?;
                 self.reconstruction_handler(&reconstr_message, params, network)
                     .await?;
+                return Ok(None);
             }
         }
-        Ok(())
     }
 }
