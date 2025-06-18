@@ -1,14 +1,13 @@
 #[cfg(test)]
 mod tests {
 
-    use std::collections::HashMap;
-    use std::iter::zip;
-    use std::sync::{Arc, Mutex};
-    use std::vec;
-
     use ark_bls12_381::Fr;
     use ark_ff::UniformRand;
     use ark_std::test_rng;
+    use std::collections::HashMap;
+    use std::iter::zip;
+    use std::sync::Arc;
+    use std::vec;
     use stoffelmpc_common::share::shamir::{self, ShamirSecretSharing};
     use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
         InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
@@ -18,20 +17,27 @@ mod tests {
     };
     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
     use stoffelmpc_network::{Network, Node};
+    use tokio::sync::mpsc::Receiver;
+    use tokio::sync::Mutex;
 
     fn test_setup(
         n: usize,
         t: usize,
         session_id: usize,
-    ) -> (RanDouShaParams, Arc<Mutex<FakeNetwork>>) {
+    ) -> (
+        RanDouShaParams,
+        Arc<Mutex<FakeNetwork>>,
+        Vec<Receiver<Vec<u8>>>,
+    ) {
         let config = FakeNetworkConfig::new(100);
-        let network = Arc::new(Mutex::new(FakeNetwork::new(n, config)));
+        let (network, receivers) = FakeNetwork::new(n, config);
+        let network = Arc::new(Mutex::new(network));
         let params = RanDouShaParams {
             session_id,
             n_parties: n,
             threshold: t,
         };
-        (params, network)
+        (params, network, receivers)
     }
 
     fn construct_input(
@@ -52,7 +58,7 @@ mod tests {
         (secret, shares_si_t, shares_si_2t)
     }
 
-    // return vec contains vecs of inputs for each node
+    // return vec conxtains vecs of inputs for each node
     fn construct_e2e_input(
         n: usize,
         degree_t: usize,
@@ -88,7 +94,7 @@ mod tests {
         let session_id = 1111;
         let degree_t = 3;
 
-        let (params, network) = test_setup(n_parties, threshold, session_id);
+        let (params, network, mut receivers) = test_setup(n_parties, threshold, session_id);
         let (_, shares_si_t, shares_si_2t) = construct_input(n_parties, degree_t);
 
         let sender_id = 1;
@@ -112,10 +118,10 @@ mod tests {
             .await
             .unwrap();
 
-        for party in network.lock().unwrap().parties_mut() {
+        for party in network.lock().await.parties_mut() {
             // check only designated parties are receiving messages
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
-                let received_message = party.receiver_channel.try_recv().unwrap();
+                let received_message = receivers[party.id() - 1].try_recv().unwrap();
                 let deseralized_msg: RanDouShaMessage =
                     bincode::deserialize(received_message.as_slice()).unwrap();
                 let msg_type = deseralized_msg.msg_type;
@@ -131,7 +137,7 @@ mod tests {
             }
             // check that rest does not receive messages
             else {
-                assert!(party.receiver_channel.try_recv().is_err());
+                assert!(receivers[party.id() - 1].try_recv().is_err());
             }
 
             // check all stores should be empty except for the sender's store
@@ -140,8 +146,9 @@ mod tests {
                 .unwrap()
                 .clone()
                 .get_or_create_store(&params)
+                .await
                 .lock()
-                .unwrap()
+                .await
                 .clone();
             if party.id != sender_id {
                 assert!(store.computed_r_shares_degree_t.len() == 0);
@@ -168,7 +175,7 @@ mod tests {
         let session_id = 1111;
         let degree_t = 3;
 
-        let (params, network) = test_setup(n_parties, threshold, session_id);
+        let (params, network, mut receivers) = test_setup(n_parties, threshold, session_id);
         let (_, shares_ri_t, shares_ri_2t) = construct_input(n_parties, degree_t);
 
         // initialize RanDouShaNode
@@ -193,8 +200,8 @@ mod tests {
         }
 
         // check all parties received OutputMessage Ok sent by the receiver of the ReconstructionMessage
-        for party in network.lock().unwrap().parties_mut() {
-            let received_message = party.receiver_channel.try_recv().unwrap();
+        for party in network.lock().await.parties_mut() {
+            let received_message = receivers[party.id() - 1].try_recv().unwrap();
             let deseralized_msg: RanDouShaMessage =
                 bincode::deserialize(received_message.as_slice()).unwrap();
             let msg_type = deseralized_msg.msg_type;
@@ -212,8 +219,9 @@ mod tests {
         // check the store
         let store = randousha_node
             .get_or_create_store(&params)
+            .await
             .lock()
-            .unwrap()
+            .await
             .clone();
         assert!(store.received_r_shares_degree_t.len() == 2 * threshold + 1);
         assert!(store.received_r_shares_degree_2t.len() == 2 * threshold + 1);
@@ -226,7 +234,7 @@ mod tests {
         let threshold = 3;
         let session_id = 1111;
 
-        let (params, network) = test_setup(n_parties, threshold, session_id);
+        let (params, network, mut receivers) = test_setup(n_parties, threshold, session_id);
         let secret = Fr::from(1234);
         let secret_2t = Fr::from(4321);
         let degree_t = 3;
@@ -234,7 +242,7 @@ mod tests {
 
         let ids: Vec<Fr> = network
             .lock()
-            .unwrap()
+            .await
             .parties()
             .iter()
             .map(|p| p.scalar_id())
@@ -265,8 +273,8 @@ mod tests {
         }
 
         // check all parties received OutputMessage Ok sent by the receiver of the ReconstructionMessage
-        for party in network.lock().unwrap().parties_mut() {
-            let received_message = party.receiver_channel.try_recv().unwrap();
+        for party in network.lock().await.parties_mut() {
+            let received_message = receivers[party.id() - 1].try_recv().unwrap();
             let deseralized_msg: RanDouShaMessage =
                 bincode::deserialize(received_message.as_slice()).unwrap();
             let msg_type = deseralized_msg.msg_type;
@@ -285,8 +293,9 @@ mod tests {
         // check the store
         let store = randousha_node
             .get_or_create_store(&params)
+            .await
             .lock()
-            .unwrap()
+            .await
             .clone();
         assert!(store.received_r_shares_degree_t.len() == 2 * threshold + 1);
         assert!(store.received_r_shares_degree_2t.len() == 2 * threshold + 1);
@@ -300,9 +309,8 @@ mod tests {
         let session_id = 1111;
         let degree_t = 3;
 
-        let (params, network) = test_setup(n_parties, threshold, session_id);
+        let (params, network, receivers) = test_setup(n_parties, threshold, session_id);
         let (_, shares_si_t, shares_si_2t) = construct_input(n_parties, degree_t);
-
         let receiver_id = 1;
 
         let init_msg = InitMessage {
@@ -323,7 +331,7 @@ mod tests {
             .await
             .unwrap();
 
-        let node_store = randousha_node.get_or_create_store(&params);
+        let node_store = randousha_node.get_or_create_store(&params).await;
 
         // first n-(t+1)-1 message should return error
         for i in 0..params.n_parties - (params.threshold + 2) {
@@ -336,7 +344,7 @@ mod tests {
         }
         // check the store (n-(t+1)-1 shares)
         assert!(
-            node_store.lock().unwrap().received_ok_msg.len()
+            node_store.lock().await.received_ok_msg.len()
                 == params.n_parties - (params.threshold + 2)
         );
 
@@ -349,7 +357,7 @@ mod tests {
         assert_eq!(e.to_string(), RanDouShaError::WaitForOk.to_string());
         // check the store (n-(t+1)-1 shares)
         assert!(
-            node_store.lock().unwrap().received_ok_msg.len()
+            node_store.lock().await.received_ok_msg.len()
                 == params.n_parties - (params.threshold + 2)
         );
 
@@ -362,7 +370,7 @@ mod tests {
         assert_eq!(e.to_string(), RanDouShaError::Abort.to_string());
         // check the store (n-(t+1)-1 shares)
         assert!(
-            node_store.lock().unwrap().received_ok_msg.len()
+            node_store.lock().await.received_ok_msg.len()
                 == params.n_parties - (params.threshold + 2)
         );
 
@@ -379,8 +387,79 @@ mod tests {
         }
         // check the store (n-(t+1) shares)
         assert!(
-            node_store.lock().unwrap().received_ok_msg.len()
+            node_store.lock().await.received_ok_msg.len()
                 == params.n_parties - (params.threshold + 1)
         );
+    }
+
+    #[tokio::test]
+    async fn randousha_e2e() {
+        let n_parties = 10;
+        let threshold = 3;
+        let session_id = 1111;
+        let degree_t = 3;
+
+        let (params, network, mut receivers) = test_setup(n_parties, threshold, session_id);
+        let (n_shares_t, n_shares_2t) = construct_e2e_input(params.n_parties, degree_t);
+
+        // create randousha nodes
+        let mut randousha_nodes = vec![];
+        for i in 1..=n_parties {
+            randousha_nodes.push(Arc::new(Mutex::new(initialize_node(i))));
+        }
+
+        // spawn tasks to process received messages
+        for i in 1..=n_parties {
+            let randosha_node = Arc::clone(&randousha_nodes[i - 1]);
+            let network = Arc::clone(&network);
+            let mut receiver = receivers.remove(0);
+            tokio::spawn(async move {
+                loop {
+                    let msg = receiver.recv().await.unwrap();
+                    let deseralized_msg: RanDouShaMessage =
+                        bincode::deserialize(msg.as_slice()).unwrap();
+                    let process_result = randosha_node
+                        .lock()
+                        .await
+                        .process(&deseralized_msg, &params, Arc::clone(&network))
+                        .await;
+                    match process_result {
+                        Ok(_) => (),
+                        Err(e) => match e {
+                            RanDouShaError::NetworkError(network_error) => {
+                                panic!("NetWork Error: {}", network_error)
+                            }
+                            RanDouShaError::ArkSerialization(serialization_error) => {
+                                panic!("ArkSerialization Error: {}", serialization_error)
+                            }
+                            RanDouShaError::ArkDeserialization(serialization_error) => {
+                                panic!("ArkDeserialization Error: {}", serialization_error)
+                            }
+                            RanDouShaError::SerializationError(error_kind) => {
+                                panic!("SerializationError Error: {}", error_kind)
+                            }
+                            RanDouShaError::Abort => {
+                                panic!("Abort")
+                            }
+                            RanDouShaError::WaitForOk => {}
+                        },
+                    }
+                }
+            });
+        }
+
+        // init all randousha nodes
+        for node in randousha_nodes {
+            let mut node_locked = node.lock().await;
+            let init_msg = InitMessage {
+                sender_id: node_locked.id,
+                s_shares_deg_t: n_shares_t[node_locked.id - 1].clone(),
+                s_shares_deg_2t: n_shares_2t[node_locked.id - 1].clone(),
+            };
+            node_locked
+                .init_handler(&init_msg, &params, Arc::clone(&network))
+                .await
+                .unwrap();
+        }
     }
 }

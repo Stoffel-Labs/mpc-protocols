@@ -44,6 +44,9 @@ impl<F: FftField> ShamirSecretSharing<F> {
             shares.iter().map(|share| (share.id, share.share)).unzip();
 
         let result_poly = lagrange_interpolate(&x_vals, &y_vals);
+        if result_poly.len() == 0 {
+            println!("incorrect shares: {:?}", shares)
+        }
         Ok(result_poly[0])
     }
 }

@@ -7,12 +7,10 @@ use bincode::ErrorKind;
 use messages::{
     InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
 };
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
 use stoffelmpc_common::share::shamir::ShamirSecretSharing;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 use stoffelmpc_network::{Network, NetworkError, Node, PartyId, SessionId};
 
@@ -70,6 +68,7 @@ where
 }
 
 /// Parameters for the Random Double Share protocol.
+#[derive(Clone, Copy)]
 pub struct RanDouShaParams {
     /// Number of parties involved in the protocol.
     pub n_parties: usize,
@@ -94,11 +93,11 @@ where
 {
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
-    pub fn get_or_create_store(
+    pub async fn get_or_create_store(
         &mut self,
         params: &RanDouShaParams,
     ) -> Arc<Mutex<RanDouShaStore<F>>> {
-        let mut storage = self.store.lock().unwrap();
+        let mut storage = self.store.lock().await;
         storage
             .entry(params.session_id)
             .or_insert(Arc::new(Mutex::new(RanDouShaStore::empty())))
@@ -147,8 +146,8 @@ where
         let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &share_values_deg_2t);
 
         // Save the shares of r of degree t and 2t into the storage.
-        let bind_store = self.get_or_create_store(params);
-        let mut store = bind_store.lock().unwrap();
+        let bind_store = self.get_or_create_store(params).await;
+        let mut store = bind_store.lock().await;
         store.computed_r_shares_degree_t = r_deg_t
             .iter()
             .map(|share_value| {
@@ -172,7 +171,7 @@ where
 
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
-        let network_locked = network.lock().unwrap();
+        let network_locked = network.lock().await;
         for party in network_locked.parties() {
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
                 let share_deg_t = ShamirSecretSharing::new(
@@ -236,8 +235,8 @@ where
         // one for degree t and one for degree 2t.
         // These shares originate from the *sender* of the message, but they are components of the 'r_j'
 
-        let binding = self.get_or_create_store(params);
-        let mut store = binding.lock().unwrap();
+        let binding = self.get_or_create_store(params).await;
+        let mut store = binding.lock().await;
 
         let sender_id = rec_msg.sender_id;
         store
@@ -304,7 +303,7 @@ where
                 // if the verification succeeds, broadcast true (aka. OK)
                 network
                     .lock()
-                    .unwrap()
+                    .await
                     .broadcast(&bytes_generic_message)
                     .await
                     .map_err(RanDouShaError::NetworkError)?;
@@ -327,8 +326,8 @@ where
         if message.msg == false {
             return Err(RanDouShaError::Abort);
         }
-        let binding = self.get_or_create_store(params);
-        let mut store = binding.lock().unwrap();
+        let binding = self.get_or_create_store(params).await;
+        let mut store = binding.lock().await;
         // sender already exists, wait for more messages
         if store.received_ok_msg.contains(&message.sender_id) {
             return Err(RanDouShaError::WaitForOk);
@@ -370,9 +369,10 @@ where
                 self.output_handler(&output_message, params).await?;
             }
             messages::RanDouShaMessageType::ReconstructMessage => {
-                let reconstr_message =
-                    ReconstructionMessage::<F>::deserialize_compressed(message.payload.as_slice())
-                        .map_err(RanDouShaError::ArkDeserialization)?;
+                let reconstr_message = ark_serialize::CanonicalDeserialize::deserialize_compressed(
+                    message.payload.as_slice(),
+                )
+                .map_err(RanDouShaError::ArkDeserialization)?;
                 self.reconstruction_handler(&reconstr_message, params, network)
                     .await?;
             }
