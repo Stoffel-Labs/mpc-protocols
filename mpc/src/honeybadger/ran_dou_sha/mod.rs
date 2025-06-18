@@ -127,6 +127,7 @@ where
     where
         N: Network,
     {
+        // todo - should check sender.id == self?
         let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties);
         let share_values_deg_t: Vec<F> = init_msg
             .s_shares_deg_t
@@ -164,7 +165,7 @@ where
                 ShamirSecretSharing::new(
                     share_value.clone(),
                     F::from(self.id as u64),
-                    params.threshold,
+                    2 * params.threshold,
                 )
             })
             .collect();
@@ -339,19 +340,9 @@ where
         }
 
         // create vector for share [r_1]_t ... [r_t+1]_t
-        let output_r_t = store
-            .computed_r_shares_degree_t
-            .iter()
-            .copied()
-            .filter(|share| share.id <= F::from((params.threshold + 1) as u64))
-            .collect::<Vec<_>>();
+        let output_r_t = store.computed_r_shares_degree_t[0..params.threshold + 1].to_vec();
         // create vector for share [r_1]_2t ... [r_t+1]_2t
-        let output_r_2t = store
-            .computed_r_shares_degree_2t
-            .iter()
-            .copied()
-            .filter(|share| share.id <= F::from((params.threshold + 1) as u64))
-            .collect::<Vec<_>>();
+        let output_r_2t = store.computed_r_shares_degree_2t[0..params.threshold + 1].to_vec();
 
         Ok((output_r_t, output_r_2t))
     }

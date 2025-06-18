@@ -2,6 +2,7 @@
 mod tests {
 
     use std::collections::HashMap;
+    use std::iter::zip;
     use std::sync::{Arc, Mutex};
     use std::vec;
 
@@ -12,7 +13,9 @@ mod tests {
     use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
         InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
     };
-    use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaNode, RanDouShaParams};
+    use stoffelmpc_mpc::honeybadger::ran_dou_sha::{
+        RanDouShaError, RanDouShaNode, RanDouShaParams,
+    };
     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
     use stoffelmpc_network::{Network, Node};
 
@@ -47,6 +50,28 @@ mod tests {
         let (shares_si_2t, _) =
             shamir::ShamirSecretSharing::compute_shares(secret, degree_t * 2, &ids, &mut rng);
         (secret, shares_si_t, shares_si_2t)
+    }
+
+    // return vec contains vecs of inputs for each node
+    fn construct_e2e_input(
+        n: usize,
+        degree_t: usize,
+    ) -> (
+        Vec<Vec<ShamirSecretSharing<Fr>>>,
+        Vec<Vec<ShamirSecretSharing<Fr>>>,
+    ) {
+        let mut n_shares_t = vec![vec![]; n];
+        let mut n_shares_2t = vec![vec![]; n];
+
+        for _ in 0..n {
+            let (_, shares_si_t, shares_si_2t) = construct_input(n, degree_t);
+            for j in 0..n {
+                n_shares_t[j].push(shares_si_t[j]);
+                n_shares_2t[j].push(shares_si_2t[j]);
+            }
+        }
+
+        return (n_shares_t, n_shares_2t);
     }
 
     fn initialize_node(node_id: usize) -> RanDouShaNode<Fr> {
@@ -158,7 +183,7 @@ mod tests {
         // receiver randousha node
         let mut randousha_node = randousha_nodes.get(receiver_id - 1).unwrap().clone();
 
-        // receiver nodes received t+1 ReconstructionMessage
+        // receiver nodes received 2t+1 ReconstructionMessage
         for i in 0..2 * threshold + 1 {
             let rec_msg = ReconstructionMessage::new(i + 1, shares_ri_t[i], shares_ri_2t[i]);
             randousha_node
@@ -266,5 +291,96 @@ mod tests {
         assert!(store.received_r_shares_degree_t.len() == 2 * threshold + 1);
         assert!(store.received_r_shares_degree_2t.len() == 2 * threshold + 1);
         assert!(store.received_ok_msg.len() == 0);
+    }
+
+    #[tokio::test]
+    async fn test_output_handler() {
+        let n_parties = 10;
+        let threshold = 3;
+        let session_id = 1111;
+        let degree_t = 3;
+
+        let (params, network) = test_setup(n_parties, threshold, session_id);
+        let (_, shares_si_t, shares_si_2t) = construct_input(n_parties, degree_t);
+
+        let receiver_id = 1;
+
+        let init_msg = InitMessage {
+            sender_id: receiver_id,
+            s_shares_deg_t: shares_si_t.clone(),
+            s_shares_deg_2t: shares_si_2t.clone(),
+        };
+
+        // create receiver randousha node
+        let mut randousha_node: RanDouShaNode<Fr> = RanDouShaNode {
+            id: receiver_id,
+            store: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        // call init_handler to create random share
+        randousha_node
+            .init_handler(&init_msg, &params, Arc::clone(&network))
+            .await
+            .unwrap();
+
+        let node_store = randousha_node.get_or_create_store(&params);
+
+        // first n-(t+1)-1 message should return error
+        for i in 0..params.n_parties - (params.threshold + 2) {
+            let output_message = OutputMessage::new(i + 1, true);
+            let result = randousha_node
+                .output_handler(&output_message, &params)
+                .await;
+            let e = result.expect_err("should return waitForOk");
+            assert_eq!(e.to_string(), RanDouShaError::WaitForOk.to_string());
+        }
+        // check the store (n-(t+1)-1 shares)
+        assert!(
+            node_store.lock().unwrap().received_ok_msg.len()
+                == params.n_parties - (params.threshold + 2)
+        );
+
+        // existed id should not be counted
+        let output_message = OutputMessage::new(1, true);
+        let e = randousha_node
+            .output_handler(&output_message, &params)
+            .await
+            .expect_err("should return waitForOk");
+        assert_eq!(e.to_string(), RanDouShaError::WaitForOk.to_string());
+        // check the store (n-(t+1)-1 shares)
+        assert!(
+            node_store.lock().unwrap().received_ok_msg.len()
+                == params.n_parties - (params.threshold + 2)
+        );
+
+        // should return abort once received false outputMessage
+        let output_message = OutputMessage::new(1, false);
+        let e = randousha_node
+            .output_handler(&output_message, &params)
+            .await
+            .expect_err("should return abort");
+        assert_eq!(e.to_string(), RanDouShaError::Abort.to_string());
+        // check the store (n-(t+1)-1 shares)
+        assert!(
+            node_store.lock().unwrap().received_ok_msg.len()
+                == params.n_parties - (params.threshold + 2)
+        );
+
+        // should return two t+1 shares once received n-(t+1) Ok message
+        let output_message = OutputMessage::new(params.n_parties, true);
+        let (v_t1, v_t2) = randousha_node
+            .output_handler(&output_message, &params)
+            .await
+            .expect("should return vecs");
+        assert!(v_t1.len() == params.threshold + 1 && v_t2.len() == params.threshold + 1);
+        for (share_t1, share_t2) in zip(v_t1, v_t2) {
+            assert!(share_t1.degree == params.threshold);
+            assert!(share_t2.degree == 2 * params.threshold)
+        }
+        // check the store (n-(t+1) shares)
+        assert!(
+            node_store.lock().unwrap().received_ok_msg.len()
+                == params.n_parties - (params.threshold + 1)
+        );
     }
 }
