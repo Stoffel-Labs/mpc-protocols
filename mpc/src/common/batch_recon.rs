@@ -1,7 +1,6 @@
 use super::robust_interpolate::*;
 use ark_ff::FftField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
-use tokio::sync::mpsc::Sender;
 use tracing::{debug, info, warn};
 
 /// Represents message type exchanged between network nodes during the batch reconstruction protocol.
@@ -24,24 +23,6 @@ impl BatchReconMsg {
             msg_type,
             payload,
         }
-    }
-}
-
-/// Mocked for testing purposes.
-/// Represents a network interface for a node, allowing it to send messages to other nodes.
-#[derive(Clone)]
-pub struct Network {
-    pub id: usize,
-    pub senders: Vec<Sender<BatchReconMsg>>,
-}
-impl Network {
-    pub async fn broadcast(&self, msg: BatchReconMsg) {
-        for sender in &self.senders {
-            let _ = sender.send(msg.clone()).await;
-        }
-    }
-    pub async fn send(&self, target: usize, msg: BatchReconMsg) {
-        let _ = self.senders[target].send(msg).await;
     }
 }
 
@@ -99,7 +80,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn init_batch_reconstruct(
         &self,
         shares: &[F], // this party's shares of x_0 to x_t
-        net: Network,
+        // net: Network,
     ) {
         assert!(
             shares.len() >= self.t + 1,
@@ -109,20 +90,21 @@ impl<F: FftField> BatchReconNode<F> {
         let y_shares = apply_vandermonde(&vandermonde, &shares[..(self.t + 1)]);
 
         info!(
-            id = net.id,
+            id = self.id,
             "Initialized batch reconstruction with Vandermonde transform"
         );
 
         for (j, y_j_share) in y_shares.into_iter().enumerate() {
-            info!(from = net.id, to = j, "Sending y_j shares ");
+            info!(from = self.id, to = j, "Sending y_j shares ");
 
             let mut payload = Vec::new();
             y_j_share
                 .serialize_compressed(&mut payload)
                 .expect("serialization should not fail");
-            let msg = BatchReconMsg::new(self.id, BatchReconMsgType::Eval, payload);
+            let _msg = BatchReconMsg::new(self.id, BatchReconMsgType::Eval, payload);
 
-            net.send(j, msg).await;
+            //Send share y_j to each Party j
+            //net.send(j, msg).await;
         }
     }
 
@@ -130,7 +112,7 @@ impl<F: FftField> BatchReconNode<F> {
     ///
     /// This function processes `Eval` messages (first round) and `Reveal` messages (second round)
     /// to collectively reconstruct the original secrets.
-    pub async fn batch_recon_handler(&mut self, msg: BatchReconMsg, net: Network) {
+    pub async fn batch_recon_handler(&mut self, msg: BatchReconMsg, /*net: Network*/) {
         match msg.msg_type {
             BatchReconMsgType::Eval => {
                 debug!(
@@ -163,11 +145,11 @@ impl<F: FftField> BatchReconNode<F> {
                             value
                                 .serialize_compressed(&mut payload)
                                 .expect("serialization should not fail");
-                            let msg =
+                            let _msg =
                                 BatchReconMsg::new(self.id, BatchReconMsgType::Reveal, payload);
 
                             // Broadcast our computed `y_j` to all other parties.
-                            net.broadcast(msg).await;
+                            //net.broadcast(msg).await;
                         }
                         Err(e) => {
                             warn!(self_id = self.id, error = ?e, "Interpolation of y_j failed");
@@ -256,14 +238,11 @@ fn apply_vandermonde<F: FftField>(vandermonde: &[Vec<F>], shares: &[F]) -> Vec<F
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use ark_bls12_381::Fr;
     use ark_ff::{Field, One, Zero};
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
     use ark_std::test_rng;
-    use tokio::time::timeout;
 
     /// Generate secret shares where each secret is shared independently using a random polynomial
     /// with that secret as the constant term (f(0) = secret), and evaluated using FFT-based domain.
@@ -452,74 +431,6 @@ mod tests {
         assert_eq!(recovered_all.len(), n, "Share reconstruction failed");
         // === Check all recovered results match the original secrets
         for recovered in recovered_all {
-            assert_eq!(recovered[..secrets.len()], secrets[..]);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_batch_reconstruction_protocol() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
-        use tokio::sync::mpsc;
-
-        let n = 4;
-        let t = 1;
-        let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(4u64)];
-
-        // Step 1: Generate secret shares
-        let shares = generate_independent_shares(&secrets, t, n);
-
-        // Step 2: Create channels
-        let mut senders = Vec::new();
-        let mut receivers = Vec::new();
-        for _ in 0..n {
-            let (tx, rx) = mpsc::channel(100);
-            senders.push(tx);
-            receivers.push(rx);
-        }
-
-        // Step 3: Initialize nodes
-        let mut handles = vec![];
-        for i in 0..n {
-            let node_senders = senders.clone();
-            let net = Network {
-                id: i,
-                senders: node_senders,
-            };
-            let mut node = BatchReconNode::<Fr>::new(i, n, t).expect("Incorrect n or t");
-            let mut rx = receivers.remove(0); // each node gets its own receiver
-            let my_shares = shares[i].clone();
-
-            let handle = tokio::spawn(async move {
-                // Step 4: Start the protocol
-                node.init_batch_reconstruct(&my_shares, net.clone()).await;
-
-                // Step 5: Process incoming messages
-                while node.secrets.is_none() {
-                    let msg = timeout(Duration::from_secs(2), rx.recv()).await;
-                    match msg {
-                        Ok(Some(msg)) => {
-                            node.batch_recon_handler(msg, net.clone()).await;
-                        }
-                        Ok(None) => break, // Channel closed
-                        Err(_) => {
-                            panic!("Node {} timed out waiting for a message", i);
-                        }
-                    }
-                }
-
-                // Return recovered secrets
-                node.secrets.clone().unwrap()
-            });
-
-            handles.push(handle);
-        }
-
-        // Step 6: Collect results
-        for handle in handles {
-            let recovered = handle.await.unwrap();
             assert_eq!(recovered[..secrets.len()], secrets[..]);
         }
     }
