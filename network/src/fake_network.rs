@@ -5,6 +5,7 @@ use tokio::{
     sync::Mutex,
     task::JoinSet,
 };
+use async_trait::async_trait;
 
 use crate::{Network, NetworkError, Node, PartyId};
 
@@ -43,6 +44,7 @@ impl FakeNetwork {
     }
 }
 
+#[async_trait]
 impl Network for FakeNetwork {
     type NodeType = FakeNode;
     type NetworkConfig = FakeNetworkConfig;
