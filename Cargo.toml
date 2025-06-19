@@ -1,10 +1,16 @@
+[workspace]
+members = [
+    ".",       # current root crate (stoffelmpc)
+    "mpc",     # the mpc crate
+]
+
 [package]
-name = "mpc"
+name = "stoffelmpc"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ark-ff = { version = "0.4", features = [ "asm" ] }
+ark-ff = { version = "0.5.0", features = [ "asm" ] }
 tokio = { version = "1.38", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
