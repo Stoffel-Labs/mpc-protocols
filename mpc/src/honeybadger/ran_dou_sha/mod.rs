@@ -208,27 +208,6 @@ where
                     .map_err(RanDouShaError::NetworkError)?;
             }
         }
-        // if self is not a checking party and has already received enough (n-(t+1)) Ok, jump to output
-        if self.id <= params.threshold + 1
-            && (store.received_ok_msg.len() >= params.n_parties - (params.threshold + 1))
-        {
-            let output_msg = OutputMessage::new(self.id, true);
-            let mut bytes_out_message = Vec::new();
-            output_msg
-                .serialize_compressed(&mut bytes_out_message)
-                .map_err(RanDouShaError::ArkSerialization)?;
-            let generic_message = RanDouShaMessage::new(
-                self.id,
-                RanDouShaMessageType::OutputMessage,
-                &bytes_out_message,
-            );
-            let bytes_generic_message =
-                bincode::serialize(&generic_message).map_err(RanDouShaError::SerializationError)?;
-            network_locked
-                .send(self.id, &bytes_generic_message)
-                .await
-                .map_err(RanDouShaError::NetworkError)?;
-        }
         Ok(())
     }
 
