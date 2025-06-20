@@ -3,9 +3,8 @@ pub mod fake_network;
 use ark_ff::Field;
 use serde::{Deserialize, Serialize};
 // use std::sync::mpsc::Receiver;
-use thiserror::Error;
 use async_trait::async_trait;
-
+use thiserror::Error;
 
 /// Error type for network related issues.
 #[derive(Error, Debug, PartialEq)]

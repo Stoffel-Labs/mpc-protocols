@@ -7,13 +7,14 @@ mod tests {
     use std::collections::HashMap;
     use std::iter::zip;
     use std::sync::Arc;
+    use std::time::Duration;
     use std::vec;
     use stoffelmpc_common::share::shamir::{self, ShamirSecretSharing};
     use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
         InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
     };
     use stoffelmpc_mpc::honeybadger::ran_dou_sha::{
-        RanDouShaError, RanDouShaNode, RanDouShaParams,
+        RanDouShaError, RanDouShaNode, RanDouShaParams, RanDouShaState,
     };
     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
     use stoffelmpc_network::{Network, Node};
@@ -163,6 +164,7 @@ mod tests {
                 assert!(store.received_r_shares_degree_t.len() == 0);
                 assert!(store.received_r_shares_degree_2t.len() == 0);
                 assert!(store.received_ok_msg.len() == 0);
+                assert!(store.state == RanDouShaState::Initialized);
             }
 
             if party.id == sender_id {
@@ -171,6 +173,7 @@ mod tests {
                 assert!(store.received_r_shares_degree_t.len() == 0);
                 assert!(store.received_r_shares_degree_2t.len() == 0);
                 assert!(store.received_ok_msg.len() == 0);
+                assert!(store.state == RanDouShaState::Initialized);
             }
         }
     }
@@ -233,6 +236,7 @@ mod tests {
         assert!(store.received_r_shares_degree_t.len() == 2 * threshold + 1);
         assert!(store.received_r_shares_degree_2t.len() == 2 * threshold + 1);
         assert!(store.received_ok_msg.len() == 0);
+        assert!(store.state == RanDouShaState::Reconstruction);
     }
 
     #[tokio::test]
@@ -307,6 +311,7 @@ mod tests {
         assert!(store.received_r_shares_degree_t.len() == 2 * threshold + 1);
         assert!(store.received_r_shares_degree_2t.len() == 2 * threshold + 1);
         assert!(store.received_ok_msg.len() == 0);
+        assert!(store.state == RanDouShaState::Reconstruction);
     }
 
     #[tokio::test]
@@ -397,6 +402,7 @@ mod tests {
             node_store.lock().await.received_ok_msg.len()
                 == params.n_parties - (params.threshold + 1)
         );
+        assert!(node_store.lock().await.state == RanDouShaState::Finished);
     }
 
     #[tokio::test]
@@ -470,7 +476,7 @@ mod tests {
         }
 
         // init all randousha nodes
-        for node in randousha_nodes {
+        for node in &randousha_nodes {
             let mut node_locked = node.lock().await;
             let init_msg = InitMessage {
                 sender_id: node_locked.id,
@@ -487,8 +493,6 @@ mod tests {
         while let Some((id, final_shares)) = fin_recv.recv().await {
             final_results.insert(id, final_shares);
             if final_results.len() == 10 {
-                // println!("result: {:?}", final_results);
-
                 // check final_shares consist of correct shares
                 for (id, (shares_t, shares_2t)) in final_results {
                     let _ = shares_t.iter().zip(shares_2t).map(|(s_t, s_2t)| {
@@ -500,6 +504,16 @@ mod tests {
                 }
                 break;
             }
+        }
+
+        // wait for all randousha nodes to finish
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        for nodes in &randousha_nodes {
+            let mut node_locked = nodes.lock().await;
+            let store = node_locked.get_or_create_store(&params).await;
+            let store_locked = store.lock().await;
+            assert!(store_locked.state == RanDouShaState::Finished);
         }
     }
 }

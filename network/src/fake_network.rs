@@ -1,11 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
+use async_trait::async_trait;
 use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     sync::Mutex,
     task::JoinSet,
 };
-use async_trait::async_trait;
 
 use crate::{Network, NetworkError, Node, PartyId};
 

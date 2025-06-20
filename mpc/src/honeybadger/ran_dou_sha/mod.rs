@@ -49,6 +49,21 @@ pub struct RanDouShaStore<F: FftField> {
     pub computed_r_shares_degree_2t: Vec<ShamirSecretSharing<F>>,
     /// Vector that stores the nodes who have sent the output ok msg.
     pub received_ok_msg: Vec<usize>,
+
+    pub state: RanDouShaState,
+}
+
+/// State of the Random Double Sharing protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RanDouShaState {
+    /// The protocol has been initialized.
+    Initialized,
+    /// The protocol is in the reconstruction phase.
+    Reconstruction,
+    /// The protocol is in the output phase.
+    Output,
+    /// The protocol has been finished.
+    Finished,
 }
 
 impl<F> RanDouShaStore<F>
@@ -63,6 +78,7 @@ where
             computed_r_shares_degree_t: Vec::new(),
             computed_r_shares_degree_2t: Vec::new(),
             received_ok_msg: Vec::new(),
+            state: RanDouShaState::Initialized,
         }
     }
 }
@@ -238,6 +254,8 @@ where
         let binding = self.get_or_create_store(params).await;
         let mut store = binding.lock().await;
 
+        store.state = RanDouShaState::Reconstruction;
+
         let sender_id = rec_msg.sender_id;
         store
             .received_r_shares_degree_t
@@ -329,6 +347,9 @@ where
         }
         let binding = self.get_or_create_store(params).await;
         let mut store = binding.lock().await;
+
+        store.state = RanDouShaState::Output;
+
         // push to received_ok_msg if sender doesn't exist
         if !store.received_ok_msg.contains(&message.sender_id) {
             store.received_ok_msg.push(message.sender_id);
@@ -349,6 +370,9 @@ where
         let output_r_t = store.computed_r_shares_degree_t[0..params.threshold + 1].to_vec();
         // create vector for share [r_1]_2t ... [r_t+1]_2t
         let output_r_2t = store.computed_r_shares_degree_2t[0..params.threshold + 1].to_vec();
+
+        // computation is done so set state to Finished
+        store.state = RanDouShaState::Finished;
         Ok((output_r_t, output_r_2t))
     }
 
