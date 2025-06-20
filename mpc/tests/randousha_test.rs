@@ -6,6 +6,8 @@ mod tests {
     use ark_std::test_rng;
     use std::collections::HashMap;
     use std::iter::zip;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::Duration;
     use std::vec;
@@ -16,8 +18,8 @@ mod tests {
     use stoffelmpc_mpc::honeybadger::ran_dou_sha::{
         RanDouShaError, RanDouShaNode, RanDouShaParams, RanDouShaState,
     };
-    use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-    use stoffelmpc_network::{Network, Node};
+    use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig,};
+    use stoffelmpc_network::{Network, Node, NetworkError};
     use tokio::sync::mpsc::{self, Receiver};
     use tokio::sync::Mutex;
     use tokio::task::JoinSet;
@@ -515,5 +517,151 @@ mod tests {
             let store_locked = store.lock().await;
             assert!(store_locked.state == RanDouShaState::Finished);
         }
+    }
+
+    #[tokio::test]
+    async fn test_e2e_reconstruct_mismatch() {
+        let n_parties = 10;
+        let threshold = 3;
+        let session_id = 1111;
+        let degree_t = 3;
+
+        let (params, network, mut receivers) = test_setup(n_parties, threshold, session_id);
+        let (mut n_shares_t, n_shares_2t) = construct_e2e_input(params.n_parties, degree_t);
+
+        // lets corrupt the shares of party 1 so that the shares reconstruct different values
+        let rng = &mut test_rng();
+        n_shares_t[0][0] =
+            ShamirSecretSharing::new(Fr::rand(rng), n_shares_t[0][0].id, n_shares_t[0][0].degree);
+
+        // create randousha nodes
+        let mut randousha_nodes = vec![];
+        for i in 1..=n_parties {
+            randousha_nodes.push(Arc::new(Mutex::new(initialize_node(i))));
+        }
+
+        let mut set: JoinSet<_> = JoinSet::new();
+        let (fin_send, mut fin_recv) = mpsc::channel::<(
+            usize,
+            (Vec<ShamirSecretSharing<Fr>>, Vec<ShamirSecretSharing<Fr>>),
+        )>(100);
+
+        // Keep track of aborts
+        let abort_count = Arc::new(AtomicUsize::new(0));
+
+        // spawn tasks to process received messages
+        for i in 1..=n_parties {
+            let randosha_node = Arc::clone(&randousha_nodes[i - 1]);
+            let network = Arc::clone(&network);
+            let mut receiver = receivers.remove(0);
+            let fin_send = fin_send.clone();
+            let abort_count_clone = Arc::clone(&abort_count); // Clone for each task
+
+            set.spawn(async move {
+                loop {
+                    // println!("get_msg: {}", randosha_node.lock().await.id);
+                    let msg = receiver.recv().await.unwrap();
+                    let deseralized_msg: RanDouShaMessage =
+                        bincode::deserialize(msg.as_slice()).unwrap();
+                    let process_result = randosha_node
+                        .lock()
+                        .await
+                        .process(&deseralized_msg, &params, Arc::clone(&network))
+                        .await;
+                    match process_result {
+                        Ok(r) => match r {
+                            Some(final_shares) => {
+                                fin_send
+                                    .send((randosha_node.lock().await.id, final_shares))
+                                    .await
+                                    .unwrap();
+                            }
+                            None => continue,
+                        },
+                        Err(e) => match e {
+                            RanDouShaError::NetworkError(network_error) => {
+                                // we are allowing because Some parties will be dropped because of Abort
+                                eprintln!(
+                                    "Party {} encountered SendError: {:?}",
+                                    randosha_node.lock().await.id,
+                                    network_error
+                                );
+                                continue;
+                            }
+                            RanDouShaError::ArkSerialization(serialization_error) => {
+                                panic!("ArkSerialization Error: {}", serialization_error)
+                            }
+                            RanDouShaError::ArkDeserialization(serialization_error) => {
+                                panic!("ArkDeserialization Error: {}", serialization_error)
+                            }
+                            RanDouShaError::SerializationError(error_kind) => {
+                                panic!("SerializationError Error: {}", error_kind)
+                            }
+                            RanDouShaError::Abort => {
+                                println!(
+                                    "RanDouSha Aborted by node {}",
+                                    randosha_node.lock().await.id
+                                );
+
+                                // Increment the abort counter
+                                abort_count_clone.fetch_add(1, Ordering::SeqCst);
+
+                                // break is done so that the party no more processes messages
+                                break;
+                            }
+                            RanDouShaError::WaitForOk => {}
+                        },
+                    }
+                }
+            });
+        }
+
+        // init all randousha nodes
+        for node in &randousha_nodes {
+            let mut node_locked = node.lock().await;
+            let init_msg = InitMessage {
+                sender_id: node_locked.id,
+                s_shares_deg_t: n_shares_t[node_locked.id - 1].clone(),
+                s_shares_deg_2t: n_shares_2t[node_locked.id - 1].clone(),
+            };
+            match node_locked
+                .init_handler(&init_msg, &params, Arc::clone(&network))
+                .await
+            {
+                Ok(()) => {}
+                // Allowing NetworkError because some nodes will be dropped because of Abort
+                Err(e) => {
+                    if let RanDouShaError::NetworkError(NetworkError::SendError) = e {
+                        eprintln!(
+                            "Test: Init handler for node {} got expected SendError: {:?}",
+                            node_locked.id, e
+                        );
+                        
+                    } else {
+                        panic!(
+                            "Test: Unexpected error during init_handler for node {}: {:?}",
+                            node_locked.id, e
+                        );
+                    }
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let num_aborted_tasks = abort_count.load(Ordering::SeqCst);
+
+        // since there are 10 nodes, each one should have receive abort by some party
+        assert!(num_aborted_tasks == 10);
+
+        let mut final_shares_received = Vec::new();
+        while let Ok(msg) = fin_recv.try_recv() {
+            final_shares_received.push(msg);
+        }
+        assert!(
+            final_shares_received.is_empty(),
+            "No final shares should be received when an abort occurs."
+        );
+
     }
 }
