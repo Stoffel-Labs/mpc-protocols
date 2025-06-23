@@ -1,6 +1,11 @@
+pub mod utils;
+
 #[cfg(test)]
 mod tests {
-
+    use crate::utils::test_utils::{
+        construct_e2e_input, construct_input, create_nodes, initialize_all_nodes, initialize_node,
+        spawn_receiver_tasks, test_setup, setup_tracing,
+    };
     use ark_bls12_381::Fr;
     use ark_ff::UniformRand;
     use ark_std::test_rng;
@@ -15,90 +20,15 @@ mod tests {
     use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
         InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
     };
-    use stoffelmpc_mpc::honeybadger::ran_dou_sha::{
-        RanDouShaError, RanDouShaNode, RanDouShaParams, RanDouShaState,
-    };
-    use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig,};
-    use stoffelmpc_network::{Network, Node, NetworkError};
-    use tokio::sync::mpsc::{self, Receiver};
+    use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
+    use stoffelmpc_network::{Network, Node};
+    use tokio::sync::mpsc::{self};
     use tokio::sync::Mutex;
-    use tokio::task::JoinSet;
-
-    fn test_setup(
-        n: usize,
-        t: usize,
-        session_id: usize,
-    ) -> (
-        RanDouShaParams,
-        Arc<Mutex<FakeNetwork>>,
-        Vec<Receiver<Vec<u8>>>,
-    ) {
-        let config = FakeNetworkConfig::new(500);
-        let (network, receivers) = FakeNetwork::new(n, config);
-        let network = Arc::new(Mutex::new(network));
-        let params = RanDouShaParams {
-            session_id,
-            n_parties: n,
-            threshold: t,
-        };
-        (params, network, receivers)
-    }
-
-    fn construct_input(
-        n: usize,
-        degree_t: usize,
-    ) -> (
-        Fr,
-        Vec<ShamirSecretSharing<Fr>>,
-        Vec<ShamirSecretSharing<Fr>>,
-    ) {
-        let mut rng = test_rng();
-        let secret = Fr::rand(&mut rng);
-        let ids: Vec<Fr> = (1..=n).map(|i| Fr::from(i as u64)).collect();
-        let (shares_si_t, _) =
-            shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
-        let (shares_si_2t, _) =
-            shamir::ShamirSecretSharing::compute_shares(secret, degree_t * 2, &ids, &mut rng);
-        (secret, shares_si_t, shares_si_2t)
-    }
-
-    // return vec conxtains vecs of inputs for each node
-    fn construct_e2e_input(
-        n: usize,
-        degree_t: usize,
-    ) -> (
-        Vec<Vec<ShamirSecretSharing<Fr>>>,
-        Vec<Vec<ShamirSecretSharing<Fr>>>,
-    ) {
-        let mut n_shares_t = vec![vec![]; n];
-        let mut n_shares_2t = vec![vec![]; n];
-        let mut rng = test_rng();
-        let ids: Vec<Fr> = (1..=n).map(|i| Fr::from(i as u64)).collect();
-
-        for _ in 0..n {
-            let secret = Fr::rand(&mut rng);
-            let (shares_si_t, _) =
-                shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
-            let (shares_si_2t, _) =
-                shamir::ShamirSecretSharing::compute_shares(secret, degree_t * 2, &ids, &mut rng);
-            for j in 0..n {
-                n_shares_t[j].push(shares_si_t[j]);
-                n_shares_2t[j].push(shares_si_2t[j]);
-            }
-        }
-
-        return (n_shares_t, n_shares_2t);
-    }
-
-    fn initialize_node(node_id: usize) -> RanDouShaNode<Fr> {
-        RanDouShaNode {
-            id: node_id,
-            store: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
 
     #[tokio::test]
     async fn test_init_reconstruct_flow() {
+        setup_tracing();
+
         let n_parties = 10;
         let threshold = 3;
         let session_id = 1111;
@@ -182,6 +112,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconstruct_handler() {
+        setup_tracing();
         let n_parties = 10;
         let threshold = 3;
         let session_id = 1111;
@@ -243,6 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconstruct_handler_mismatch_r_t_2t() {
+        setup_tracing();
         let n_parties = 10;
         let threshold = 3;
         let session_id = 1111;
@@ -318,6 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_handler() {
+        setup_tracing();
         let n_parties = 10;
         let threshold = 3;
         let session_id = 1111;
@@ -409,6 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn randousha_e2e() {
+        setup_tracing();
         let n_parties = 10;
         let threshold = 3;
         let session_id = 1111;
@@ -418,78 +352,31 @@ mod tests {
         let (n_shares_t, n_shares_2t) = construct_e2e_input(params.n_parties, degree_t);
 
         // create randousha nodes
-        let mut randousha_nodes = vec![];
-        for i in 1..=n_parties {
-            randousha_nodes.push(Arc::new(Mutex::new(initialize_node(i))));
-        }
-        let mut set: JoinSet<_> = JoinSet::new();
+        let randousha_nodes = create_nodes(n_parties);
         let (fin_send, mut fin_recv) = mpsc::channel::<(
             usize,
             (Vec<ShamirSecretSharing<Fr>>, Vec<ShamirSecretSharing<Fr>>),
         )>(100);
         // spawn tasks to process received messages
-        for i in 1..=n_parties {
-            let randosha_node = Arc::clone(&randousha_nodes[i - 1]);
-            let network = Arc::clone(&network);
-            let mut receiver = receivers.remove(0);
-            let fin_send = fin_send.clone();
-            set.spawn(async move {
-                loop {
-                    // println!("get_msg: {}", randosha_node.lock().await.id);
-                    let msg = receiver.recv().await.unwrap();
-                    let deseralized_msg: RanDouShaMessage =
-                        bincode::deserialize(msg.as_slice()).unwrap();
-                    let process_result = randosha_node
-                        .lock()
-                        .await
-                        .process(&deseralized_msg, &params, Arc::clone(&network))
-                        .await;
-                    match process_result {
-                        Ok(r) => match r {
-                            Some(final_shares) => {
-                                fin_send
-                                    .send((randosha_node.lock().await.id, final_shares))
-                                    .await
-                                    .unwrap();
-                            }
-                            None => continue,
-                        },
-                        Err(e) => match e {
-                            RanDouShaError::NetworkError(network_error) => {
-                                panic!("NetWork Error: {}", network_error)
-                            }
-                            RanDouShaError::ArkSerialization(serialization_error) => {
-                                panic!("ArkSerialization Error: {}", serialization_error)
-                            }
-                            RanDouShaError::ArkDeserialization(serialization_error) => {
-                                panic!("ArkDeserialization Error: {}", serialization_error)
-                            }
-                            RanDouShaError::SerializationError(error_kind) => {
-                                panic!("SerializationError Error: {}", error_kind)
-                            }
-                            RanDouShaError::Abort => {
-                                panic!("Abort")
-                            }
-                            RanDouShaError::WaitForOk => {}
-                        },
-                    }
-                }
-            });
-        }
+        let _set = spawn_receiver_tasks(
+            randousha_nodes.clone(),
+            receivers,
+            params.clone(),
+            Arc::clone(&network),
+            fin_send,
+            None,
+        );
 
         // init all randousha nodes
-        for node in &randousha_nodes {
-            let mut node_locked = node.lock().await;
-            let init_msg = InitMessage {
-                sender_id: node_locked.id,
-                s_shares_deg_t: n_shares_t[node_locked.id - 1].clone(),
-                s_shares_deg_2t: n_shares_2t[node_locked.id - 1].clone(),
-            };
-            node_locked
-                .init_handler(&init_msg, &params, Arc::clone(&network))
-                .await
-                .unwrap();
-        }
+        initialize_all_nodes(
+            &randousha_nodes,
+            &n_shares_t,
+            &n_shares_2t,
+            &params,
+            Arc::clone(&network),
+        )
+        .await;
+
         let mut final_results =
             HashMap::<usize, (Vec<ShamirSecretSharing<Fr>>, Vec<ShamirSecretSharing<Fr>>)>::new();
         while let Some((id, final_shares)) = fin_recv.recv().await {
@@ -521,6 +408,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_e2e_reconstruct_mismatch() {
+        setup_tracing();
         let n_parties = 10;
         let threshold = 3;
         let session_id = 1111;
@@ -535,12 +423,8 @@ mod tests {
             ShamirSecretSharing::new(Fr::rand(rng), n_shares_t[0][0].id, n_shares_t[0][0].degree);
 
         // create randousha nodes
-        let mut randousha_nodes = vec![];
-        for i in 1..=n_parties {
-            randousha_nodes.push(Arc::new(Mutex::new(initialize_node(i))));
-        }
+        let randousha_nodes = create_nodes(n_parties);
 
-        let mut set: JoinSet<_> = JoinSet::new();
         let (fin_send, mut fin_recv) = mpsc::channel::<(
             usize,
             (Vec<ShamirSecretSharing<Fr>>, Vec<ShamirSecretSharing<Fr>>),
@@ -549,103 +433,24 @@ mod tests {
         // Keep track of aborts
         let abort_count = Arc::new(AtomicUsize::new(0));
 
-        // spawn tasks to process received messages
-        for i in 1..=n_parties {
-            let randosha_node = Arc::clone(&randousha_nodes[i - 1]);
-            let network = Arc::clone(&network);
-            let mut receiver = receivers.remove(0);
-            let fin_send = fin_send.clone();
-            let abort_count_clone = Arc::clone(&abort_count); // Clone for each task
-
-            set.spawn(async move {
-                loop {
-                    // println!("get_msg: {}", randosha_node.lock().await.id);
-                    let msg = receiver.recv().await.unwrap();
-                    let deseralized_msg: RanDouShaMessage =
-                        bincode::deserialize(msg.as_slice()).unwrap();
-                    let process_result = randosha_node
-                        .lock()
-                        .await
-                        .process(&deseralized_msg, &params, Arc::clone(&network))
-                        .await;
-                    match process_result {
-                        Ok(r) => match r {
-                            Some(final_shares) => {
-                                fin_send
-                                    .send((randosha_node.lock().await.id, final_shares))
-                                    .await
-                                    .unwrap();
-                            }
-                            None => continue,
-                        },
-                        Err(e) => match e {
-                            RanDouShaError::NetworkError(network_error) => {
-                                // we are allowing because Some parties will be dropped because of Abort
-                                eprintln!(
-                                    "Party {} encountered SendError: {:?}",
-                                    randosha_node.lock().await.id,
-                                    network_error
-                                );
-                                continue;
-                            }
-                            RanDouShaError::ArkSerialization(serialization_error) => {
-                                panic!("ArkSerialization Error: {}", serialization_error)
-                            }
-                            RanDouShaError::ArkDeserialization(serialization_error) => {
-                                panic!("ArkDeserialization Error: {}", serialization_error)
-                            }
-                            RanDouShaError::SerializationError(error_kind) => {
-                                panic!("SerializationError Error: {}", error_kind)
-                            }
-                            RanDouShaError::Abort => {
-                                println!(
-                                    "RanDouSha Aborted by node {}",
-                                    randosha_node.lock().await.id
-                                );
-
-                                // Increment the abort counter
-                                abort_count_clone.fetch_add(1, Ordering::SeqCst);
-
-                                // break is done so that the party no more processes messages
-                                break;
-                            }
-                            RanDouShaError::WaitForOk => {}
-                        },
-                    }
-                }
-            });
-        }
+        let _set = spawn_receiver_tasks(
+            randousha_nodes.clone(),
+            receivers,
+            params.clone(),
+            Arc::clone(&network),
+            fin_send,
+            Some(abort_count.clone()),
+        );
 
         // init all randousha nodes
-        for node in &randousha_nodes {
-            let mut node_locked = node.lock().await;
-            let init_msg = InitMessage {
-                sender_id: node_locked.id,
-                s_shares_deg_t: n_shares_t[node_locked.id - 1].clone(),
-                s_shares_deg_2t: n_shares_2t[node_locked.id - 1].clone(),
-            };
-            match node_locked
-                .init_handler(&init_msg, &params, Arc::clone(&network))
-                .await
-            {
-                Ok(()) => {}
-                // Allowing NetworkError because some nodes will be dropped because of Abort
-                Err(e) => {
-                    if let RanDouShaError::NetworkError(NetworkError::SendError) = e {
-                        eprintln!(
-                            "Test: Init handler for node {} got expected SendError: {:?}",
-                            node_locked.id, e
-                        );
-                        
-                    } else {
-                        panic!(
-                            "Test: Unexpected error during init_handler for node {}: {:?}",
-                            node_locked.id, e
-                        );
-                    }
-                }
-            }
-        }
+        initialize_all_nodes(
+            &randousha_nodes,
+            &n_shares_t,
+            &n_shares_2t,
+            &params,
+            Arc::clone(&network),
+        )
+        .await;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -662,6 +467,5 @@ mod tests {
             final_shares_received.is_empty(),
             "No final shares should be received when an abort occurs."
         );
-
     }
 }
