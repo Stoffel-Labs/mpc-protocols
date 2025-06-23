@@ -124,62 +124,27 @@ where
         N: Network,
     {
         let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties);
-        let share_values_deg_t: Vec<F> = init_msg
-            .s_shares_deg_t
-            .iter()
-            .map(|share| share.share)
-            .collect();
-        let share_values_deg_2t: Vec<F> = init_msg
-            .s_shares_deg_2t
-            .iter()
-            .map(|share| share.share)
-            .collect();
-
         // Implementation of Step 1.
-        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &share_values_deg_t);
+        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_t)
+            .map_err(|e| RanDouShaError::ArkDeserialization(SerializationError::InvalidData))?;
 
         // Implementation of Step 2.
-        let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &share_values_deg_2t);
+        let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_2t)
+            .map_err(|e| RanDouShaError::ArkDeserialization(SerializationError::InvalidData))?;
 
         // Save the shares of r of degree t and 2t into the storage.
         let bind_store = self.get_or_create_store(params);
         let mut store = bind_store.lock().unwrap();
-        store.computed_r_shares_degree_t = r_deg_t
-            .iter()
-            .map(|share_value| {
-                ShamirSecretSharing::new(
-                    share_value.clone(),
-                    F::from(self.id as u64),
-                    params.threshold,
-                )
-            })
-            .collect();
-        store.computed_r_shares_degree_2t = r_deg_2t
-            .iter()
-            .map(|share_value| {
-                ShamirSecretSharing::new(
-                    share_value.clone(),
-                    F::from(self.id as u64),
-                    params.threshold,
-                )
-            })
-            .collect();
+        store.computed_r_shares_degree_t = r_deg_t.clone();
+        store.computed_r_shares_degree_2t = r_deg_2t.clone();
 
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
         for party in network.parties() {
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
-                let share_deg_t = ShamirSecretSharing::new(
-                    r_deg_t[party.id()],
-                    F::from(self.id as u64),
-                    params.threshold,
-                );
-                let share_deg_2t = ShamirSecretSharing::new(
-                    r_deg_2t[party.id()],
-                    F::from(self.id as u64),
-                    2 * params.threshold,
-                );
-
+                let share_deg_t = r_deg_t[party.id()];
+                let share_deg_2t = r_deg_2t[party.id()];
+               
                 let reconst_message =
                     ReconstructionMessage::new(self.id, share_deg_t, share_deg_2t);
 
@@ -336,14 +301,14 @@ where
             .computed_r_shares_degree_t
             .iter()
             .copied()
-            .filter(|share| share.id <= F::from((params.threshold + 1) as u64))
+            .filter(|share| share.id <= params.threshold + 1)
             .collect::<Vec<_>>();
         // create vector for share [r_1]_2t ... [r_t+1]_2t
         let output_r_2t = store
             .computed_r_shares_degree_2t
             .iter()
             .copied()
-            .filter(|share| share.id <= F::from((params.threshold + 1) as u64))
+            .filter(|share| share.id <= params.threshold + 1)
             .collect::<Vec<_>>();
 
         Ok((output_r_t, output_r_2t))

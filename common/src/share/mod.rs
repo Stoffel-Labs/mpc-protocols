@@ -5,7 +5,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-trait Share: Sized + CanonicalSerialize + CanonicalDeserialize {
+pub trait Share: Sized + CanonicalSerialize + CanonicalDeserialize {
     /// The underlying secret that this share represents.
     type UnderlyingSecret: Field;
 
@@ -31,4 +31,6 @@ pub enum ShareError {
     DegreeMismatch,
     #[error("mismatch index between shares")]
     IdMismatch,
+    #[error("Invalid input")]
+    InvalidInput
 }
