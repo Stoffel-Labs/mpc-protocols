@@ -4,26 +4,25 @@ pub mod utils;
 mod tests {
     use crate::utils::test_utils::{
         construct_e2e_input, construct_input, create_nodes, initialize_all_nodes, initialize_node,
-        spawn_receiver_tasks, test_setup, setup_tracing,
+        setup_tracing, spawn_receiver_tasks, test_setup,
     };
     use ark_bls12_381::Fr;
     use ark_ff::UniformRand;
     use ark_std::test_rng;
-    use std::collections::HashMap;
-    use std::iter::zip;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-    use std::sync::Arc;
-    use std::time::Duration;
-    use std::vec;
+    use std::{
+        collections::HashMap, iter::zip, sync::atomic::AtomicUsize, sync::atomic::Ordering,
+        sync::Arc, time::Duration, vec,
+    };
     use stoffelmpc_common::share::shamir::{self, ShamirSecretSharing};
     use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
         InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
     };
     use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
     use stoffelmpc_network::{Network, Node};
-    use tokio::sync::mpsc::{self};
-    use tokio::sync::Mutex;
+    use tokio::sync::{
+        mpsc::{self},
+        Mutex,
+    };
 
     #[tokio::test]
     async fn test_init_reconstruct_flow() {

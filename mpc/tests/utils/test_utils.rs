@@ -1,11 +1,11 @@
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::vec;
+use once_cell::sync::Lazy;
+use std::{
+    collections::HashMap, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec,
+};
+
 use stoffelmpc_common::share::shamir::{self, ShamirSecretSharing};
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{InitMessage, RanDouShaMessage};
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaParams};
@@ -14,9 +14,8 @@ use stoffelmpc_network::NetworkError;
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing_subscriber::FmtSubscriber;
-use once_cell::sync::Lazy;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::FmtSubscriber;
 
 pub fn test_setup(
     n: usize,
@@ -224,10 +223,8 @@ static TRACING_INIT: Lazy<()> = Lazy::new(|| {
         .with_env_filter(EnvFilter::from_default_env().add_directive("trace".parse().unwrap()))
         .pretty()
         .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 });
-
 
 pub fn setup_tracing() {
     Lazy::force(&TRACING_INIT);

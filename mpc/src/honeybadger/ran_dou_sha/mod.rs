@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use stoffelmpc_network::{Network, NetworkError, Node, PartyId, SessionId};
-use tracing::{info};
+use tracing::info;
 
 /// Error that occurs during the execution of the Random Double Share Error.
 #[derive(Debug, Error)]
@@ -143,7 +143,10 @@ where
     where
         N: Network,
     {
-        info!("Node {} (session {}) - Starting init_handler.", self.id, params.session_id);
+        info!(
+            "Node {} (session {}) - Starting init_handler.",
+            self.id, params.session_id
+        );
         // todo - should check sender.id == self?
         let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties);
         let share_values_deg_t: Vec<F> = init_msg
@@ -247,7 +250,10 @@ where
     where
         N: Network,
     {
-        info!("Node {} (session {}) - Starting reconstruction_handler for message from sender {}.", self.id, params.session_id, rec_msg.sender_id);
+        info!(
+            "Node {} (session {}) - Starting reconstruction_handler for message from sender {}.",
+            self.id, params.session_id, rec_msg.sender_id
+        );
         // --- Step (3) Implementation ---
         // (1) Store the received shares.
         // Each party receives a ReconstructionMessage. This message contains two ShamirSecretSharing objects:
