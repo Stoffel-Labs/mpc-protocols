@@ -5,7 +5,6 @@ pub mod rbc;
 /// a certain number of shares can reconstruct a secret.
 /// When wanting to implement your own custom MPC protocols that can plug
 /// into the StoffelVM, you must implement the Share type.
-pub mod reed_solomon;
 pub mod share;
 
 use crate::{rbc::rbc::Network, rbc::rbc_store::Msg};
