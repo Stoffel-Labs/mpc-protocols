@@ -1,6 +1,6 @@
 mod messages;
 
-use crate::honeybadger::batch_recon::batch_recon::{apply_vandermonde, make_vandermonde};
+use crate::honeybadger::{batch_recon::batch_recon::{apply_vandermonde, make_vandermonde}, robust_interpolate::InterpolateError};
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
@@ -28,6 +28,8 @@ pub enum RanDouShaError {
     ArkDeserialization(SerializationError),
     #[error("error while serializing the object into bytes: {0:?}")]
     SerializationError(Box<ErrorKind>),
+    #[error("inner error: {0}")]
+    Inner(#[from] InterpolateError),
     /// The protocol received an abort signal.
     #[error("received abort singal")]
     Abort,
@@ -123,14 +125,12 @@ where
     where
         N: Network,
     {
-        let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties);
+        let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties)?;
         // Implementation of Step 1.
-        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_t)
-            .map_err(|e| RanDouShaError::ArkDeserialization(SerializationError::InvalidData))?;
+        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_t)?;
 
         // Implementation of Step 2.
-        let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_2t)
-            .map_err(|e| RanDouShaError::ArkDeserialization(SerializationError::InvalidData))?;
+        let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_2t)?;
 
         // Save the shares of r of degree t and 2t into the storage.
         let bind_store = self.get_or_create_store(params);
