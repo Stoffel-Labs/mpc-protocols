@@ -55,21 +55,24 @@ pub fn construct_input(
     (secret, shares_si_t, shares_si_2t)
 }
 
-// return vec conxtains vecs of inputs for each node
+// Return a vector that contains a vector of inputs for each node
 pub fn construct_e2e_input(
     n: usize,
     degree_t: usize,
 ) -> (
+    Vec<Fr>,
     Vec<Vec<ShamirSecretSharing<Fr>>>,
     Vec<Vec<ShamirSecretSharing<Fr>>>,
 ) {
     let mut n_shares_t = vec![vec![]; n];
     let mut n_shares_2t = vec![vec![]; n];
+    let mut secrets = Vec::new();
     let mut rng = test_rng();
     let ids: Vec<Fr> = (1..=n).map(|i| Fr::from(i as u64)).collect();
 
     for _ in 0..n {
         let secret = Fr::rand(&mut rng);
+        secrets.push(secret);
         let (shares_si_t, _) =
             shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
         let (shares_si_2t, _) =
@@ -80,7 +83,7 @@ pub fn construct_e2e_input(
         }
     }
 
-    return (n_shares_t, n_shares_2t);
+    return (secrets, n_shares_t, n_shares_2t);
 }
 
 pub fn initialize_node(node_id: usize) -> RanDouShaNode<Fr> {
@@ -139,7 +142,7 @@ pub async fn initialize_all_nodes(
 }
 
 /// Spawns receiver tasks for all nodes.
-/// NOTE: In the case of a SendError, We log the error for the and continue because of the expected Abort behaviour
+/// NOTE: In the case of a SendError, we log the error and continue because of the expected Abort behaviour
 /// In the case of Abort, the node is dropped from the network and the task is cancelled
 /// For the rest of the errors, we panic
 pub fn spawn_receiver_tasks(
