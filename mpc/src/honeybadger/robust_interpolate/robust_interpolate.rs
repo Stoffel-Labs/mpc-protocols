@@ -7,32 +7,9 @@ use ark_std::rand::Rng;
 use std::collections::HashSet;
 use stoffelmpc_common::share::{
     shamir::{lagrange_interpolate, ShamirSecretSharing},
-    ShareError,
 };
-use thiserror::Error;
+use super::*;
 
-/// Custom Error type for polynomial operations.
-#[derive(Error, Debug)]
-pub enum InterpolateError {
-    /// Errors related to polynomial operations, potentially with an underlying cause.
-    #[error("Polynomial operation failed: {0}")]
-    PolynomialOperationError(String),
-
-    /// Errors specific to invalid input parameters or conditions.
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
-
-    /// Errors that occur during the decoding process.
-    #[error("Decoding failed: {0}")]
-    DecodingError(String),
-
-    /// No suitable FFT evaluation domain could be found.
-    #[error("No suitable FFT evaluation domain found for n={0}")]
-    NoSuitableDomain(usize),
-
-    #[error("inner error: {0}")]
-    Inner(#[from] ShareError),
-}
 /// Computes the formal derivative of a polynomial.
 ///
 /// # Returns
@@ -480,10 +457,6 @@ mod tests {
         let secret = Fr::from(42u32);
         let shares = gen_shares(secret, n, t, &mut rng).unwrap();
 
-        // // Step 2: Create shares as (index, value)
-        // let shares_list: Vec<(usize, ShamirSecretSharing<Fr>)> =
-        //     shares.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-
         // Step 3: Corrupt up to t shares
         let _ = shares[2].add(&ShamirSecretSharing {
             share: Fr::from(3u64),
@@ -523,10 +496,6 @@ mod tests {
         // Generate random message and encode it
         let secret = Fr::from(42u32);
         let shares = gen_shares(secret, n, t, &mut rng).unwrap();
-
-        // // Create shares as (index, value)
-        // let shares_list: Vec<(usize, ShamirSecretSharing<Fr>)> =
-        //     shares.iter().enumerate().map(|(i, &v)| (i, v)).collect();
 
         // Corrupt up to t shares
         let corruption_indices = [1, 4];

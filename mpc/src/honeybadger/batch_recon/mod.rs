@@ -1,4 +1,5 @@
 pub mod batch_recon;
+pub use batch_recon::{apply_vandermonde, make_vandermonde};
 
 use crate::honeybadger::robust_interpolate::InterpolateError;
 use ark_serialize::SerializationError;

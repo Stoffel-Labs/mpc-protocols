@@ -1,6 +1,6 @@
 mod messages;
 
-use crate::honeybadger::{batch_recon::batch_recon::{apply_vandermonde, make_vandermonde}, robust_interpolate::InterpolateError};
+use crate::honeybadger::{batch_recon::{apply_vandermonde, make_vandermonde}, robust_interpolate::InterpolateError};
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;

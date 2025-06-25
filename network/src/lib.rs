@@ -1,7 +1,8 @@
-mod fake_network;
+pub mod fake_network;
 
 use ark_ff::Field;
 use serde::{Deserialize, Serialize};
+use async_trait::async_trait;
 use thiserror::Error;
 
 /// Error type for network related issues.
@@ -36,6 +37,7 @@ pub trait Message: Serialize + for<'a> Deserialize<'a> + Sized {
 
 /// Trait that represents a network used to communicate messages during the execution of a
 /// protocol.
+#[async_trait]
 pub trait Network {
     /// Type of the node in the network.
     type NodeType: Node;
