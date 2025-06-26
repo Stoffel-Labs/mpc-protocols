@@ -253,7 +253,7 @@ async fn test_output_handler() {
     let session_id = 1111;
     let degree_t = 3;
 
-    let (params, network, _) = test_setup(n_parties, threshold, session_id);
+    let (params, network, receivers) = test_setup(n_parties, threshold, session_id);
     let (_, shares_si_t, shares_si_2t) = construct_input(n_parties, degree_t);
     let receiver_id = 1;
 
@@ -321,6 +321,7 @@ async fn test_output_handler() {
         .output_handler(&output_message, &params)
         .await
         .expect("should return vecs");
+
     assert!(v_t1.len() == params.threshold + 1 && v_t2.len() == params.threshold + 1);
     for (share_t1, share_t2) in zip(v_t1, v_t2) {
         assert!(share_t1.degree == params.threshold);
@@ -472,7 +473,7 @@ async fn test_e2e_wrong_degree() {
     let degree_t = 3;
 
     // Generate the network and parameters.
-    let (params, network, mut receivers) = test_setup(n_parties, threshold, session_id);
+    let (params, network, receivers) = test_setup(n_parties, threshold, session_id);
     let (secrets, mut n_shares_t, n_shares_2t) = construct_e2e_input(params.n_parties, degree_t);
 
     // Modify the shares to obtain a sharing of different degree.
@@ -480,6 +481,9 @@ async fn test_e2e_wrong_degree() {
 
     // Increasing the degree of s_{idx_mod} by two.
     // This computes the new shares as new_share = secret + id^2 * prev_share.
+    // More specifically:
+    // p(x) = s + a_1 * x + ... + a_t * x^t.
+    // q(x) = s + x^2 * p(x) = s + x^2 * s + a_1 x^3 + ... + a_t * x^{t + 2}
     for j in 0..n_parties {
         n_shares_t[j][idx_mod].share = secrets[idx_mod]
             + n_shares_t[j][idx_mod].id.pow([0, 0, 0, 2]) * n_shares_t[j][idx_mod].share;
