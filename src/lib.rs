@@ -29,18 +29,23 @@ trait Share: Sized {
     fn reveal();
 }
 
-trait SecretSharing<S: Share>: Sized {
+trait SecretSharing: Sized {
+    /// Secret type used in the Share
+    type Secret;
+    /// Share type of the SecretSharing
+    type Share: Share<UnderlyingSecret = Self::Secret>;
+
     /// compute the shares of all ids for a secret
     /// returns a vec of shares
     fn compute_shares(
-        secret: S::UnderlyingSecret,
+        secret: Self::Secret,
         degree: usize,
         ids: &[usize],
         rng: &mut impl Rng,
-    ) -> Vec<S>;
+    ) -> Vec<Self::Share>;
 
     /// recover the secret of the input shares
-    fn recover_secret(shares: &[Self]) -> Result<S::UnderlyingSecret, ShareError>;
+    fn recover_secret(shares: &[Self]) -> Result<Self::Secret, ShareError>;
 }
 
 #[derive(Debug, Error)]

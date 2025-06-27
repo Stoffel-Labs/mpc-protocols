@@ -20,10 +20,13 @@ impl<F: FftField> ShamirSecretSharing<F> {
     }
 }
 
-impl<F: FftField> SecretSharing<ShamirSecretSharing<F>> for ShamirSecretSharing<F> {
+impl<F: FftField> SecretSharing for ShamirSecretSharing<F> {
+    type Secret = <ShamirSecretSharing<F> as Share>::UnderlyingSecret;
+    type Share = Self;
+
     // compute the shamir shares of all ids for a secret
     fn compute_shares(
-        secret: <ShamirSecretSharing<F> as Share>::UnderlyingSecret,
+        secret: Self::Secret,
         degree: usize,
         ids: &[usize],
         rng: &mut impl Rng,
@@ -39,9 +42,7 @@ impl<F: FftField> SecretSharing<ShamirSecretSharing<F>> for ShamirSecretSharing<
     }
 
     // recover the secret of the input shares
-    fn recover_secret(
-        shares: &[Self],
-    ) -> Result<<ShamirSecretSharing<F> as Share>::UnderlyingSecret, ShareError> {
+    fn recover_secret(shares: &[Self]) -> Result<Self::Secret, ShareError> {
         let deg = shares[0].degree;
         if !shares.iter().all(|share| share.degree == deg) {
             return Err(ShareError::DegreeMismatch);
