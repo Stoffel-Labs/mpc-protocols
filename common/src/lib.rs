@@ -7,12 +7,12 @@ pub mod rbc;
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
 
-use crate::{rbc::rbc::Network, rbc::rbc_store::Msg};
+use crate::rbc::{rbc_store::Msg, RbcError};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::mpsc::Receiver;
+use stoffelmpc_network::Network;
 
-trait Share {
+pub trait Share {
     /// The underlying secret that this share represents.
     type UnderlyingSecret;
 
@@ -32,27 +32,45 @@ trait Share {
 /// The primitive that does this is called Reliable Broadcast (RBC).
 /// When implementing your own custom MPC protocols, you must implement the RBC trait.
 #[async_trait]
-pub trait RBC: Send + Sync + 'static {
+pub trait RBC: Send + Sync {
     /// Creates a new instance
-    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, String>
+    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, RbcError>
     where
         Self: Sized;
+    /// Returns the unique identifier of the current party.
+    fn id(&self) -> u32;
     /// Required for initiating the broadcast
-    async fn init(&self, payload: Vec<u8>, session_id: u32, parties: Arc<Network>);
+    async fn init<N: Network + Send + Sync>(
+        &self,
+        payload: Vec<u8>,
+        session_id: u32,
+        parties: Arc<N>,
+    ) -> Result<(), RbcError>;
     ///Processing messages sent by other nodes based on their type
-    async fn process(&self, msg: Msg, parties: Arc<Network>);
+    async fn process<N: Network + Send + Sync + 'static>(
+        &self,
+        msg: Vec<u8>,
+        parties: Arc<N>,
+    ) -> Result<(), RbcError>;
     /// Broadcast messages to other nodes.
-    async fn broadcast(&self, msg: Msg, parties: Arc<Network>);
+    async fn broadcast<N: Network + Send + Sync>(
+        &self,
+        msg: Msg,
+        net: Arc<N>,
+    ) -> Result<(), RbcError>;
     /// Send to another node
-    async fn send(&self, msg: Msg, parties: Arc<Network>, recv: u32);
-    ///Listen to messages
-    async fn run_party(&self, receiver: &mut Receiver<Msg>, parties: Arc<Network>);
+    async fn send<N: Network + Send + Sync>(
+        &self,
+        msg: Msg,
+        net: Arc<N>,
+        recv: u32,
+    ) -> Result<(), RbcError>;
 }
 
 /// Now, it's time to define the MPC Protocol trait.
 /// Given an underlying secret sharing protocol and a reliable broadcast protocol,
 /// you can define an MPC protocol.
-trait MPCProtocol<S: Share, R: RBC> {
+pub trait MPCProtocol<S: Share, R: RBC> {
     /// Defines the information needed to run and define the MPC protocol.
     type MPCOpts;
 
@@ -61,7 +79,7 @@ trait MPCProtocol<S: Share, R: RBC> {
 }
 
 /// Some MPC protocols require preprocessing before they can be used
-trait PreprocessingMPCProtocol<S: Share, R: RBC>: MPCProtocol<S, R> {
+pub trait PreprocessingMPCProtocol<S: Share, R: RBC>: MPCProtocol<S, R> {
     /// Defines the information needed to run the preprocessing phase of an MPC protocol
     type PreprocessingOpts;
 

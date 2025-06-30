@@ -2,7 +2,6 @@ pub mod shamir;
 
 use ark_ff::Field;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub trait Share: Sized + CanonicalSerialize + CanonicalDeserialize {
