@@ -4,7 +4,7 @@ use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 
-#[derive(Debug, Clone, Copy, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Debug, Clone, Copy, CanonicalSerialize, CanonicalDeserialize, PartialEq)]
 pub struct ShamirSecretSharing<F: FftField> {
     pub share: F,
     pub id: usize,
