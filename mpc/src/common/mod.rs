@@ -8,7 +8,7 @@ pub mod rbc;
 pub mod share;
 
 use crate::common::{
-    rbc::{rbc::Network, rbc_store::Msg},
+    rbc::{rbc_store::Msg, RbcError},
     share::ShareError,
 };
 
@@ -23,7 +23,7 @@ use std::{
     sync::Arc,
     usize,
 };
-use tokio::sync::mpsc::Receiver;
+use stoffelmpc_network::Network;
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
@@ -130,21 +130,39 @@ impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
 /// The primitive that does this is called Reliable Broadcast (RBC).
 /// When implementing your own custom MPC protocols, you must implement the RBC trait.
 #[async_trait]
-pub trait RBC: Send + Sync + 'static {
+pub trait RBC: Send + Sync {
     /// Creates a new instance
-    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, String>
+    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, RbcError>
     where
         Self: Sized;
+    /// Returns the unique identifier of the current party.
+    fn id(&self) -> u32;
     /// Required for initiating the broadcast
-    async fn init(&self, payload: Vec<u8>, session_id: u32, parties: Arc<Network>);
+    async fn init<N: Network + Send + Sync>(
+        &self,
+        payload: Vec<u8>,
+        session_id: u32,
+        parties: Arc<N>,
+    ) -> Result<(), RbcError>;
     ///Processing messages sent by other nodes based on their type
-    async fn process(&self, msg: Msg, parties: Arc<Network>);
+    async fn process<N: Network + Send + Sync + 'static>(
+        &self,
+        msg: Vec<u8>,
+        parties: Arc<N>,
+    ) -> Result<(), RbcError>;
     /// Broadcast messages to other nodes.
-    async fn broadcast(&self, msg: Msg, parties: Arc<Network>);
+    async fn broadcast<N: Network + Send + Sync>(
+        &self,
+        msg: Msg,
+        net: Arc<N>,
+    ) -> Result<(), RbcError>;
     /// Send to another node
-    async fn send(&self, msg: Msg, parties: Arc<Network>, recv: u32);
-    ///Listen to messages
-    async fn run_party(&self, receiver: &mut Receiver<Msg>, parties: Arc<Network>);
+    async fn send<N: Network + Send + Sync>(
+        &self,
+        msg: Msg,
+        net: Arc<N>,
+        recv: u32,
+    ) -> Result<(), RbcError>;
 }
 
 /// Now, it's time to define the MPC Protocol trait.
