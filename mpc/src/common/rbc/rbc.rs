@@ -511,22 +511,18 @@ impl RBC for Avid {
         let wrapped: WrappedMessage =
             bincode::deserialize(&msg).map_err(RbcError::SerializationError)?;
         match wrapped {
-            WrappedMessage::Rbc(msg) => {
-                match &msg.msg_type {
-                    GenericMsgType::Avid(msg_type) => match msg_type {
-                        MsgTypeAvid::Send => self.send_handler(msg, net).await?,
-                        MsgTypeAvid::Echo => self.echo_handler(msg, net).await?,
-                        MsgTypeAvid::Ready => self.ready_handler(msg, net).await?,
-                        MsgTypeAvid::Unknown(tag) => {
-                            return Err(RbcError::UnknownMsgType(tag.clone()))
-                        }
-                    },
-                    _ => return Err(RbcError::UnknownMsgType("non-Avid".into())),
-                }
-                Ok(())
-            }
-            _ => Ok(()),
+            WrappedMessage::Rbc(msg) => match &msg.msg_type {
+                GenericMsgType::Avid(msg_type) => match msg_type {
+                    MsgTypeAvid::Send => self.send_handler(msg, net).await?,
+                    MsgTypeAvid::Echo => self.echo_handler(msg, net).await?,
+                    MsgTypeAvid::Ready => self.ready_handler(msg, net).await?,
+                    MsgTypeAvid::Unknown(tag) => return Err(RbcError::UnknownMsgType(tag.clone())),
+                },
+                _ => return Err(RbcError::UnknownMsgType("non-Avid".into())),
+            },
+            _ => {}
         }
+        Ok(())
     }
     /// Broadcast messages to other nodes.
     async fn broadcast<N: Network + Send + Sync>(
