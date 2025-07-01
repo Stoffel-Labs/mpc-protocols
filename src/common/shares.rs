@@ -4,10 +4,11 @@
 use crate::{SecretSharing, Share, ShareError};
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 
 // struct represents a single shamir share
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, CanonicalSerialize, CanonicalDeserialize, PartialEq)]
 pub struct ShamirSecretSharing<F: FftField> {
     pub share: F,      // shamir share
     pub id: usize,     // id of the share
@@ -55,10 +56,7 @@ impl<F: FftField> SecretSharing for ShamirSecretSharing<F> {
             .map(|share| (F::from(share.id as u64), share.share))
             .unzip();
 
-        let result_poly = lagrange_interpolate(&x_vals, &y_vals);
-        if result_poly.degree() != deg {
-            return Err(ShareError::DegreeMismatch);
-        }
+        let result_poly = lagrange_interpolate(&x_vals, &y_vals)?;
         Ok(result_poly[0])
     }
 }
@@ -100,10 +98,17 @@ impl<F: FftField> Share for ShamirSecretSharing<F> {
     }
 }
 
-/// Interpolates a polynomial from (x, y) pairs using Lagrange interpolation.
-pub fn lagrange_interpolate<F: FftField>(x_vals: &[F], y_vals: &[F]) -> DensePolynomial<F> {
-    assert_eq!(x_vals.len(), y_vals.len(), "Mismatched input lengths");
-
+/// Interpolates a polynomial from `(x, y)` pairs using Lagrange interpolation.
+///
+/// # Errors
+/// - `ShareError::InsufficientShares` if `x_vals` and `y_vals` have mismatched lengths.
+pub fn lagrange_interpolate<F: FftField>(
+    x_vals: &[F],
+    y_vals: &[F],
+) -> Result<DensePolynomial<F>, ShareError> {
+    if x_vals.len() != y_vals.len() {
+        return Err(ShareError::InvalidInput);
+    }
     let n = x_vals.len();
     let mut result = DensePolynomial::zero();
 
@@ -123,7 +128,7 @@ pub fn lagrange_interpolate<F: FftField>(x_vals: &[F], y_vals: &[F]) -> DensePol
         result = &result + &term;
     }
 
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -187,6 +192,7 @@ mod test {
             ShareError::InsufficientShares => panic!("incorrect error type"),
             ShareError::DegreeMismatch => (),
             ShareError::IdMismatch => panic!("incorrect error type"),
+            ShareError::InvalidInput => panic!("incorrect error type"),
         }
     }
 
@@ -201,6 +207,7 @@ mod test {
             ShareError::InsufficientShares => (),
             ShareError::DegreeMismatch => panic!("incorrect error type"),
             ShareError::IdMismatch => panic!("incorrect error type"),
+            ShareError::InvalidInput => panic!("incorrect error type"),
         }
     }
 
@@ -219,6 +226,7 @@ mod test {
             ShareError::InsufficientShares => panic!("incorrect error type"),
             ShareError::DegreeMismatch => panic!("incorrect error type"),
             ShareError::IdMismatch => (),
+            ShareError::InvalidInput => panic!("incorrect error type"),
         }
     }
 }

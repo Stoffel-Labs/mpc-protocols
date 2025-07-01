@@ -12,7 +12,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::mpsc::Receiver;
 
-trait Share: Sized {
+pub trait Share: Sized {
     /// The underlying secret that this share represents.
     type UnderlyingSecret;
     /// You can add shares together locally
@@ -29,7 +29,7 @@ trait Share: Sized {
     fn reveal();
 }
 
-trait SecretSharing: Sized {
+pub trait SecretSharing: Sized {
     /// Secret type used in the Share
     type Secret;
     /// Share type of the SecretSharing
@@ -56,6 +56,8 @@ pub enum ShareError {
     DegreeMismatch,
     #[error("mismatch index between shares")]
     IdMismatch,
+    #[error("Invalid input")]
+    InvalidInput
 }
 
 /// In MPC, there needs to be a way for a dealer and the nodes to broadcast messages
