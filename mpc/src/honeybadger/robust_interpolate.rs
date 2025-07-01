@@ -375,7 +375,7 @@ mod tests {
     use super::*;
     use ark_bls12_381::Fr;
     use ark_std::test_rng;
-    use stoffelmpc_common::share::Share;
+    use stoffelmpc_common::Share;
 
     #[test]
     fn test_poly_derivative() {

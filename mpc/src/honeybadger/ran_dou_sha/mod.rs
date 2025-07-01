@@ -1,6 +1,9 @@
 pub mod messages;
 
-use crate::honeybadger::{batch_recon::batch_recon::{apply_vandermonde, make_vandermonde}, robust_interpolate::InterpolateError};
+use crate::honeybadger::{
+    batch_recon::batch_recon::{apply_vandermonde, make_vandermonde},
+    robust_interpolate::InterpolateError,
+};
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
@@ -8,7 +11,7 @@ use messages::{
     InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
 };
 use std::{collections::HashMap, sync::Arc};
-use stoffelmpc_common::share::shamir::ShamirSecretSharing;
+use stoffelmpc_common::{share::shamir::ShamirSecretSharing, SecretSharing};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -145,7 +148,12 @@ where
     where
         N: Network,
     {
-        let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties)?;
+        info!(
+            "Node {} (session {}) - Starting init_handler.",
+            self.id, params.session_id
+        );
+        // todo - should check sender.id == self?
+        let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties - 1)?;
         // Implementation of Step 1.
         let r_deg_t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_t)?;
 
@@ -153,8 +161,8 @@ where
         let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_2t)?;
 
         // Save the shares of r of degree t and 2t into the storage.
-        let bind_store = self.get_or_create_store(params);
-        let mut store = bind_store.lock().unwrap();
+        let bind_store = self.get_or_create_store(params).await;
+        let mut store = bind_store.lock().await;
         store.computed_r_shares_degree_t = r_deg_t.clone();
         store.computed_r_shares_degree_2t = r_deg_2t.clone();
 
@@ -163,9 +171,8 @@ where
         let network_locked = network.lock().await;
         for party in network_locked.parties() {
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
-                let share_deg_t = r_deg_t[party.id()];
-                let share_deg_2t = r_deg_2t[party.id()];
-               
+                let share_deg_t = r_deg_t[party.id() - 1];
+                let share_deg_2t = r_deg_2t[party.id() - 1];
                 let reconst_message =
                     ReconstructionMessage::new(self.id, share_deg_t, share_deg_2t);
 

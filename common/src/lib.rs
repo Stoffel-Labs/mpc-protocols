@@ -7,17 +7,20 @@ pub mod rbc;
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
 
-use crate::{rbc::rbc::Network, rbc::rbc_store::Msg};
+use crate::{rbc::{rbc::Network, rbc_store::Msg}, share::ShareError};
+use ark_std::rand::Rng;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc::Receiver;
 
-trait Share {
+pub trait Share: Sized {
     /// The underlying secret that this share represents.
     type UnderlyingSecret;
-
     /// You can add shares together locally
-    fn add();
+    fn add(&self, other: &Self) -> Result<Self, ShareError>;
+
+    /// You can multiply a scalar to a share locally
+    fn scalar_mul(&self, scalar: &Self::UnderlyingSecret) -> Self;
 
     /// You can multiply shares together with other parties
     fn mul();
@@ -25,6 +28,25 @@ trait Share {
     /// You can reveal shares together with other parties
     /// Reveal a share means that you are revealing the underlying secret
     fn reveal();
+}
+
+pub trait SecretSharing: Sized {
+    /// Secret type used in the Share
+    type Secret;
+    /// Share type of the SecretSharing
+    type Share: Share<UnderlyingSecret = Self::Secret>;
+
+    /// compute the shares of all ids for a secret
+    /// returns a vec of shares
+    fn compute_shares(
+        secret: Self::Secret,
+        degree: usize,
+        ids: &[usize],
+        rng: &mut impl Rng,
+    ) -> Vec<Self::Share>;
+
+    /// recover the secret of the input shares
+    fn recover_secret(shares: &[Self]) -> Result<Self::Secret, ShareError>;
 }
 
 /// In MPC, there needs to be a way for a dealer and the nodes to broadcast messages

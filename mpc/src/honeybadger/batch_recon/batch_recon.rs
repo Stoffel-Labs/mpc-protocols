@@ -3,7 +3,7 @@ use crate::honeybadger::robust_interpolate::*;
 use ark_ff::FftField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 // use std::sync::Arc;
-use stoffelmpc_common::share::{shamir::ShamirSecretSharing, Share};
+use stoffelmpc_common::{share::shamir::ShamirSecretSharing, Share};
 use tracing::{debug, info, warn};
 
 /// --------------------------BatchRecPub--------------------------
@@ -57,7 +57,7 @@ impl<F: FftField> BatchReconNode<F> {
     /// Initiates the batch reconstruction protocol for a given node.
     ///
     /// Each party computes its `y_j_share` for all `j` and sends it to party `P_j`.
-    pub async fn init_batch_reconstruct /*<N: Network>*/(
+    pub async fn init_batch_reconstruct(
         &self,
         shares: &[ShamirSecretSharing<F>], // this party's shares of x_0 to x_t
         //net: &Arc<N>,
@@ -101,7 +101,7 @@ impl<F: FftField> BatchReconNode<F> {
     ///
     /// This function processes `Eval` messages (first round) and `Reveal` messages (second round)
     /// to collectively reconstruct the original secrets.
-    pub async fn batch_recon_handler/*<N: Network>*/(
+    pub async fn batch_recon_handler(
         &mut self,
         msg: BatchReconMsg,
         //net: &Arc<N>,
@@ -221,12 +221,6 @@ impl<F: FftField> BatchReconNode<F> {
 /// Creates a Vandermonde matrix `V` of size `n x (t+1)`.
 /// Each row `j` contains powers of `domain.element(j)`: `[1, alpha_j, alpha_j^2, ..., alpha_j^t]`.
 pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Result<Vec<Vec<F>>, InterpolateError> {
-    if n <= t {
-        return Err(InterpolateError::InvalidInput(format!(
-            "Invalid n :{} or t : {} values",
-            n, t
-        )));
-    }
     let domain =
         GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
     let mut matrix = vec![vec![F::zero(); t + 1]; n];

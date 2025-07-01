@@ -12,6 +12,7 @@ use std::{
     time::Duration, vec,
 };
 use stoffelmpc_common::share::shamir::{self, ShamirSecretSharing};
+use stoffelmpc_common::SecretSharing;
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
     InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
 };
@@ -79,7 +80,7 @@ async fn test_init_reconstruct_flow() {
 
         // check all stores should be empty except for the sender's store
         let store = randousha_nodes
-            .get(party.id - 1)
+            .get(party.id() - 1)
             .unwrap()
             .clone()
             .get_or_create_store(&params)
@@ -87,7 +88,7 @@ async fn test_init_reconstruct_flow() {
             .lock()
             .await
             .clone();
-        if party.id != sender_id {
+        if party.id() != sender_id {
             assert!(store.computed_r_shares_degree_t.len() == 0);
             assert!(store.computed_r_shares_degree_2t.len() == 0);
             assert!(store.received_r_shares_degree_t.len() == 0);
@@ -96,7 +97,7 @@ async fn test_init_reconstruct_flow() {
             assert!(store.state == RanDouShaState::Initialized);
         }
 
-        if party.id == sender_id {
+        if party.id() == sender_id {
             assert!(store.computed_r_shares_degree_t.len() == n_parties);
             assert!(store.computed_r_shares_degree_2t.len() == n_parties);
             assert!(store.received_r_shares_degree_t.len() == 0);
@@ -182,22 +183,21 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let degree_t = 3;
     let degree_2t = 6;
 
-    let ids: Vec<Fr> = network
+    let ids: Vec<usize> = network
         .lock()
         .await
         .parties()
         .iter()
-        .map(|p| p.scalar_id())
+        .map(|p| p.id())
         .collect();
     // receiver id receives recconstruct messages from other party
     let receiver_id = threshold + 2;
 
     let mut rng = test_rng();
     // ri_t created by each party i
-    let (shares_ri_t, _) =
-        shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
+    let shares_ri_t = shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
     // ri_2t created by each party i
-    let (shares_ri_2t, _) =
+    let shares_ri_2t =
         shamir::ShamirSecretSharing::compute_shares(secret_2t, degree_2t, &ids, &mut rng);
 
     // create receiver randousha node
@@ -253,7 +253,7 @@ async fn test_output_handler() {
     let session_id = 1111;
     let degree_t = 3;
 
-    let (params, network, receivers) = test_setup(n_parties, threshold, session_id);
+    let (params, network, _) = test_setup(n_parties, threshold, session_id);
     let (_, shares_si_t, shares_si_2t) = construct_input(n_parties, degree_t);
     let receiver_id = 1;
 
@@ -381,8 +381,8 @@ async fn randousha_e2e() {
                 let _ = shares_t.iter().zip(shares_2t).map(|(s_t, s_2t)| {
                     assert_eq!(s_t.degree, params.threshold);
                     assert_eq!(s_2t.degree, 2 * params.threshold);
-                    assert_eq!(s_t.id, Fr::from(id as u64));
-                    assert_eq!(s_2t.id, Fr::from(id as u64));
+                    assert_eq!(s_t.id, id);
+                    assert_eq!(s_2t.id, id);
                 });
             }
             break;
@@ -485,8 +485,9 @@ async fn test_e2e_wrong_degree() {
     // p(x) = s + a_1 * x + ... + a_t * x^t.
     // q(x) = s + x^2 * p(x) = s + x^2 * s + a_1 x^3 + ... + a_t * x^{t + 2}
     for j in 0..n_parties {
-        n_shares_t[j][idx_mod].share = secrets[idx_mod]
-            + n_shares_t[j][idx_mod].id.pow([0, 0, 0, 2]) * n_shares_t[j][idx_mod].share;
+        let id_fr = Fr::from(n_shares_t[j][idx_mod].id as u64);
+        n_shares_t[j][idx_mod].share =
+            secrets[idx_mod] + id_fr.pow([0, 0, 0, 2]) * n_shares_t[j][idx_mod].share;
     }
 
     let randousha_nodes = create_nodes(n_parties);

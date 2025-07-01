@@ -5,6 +5,7 @@ use once_cell::sync::Lazy;
 use std::{
     collections::HashMap, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec,
 };
+use stoffelmpc_common::SecretSharing;
 
 use stoffelmpc_common::share::shamir::{self, ShamirSecretSharing};
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{InitMessage, RanDouShaMessage};
@@ -47,10 +48,9 @@ pub fn construct_input(
 ) {
     let mut rng = test_rng();
     let secret = Fr::rand(&mut rng);
-    let ids: Vec<Fr> = (1..=n).map(|i| Fr::from(i as u64)).collect();
-    let (shares_si_t, _) =
-        shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
-    let (shares_si_2t, _) =
+    let ids: Vec<usize> = (1..=n).collect();
+    let shares_si_t = shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
+    let shares_si_2t =
         shamir::ShamirSecretSharing::compute_shares(secret, degree_t * 2, &ids, &mut rng);
     (secret, shares_si_t, shares_si_2t)
 }
@@ -68,14 +68,14 @@ pub fn construct_e2e_input(
     let mut n_shares_2t = vec![vec![]; n];
     let mut secrets = Vec::new();
     let mut rng = test_rng();
-    let ids: Vec<Fr> = (1..=n).map(|i| Fr::from(i as u64)).collect();
+    let ids: Vec<usize> = (1..=n).collect();
 
     for _ in 0..n {
         let secret = Fr::rand(&mut rng);
         secrets.push(secret);
-        let (shares_si_t, _) =
+        let shares_si_t =
             shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
-        let (shares_si_2t, _) =
+        let shares_si_2t =
             shamir::ShamirSecretSharing::compute_shares(secret, degree_t * 2, &ids, &mut rng);
         for j in 0..n {
             n_shares_t[j].push(shares_si_t[j]);
