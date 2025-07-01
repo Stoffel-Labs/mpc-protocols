@@ -1,13 +1,24 @@
+[workspace]
+members = [
+    ".",       # current root crate (stoffelmpc)
+    "mpc",     # the mpc crate
+]
+
 [package]
-name = "mpc"
+name = "stoffelmpc"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+name = "stoffelmpc"          
+path = "src/lib.rs"
 
 [dependencies]
 ark-ff = { version = "0.5.0", features = [ "asm" ] }
 ark-poly = "0.5.0"
 ark-std = "0.5"
 ark-bls12-381 = "0.5"
+ark-serialize = { version = "0.5", features = ["derive"] }
 thiserror = "2.0.12"
 tokio = { version = "1.38", features = ["full"] }
 tracing = "0.1"
