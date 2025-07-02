@@ -690,9 +690,10 @@ mod tests {
         let session_id = 42;
         let round_id = 0;
 
-        let (parties, net, receivers) = setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 1000)
-            .await
-            .expect("Failed to set up parties");
+        let (parties, net, receivers) =
+            setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 1000)
+                .await
+                .expect("Failed to set up parties");
         spawn_parties(&parties, receivers, net.clone()).await;
 
         // === Dealer Distributes Keys ===
@@ -708,7 +709,7 @@ mod tests {
         );
         let _ = dealer.distribute_keys(key_dist_msg, net.clone()).await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
 
         // === Trigger ABA with diverse inputs ===
         let mut rng = rand::thread_rng();
@@ -796,9 +797,10 @@ mod tests {
         let k = t + 1;
         let session_ids: Vec<u32> = vec![100, 101, 102, 103]; // One session per party
 
-        let (parties, net, receivers) = setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 1000)
-            .await
-            .expect("Failed to set up parties");
+        let (parties, net, receivers) =
+            setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 1000)
+                .await
+                .expect("Failed to set up parties");
         spawn_parties(&parties, receivers, net.clone()).await;
 
         // === Dealer Distributes Keys ===
@@ -814,17 +816,19 @@ mod tests {
         );
         let _ = dealer.distribute_keys(key_dist_msg, net.clone()).await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
 
         // === Trigger multiple ABA sessions per party ===
         let mut rng = rand::thread_rng();
         for session_id in &session_ids {
+            let mut init_futures = Vec::new();
             for (i, aba) in parties.iter().enumerate() {
                 let input = rng.gen_bool(0.5); // Randomly true or false
                 tracing::info!("Party {} input: {}", i, input);
                 let payload = set_value_round(input, 0);
-                let _ = aba.init(payload, *session_id, net.clone()).await;
+                init_futures.push(aba.init(payload, *session_id, net.clone()));
             }
+            futures::future::join_all(init_futures).await;
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
@@ -964,6 +968,8 @@ mod tests {
 
     //     // === Feed RBC outputs into each party's ACS instance ===
     //     for (session_id, payload) in fake_rbc_outputs.iter().enumerate() {
+    //         let mut init_futures = Vec::new();
+
     //         for (i, _) in acs_parties.iter().enumerate() {
     //             let msg = Msg {
     //                 sender_id: i as u32,
@@ -975,13 +981,40 @@ mod tests {
     //                 msg_len: payload.len(),
     //             };
 
-    //             let _ = acs_instances[i as usize].init(msg, net.clone()).await;
+    //             init_futures.push(acs_instances[i].init(msg, net.clone()));
     //         }
+
+    //         futures::future::join_all(init_futures).await;
     //         tokio::time::sleep(Duration::from_millis(5)).await;
     //     }
 
     //     // Wait for ACS to complete
     //     tokio::time::sleep(Duration::from_millis(300)).await;
+    //     let timeout_duration = Duration::from_secs(50);
+    //     let poll_interval = Duration::from_millis(50);
+
+    //     let wait_result = timeout(timeout_duration, async {
+    //         loop {
+    //             let mut all_done = true;
+
+    //             for acs in &acs_instances {
+    //                 let store = acs.store.lock().await;
+    //                 if !store.ended {
+    //                     all_done = false;
+    //                     break;
+    //                 }
+    //             }
+
+    //             if all_done {
+    //                 break;
+    //             }
+
+    //             tokio::time::sleep(poll_interval).await;
+    //         }
+    //     })
+    //     .await;
+
+    //     assert!(wait_result.is_ok(), "ACS did not complete in time");
 
     //     // === Validate ACS Outputs ===
     //     let mut commonsubsets = Vec::new();
