@@ -1,8 +1,8 @@
 pub mod utils;
 
 use crate::utils::test_utils::{
-    construct_e2e_input, construct_input, create_nodes, initialize_all_nodes, initialize_node,
-    setup_tracing, spawn_receiver_tasks, test_setup,
+    construct_e2e_input, create_nodes, get_reconstruct_input, initialize_all_nodes,
+    initialize_node, setup_tracing, spawn_receiver_tasks, test_setup,
 };
 use ark_bls12_381::Fr;
 use ark_ff::{Field, UniformRand};
@@ -32,14 +32,14 @@ async fn test_init_reconstruct_flow() {
     let degree_t = 3;
 
     let (params, network, mut receivers) = test_setup(n_parties, threshold, session_id);
-    let (_, shares_si_t, shares_si_2t) = construct_input(n_parties, degree_t);
+    let (_, shares_si_t, shares_si_2t) = construct_e2e_input(n_parties, degree_t);
 
     let sender_id = 1;
 
     let init_msg = InitMessage {
         sender_id: sender_id,
-        s_shares_deg_t: shares_si_t.clone(),
-        s_shares_deg_2t: shares_si_2t.clone(),
+        s_shares_deg_t: shares_si_t[sender_id].clone(),
+        s_shares_deg_2t: shares_si_2t[sender_id].clone(),
     };
 
     // create randousha nodes
@@ -116,7 +116,7 @@ async fn test_reconstruct_handler() {
     let degree_t = 3;
 
     let (params, network, mut receivers) = test_setup(n_parties, threshold, session_id);
-    let (_, shares_ri_t, shares_ri_2t) = construct_input(n_parties, degree_t);
+    let (_, shares_ri_t, shares_ri_2t) = get_reconstruct_input(n_parties, degree_t);
 
     // initialize RanDouShaNode
     let mut randousha_nodes = vec![];
@@ -253,14 +253,14 @@ async fn test_output_handler() {
     let session_id = 1111;
     let degree_t = 3;
 
-    let (params, network, receivers) = test_setup(n_parties, threshold, session_id);
-    let (_, shares_si_t, shares_si_2t) = construct_input(n_parties, degree_t);
+    let (params, network, _receivers) = test_setup(n_parties, threshold, session_id);
+    let (_, shares_si_t, shares_si_2t) = construct_e2e_input(n_parties, degree_t);
     let receiver_id = 1;
 
     let init_msg = InitMessage {
         sender_id: receiver_id,
-        s_shares_deg_t: shares_si_t.clone(),
-        s_shares_deg_2t: shares_si_2t.clone(),
+        s_shares_deg_t: shares_si_t[receiver_id].clone(),
+        s_shares_deg_2t: shares_si_2t[receiver_id].clone(),
     };
 
     // create receiver randousha node
