@@ -253,7 +253,7 @@ async fn test_output_handler() {
     let session_id = 1111;
     let degree_t = 3;
 
-    let (params, network, _receiver) = test_setup(n_parties, threshold, session_id);
+    let (params, network, _receivers) = test_setup(n_parties, threshold, session_id);
     let (_, shares_si_t, shares_si_2t) = construct_e2e_input(n_parties, degree_t);
     let receiver_id = 1;
 
