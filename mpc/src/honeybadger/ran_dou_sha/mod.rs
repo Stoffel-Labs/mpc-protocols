@@ -344,19 +344,9 @@ where
         }
 
         // create vector for share [r_1]_t ... [r_t+1]_t
-        let output_r_t = store
-            .computed_r_shares_degree_t
-            .iter()
-            .copied()
-            .filter(|share| share.id <= params.threshold + 1)
-            .collect::<Vec<_>>();
+        let output_r_t = store.computed_r_shares_degree_t[0..params.threshold + 1].to_vec();
         // create vector for share [r_1]_2t ... [r_t+1]_2t
-        let output_r_2t = store
-            .computed_r_shares_degree_2t
-            .iter()
-            .copied()
-            .filter(|share| share.id <= params.threshold + 1)
-            .collect::<Vec<_>>();
+        let output_r_2t = store.computed_r_shares_degree_2t[0..params.threshold + 1].to_vec();
 
         // computation is done so set state to Finished
         store.state = RanDouShaState::Finished;

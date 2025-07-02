@@ -38,7 +38,7 @@ pub fn test_setup(
     (params, network, receivers)
 }
 
-pub fn construct_input(
+pub fn get_reconstruct_input(
     n: usize,
     degree_t: usize,
 ) -> (
