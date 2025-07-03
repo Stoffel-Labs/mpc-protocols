@@ -8,3 +8,5 @@ pub mod batch_recon;
 /// Application to Anonymous Communication".
 pub mod ran_dou_sha;
 pub mod robust_interpolate;
+
+pub struct HoneyBadgerMPC;

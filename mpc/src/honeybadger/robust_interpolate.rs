@@ -5,9 +5,12 @@ use ark_poly::{
 };
 use ark_std::rand::Rng;
 use std::collections::HashSet;
-use stoffelmpc_common::share::{
-    shamir::{lagrange_interpolate, ShamirSecretSharing},
-    ShareError,
+use stoffelmpc_common::{
+    share::{
+        shamir::{lagrange_interpolate, ShamirSecretSharing, ShamirShare},
+        ShareError,
+    },
+    SecretSharingScheme,
 };
 use thiserror::Error;
 
@@ -33,6 +36,7 @@ pub enum InterpolateError {
     #[error("inner error: {0}")]
     Inner(#[from] ShareError),
 }
+
 /// Computes the formal derivative of a polynomial.
 ///
 /// # Returns
@@ -177,6 +181,7 @@ pub fn gen_shares<F: FftField, R: Rng>(
 
     Ok(shares)
 }
+
 /// Decodes a Reed-Solomon codeword with known erasure positions using Gao's algorithm.
 ///
 /// https://www.math.clemson.edu/~sgao/papers/RS.pdf
@@ -337,6 +342,7 @@ fn oec_decode<F: FftField>(
         "Online Error Correction failed to find a valid polynomial".into(),
     ))
 }
+
 /// Full robust interpolation combining optimistic decoding and error correction
 ///
 /// # Arguments

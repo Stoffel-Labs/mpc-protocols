@@ -7,46 +7,29 @@ pub mod rbc;
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
 
-use crate::{rbc::{rbc::Network, rbc_store::Msg}, share::ShareError};
+use crate::{
+    rbc::{rbc::Network, rbc_store::Msg},
+    share::ShareError,
+};
 use ark_std::rand::Rng;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc::Receiver;
 
-pub trait Share: Sized {
-    /// The underlying secret that this share represents.
-    type UnderlyingSecret;
-    /// You can add shares together locally
-    fn add(&self, other: &Self) -> Result<Self, ShareError>;
-
-    /// You can multiply a scalar to a share locally
-    fn scalar_mul(&self, scalar: &Self::UnderlyingSecret) -> Self;
-
-    /// You can multiply shares together with other parties
-    fn mul();
-
-    /// You can reveal shares together with other parties
-    /// Reveal a share means that you are revealing the underlying secret
-    fn reveal();
-}
-
-pub trait SecretSharing: Sized {
+pub trait SecretSharingScheme: Sized {
     /// Secret type used in the Share
-    type Secret;
-    /// Share type of the SecretSharing
-    type Share: Share<UnderlyingSecret = Self::Secret>;
+    type SecretType;
+    type ShareType;
 
-    /// compute the shares of all ids for a secret
-    /// returns a vec of shares
     fn compute_shares(
-        secret: Self::Secret,
+        secret: Self::SecretType,
         degree: usize,
         ids: &[usize],
         rng: &mut impl Rng,
-    ) -> Vec<Self::Share>;
+    ) -> Vec<Self::ShareType>;
 
-    /// recover the secret of the input shares
-    fn recover_secret(shares: &[Self]) -> Result<Self::Secret, ShareError>;
+    /// Recover the secret of the input shares.
+    fn recover_secret(shares: &[Self::ShareType]) -> Result<Self::SecretType, ShareError>;
 }
 
 /// In MPC, there needs to be a way for a dealer and the nodes to broadcast messages
@@ -74,16 +57,21 @@ pub trait RBC: Send + Sync + 'static {
 /// Now, it's time to define the MPC Protocol trait.
 /// Given an underlying secret sharing protocol and a reliable broadcast protocol,
 /// you can define an MPC protocol.
-trait MPCProtocol<S: Share, R: RBC> {
+trait MPCProtocol<S: SecretSharingScheme> {
     /// Defines the information needed to run and define the MPC protocol.
     type MPCOpts;
 
-    /// Runs the online phase for an MPC protocol
-    fn run(opts: Self::MPCOpts);
+    fn init(opts: Self::MPCOpts);
+
+    fn input();
+
+    fn mul();
+
+    fn output();
 }
 
 /// Some MPC protocols require preprocessing before they can be used
-trait PreprocessingMPCProtocol<S: Share, R: RBC>: MPCProtocol<S, R> {
+trait PreprocessingMPCProtocol<S: SecretSharingScheme, R: RBC>: MPCProtocol<S, R> {
     /// Defines the information needed to run the preprocessing phase of an MPC protocol
     type PreprocessingOpts;
 

@@ -1,33 +1,47 @@
+use std::ops::{Add, Mul};
+
 /// This file contains the more common secret sharing protocols used in MPC.
 /// You can reuse them for the MPC protocols that you aim to implement.
 ///
-use crate::{SecretSharing, Share, ShareError};
+use crate::{SecretSharingScheme, ShareError};
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 
-// struct represents a single shamir share
+// Struct represents a single Shamir share
 #[derive(Debug, Clone, Copy, CanonicalSerialize, CanonicalDeserialize, PartialEq)]
-pub struct ShamirSecretSharing<F: FftField> {
+pub struct ShamirShare<F: FftField> {
     pub share: F,      // shamir share
     pub id: usize,     // id of the share
     pub degree: usize, // degree of the underlying polynomial
+    pub shamir_type: ShamirType,
 }
 
-impl<F: FftField> ShamirSecretSharing<F> {
-    pub fn new(share: F, id: usize, degree: usize) -> Self {
-        Self { share, id, degree }
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShamirType {
+    Robust,
+    NonRobust,
+}
+
+impl<F: FftField> ShamirShare<F> {
+    pub fn new(share: F, id: usize, degree: usize, share_type: ShamirType) -> Self {
+        Self {
+            share,
+            id,
+            degree,
+            shamir_type: share_type,
+        }
     }
 }
 
-impl<F: FftField> SecretSharing for ShamirSecretSharing<F> {
-    type Secret = <ShamirSecretSharing<F> as Share>::UnderlyingSecret;
-    type Share = Self;
+impl<F: FftField> SecretSharingScheme for ShamirShare<F> {
+    type SecretType = F;
+    type ShareType = Self;
 
     // compute the shamir shares of all ids for a secret
     fn compute_shares(
-        secret: Self::Secret,
+        secret: Self::SecretType,
         degree: usize,
         ids: &[usize],
         rng: &mut impl Rng,
@@ -37,13 +51,20 @@ impl<F: FftField> SecretSharing for ShamirSecretSharing<F> {
 
         let shares = ids
             .iter()
-            .map(|id| ShamirSecretSharing::new(poly.evaluate(&F::from(*id as u64)), *id, degree))
+            .map(|id| {
+                ShamirShare::new(
+                    poly.evaluate(&F::from(*id as u64)),
+                    *id,
+                    degree,
+                    ShamirType::NonRobust,
+                )
+            })
             .collect();
         shares
     }
 
     // recover the secret of the input shares
-    fn recover_secret(shares: &[Self]) -> Result<Self::Secret, ShareError> {
+    fn recover_secret(shares: &[Self]) -> Result<Self::SecretType, ShareError> {
         let deg = shares[0].degree;
         if !shares.iter().all(|share| share.degree == deg) {
             return Err(ShareError::DegreeMismatch);
@@ -58,42 +79,6 @@ impl<F: FftField> SecretSharing for ShamirSecretSharing<F> {
 
         let result_poly = lagrange_interpolate(&x_vals, &y_vals)?;
         Ok(result_poly[0])
-    }
-}
-
-impl<F: FftField> Share for ShamirSecretSharing<F> {
-    type UnderlyingSecret = F;
-    // adds two shares with the same id
-    fn add(&self, other: &Self) -> Result<Self, ShareError> {
-        if self.degree != other.degree {
-            return Err(ShareError::DegreeMismatch);
-        }
-        if self.id != other.id {
-            return Err(ShareError::IdMismatch);
-        }
-        let new_share = self.share + other.share;
-        Ok(Self {
-            share: new_share,
-            id: self.id,
-            degree: self.degree,
-        })
-    }
-
-    // multiplies the share with a scalar
-    fn scalar_mul(&self, scalar: &Self::UnderlyingSecret) -> Self {
-        Self {
-            share: self.share * scalar,
-            id: self.id,
-            degree: self.degree,
-        }
-    }
-
-    fn mul() {
-        todo!()
-    }
-
-    fn reveal() {
-        todo!()
     }
 }
 
@@ -128,6 +113,47 @@ pub fn lagrange_interpolate<F: FftField>(
     }
 
     Ok(result)
+}
+
+impl<F> Add<Rhs = &Self> for ShamirShare<F>
+where
+    F: FftField,
+{
+    type Output = Result<Self, ShareError>;
+
+    fn add(self, other: Self) -> Self::Output {
+        if self.degree != other.degree {
+            return Err(ShareError::DegreeMismatch);
+        }
+        if self.id != other.id {
+            return Err(ShareError::IdMismatch);
+        }
+        if self.shamir_type != other.shamir_type {
+            return Err(ShareError::TypeMismatch);
+        }
+        let new_share = self.share + other.share;
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+            shamir_type: self.shamir_type,
+        })
+    }
+}
+
+impl<F> Mul<Rhs = &F> for ShamirShare<F>
+where
+    F: FftField,
+{
+    type Output = Self;
+    fn mul(self, rhs: F) -> Self::Output {
+        Self {
+            share: self.share * rhs,
+            id: self.id,
+            degree: self.degree,
+            shamir_type: self.shamir_type,
+        }
+    }
 }
 
 #[cfg(test)]
