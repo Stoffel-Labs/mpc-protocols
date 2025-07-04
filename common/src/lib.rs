@@ -12,24 +12,65 @@ use crate::{
     share::ShareError,
 };
 use ark_std::rand::Rng;
+use ark_ff::{FftField, Zero};
+use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::{sync::Arc, usize};
 use tokio::sync::mpsc::Receiver;
 
-pub trait SecretSharingScheme: Sized {
+
+pub struct Share<F: FftField, const N: usize> {
+    pub share: [F; N],
+    pub id: usize,
+    pub degree: usize,
+}
+
+pub trait SecretSharingScheme<F: FftField, const N: usize>: Sized {
     /// Secret type used in the Share
     type SecretType;
-    type ShareType;
 
     fn compute_shares(
         secret: Self::SecretType,
         degree: usize,
         ids: &[usize],
         rng: &mut impl Rng,
-    ) -> Vec<Self::ShareType>;
+    ) -> Share<F, N>;
 
     /// Recover the secret of the input shares.
-    fn recover_secret(shares: &[Self::ShareType]) -> Result<Self::SecretType, ShareError>;
+    fn recover_secret(shares: &[Share<F, N>]) -> Result<Self::SecretType, ShareError>;
+
+        /// Interpolates a polynomial from `(x, y)` pairs using Lagrange interpolation.
+    ///
+    /// # Errors
+    /// - `ShareError::InsufficientShares` if `x_vals` and `y_vals` have mismatched lengths.
+    fn lagrange_interpolate<F: FftField>(
+        x_vals: &[F],
+        y_vals: &[F],
+    ) -> Result<DensePolynomial<F>, ShareError> {
+        if x_vals.len() != y_vals.len() {
+            return Err(ShareError::InvalidInput);
+        }
+        let n = x_vals.len();
+        let mut result = DensePolynomial::zero();
+
+        for j in 0..n {
+            let mut numerator = DensePolynomial::from_coefficients_slice(&[F::one()]);
+            let mut denominator = F::one();
+
+            for m in 0..n {
+                if m != j {
+                    numerator =
+                        &numerator * &DensePolynomial::from_coefficients_slice(&[-x_vals[m], F::one()]);
+                    denominator *= x_vals[j] - x_vals[m];
+                }
+            }
+
+            let term = numerator * DensePolynomial::from_coefficients_slice(&[y_vals[j] / denominator]);
+            result = &result + &term;
+        }
+
+        Ok(result)
+    }
 }
 
 /// In MPC, there needs to be a way for a dealer and the nodes to broadcast messages
@@ -57,9 +98,11 @@ pub trait RBC: Send + Sync + 'static {
 /// Now, it's time to define the MPC Protocol trait.
 /// Given an underlying secret sharing protocol and a reliable broadcast protocol,
 /// you can define an MPC protocol.
-trait MPCProtocol<S: SecretSharingScheme> {
+trait MPCProtocol<S: SecretSharingScheme<N, F>, R: RBC> where F: FftField {
     /// Defines the information needed to run and define the MPC protocol.
     type MPCOpts;
+
+    type ShareType;
 
     fn init(opts: Self::MPCOpts);
 
@@ -71,7 +114,7 @@ trait MPCProtocol<S: SecretSharingScheme> {
 }
 
 /// Some MPC protocols require preprocessing before they can be used
-trait PreprocessingMPCProtocol<S: SecretSharingScheme, R: RBC>: MPCProtocol<S, R> {
+trait PreprocessingMPCProtocol<S: SecretSharingScheme<F,N>, R: RBC, F: FftField, const N: usize>: MPCProtocol<S, R>{
     /// Defines the information needed to run the preprocessing phase of an MPC protocol
     type PreprocessingOpts;
 
