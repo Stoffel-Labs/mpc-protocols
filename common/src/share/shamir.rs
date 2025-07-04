@@ -27,7 +27,7 @@ impl<F: FftField> SecretSharingScheme<F, 1> for ShamirShare<F> {
         degree: usize,
         ids: &[usize],
         rng: &mut impl Rng,
-    ) -> Vec<Self> {
+    ) -> Result<Vec<Self>, ShareError> {
         let mut poly = DensePolynomial::rand(degree, rng);
         poly[0] = secret;
 
@@ -41,7 +41,7 @@ impl<F: FftField> SecretSharingScheme<F, 1> for ShamirShare<F> {
                 )
             })
             .collect();
-        shares
+        Ok(shares)
     }
 
     // recover the secret of the input shares

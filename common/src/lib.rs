@@ -7,11 +7,14 @@ pub mod rbc;
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
 
+use std::error::Error;
+
 use crate::{
     rbc::{rbc::Network, rbc_store::Msg},
     share::ShareError,
 };
-use ark_std::rand::Rng;
+
+use ark_std::rand::{Error, Rng};
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use async_trait::async_trait;

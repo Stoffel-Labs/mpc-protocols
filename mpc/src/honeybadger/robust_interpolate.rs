@@ -37,6 +37,29 @@ pub enum InterpolateError {
     Inner(#[from] ShareError),
 }
 
+pub type RobustShamirShare<T> = Share<T, 1>;
+
+impl<F: FftField> RobustShamirShare<F> {
+    fn new(share: F, degree: usize, id: usize) -> Self {
+        Share { share: [share], id: id, degree: degree }
+    }
+}
+
+impl<F: FftField> SecretSharingScheme<F, 1> for RobustShamirShare<F> {
+    fn compute_shares(
+            secret: Self::SecretType,
+            degree: usize,
+            ids: &[usize],
+            rng: &mut impl Rng,
+        ) -> Vec<Self> {
+        
+    }
+
+    fn recover_secret(shares: &[Self::ShareType]) -> Result<Self::SecretType, ShareError> {
+        
+    }
+}
+
 /// Computes the formal derivative of a polynomial.
 ///
 /// # Returns
