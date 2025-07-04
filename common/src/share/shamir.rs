@@ -93,48 +93,6 @@ impl<F: FftField> SecretSharingScheme<F, 1> for ShamirShare<F> {
 }
 
 
-
-impl<F> Add<Rhs = &Self> for S<F>
-where
-    F: FftField,
-{
-    type Output = Result<Self, ShareError>;
-
-    fn add(self, other: Self) -> Self::Output {
-        if self.degree != other.degree {
-            return Err(ShareError::DegreeMismatch);
-        }
-        if self.id != other.id {
-            return Err(ShareError::IdMismatch);
-        }
-        if self.shamir_type != other.shamir_type {
-            return Err(ShareError::TypeMismatch);
-        }
-        let new_share = self.share + other.share;
-        Ok(Self {
-            share: new_share,
-            id: self.id,
-            degree: self.degree,
-            shamir_type: self.shamir_type,
-        })
-    }
-}
-
-impl<F> Mul<Rhs = &F> for ShamirShare<F>
-where
-    F: FftField,
-{
-    type Output = Self;
-    fn mul(self, rhs: F) -> Self::Output {
-        Self {
-            share: self.share * rhs,
-            id: self.id,
-            degree: self.degree,
-            shamir_type: self.shamir_type,
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
 

@@ -15,7 +15,7 @@ use ark_std::rand::Rng;
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use async_trait::async_trait;
-use std::{sync::Arc, usize};
+use std::{ops::{Add, Mul}, sync::Arc, usize};
 use tokio::sync::mpsc::Receiver;
 
 
@@ -72,6 +72,44 @@ pub trait SecretSharingScheme<F: FftField, const N: usize>: Sized {
         Ok(result)
     }
 }
+
+impl<F: FftField, const N:usize> Add<Self> for Share<F, N> {
+    type Output = Result<Self, ShareError>;
+
+    fn add(self, other: Self) -> Self::Output {
+        if self.degree != other.degree {
+            return Err(ShareError::DegreeMismatch);
+        }
+
+        if self.id != other.id {
+            return Err(ShareError::IdMismatch);
+        }
+
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] + other.share[i]);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+        })
+    }
+}
+
+impl<F: FftField, const N:usize> Mul<F> for Share<F, N> {
+    type Output = Result<Self, ShareError>;
+
+    fn mul(self, other: F) -> Self::Output {
+        let new_share: [F; N] = std::array::from_fn(|i| other * self.share[i]);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+        })
+    }
+}
+
+
 
 /// In MPC, there needs to be a way for a dealer and the nodes to broadcast messages
 /// to each other. And the receivers need to agree on the senders' messages.
