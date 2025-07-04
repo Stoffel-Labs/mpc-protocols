@@ -34,7 +34,7 @@ pub trait SecretSharingScheme<F: FftField, const N: usize>: Sized {
         degree: usize,
         ids: &[usize],
         rng: &mut impl Rng,
-    ) -> Share<F, N>;
+    ) -> Vec<Share<F, N>>;
 
     /// Recover the secret of the input shares.
     fn recover_secret(shares: &[Share<F, N>]) -> Result<Self::SecretType, ShareError>;
@@ -43,7 +43,7 @@ pub trait SecretSharingScheme<F: FftField, const N: usize>: Sized {
     ///
     /// # Errors
     /// - `ShareError::InsufficientShares` if `x_vals` and `y_vals` have mismatched lengths.
-    fn lagrange_interpolate<F: FftField>(
+    fn lagrange_interpolate(
         x_vals: &[F],
         y_vals: &[F],
     ) -> Result<DensePolynomial<F>, ShareError> {
