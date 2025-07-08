@@ -5,9 +5,9 @@ use once_cell::sync::Lazy;
 use std::{
     collections::HashMap, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec,
 };
-use stoffelmpc_common::SecretSharing;
+use stoffelmpc_mpc::common::share::shamir::ShamirShare;
+use stoffelmpc_mpc::common::SecretSharingScheme;
 
-use stoffelmpc_common::share::shamir::{self, ShamirSecretSharing};
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{InitMessage, RanDouShaMessage};
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaParams};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
@@ -41,17 +41,12 @@ pub fn test_setup(
 pub fn get_reconstruct_input(
     n: usize,
     degree_t: usize,
-) -> (
-    Fr,
-    Vec<ShamirSecretSharing<Fr>>,
-    Vec<ShamirSecretSharing<Fr>>,
-) {
+) -> (Fr, Vec<ShamirShare<Fr>>, Vec<ShamirShare<Fr>>) {
     let mut rng = test_rng();
     let secret = Fr::rand(&mut rng);
     let ids: Vec<usize> = (1..=n).collect();
-    let shares_si_t = shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
-    let shares_si_2t =
-        shamir::ShamirSecretSharing::compute_shares(secret, degree_t * 2, &ids, &mut rng);
+    let shares_si_t = ShamirShare::compute_shares(secret, degree_t, &ids, &mut rng);
+    let shares_si_2t = ShamirShare::compute_shares(secret, degree_t * 2, &ids, &mut rng);
     (secret, shares_si_t, shares_si_2t)
 }
 
@@ -61,8 +56,8 @@ pub fn construct_e2e_input(
     degree_t: usize,
 ) -> (
     Vec<Fr>,
-    Vec<Vec<ShamirSecretSharing<Fr>>>,
-    Vec<Vec<ShamirSecretSharing<Fr>>>,
+    Vec<Vec<ShamirShare<Fr>>>,
+    Vec<Vec<ShamirShare<Fr>>>,
 ) {
     let mut n_shares_t = vec![vec![]; n];
     let mut n_shares_2t = vec![vec![]; n];
@@ -73,13 +68,11 @@ pub fn construct_e2e_input(
     for _ in 0..n {
         let secret = Fr::rand(&mut rng);
         secrets.push(secret);
-        let shares_si_t =
-            shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
-        let shares_si_2t =
-            shamir::ShamirSecretSharing::compute_shares(secret, degree_t * 2, &ids, &mut rng);
+        let shares_si_t = ShamirShare::compute_shares(secret, degree_t, &ids, &mut rng);
+        let shares_si_2t = ShamirShare::compute_shares(secret, degree_t * 2, &ids, &mut rng);
         for j in 0..n {
-            n_shares_t[j].push(shares_si_t[j]);
-            n_shares_2t[j].push(shares_si_2t[j]);
+            n_shares_t[j].push(shares_si_t[j].clone());
+            n_shares_2t[j].push(shares_si_2t[j].clone());
         }
     }
 
@@ -103,8 +96,8 @@ pub fn create_nodes(n_parties: usize) -> Vec<Arc<Mutex<RanDouShaNode<Fr>>>> {
 /// Initializes all nodes with their respective shares.
 pub async fn initialize_all_nodes(
     nodes: &[Arc<Mutex<RanDouShaNode<Fr>>>],
-    n_shares_t: &[Vec<ShamirSecretSharing<Fr>>],
-    n_shares_2t: &[Vec<ShamirSecretSharing<Fr>>],
+    n_shares_t: &[Vec<ShamirShare<Fr>>],
+    n_shares_2t: &[Vec<ShamirShare<Fr>>],
     params: &RanDouShaParams,
     network: Arc<Mutex<FakeNetwork>>,
 ) {
@@ -152,7 +145,7 @@ pub fn spawn_receiver_tasks(
     network: Arc<Mutex<FakeNetwork>>,
     fin_send: mpsc::Sender<(
         usize,
-        (Vec<ShamirSecretSharing<Fr>>, Vec<ShamirSecretSharing<Fr>>),
+        (Vec<ShamirShare<Fr>>, Vec<ShamirShare<Fr>>),
     )>,
     abort_counter: Option<Arc<AtomicUsize>>,
 ) -> JoinSet<()> {

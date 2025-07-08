@@ -1,25 +1,32 @@
-use std::ops::{Add, Mul};
+use std::marker::PhantomData;
 
 /// This file contains the more common secret sharing protocols used in MPC.
 /// You can reuse them for the MPC protocols that you aim to implement.
 ///
-use crate::{Share, SecretSharingScheme, ShareError};
-use ark_ff::{FftField, Zero};
+use crate::common::{lagrange_interpolate, share::ShareError, SecretSharingScheme, Share};
+use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 
-pub type ShamirShare<T> = Share<T, 1>;  
-
+#[derive(Clone, Debug)]
+pub struct Shamir;
+pub type ShamirShare<T> = Share<T, 1, Shamir>;
 
 impl<F: FftField> ShamirShare<F> {
-    fn new(share: F, degree: usize, id: usize) -> Self {
-        Share { share: [share], id: id, degree: degree }
+    pub fn new(share: F, id: usize, degree: usize) -> Self {
+        Share {
+            share: [share],
+            id: id,
+            degree: degree,
+            _sharetype: PhantomData,
+        }
     }
 }
 
 impl<F: FftField> SecretSharingScheme<F, 1> for ShamirShare<F> {
     type SecretType = F;
+    type Sharetype = Shamir;
+    type Error = ShareError;
 
     // compute the shamir shares of all ids for a secret
     fn compute_shares(
@@ -27,25 +34,21 @@ impl<F: FftField> SecretSharingScheme<F, 1> for ShamirShare<F> {
         degree: usize,
         ids: &[usize],
         rng: &mut impl Rng,
-    ) -> Result<Vec<Self>, ShareError> {
+    ) -> Vec<Self> {
         let mut poly = DensePolynomial::rand(degree, rng);
         poly[0] = secret;
 
         let shares = ids
             .iter()
-            .map(|id| {
-                ShamirShare::new(
-                    poly.evaluate(&F::from(*id as u64)),
-                    *id,
-                    degree
-                )
-            })
+            .map(|id| ShamirShare::new(poly.evaluate(&F::from(*id as u64)), *id, degree))
             .collect();
-        Ok(shares)
+        shares
     }
 
     // recover the secret of the input shares
-    fn recover_secret(shares: &[Self]) -> Result<Self::SecretType, ShareError> {
+    fn recover_secret(
+        shares: &[Self],
+    ) -> Result<(Vec<Self::SecretType>, Self::SecretType), ShareError> {
         let deg = shares[0].degree;
         if !shares.iter().all(|share| share.degree == deg) {
             return Err(ShareError::DegreeMismatch);
@@ -58,40 +61,10 @@ impl<F: FftField> SecretSharingScheme<F, 1> for ShamirShare<F> {
             .map(|share| (F::from(share.id as u64), share.share[0]))
             .unzip();
 
-        let result_poly = Self::lagrange_interpolate(&x_vals, &y_vals)?;
-        Ok(result_poly[0])
+        let result_poly = lagrange_interpolate(&x_vals, &y_vals)?;
+        Ok((result_poly.coeffs.clone(), result_poly[0]))
     }
-    
-    fn lagrange_interpolate(
-    x_vals: &[F],
-    y_vals: &[F],
-        ) -> Result<DensePolynomial<F>, ShareError> {
-    if x_vals.len() != y_vals.len() {
-        return Err(ShareError::InvalidInput);
-    }
-    let n = x_vals.len();
-    let mut result = DensePolynomial::zero();
-    
-    for j in 0..n {
-        let mut numerator = DensePolynomial::from_coefficients_slice(&[<F>::one()]);
-        let mut denominator = <F>::one();
-    
-        for m in 0..n {
-            if m != j {
-                numerator =
-                    &numerator * &DensePolynomial::from_coefficients_slice(&[-x_vals[m], <F>::one()]);
-                denominator *= x_vals[j] - x_vals[m];
-            }
-        }
-    
-        let term = numerator * DensePolynomial::from_coefficients_slice(&[y_vals[j] / denominator]);
-        result = &result + &term;
-    }
-    
-    Ok(result)
-        }
 }
-
 
 #[cfg(test)]
 mod test {
@@ -106,8 +79,8 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let shares = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
-        let recovered_secret = ShamirSecretSharing::recover_secret(&shares).unwrap();
+        let shares = ShamirShare::compute_shares(secret, 5, ids, &mut rng);
+        let (_, recovered_secret) = ShamirShare::recover_secret(&shares).unwrap();
         assert!(recovered_secret == secret);
     }
 
@@ -117,13 +90,14 @@ mod test {
         let secret2 = Fr::from(20);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let shares_1 = ShamirSecretSharing::compute_shares(secret1, 5, ids, &mut rng);
-        let shares_2 = ShamirSecretSharing::compute_shares(secret2, 5, ids, &mut rng);
+        let shares_1 = ShamirShare::compute_shares(secret1, 5, ids, &mut rng);
+        let shares_2 = ShamirShare::compute_shares(secret2, 5, ids, &mut rng);
 
-        let added_shares = zip(shares_1, shares_2)
-            .map(|(a, b)| a.add(&b).unwrap())
-            .collect::<Vec<_>>();
-        let recovered_secret = ShamirSecretSharing::recover_secret(&added_shares).unwrap();
+        let added_shares: Vec<_> = zip(shares_1, shares_2)
+            .map(|(a, b)| a + b)
+            .collect::<Result<_, _>>() // Handles errors cleanly
+            .unwrap();
+        let (_, recovered_secret) = ShamirShare::recover_secret(&added_shares).unwrap();
         assert!(recovered_secret == secret1 + secret2);
     }
 
@@ -132,12 +106,13 @@ mod test {
         let secret = Fr::from(55);
         let ids = &[1, 2, 3, 4, 5, 6, 7, 20];
         let mut rng = test_rng();
-        let shares = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
+        let shares = ShamirShare::compute_shares(secret, 5, ids, &mut rng);
         let tripled_shares = shares
             .iter()
-            .map(|share| share.scalar_mul(&Fr::from(3)))
-            .collect::<Vec<_>>();
-        let recovered_secret = ShamirSecretSharing::recover_secret(&tripled_shares).unwrap();
+            .map(|share| share.clone() * Fr::from(3))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let (_, recovered_secret) = ShamirShare::recover_secret(&tripled_shares).unwrap();
         assert!(recovered_secret == secret * Fr::from(3));
     }
 
@@ -146,15 +121,16 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let mut shares = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
+        let mut shares = ShamirShare::compute_shares(secret, 5, ids, &mut rng);
 
         shares[2].degree = 4;
-        let recovered_secret = ShamirSecretSharing::recover_secret(&shares).unwrap_err();
+        let recovered_secret = ShamirShare::recover_secret(&shares).unwrap_err();
         match recovered_secret {
             ShareError::InsufficientShares => panic!("incorrect error type"),
             ShareError::DegreeMismatch => (),
             ShareError::IdMismatch => panic!("incorrect error type"),
             ShareError::InvalidInput => panic!("incorrect error type"),
+            ShareError::TypeMismatch => panic!("incorrect error type"),
         }
     }
 
@@ -163,13 +139,14 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3];
         let mut rng = test_rng();
-        let shares = ShamirSecretSharing::compute_shares(secret, 5, ids, &mut rng);
-        let recovered_secret = ShamirSecretSharing::recover_secret(&shares).unwrap_err();
+        let shares = ShamirShare::compute_shares(secret, 5, ids, &mut rng);
+        let recovered_secret = ShamirShare::recover_secret(&shares).unwrap_err();
         match recovered_secret {
             ShareError::InsufficientShares => (),
             ShareError::DegreeMismatch => panic!("incorrect error type"),
             ShareError::IdMismatch => panic!("incorrect error type"),
             ShareError::InvalidInput => panic!("incorrect error type"),
+            ShareError::TypeMismatch => panic!("incorrect error type"),
         }
     }
 
@@ -180,15 +157,16 @@ mod test {
         let ids1 = &[1, 2, 3, 4, 5, 6];
         let ids2 = &[7, 8, 9, 4, 5, 6];
         let mut rng = test_rng();
-        let shares_1 = ShamirSecretSharing::compute_shares(secret1, 5, ids1, &mut rng);
-        let shares_2 = ShamirSecretSharing::compute_shares(secret2, 5, ids2, &mut rng);
+        let shares_1 = ShamirShare::compute_shares(secret1, 5, ids1, &mut rng);
+        let shares_2 = ShamirShare::compute_shares(secret2, 5, ids2, &mut rng);
 
-        let err = shares_1[0].add(&shares_2[0]).unwrap_err();
+        let err = (shares_1[0].clone() + shares_2[0].clone()).unwrap_err();
         match err {
             ShareError::InsufficientShares => panic!("incorrect error type"),
             ShareError::DegreeMismatch => panic!("incorrect error type"),
             ShareError::IdMismatch => (),
             ShareError::InvalidInput => panic!("incorrect error type"),
+            ShareError::TypeMismatch => panic!("incorrect error type"),
         }
     }
 }

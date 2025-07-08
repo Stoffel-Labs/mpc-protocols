@@ -3,3 +3,4 @@
 ///
 /// [honeybadger-paper]: https://eprint.iacr.org/2019/883.pdf
 pub mod honeybadger;
+pub mod common;

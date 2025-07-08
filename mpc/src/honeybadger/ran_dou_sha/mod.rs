@@ -1,9 +1,9 @@
 pub mod messages;
 
-use crate::honeybadger::{
+use crate::{common::{share::shamir::ShamirShare, SecretSharingScheme}, honeybadger::{
     batch_recon::batch_recon::{apply_vandermonde, make_vandermonde},
     robust_interpolate::InterpolateError,
-};
+}};
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
@@ -11,7 +11,6 @@ use messages::{
     InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
 };
 use std::{collections::HashMap, sync::Arc};
-use stoffelmpc_common::{share::shamir::ShamirSecretSharing, SecretSharing};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -44,15 +43,15 @@ pub enum RanDouShaError {
 #[derive(Clone)]
 pub struct RanDouShaStore<F: FftField> {
     /// Vector that stores the received degree t shares of r.
-    pub received_r_shares_degree_t: HashMap<PartyId, ShamirSecretSharing<F>>,
+    pub received_r_shares_degree_t: HashMap<PartyId, ShamirShare<F>>,
     /// Vector that stores the received degree 2t shares of r.
-    pub received_r_shares_degree_2t: HashMap<PartyId, ShamirSecretSharing<F>>,
+    pub received_r_shares_degree_2t: HashMap<PartyId, ShamirShare<F>>,
     /// Vector of r shares of degree t computed as a result of multiplying the Vandermonde matrix
     /// with the shares of s.
-    pub computed_r_shares_degree_t: Vec<ShamirSecretSharing<F>>,
+    pub computed_r_shares_degree_t: Vec<ShamirShare<F>>,
     /// Vector of r shares of degree 2t computed as a result of multiplying the Vandermonde matrix
     /// with the shares of s.
-    pub computed_r_shares_degree_2t: Vec<ShamirSecretSharing<F>>,
+    pub computed_r_shares_degree_2t: Vec<ShamirShare<F>>,
     /// Vector that stores the nodes who have sent the output ok msg.
     pub received_ok_msg: Vec<usize>,
 
@@ -171,8 +170,8 @@ where
         let network_locked = network.lock().await;
         for party in network_locked.parties() {
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
-                let share_deg_t = r_deg_t[party.id() - 1];
-                let share_deg_2t = r_deg_2t[party.id() - 1];
+                let share_deg_t = r_deg_t[party.id() - 1].clone();
+                let share_deg_2t = r_deg_2t[party.id() - 1].clone();
                 let reconst_message =
                     ReconstructionMessage::new(self.id, share_deg_t, share_deg_2t);
 
@@ -251,8 +250,8 @@ where
             if store.received_r_shares_degree_t.len() >= params.threshold + 1
                 && store.received_r_shares_degree_2t.len() >= 2 * params.threshold + 1
             {
-                let mut shares_t_for_recon: Vec<ShamirSecretSharing<F>> = Vec::new();
-                let mut shares_2t_for_recon: Vec<ShamirSecretSharing<F>> = Vec::new();
+                let mut shares_t_for_recon: Vec<ShamirShare<F>> = Vec::new();
+                let mut shares_2t_for_recon: Vec<ShamirShare<F>> = Vec::new();
 
                 for (_, share) in store.received_r_shares_degree_t.iter() {
                     shares_t_for_recon.push(share.clone());
@@ -263,8 +262,8 @@ where
 
                 // (5) Perform reconstruction for both degrees.
                 // ShamirSecretSharing::reconstruct expects a vector of shares.
-                let reconstructed_r_t = ShamirSecretSharing::recover_secret(&shares_t_for_recon);
-                let reconstructed_r_2t = ShamirSecretSharing::recover_secret(&shares_2t_for_recon);
+                let reconstructed_r_t = ShamirShare::recover_secret(&shares_t_for_recon);
+                let reconstructed_r_2t = ShamirShare::recover_secret(&shares_2t_for_recon);
 
                 // if the reconstruction fails, broadcast false
                 let mut output_message = OutputMessage::new(self.id, true);
@@ -315,7 +314,7 @@ where
         &mut self,
         message: &OutputMessage,
         params: &RanDouShaParams,
-    ) -> Result<(Vec<ShamirSecretSharing<F>>, Vec<ShamirSecretSharing<F>>), RanDouShaError> {
+    ) -> Result<(Vec<ShamirShare<F>>, Vec<ShamirShare<F>>), RanDouShaError> {
         info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, params.session_id, message.sender_id, message.msg);
         // todo - add randousha status so we can omit output_handler
         // abort randousha once received the abort message
@@ -358,7 +357,7 @@ where
         message: &RanDouShaMessage,
         params: &RanDouShaParams,
         network: Arc<Mutex<N>>,
-    ) -> Result<Option<(Vec<ShamirSecretSharing<F>>, Vec<ShamirSecretSharing<F>>)>, RanDouShaError>
+    ) -> Result<Option<(Vec<ShamirShare<F>>, Vec<ShamirShare<F>>)>, RanDouShaError>
     where
         N: Network,
     {

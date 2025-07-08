@@ -2,7 +2,7 @@
 /// You can reuse them in your own custom MPC protocol implementations.
 use super::rbc_store::*;
 use super::utils::*;
-use crate::RBC;
+use crate::common::RBC;
 use async_trait::async_trait;
 use bincode;
 use std::{collections::HashMap, sync::Arc};
