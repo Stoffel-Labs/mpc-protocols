@@ -31,18 +31,30 @@ impl<F: FftField> SecretSharingScheme<F, 1> for ShamirShare<F> {
     // compute the shamir shares of all ids for a secret
     fn compute_shares(
         secret: Self::SecretType,
+        _n: usize,
         degree: usize,
-        ids: &[usize],
+        ids: Option<&[usize]>,
         rng: &mut impl Rng,
-    ) -> Vec<Self> {
+    ) -> Result<Vec<Self>, ShareError> {
         let mut poly = DensePolynomial::rand(degree, rng);
         poly[0] = secret;
 
-        let shares = ids
-            .iter()
-            .map(|id| ShamirShare::new(poly.evaluate(&F::from(*id as u64)), *id, degree))
-            .collect();
-        shares
+        match ids {
+            Some(id_list) => {
+                let shares = id_list
+                    .iter()
+                    .map(|id| {
+                        let x = F::from(*id as u64);
+                        let y = poly.evaluate(&x);
+                        ShamirShare::new(y, *id, degree)
+                    })
+                    .collect();
+                Ok(shares)
+            }
+            None => {
+                return Err(ShareError::InvalidInput);
+            }
+        }
     }
 
     // recover the secret of the input shares
@@ -79,7 +91,7 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let shares = ShamirShare::compute_shares(secret, 5, ids, &mut rng);
+        let shares = ShamirShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
         let (_, recovered_secret) = ShamirShare::recover_secret(&shares).unwrap();
         assert!(recovered_secret == secret);
     }
@@ -90,8 +102,8 @@ mod test {
         let secret2 = Fr::from(20);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let shares_1 = ShamirShare::compute_shares(secret1, 5, ids, &mut rng);
-        let shares_2 = ShamirShare::compute_shares(secret2, 5, ids, &mut rng);
+        let shares_1 = ShamirShare::compute_shares(secret1, 6, 5, Some(ids), &mut rng).unwrap();
+        let shares_2 = ShamirShare::compute_shares(secret2, 6, 5, Some(ids), &mut rng).unwrap();
 
         let added_shares: Vec<_> = zip(shares_1, shares_2)
             .map(|(a, b)| a + b)
@@ -106,7 +118,7 @@ mod test {
         let secret = Fr::from(55);
         let ids = &[1, 2, 3, 4, 5, 6, 7, 20];
         let mut rng = test_rng();
-        let shares = ShamirShare::compute_shares(secret, 5, ids, &mut rng);
+        let shares = ShamirShare::compute_shares(secret, 8, 5, Some(ids), &mut rng).unwrap();
         let tripled_shares = shares
             .iter()
             .map(|share| share.clone() * Fr::from(3))
@@ -121,7 +133,7 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let mut shares = ShamirShare::compute_shares(secret, 5, ids, &mut rng);
+        let mut shares = ShamirShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
 
         shares[2].degree = 4;
         let recovered_secret = ShamirShare::recover_secret(&shares).unwrap_err();
@@ -139,7 +151,7 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3];
         let mut rng = test_rng();
-        let shares = ShamirShare::compute_shares(secret, 5, ids, &mut rng);
+        let shares = ShamirShare::compute_shares(secret, 3, 5, Some(ids), &mut rng).unwrap();
         let recovered_secret = ShamirShare::recover_secret(&shares).unwrap_err();
         match recovered_secret {
             ShareError::InsufficientShares => (),
@@ -157,8 +169,8 @@ mod test {
         let ids1 = &[1, 2, 3, 4, 5, 6];
         let ids2 = &[7, 8, 9, 4, 5, 6];
         let mut rng = test_rng();
-        let shares_1 = ShamirShare::compute_shares(secret1, 5, ids1, &mut rng);
-        let shares_2 = ShamirShare::compute_shares(secret2, 5, ids2, &mut rng);
+        let shares_1 = ShamirShare::compute_shares(secret1, 6, 5, Some(ids1), &mut rng).unwrap();
+        let shares_2 = ShamirShare::compute_shares(secret2, 6, 5, Some(ids2), &mut rng).unwrap();
 
         let err = (shares_1[0].clone() + shares_2[0].clone()).unwrap_err();
         match err {

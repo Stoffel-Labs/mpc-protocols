@@ -308,7 +308,8 @@ mod tests {
         for (j, secret) in secrets.iter().enumerate() {
             // Call gen_shares to create 'n' shares for the current 'secret'
             let ids: Vec<usize> = (0..n).collect();
-            let secret_shares = RobustShamirShare::compute_shares(*secret, n, &ids, &mut rng);
+            let secret_shares =
+                RobustShamirShare::compute_shares(*secret, n, t, Some(&ids), &mut rng).unwrap();
             for i in 0..n {
                 shares[i][j] = secret_shares[i].clone(); // Party i receives evaluation of f_j at α_i
             }

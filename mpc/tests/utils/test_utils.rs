@@ -45,8 +45,10 @@ pub fn get_reconstruct_input(
     let mut rng = test_rng();
     let secret = Fr::rand(&mut rng);
     let ids: Vec<usize> = (1..=n).collect();
-    let shares_si_t = ShamirShare::compute_shares(secret, degree_t, &ids, &mut rng);
-    let shares_si_2t = ShamirShare::compute_shares(secret, degree_t * 2, &ids, &mut rng);
+    let shares_si_t =
+        ShamirShare::compute_shares(secret, n, degree_t, Some(&ids), &mut rng).unwrap();
+    let shares_si_2t =
+        ShamirShare::compute_shares(secret, n, degree_t * 2, Some(&ids), &mut rng).unwrap();
     (secret, shares_si_t, shares_si_2t)
 }
 
@@ -68,8 +70,10 @@ pub fn construct_e2e_input(
     for _ in 0..n {
         let secret = Fr::rand(&mut rng);
         secrets.push(secret);
-        let shares_si_t = ShamirShare::compute_shares(secret, degree_t, &ids, &mut rng);
-        let shares_si_2t = ShamirShare::compute_shares(secret, degree_t * 2, &ids, &mut rng);
+        let shares_si_t =
+            ShamirShare::compute_shares(secret, n, degree_t, Some(&ids), &mut rng).unwrap();
+        let shares_si_2t =
+            ShamirShare::compute_shares(secret, n, degree_t * 2, Some(&ids), &mut rng).unwrap();
         for j in 0..n {
             n_shares_t[j].push(shares_si_t[j].clone());
             n_shares_2t[j].push(shares_si_2t[j].clone());
@@ -143,10 +147,7 @@ pub fn spawn_receiver_tasks(
     mut receivers: Vec<Receiver<Vec<u8>>>,
     params: RanDouShaParams,
     network: Arc<Mutex<FakeNetwork>>,
-    fin_send: mpsc::Sender<(
-        usize,
-        (Vec<ShamirShare<Fr>>, Vec<ShamirShare<Fr>>),
-    )>,
+    fin_send: mpsc::Sender<(usize, (Vec<ShamirShare<Fr>>, Vec<ShamirShare<Fr>>))>,
     abort_counter: Option<Arc<AtomicUsize>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();

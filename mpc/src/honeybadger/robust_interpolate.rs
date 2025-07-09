@@ -52,21 +52,43 @@ impl<F: FftField> SecretSharingScheme<F, 1> for RobustShamirShare<F> {
     type SecretType = F;
     type Sharetype = Robust;
     type Error = InterpolateError;
-    // compute the shamir shares of all ids for a secret
+    /// Generates `n` secret shares for a `value` using a degree `t` polynomial,
+    /// such that `f(0) = value`. Any `t + 1` shares can reconstruct the secret.
+    ///
+    /// Shares are evaluations of `f(x)` on an FFT domain.
+    ///
+    /// # Errors
+    /// - `InterpolateError::InvalidInput` if `n` is not greater than `t`.
+    /// - `InterpolateError::NoSuitableDomain` if a suitable FFT evaluation domain of size `n` isn't found.
     fn compute_shares(
         secret: Self::SecretType,
+        n: usize,
         degree: usize,
-        ids: &[usize],
+        _ids: Option<&[usize]>,
         rng: &mut impl Rng,
-    ) -> Vec<Self> {
-        let mut poly = DensePolynomial::rand(degree, rng);
-        poly[0] = secret;
+    ) -> Result<Vec<RobustShamirShare<F>>, InterpolateError> {
+        if n <= degree {
+            return Err(InterpolateError::InvalidInput(format!(
+                "Number of shares ({}) must be greater than threshold ({})",
+                n, degree
+            )));
+        }
+        let domain = GeneralEvaluationDomain::<F>::new(n)
+            .ok_or_else(|| InterpolateError::NoSuitableDomain(n))?;
 
-        let shares = ids
+        let mut poly = DensePolynomial::<F>::rand(degree, rng);
+        poly[0] = secret;
+        // Evaluate the polynomial over the domain
+        let evals = domain.fft(&poly);
+
+        // Create shares from evaluations
+        let shares = evals
             .iter()
-            .map(|id| RobustShamirShare::new(poly.evaluate(&F::from(*id as u64)), *id, degree))
+            .enumerate()
+            .map(|(i, eval)| RobustShamirShare::new(*eval, i, degree))
             .collect();
-        shares
+
+        Ok(shares)
     }
 
     /// Full robust interpolation combining optimistic decoding and error correction
@@ -219,44 +241,6 @@ fn robust_interpolate_fnt<F: FftField>(
         ))
     }
 }
-
-/// Generates `n` secret shares for a `value` using a degree `t` polynomial,
-/// such that `f(0) = value`. Any `t + 1` shares can reconstruct the secret.
-///
-/// Shares are evaluations of `f(x)` on an FFT domain.
-///
-/// # Errors
-/// - `InterpolateError::InvalidInput` if `n` is not greater than `t`.
-/// - `InterpolateError::NoSuitableDomain` if a suitable FFT evaluation domain of size `n` isn't found.
-// pub fn gen_shares<F: FftField, R: Rng>(
-//     value: F,
-//     n: usize,
-//     t: usize,
-//     rng: &mut R,
-// ) -> Result<Vec<ShamirSecretSharing<F>>, InterpolateError> {
-//     if n <= t {
-//         return Err(InterpolateError::InvalidInput(format!(
-//             "Number of shares ({}) must be greater than threshold ({})",
-//             n, t
-//         )));
-//     }
-//     let domain = GeneralEvaluationDomain::<F>::new(n)
-//         .ok_or_else(|| InterpolateError::NoSuitableDomain(n))?;
-
-//     let mut poly = DensePolynomial::<F>::rand(t, rng);
-//     poly[0] = value;
-//     // Evaluate the polynomial over the domain
-//     let evals = domain.fft(&poly);
-
-//     // Create shares from evaluations
-//     let shares = evals
-//         .iter()
-//         .enumerate()
-//         .map(|(i, eval)| ShamirSecretSharing::new(*eval, i, t))
-//         .collect();
-
-//     Ok(shares)
-// }
 
 /// Decodes a Reed-Solomon codeword with known erasure positions using Gao's algorithm.
 ///
@@ -478,7 +462,7 @@ mod tests {
 
         let secret = Fr::from(42u32);
         let ids: Vec<usize> = (0..n).collect();
-        let shares = RobustShamirShare::compute_shares(secret, t, &ids, &mut rng);
+        let shares = RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
 
         // === Case 1: Erasure-only decoding ===
         let mut erased: Vec<Fr> = shares.iter().map(|a| a.share[0]).collect();
@@ -500,7 +484,7 @@ mod tests {
         let n = 8;
         let secret = Fr::from(42u32);
         let ids: Vec<usize> = (0..n).collect();
-        let shares = RobustShamirShare::compute_shares(secret, t, &ids, &mut rng);
+        let shares = RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
 
         // === Case 2: Error-only decoding ===
         let mut corrupted: Vec<Fr> = shares.iter().map(|a| a.share[0]).collect();
@@ -528,7 +512,7 @@ mod tests {
         // Step 1: Create random message and encode it
         let secret = Fr::from(42u32);
         let ids: Vec<usize> = (0..n).collect();
-        let shares = RobustShamirShare::compute_shares(secret, t, &ids, &mut rng);
+        let shares = RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
 
         // // Step 2: Create shares as (index, value)
         // let shares_list: Vec<(usize, ShamirSecretSharing<Fr>)> =
@@ -577,7 +561,7 @@ mod tests {
         // Generate random message and encode it
         let secret = Fr::from(42u32);
         let ids: Vec<usize> = (0..n).collect();
-        let shares = RobustShamirShare::compute_shares(secret, t, &ids, &mut rng);
+        let shares = RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
 
         // // Create shares as (index, value)
         // let shares_list: Vec<(usize, ShamirSecretSharing<Fr>)> =

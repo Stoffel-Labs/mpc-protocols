@@ -44,10 +44,11 @@ pub trait SecretSharingScheme<F: FftField, const N: usize>: Sized {
 
     fn compute_shares(
         secret: Self::SecretType,
+        n: usize,
         degree: usize,
-        ids: &[usize],
+        ids: Option<&[usize]>,
         rng: &mut impl Rng,
-    ) -> Vec<Share<F, N, Self::Sharetype>>;
+    ) -> Result<Vec<Share<F, N, Self::Sharetype>>, Self::Error>;
 
     /// Recover the secret of the input shares.
     fn recover_secret(

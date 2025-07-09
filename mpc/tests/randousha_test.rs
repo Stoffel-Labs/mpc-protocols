@@ -196,9 +196,11 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
 
     let mut rng = test_rng();
     // ri_t created by each party i
-    let shares_ri_t = ShamirShare::compute_shares(secret, degree_t, &ids, &mut rng);
+    let shares_ri_t =
+        ShamirShare::compute_shares(secret, n_parties, degree_t, Some(&ids), &mut rng).unwrap();
     // ri_2t created by each party i
-    let shares_ri_2t = ShamirShare::compute_shares(secret_2t, degree_2t, &ids, &mut rng);
+    let shares_ri_2t =
+        ShamirShare::compute_shares(secret_2t, n_parties, degree_2t, Some(&ids), &mut rng).unwrap();
 
     // create receiver randousha node
     let mut randousha_node: RanDouShaNode<Fr> = RanDouShaNode {

@@ -273,7 +273,7 @@ where
                 }
                 // (6) Check that their 0-evaluation is the same.
                 // This means checking if the reconstructed values are equal.
-                let verify = reconstructed_r_t.unwrap() == reconstructed_r_2t.unwrap();
+                let verify = reconstructed_r_t.unwrap().1 == reconstructed_r_2t.unwrap().1;
 
                 if !verify {
                     // if the verification fails, broadcast false(aka. Abort)
