@@ -1,4 +1,4 @@
-use crate::common::{lagrange_interpolate, share::ShareError, SecretSharingScheme, Share};
+use crate::common::{lagrange_interpolate, share::ShareError, SecretSharingScheme, ShamirShare};
 use ark_ff::{FftField, Zero};
 use ark_poly::{
     univariate::{DenseOrSparsePolynomial, DensePolynomial},
@@ -35,11 +35,11 @@ pub enum InterpolateError {
 
 #[derive(Clone, Debug)]
 pub struct Robust;
-pub type RobustShamirShare<T> = Share<T, 1, Robust>;
+pub type RobustShamirShare<T> = ShamirShare<T, 1, Robust>;
 
 impl<F: FftField> RobustShamirShare<F> {
     pub fn new(share: F, id: usize, degree: usize) -> Self {
-        Share {
+        ShamirShare {
             share: [share],
             id: id,
             degree: degree,

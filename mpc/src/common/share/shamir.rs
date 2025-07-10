@@ -3,18 +3,18 @@ use std::marker::PhantomData;
 /// This file contains the more common secret sharing protocols used in MPC.
 /// You can reuse them for the MPC protocols that you aim to implement.
 ///
-use crate::common::{lagrange_interpolate, share::ShareError, SecretSharingScheme, Share};
+use crate::common::{lagrange_interpolate, share::ShareError, SecretSharingScheme, ShamirShare};
 use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_std::rand::Rng;
 
 #[derive(Clone, Debug)]
-pub struct Shamir;
-pub type ShamirShare<T> = Share<T, 1, Shamir>;
+pub struct NonRobust;
+pub type NonRobustShare<T> = ShamirShare<T, 1, NonRobust>;
 
-impl<F: FftField> ShamirShare<F> {
+impl<F: FftField> NonRobustShare<F> {
     pub fn new(share: F, id: usize, degree: usize) -> Self {
-        Share {
+        ShamirShare {
             share: [share],
             id: id,
             degree: degree,
@@ -23,9 +23,9 @@ impl<F: FftField> ShamirShare<F> {
     }
 }
 
-impl<F: FftField> SecretSharingScheme<F, 1> for ShamirShare<F> {
+impl<F: FftField> SecretSharingScheme<F, 1> for NonRobustShare<F> {
     type SecretType = F;
-    type Sharetype = Shamir;
+    type Sharetype = NonRobust;
     type Error = ShareError;
 
     // compute the shamir shares of all ids for a secret
@@ -46,7 +46,7 @@ impl<F: FftField> SecretSharingScheme<F, 1> for ShamirShare<F> {
                     .map(|id| {
                         let x = F::from(*id as u64);
                         let y = poly.evaluate(&x);
-                        ShamirShare::new(y, *id, degree)
+                        NonRobustShare::new(y, *id, degree)
                     })
                     .collect();
                 Ok(shares)
@@ -91,8 +91,8 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let shares = ShamirShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
-        let (_, recovered_secret) = ShamirShare::recover_secret(&shares).unwrap();
+        let shares = NonRobustShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
+        let (_, recovered_secret) = NonRobustShare::recover_secret(&shares).unwrap();
         assert!(recovered_secret == secret);
     }
 
@@ -102,14 +102,14 @@ mod test {
         let secret2 = Fr::from(20);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let shares_1 = ShamirShare::compute_shares(secret1, 6, 5, Some(ids), &mut rng).unwrap();
-        let shares_2 = ShamirShare::compute_shares(secret2, 6, 5, Some(ids), &mut rng).unwrap();
+        let shares_1 = NonRobustShare::compute_shares(secret1, 6, 5, Some(ids), &mut rng).unwrap();
+        let shares_2 = NonRobustShare::compute_shares(secret2, 6, 5, Some(ids), &mut rng).unwrap();
 
         let added_shares: Vec<_> = zip(shares_1, shares_2)
             .map(|(a, b)| a + b)
             .collect::<Result<_, _>>() // Handles errors cleanly
             .unwrap();
-        let (_, recovered_secret) = ShamirShare::recover_secret(&added_shares).unwrap();
+        let (_, recovered_secret) = NonRobustShare::recover_secret(&added_shares).unwrap();
         assert!(recovered_secret == secret1 + secret2);
     }
 
@@ -118,13 +118,13 @@ mod test {
         let secret = Fr::from(55);
         let ids = &[1, 2, 3, 4, 5, 6, 7, 20];
         let mut rng = test_rng();
-        let shares = ShamirShare::compute_shares(secret, 8, 5, Some(ids), &mut rng).unwrap();
+        let shares = NonRobustShare::compute_shares(secret, 8, 5, Some(ids), &mut rng).unwrap();
         let tripled_shares = shares
             .iter()
             .map(|share| share.clone() * Fr::from(3))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        let (_, recovered_secret) = ShamirShare::recover_secret(&tripled_shares).unwrap();
+        let (_, recovered_secret) = NonRobustShare::recover_secret(&tripled_shares).unwrap();
         assert!(recovered_secret == secret * Fr::from(3));
     }
 
@@ -133,10 +133,10 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let mut shares = ShamirShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
+        let mut shares = NonRobustShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
 
         shares[2].degree = 4;
-        let recovered_secret = ShamirShare::recover_secret(&shares).unwrap_err();
+        let recovered_secret = NonRobustShare::recover_secret(&shares).unwrap_err();
         match recovered_secret {
             ShareError::InsufficientShares => panic!("incorrect error type"),
             ShareError::DegreeMismatch => (),
@@ -151,8 +151,8 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3];
         let mut rng = test_rng();
-        let shares = ShamirShare::compute_shares(secret, 3, 5, Some(ids), &mut rng).unwrap();
-        let recovered_secret = ShamirShare::recover_secret(&shares).unwrap_err();
+        let shares = NonRobustShare::compute_shares(secret, 3, 5, Some(ids), &mut rng).unwrap();
+        let recovered_secret = NonRobustShare::recover_secret(&shares).unwrap_err();
         match recovered_secret {
             ShareError::InsufficientShares => (),
             ShareError::DegreeMismatch => panic!("incorrect error type"),
@@ -169,8 +169,8 @@ mod test {
         let ids1 = &[1, 2, 3, 4, 5, 6];
         let ids2 = &[7, 8, 9, 4, 5, 6];
         let mut rng = test_rng();
-        let shares_1 = ShamirShare::compute_shares(secret1, 6, 5, Some(ids1), &mut rng).unwrap();
-        let shares_2 = ShamirShare::compute_shares(secret2, 6, 5, Some(ids2), &mut rng).unwrap();
+        let shares_1 = NonRobustShare::compute_shares(secret1, 6, 5, Some(ids1), &mut rng).unwrap();
+        let shares_2 = NonRobustShare::compute_shares(secret2, 6, 5, Some(ids2), &mut rng).unwrap();
 
         let err = (shares_1[0].clone() + shares_2[0].clone()).unwrap_err();
         match err {

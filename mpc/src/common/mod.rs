@@ -26,7 +26,7 @@ use std::{
 use tokio::sync::mpsc::Receiver;
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct Share<F: FftField, const N: usize, P> {
+pub struct ShamirShare<F: FftField, const N: usize, P> {
     pub share: [F; N],
     pub id: usize,
     pub degree: usize,
@@ -48,11 +48,11 @@ pub trait SecretSharingScheme<F: FftField, const N: usize>: Sized {
         degree: usize,
         ids: Option<&[usize]>,
         rng: &mut impl Rng,
-    ) -> Result<Vec<Share<F, N, Self::Sharetype>>, Self::Error>;
+    ) -> Result<Vec<ShamirShare<F, N, Self::Sharetype>>, Self::Error>;
 
     /// Recover the secret of the input shares.
     fn recover_secret(
-        shares: &[Share<F, N, Self::Sharetype>],
+        shares: &[ShamirShare<F, N, Self::Sharetype>],
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), Self::Error>;
 }
 /// Interpolates a polynomial from `(x, y)` pairs using Lagrange interpolation.
@@ -88,7 +88,7 @@ pub fn lagrange_interpolate<F: FftField>(
     Ok(result)
 }
 
-impl<F: FftField, const N: usize, P> Add for Share<F, N, P> {
+impl<F: FftField, const N: usize, P> Add for ShamirShare<F, N, P> {
     type Output = Result<Self, ShareError>;
 
     fn add(self, other: Self) -> Self::Output {
@@ -110,7 +110,7 @@ impl<F: FftField, const N: usize, P> Add for Share<F, N, P> {
         })
     }
 }
-impl<F: FftField, const N: usize, P> Mul<F> for Share<F, N, P> {
+impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
     type Output = Result<Self, ShareError>;
 
     fn mul(self, other: F) -> Self::Output {

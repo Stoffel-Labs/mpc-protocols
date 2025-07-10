@@ -5,7 +5,7 @@ use std::{
 
 use super::*;
 use crate::{
-    common::{share::ShareError, SecretSharingScheme, Share},
+    common::{share::ShareError, SecretSharingScheme, ShamirShare},
     honeybadger::robust_interpolate::*,
 };
 use ark_ff::FftField;
@@ -249,12 +249,12 @@ pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Result<Vec<Vec<F>>, 
 /// at the domain elements corresponding to the Vandermonde matrix rows.
 pub fn apply_vandermonde<F: FftField, P>(
     vandermonde: &[Vec<F>],
-    shares: &[Share<F, 1, P>],
-) -> Result<Vec<Share<F, 1, P>>, InterpolateError>
+    shares: &[ShamirShare<F, 1, P>],
+) -> Result<Vec<ShamirShare<F, 1, P>>, InterpolateError>
 where
-    Share<F, 1, P>: Clone
-        + Mul<F, Output = Result<Share<F, 1, P>, ShareError>>
-        + Add<Share<F, 1, P>, Output = Result<Share<F, 1, P>, ShareError>>,
+    ShamirShare<F, 1, P>: Clone
+        + Mul<F, Output = Result<ShamirShare<F, 1, P>, ShareError>>
+        + Add<ShamirShare<F, 1, P>, Output = Result<ShamirShare<F, 1, P>, ShareError>>,
 {
     let share_len = shares.len();
     for (_, row) in vandermonde.iter().enumerate() {
@@ -496,58 +496,4 @@ mod tests {
             assert_eq!(recovered[..secrets.len()], secrets[..]);
         }
     }
-    // #[tokio::test]
-    // async fn test_batch_reconstruction() {
-    //     let _ = tracing_subscriber::fmt()
-    //         .with_max_level(tracing::Level::DEBUG)
-    //         .with_test_writer()
-    //         .try_init();
-    //     use std::sync::Arc;
-    //     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-
-    //     let n = 4;
-    //     let t = 1;
-    //     let config = FakeNetworkConfig::new(100);
-    //     let (network, mut receivers) = FakeNetwork::new(n, config);
-    //     let net = Arc::new(network);
-
-    //     let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(6u64)];
-    //     let all_shares = generate_independent_shares(&secrets, t, n);
-
-    //     let mut handles = vec![];
-    //     for i in 0..n {
-    //         let mut node = BatchReconNode::new(i, n, t).unwrap();
-    //         let shares = all_shares[i].clone();
-    //         let net_clone = Arc::clone(&net);
-    //         let mut recv = receivers.remove(0);
-
-    //         handles.push(tokio::spawn(async move {
-    //             match node.init_batch_reconstruct(&shares, &net_clone).await {
-    //                 Ok(()) => {}
-    //                 Err(e) => warn!(id =i,error = ?e,"Sending failure"),
-    //             }
-
-    //             while node.secrets.is_none() {
-    //                 let msg = timeout(Duration::from_secs(2), recv.recv()).await;
-    //                 match msg {
-    //                     Ok(Some(msg)) => match node.process(msg, &net_clone).await {
-    //                         Ok(()) => {}
-    //                         Err(e) => warn!(id =i,error = ?e ,"Broadcasting failure"),
-    //                     },
-    //                     Ok(None) => break, // Channel closed
-    //                     Err(_) => {
-    //                         panic!("Node {} timed out waiting for a message", i);
-    //                     }
-    //                 }
-    //             }
-
-    //             // Return recovered secrets
-    //             node.secrets.clone().unwrap()
-    //         }));
-    //     }
-    //     for handle in handles {
-    //         let recovered = handle.await.unwrap();
-    //         assert_eq!(recovered[..secrets.len()], secrets[..]);
-    //     }
-    // }
 }
