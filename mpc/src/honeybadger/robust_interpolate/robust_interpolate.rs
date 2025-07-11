@@ -3,10 +3,17 @@ use ark_poly::{
     univariate::{DenseOrSparsePolynomial, DensePolynomial},
     DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain, Polynomial,
 };
-use ark_std::rand::RngCore;
+use ark_std::rand::Rng;
 use std::collections::HashSet;
+use stoffelmpc_common::share::{
+    shamir::{lagrange_interpolate, ShamirSecretSharing},
+};
+use super::*;
 
 /// Computes the formal derivative of a polynomial.
+///
+/// # Returns
+/// - an empty polynomial if the input polynomial has degree 0 or is empty.
 fn poly_derivative<F: FftField>(poly: &DensePolynomial<F>) -> DensePolynomial<F> {
     if poly.coeffs.len() <= 1 {
         return DensePolynomial::from_coefficients_vec(vec![]);
@@ -23,27 +30,42 @@ fn poly_derivative<F: FftField>(poly: &DensePolynomial<F>) -> DensePolynomial<F>
     DensePolynomial::from_coefficients_vec(derived_coeffs)
 }
 
+/// Divides a `numerator` polynomial by a `denominator` polynomial, returning the quotient and remainder.
+/// # Errors
+/// - `InterpolateError::PolynomialOperationError` if the polynomial division fails (e.g., if the denominator is a zero polynomial).
 fn div_with_remainder<F: FftField>(
     numerator: &DensePolynomial<F>,
     denominator: &DensePolynomial<F>,
-) -> (DensePolynomial<F>, DensePolynomial<F>) {
+) -> Result<(DensePolynomial<F>, DensePolynomial<F>), InterpolateError> {
     let a = DenseOrSparsePolynomial::from(numerator.clone());
     let b = DenseOrSparsePolynomial::from(denominator.clone());
     let (q, r) = a
         .divide_with_q_and_r(&b)
-        .expect("Polynomial division failed");
-    (DensePolynomial::from(q), DensePolynomial::from(r))
+        .ok_or_else(|| InterpolateError::PolynomialOperationError("Division failed".to_string()))?;
+    Ok((DensePolynomial::from(q), DensePolynomial::from(r)))
 }
 
+///Optimistically interpolates a polynomial from an arbitrary subset of t + 1 shares and checks on all
+/// 2t+1 shares given
+/// Based on https://core.ac.uk/download/pdf/12041389.pdf
+/// # Arguments
+/// * n - total number of shares
+/// * t - number of malicious parties
+/// * shares - List of (index, value) pairs representing received shares vi = v(αi)
+///
+/// # Returns
+/// * `Ok(polynomial)` if successful
+/// * `Err(InterpolateError)` if decoding fails
 fn robust_interpolate_fnt<F: FftField>(
     t: usize,
     n: usize,
-    shares: &[(usize, F)],
-) -> Option<DensePolynomial<F>> {
-    let domain = GeneralEvaluationDomain::<F>::new(n)?;
+    shares: &[ShamirSecretSharing<F>],
+) -> Result<DensePolynomial<F>, InterpolateError> {
+    let domain =
+        GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
     let subset = &shares[..=t];
-    let xs: Vec<F> = subset.iter().map(|(i, _)| domain.element(*i)).collect();
-    let ys: Vec<F> = subset.iter().map(|(_, y)| *y).collect();
+    let xs: Vec<F> = subset.iter().map(|s| domain.element(s.id)).collect();
+    let ys: Vec<F> = subset.iter().map(|s| s.share).collect();
 
     // Step 1: Compute A(x) = ∏ (x - x_i)
     let mut a_poly = DensePolynomial::from_coefficients_slice(&[F::one()]);
@@ -60,15 +82,21 @@ fn robust_interpolate_fnt<F: FftField>(
     for (i, &x_i) in xs.iter().enumerate() {
         let denom = a_derivative.evaluate(&x_i);
         if denom.is_zero() {
-            return None;
+            return Err(InterpolateError::PolynomialOperationError(
+                "Denominator evaluated to zero during interpolation basis calculation".into(),
+            ));
         }
 
         let scalar = ys[i] / denom;
 
         // A(x) / (x - x_i)
         let term_divisor = DensePolynomial::from_coefficients_slice(&[-x_i, F::one()]);
-        let (basis_poly, rem) = div_with_remainder(&a_poly, &term_divisor);
-        assert!(rem.is_zero(), "A(x) not divisible by (x - x_i)");
+        let (basis_poly, rem) = div_with_remainder(&a_poly, &term_divisor)?;
+        if !rem.is_zero() {
+            return Err(InterpolateError::PolynomialOperationError(
+                "A(x) not perfectly divisible by (x - x_i)".into(),
+            ));
+        }
 
         interpolated = &interpolated + &(&basis_poly * scalar);
     }
@@ -76,31 +104,55 @@ fn robust_interpolate_fnt<F: FftField>(
     // Step 4: Verify agreement
     let valid_count = shares
         .iter()
-        .map(|(i, y)| (domain.element(*i), *y))
+        .map(|s| (domain.element(s.id), s.share))
         .filter(|(x, y)| interpolated.evaluate(x) == *y)
         .count();
 
     if valid_count >= 2 * t + 1 {
-        Some(interpolated)
+        Ok(interpolated)
     } else {
-        None
+        Err(InterpolateError::DecodingError(
+            "Not enough shares matched the interpolated polynomial".into(),
+        ))
     }
 }
 
-/// Encodes a message into a Reed-Solomon codeword.
-pub fn gen_shares<F: FftField, R: RngCore>(value: F, n: usize, t: usize, rng: &mut R) -> Vec<F> {
-    assert!(n > t, "Number of shares must be greater than threshold");
-
-    let domain = GeneralEvaluationDomain::<F>::new(n).expect("No suitable evaluation domain found");
-
-    // Polynomial with constant term `value`, and t random coefficients
-    let mut coeffs = vec![value];
-    for _ in 0..t {
-        coeffs.push(F::rand(rng));
+/// Generates `n` secret shares for a `value` using a degree `t` polynomial,
+/// such that `f(0) = value`. Any `t + 1` shares can reconstruct the secret.
+///
+/// Shares are evaluations of `f(x)` on an FFT domain.
+///
+/// # Errors
+/// - `InterpolateError::InvalidInput` if `n` is not greater than `t`.
+/// - `InterpolateError::NoSuitableDomain` if a suitable FFT evaluation domain of size `n` isn't found.
+pub fn gen_shares<F: FftField, R: Rng>(
+    value: F,
+    n: usize,
+    t: usize,
+    rng: &mut R,
+) -> Result<Vec<ShamirSecretSharing<F>>, InterpolateError> {
+    if n <= t {
+        return Err(InterpolateError::InvalidInput(format!(
+            "Number of shares ({}) must be greater than threshold ({})",
+            n, t
+        )));
     }
+    let domain = GeneralEvaluationDomain::<F>::new(n)
+        .ok_or_else(|| InterpolateError::NoSuitableDomain(n))?;
 
-    let f = DensePolynomial::from_coefficients_slice(&coeffs);
-    domain.fft(&f)
+    let mut poly = DensePolynomial::<F>::rand(t, rng);
+    poly[0] = value;
+    // Evaluate the polynomial over the domain
+    let evals = domain.fft(&poly);
+
+    // Create shares from evaluations
+    let shares = evals
+        .iter()
+        .enumerate()
+        .map(|(i, eval)| ShamirSecretSharing::new(*eval, i, t))
+        .collect();
+
+    Ok(shares)
 }
 /// Decodes a Reed-Solomon codeword with known erasure positions using Gao's algorithm.
 ///
@@ -112,15 +164,21 @@ pub fn gen_shares<F: FftField, R: RngCore>(value: F, n: usize, t: usize, rng: &m
 /// * `erasure_positions` - Indices of erasures in the received vector
 ///
 /// # Returns
-/// * Some(Vec<F>) if decoding succeeds, or None if it fails
+/// * `Ok(Vec<F>)` if decoding succeeds, or `Err(InterpolateError)` if it fails
 fn gao_rs_decode<F: FftField>(
     received: &[F],
     k: usize,
     n: usize,
     erasure_positions: &[usize],
-) -> Option<Vec<F>> {
-    assert!(k <= n, "k must be <= n");
-    let domain = GeneralEvaluationDomain::<F>::new(n).expect("No suitable evaluation domain found");
+) -> Result<Vec<F>, InterpolateError> {
+    if k > n {
+        return Err(InterpolateError::InvalidInput(format!(
+            "k ({}) must be less than or equal to n ({})",
+            k, n
+        )));
+    }
+    let domain =
+        GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
 
     let s_set: HashSet<usize> = erasure_positions.iter().copied().collect();
     let s = s_set.len();
@@ -142,7 +200,7 @@ fn gao_rs_decode<F: FftField>(
 
     let (x_vals, y_vals): (Vec<F>, Vec<F>) = known_points.iter().cloned().unzip();
     //To do: need to make this efficient
-    let g1 = lagrange_interpolate(&x_vals, &y_vals);
+    let g1 = lagrange_interpolate(&x_vals, &y_vals)?;
 
     // Step 2 : Define g0(x) = (x^n - 1) / s(x)
     let mut xn_minus_1_coeffs = vec![F::zero(); n + 1];
@@ -186,56 +244,36 @@ fn gao_rs_decode<F: FftField>(
     let remainder = &g - &quotient * &v;
 
     if remainder.is_zero() && quotient.degree() < k {
-        Some(quotient.coeffs.clone())
+        Ok(quotient.coeffs.clone())
     } else {
-        None
+        Err(InterpolateError::DecodingError(
+            "Failed to recover message polynomial from g(x)/v(x)".into(),
+        ))
     }
-}
-
-/// Interpolates a polynomial from (x, y) pairs using Lagrange interpolation.
-fn lagrange_interpolate<F: FftField>(x_vals: &[F], y_vals: &[F]) -> DensePolynomial<F> {
-    assert_eq!(x_vals.len(), y_vals.len(), "Mismatched input lengths");
-
-    let n = x_vals.len();
-    let mut result = DensePolynomial::zero();
-
-    for j in 0..n {
-        let mut numerator = DensePolynomial::from_coefficients_slice(&[F::one()]);
-        let mut denominator = F::one();
-
-        for m in 0..n {
-            if m != j {
-                numerator =
-                    &numerator * &DensePolynomial::from_coefficients_slice(&[-x_vals[m], F::one()]);
-                denominator *= x_vals[j] - x_vals[m];
-            }
-        }
-
-        let term = numerator * DensePolynomial::from_coefficients_slice(&[y_vals[j] / denominator]);
-        result = &result + &term;
-    }
-
-    result
 }
 
 /// Implements OEC decoding by incrementally increasing the number of shares until decoding succeeds.
 /// https://eprint.iacr.org/2012/517.pdf
+///
+/// To do : Replace this with a store that is constantly updating or else make sure to call the func again
+/// with an updated list
 /// # Arguments
 /// * n - total number of shares
 /// * t - Maximum number of corrupted shares
 /// * mut shares - List of (index, value) pairs representing received shares vi = v(αi)
 ///
 /// # Returns
-/// * Some((polynomial, value_at_0)) if successful
-/// * None if decoding fails
+/// * `Ok((polynomial, value_at_0))` if successful
+/// * `Err(InterpolateError)` if decoding fails
 fn oec_decode<F: FftField>(
     n: usize,
     t: usize,
-    mut shares: Vec<(usize, F)>, //to do : Replace this with a store that is constantly updating
-) -> Option<(DensePolynomial<F>, F)> {
-    shares.sort_by_key(|(i, _)| *i);
-    let domain = GeneralEvaluationDomain::<F>::new(n).expect("invalid domain");
+    shares: Vec<ShamirSecretSharing<F>>,
+) -> Result<(DensePolynomial<F>, F), InterpolateError> {
+    let domain =
+        GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
 
+    // Iterate, increasing the number of shares considered (r) to handle more erasures/errors
     for r in 0..=t {
         let required = 2 * t + 1 + r;
         if shares.len() < required {
@@ -246,28 +284,35 @@ fn oec_decode<F: FftField>(
         let mut received = vec![F::zero(); n];
         let mut erasures = vec![];
 
+        // Populate `received` and `erasures` based on the current subset of shares
         for i in 0..n {
-            if let Some((_, val)) = subset.iter().find(|(j, _)| *j == i) {
-                received[i] = *val;
+            if let Some(val) = subset.iter().find(|s| s.id == i) {
+                received[i] = val.share;
             } else {
                 erasures.push(i);
             }
         }
 
-        if let Some(coeffs) = gao_rs_decode(&received, t + 1, n, &erasures) {
+        // Attempt Reed-Solomon decoding (Gao's algorithm is used for this)
+        // t+1 is the expected number of coefficients (degree t polynomial)
+        if let Ok(coeffs) = gao_rs_decode(&received, t + 1, n, &erasures) {
             let poly = DensePolynomial::from_coefficients_vec(coeffs);
 
+            // Verify if the interpolated polynomial matches a sufficient number of original shares
             let matched = subset
                 .iter()
-                .filter(|(i, v)| poly.evaluate(&domain.element(*i)) == *v)
+                .filter(|s| poly.evaluate(&domain.element(s.id)) == s.share)
                 .count();
 
+            // If enough shares match, the decoding is considered successful
             if matched >= 2 * t + 1 {
-                return Some((poly.clone(), poly.evaluate(&F::zero())));
+                return Ok((poly.clone(), poly.evaluate(&F::zero())));
             }
         }
     }
-    None
+    Err(InterpolateError::DecodingError(
+        "Online Error Correction failed to find a valid polynomial".into(),
+    ))
 }
 /// Full robust interpolation combining optimistic decoding and error correction
 ///
@@ -278,20 +323,25 @@ fn oec_decode<F: FftField>(
 /// * `shares` - (index, value) pairs, unordered
 ///
 /// # Returns
-/// * Some((poly, poly(0))) if decoding succeeds, or None otherwise
+/// * `Ok((poly, poly(0)))` if decoding succeeds, or `Err(InterpolateError)` otherwise
 pub fn robust_interpolate<F: FftField>(
     n: usize,
     t: usize,
-    mut shares: Vec<(usize, F)>,
-) -> Option<(DensePolynomial<F>, F)> {
-    shares.sort_by_key(|(i, _)| *i); // ensure deterministic ordering
+    mut shares: Vec<ShamirSecretSharing<F>>,
+) -> Result<(DensePolynomial<F>, F), InterpolateError> {
+    shares.sort_by_key(|i| i.id); // ensure deterministic ordering
 
     if shares.len() < 2 * t + 1 {
-        return None;
+        return Err(InterpolateError::InvalidInput(format!(
+            "Not enough shares provided ({}) to attempt decoding for t={}. At least {} shares are required.",
+            shares.len(),
+            t,
+            2 * t + 1
+        )));
     }
     // === Step 1: Optimistic decoding attempt ===
-    if let Some(poly) = robust_interpolate_fnt(t, n, &shares[..2 * t + 1]) {
-        return Some((poly.clone(), poly.evaluate(&F::zero())));
+    if let Ok(poly) = robust_interpolate_fnt(t, n, &shares[..2 * t + 1]) {
+        return Ok((poly.clone(), poly.evaluate(&F::zero())));
     }
     // === Step 2: Fall back to online error correction ===
     oec_decode(n, t, shares)
@@ -302,6 +352,7 @@ mod tests {
     use super::*;
     use ark_bls12_381::Fr;
     use ark_std::test_rng;
+    use stoffelmpc_common::share::Share;
 
     #[test]
     fn test_poly_derivative() {
@@ -327,11 +378,11 @@ mod tests {
         let poly = DensePolynomial::from_coefficients_vec(coeffs);
 
         // Evaluate over domain
-        let shares: Vec<(usize, Fr)> = (0..n)
+        let shares: Vec<ShamirSecretSharing<Fr>> = (0..n)
             .map(|i| {
                 let x = domain.element(i);
                 let y = poly.evaluate(&x);
-                (i, y)
+                ShamirSecretSharing::new(y, i, t)
             })
             .collect();
 
@@ -339,7 +390,7 @@ mod tests {
         let used_shares = shares[..(2 * t + 1)].to_vec();
 
         let result = robust_interpolate_fnt(t, n, &used_shares);
-        assert!(result.is_some(), "Optimistic interpolation failed");
+        assert!(result.is_ok(), "Optimistic interpolation failed");
 
         let recovered = result.unwrap();
 
@@ -356,10 +407,10 @@ mod tests {
         let n = 8;
 
         let secret = Fr::from(42u32);
-        let shares = gen_shares(secret, n, t, &mut rng);
+        let shares = gen_shares(secret, n, t, &mut rng).unwrap();
 
         // === Case 1: Erasure-only decoding ===
-        let mut erased = shares.clone();
+        let mut erased: Vec<Fr> = shares.iter().map(|a| a.share).collect();
         let erasures = vec![1, 2];
         for &i in &erasures {
             erased[i] = Fr::zero();
@@ -377,10 +428,10 @@ mod tests {
         let t = 2;
         let n = 8;
         let secret = Fr::from(42u32);
-        let shares = gen_shares(secret, n, t, &mut rng);
+        let shares = gen_shares(secret, n, t, &mut rng).unwrap();
 
         // === Case 2: Error-only decoding ===
-        let mut corrupted = shares.clone();
+        let mut corrupted: Vec<Fr> = shares.iter().map(|a| a.share).collect();
         corrupted[2] += Fr::from(5u64);
         corrupted[4] += Fr::from(3u64);
 
@@ -404,21 +455,25 @@ mod tests {
 
         // Step 1: Create random message and encode it
         let secret = Fr::from(42u32);
-        let shares = gen_shares(secret, n, t, &mut rng);
-
-        // Step 2: Create shares as (index, value)
-        let mut shares_list: Vec<(usize, Fr)> =
-            shares.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        let shares = gen_shares(secret, n, t, &mut rng).unwrap();
 
         // Step 3: Corrupt up to t shares
-        shares_list[2].1 += Fr::from(3u64);
-        shares_list[5].1 += Fr::from(1u64);
+        let _ = shares[2].add(&ShamirSecretSharing {
+            share: Fr::from(3u64),
+            id: 2,
+            degree: t,
+        });
+        let _ = shares[5].add(&ShamirSecretSharing {
+            share: Fr::from(1u64),
+            id: 5,
+            degree: t,
+        });
 
         // Step 4: Attempt OEC decode
-        let result = oec_decode(n, t, shares_list.clone());
+        let result = oec_decode(n, t, shares.clone());
 
         assert!(
-            result.is_some(),
+            result.is_ok(),
             "Decoding failed despite sufficient honest shares"
         );
 
@@ -440,21 +495,21 @@ mod tests {
 
         // Generate random message and encode it
         let secret = Fr::from(42u32);
-        let shares = gen_shares(secret, n, t, &mut rng);
-
-        // Create shares as (index, value)
-        let mut shares_list: Vec<(usize, Fr)> =
-            shares.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        let shares = gen_shares(secret, n, t, &mut rng).unwrap();
 
         // Corrupt up to t shares
         let corruption_indices = [1, 4];
         for &i in &corruption_indices {
-            shares_list[i].1 += Fr::from(7u64);
+            let _ = shares[i].add(&ShamirSecretSharing {
+                share: Fr::from(7u64),
+                id: i,
+                degree: t,
+            });
         }
         // Attempt robust interpolation
-        let result = robust_interpolate(n, t, shares_list.clone());
+        let result = robust_interpolate(n, t, shares.clone());
         assert!(
-            result.is_some(),
+            result.is_ok(),
             "robust_interpolate failed despite valid parameters"
         );
 

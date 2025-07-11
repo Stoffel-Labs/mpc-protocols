@@ -1,6 +1,6 @@
 pub mod messages;
 
-use crate::honeybadger::batch_recon::batch_recon::{apply_vandermonde, make_vandermonde};
+use crate::honeybadger::{batch_recon::{apply_vandermonde, make_vandermonde}, robust_interpolate::InterpolateError};
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
@@ -27,6 +27,8 @@ pub enum RanDouShaError {
     ArkDeserialization(SerializationError),
     #[error("error while serializing the object into bytes: {0:?}")]
     SerializationError(Box<ErrorKind>),
+    #[error("inner error: {0}")]
+    Inner(#[from] InterpolateError),
     /// The protocol received an abort signal.
     #[error("received abort singal")]
     Abort,
@@ -148,64 +150,26 @@ where
             self.id, params.session_id
         );
         // todo - should check sender.id == self?
-        let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties);
-        let share_values_deg_t: Vec<F> = init_msg
-            .s_shares_deg_t
-            .iter()
-            .map(|share| share.share)
-            .collect();
-        let share_values_deg_2t: Vec<F> = init_msg
-            .s_shares_deg_2t
-            .iter()
-            .map(|share| share.share)
-            .collect();
-
+        let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties)?;
         // Implementation of Step 1.
-        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &share_values_deg_t);
+        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_t)?;
 
         // Implementation of Step 2.
-        let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &share_values_deg_2t);
+        let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_2t)?;
 
         // Save the shares of r of degree t and 2t into the storage.
         let bind_store = self.get_or_create_store(params).await;
         let mut store = bind_store.lock().await;
-        store.computed_r_shares_degree_t = r_deg_t
-            .iter()
-            .map(|share_value| {
-                ShamirSecretSharing::new(
-                    share_value.clone(),
-                    F::from(self.id as u64),
-                    params.threshold,
-                )
-            })
-            .collect();
-        store.computed_r_shares_degree_2t = r_deg_2t
-            .iter()
-            .map(|share_value| {
-                ShamirSecretSharing::new(
-                    share_value.clone(),
-                    F::from(self.id as u64),
-                    2 * params.threshold,
-                )
-            })
-            .collect();
+        store.computed_r_shares_degree_t = r_deg_t.clone();
+        store.computed_r_shares_degree_2t = r_deg_2t.clone();
 
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
         let network_locked = network.lock().await;
         for party in network_locked.parties() {
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
-                let share_deg_t = ShamirSecretSharing::new(
-                    r_deg_t[party.id() - 1],
-                    F::from(self.id as u64),
-                    params.threshold,
-                );
-                let share_deg_2t = ShamirSecretSharing::new(
-                    r_deg_2t[party.id() - 1],
-                    F::from(self.id as u64),
-                    2 * params.threshold,
-                );
-
+                let share_deg_t = r_deg_t[party.id() - 1].clone();
+                let share_deg_2t = r_deg_2t[party.id() - 1].clone();
                 let reconst_message =
                     ReconstructionMessage::new(self.id, share_deg_t, share_deg_2t);
 
