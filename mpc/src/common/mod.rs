@@ -171,29 +171,30 @@ pub trait RBC: Send + Sync {
 /// Now, it's time to define the MPC Protocol trait.
 /// Given an underlying secret sharing protocol and a reliable broadcast protocol,
 /// you can define an MPC protocol.
-pub trait MPCProtocol<F, S, R, N>
+#[async_trait]
+pub trait MPCProtocol<F, S, N>
 where
     F: FftField,
     S: SecretSharingScheme<F>,
-    R: RBC,
     N: Network,
 {
     /// Defines the information needed to run and define the MPC protocol.
     type MPCOpts;
 
-    fn init(opts: Self::MPCOpts);
+    fn init(&mut self, network: Arc<N>, opts: Self::MPCOpts);
 
-    fn mul(&mut self, a: S, b: S, network: N) -> Result<S, ProtocolError>;
+    async fn mul(&mut self, a: S, b: S, network: Arc<N>) -> Result<S, ProtocolError>
+    where
+        N: 'async_trait;
 }
 
 /// Some MPC protocols require preprocessing before they can be used
 #[async_trait]
-pub trait PreprocessingMPCProtocol<F, S, R, N>: MPCProtocol<F, S, R, N>
+pub trait PreprocessingMPCProtocol<F, S, N>: MPCProtocol<F, S, N>
 where
+    N: Network,
     F: FftField,
     S: SecretSharingScheme<F>,
-    R: RBC,
-    N: Network,
 {
     /// Defines the information needed to run the preprocessing phase of an MPC protocol
     type PreprocessingOpts;
@@ -203,6 +204,9 @@ where
     /// Runs the offline/preprocessing phase for an MPC protocol
     async fn run_preprocessing(
         &mut self,
+        network: Arc<N>,
         opts: Self::PreprocessingOpts,
-    ) -> Vec<Self::PreprocessingType>;
+    ) -> Vec<Self::PreprocessingType>
+    where
+        N: 'async_trait;
 }

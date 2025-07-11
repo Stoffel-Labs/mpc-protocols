@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ark_ff::FftField;
 use async_trait::async_trait;
 use stoffelmpc_network::Network;
@@ -26,7 +28,7 @@ pub struct HoneyBadgerMPC<F: FftField> {
 }
 
 pub struct HoneyBadgerMPCPreprocMaterial<F: FftField> {
-    ranodusha_pairs: Vec<(NonRobustShamirShare<F>, NonRobustShamirShare<F>)>,
+    randousha_pairs: Vec<(NonRobustShamirShare<F>, NonRobustShamirShare<F>)>,
     random_shares: Vec<NonRobustShamirShare<F>>,
 }
 
@@ -35,84 +37,120 @@ where
     F: FftField,
 {
     /// Generates empty preprocessing material storage.
-    fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             random_shares: Vec::new(),
-            ranodusha_pairs: Vec::new(),
+            randousha_pairs: Vec::new(),
         }
     }
 
-    fn add(
+    pub fn add(
         &mut self,
-        ran_dou_sha_pair: Option<Vec<(NonRobustShamirShare<F>, NonRobustShamirShare<F>)>>,
-        random_shares: Option<Vec<NonRobustShamirShare<F>>>,
+        mut ran_dou_sha_pair: Option<Vec<(NonRobustShamirShare<F>, NonRobustShamirShare<F>)>>,
+        mut random_shares: Option<Vec<NonRobustShamirShare<F>>>,
     ) {
-        todo!()
+        if let Some(pairs) = &mut ran_dou_sha_pair {
+            self.randousha_pairs.append(pairs);
+        }
+
+        if let Some(shares) = &mut random_shares {
+            self.random_shares.append(shares);
+        }
     }
 
-    fn len(&self) -> (usize, usize) {
-        (self.ranodusha_pairs.len(), self.random_shares.len())
+    pub fn len(&self) -> (usize, usize) {
+        (self.randousha_pairs.len(), self.random_shares.len())
     }
 
-    /// Take up to n pairs from ran_dou_sha_pair.
-    fn take_randousha_pair(
+    /// Take up to n pairs of random double sharings from the preprocessing material.
+    pub fn take_randousha_pair(
         &mut self,
         n_pairs: usize,
     ) -> Vec<(NonRobustShamirShare<F>, NonRobustShamirShare<F>)> {
-        todo!()
+        let pairs = n_pairs.min(self.randousha_pairs.len());
+        self.randousha_pairs.drain(0..pairs).collect()
     }
 
-    /// Take up to n pairs from random_shares.
-    fn take_random_shares(&mut self, n_shares: usize) -> Vec<(NonRobustShamirShare<F>)> {
-        todo!()
+    /// Take up to n random shares from the preprocessing material.
+    pub fn take_random_shares(&mut self, n_shares: usize) -> Vec<NonRobustShamirShare<F>> {
+        let pairs = n_shares.min(self.random_shares.len());
+        self.random_shares.drain(0..pairs).collect()
     }
 }
 
 pub struct HoneyBadgerMPCOpts {
     /// Number of parties in the protocol.
-    n_parties: usize,
+    pub n_parties: usize,
     /// Upper bound of corrupt parties.
-    threshold: usize,
+    pub threshold: usize,
+    /// Initial preprocessing parameters
+    pub init_preproc_opts: HoneyBadgerMPCPreprocOpts,
+}
+
+impl HoneyBadgerMPCOpts {
+    pub fn new(
+        n_parties: usize,
+        threshold: usize,
+        init_preproc_opts: HoneyBadgerMPCPreprocOpts,
+    ) -> Self {
+        Self {
+            n_parties,
+            threshold,
+            init_preproc_opts,
+        }
+    }
 }
 
 pub struct HoneyBadgerMPCPreprocOpts {
     /// Number of random double sharing pairs that need to be generated.
-    n_randousha_pairs: usize,
+    pub n_randousha_pairs: usize,
     /// Number of random shares needed.
-    n_random_shares: usize,
+    pub n_random_shares: usize,
 }
 
-impl<F, R, N> MPCProtocol<F, NonRobustShamirShare<F>, R, N> for HoneyBadgerMPC<F>
+impl HoneyBadgerMPCPreprocOpts {
+    pub fn new(n_randousha_pairs: usize, n_random_shares: usize) -> Self {
+        Self {
+            n_randousha_pairs,
+            n_random_shares,
+        }
+    }
+}
+
+#[async_trait]
+impl<F, N> MPCProtocol<F, NonRobustShamirShare<F>, N> for HoneyBadgerMPC<F>
 where
-    R: RBC,
     N: Network,
     F: FftField,
 {
     type MPCOpts = HoneyBadgerMPCOpts;
 
-    fn mul(
+    async fn mul(
         &mut self,
         a: NonRobustShamirShare<F>,
         b: NonRobustShamirShare<F>,
-        network: N,
-    ) -> Result<NonRobustShamirShare<F>, ProtocolError> {
+        network: Arc<N>,
+    ) -> Result<NonRobustShamirShare<F>, ProtocolError>
+    where
+        N: 'async_trait,
+    {
         let mut randousha_pair = self
             .preprocessing_material
-            .ranodusha_pairs
+            .randousha_pairs
             .pop()
             .ok_or(ProtocolError::NotEnoughPreprocessing)?;
         todo!();
     }
 
-    fn init(opts: HoneyBadgerMPCOpts) {
-        todo!()
+    fn init(&mut self, network: Arc<N>, opts: HoneyBadgerMPCOpts) {
+        let network = Arc::clone(&network);
+        self.run_preprocessing(network, opts.init_preproc_opts);
     }
 }
 
 #[async_trait]
-impl<F, R, N> PreprocessingMPCProtocol<F, NonRobustShamirShare<F>, R, N> for HoneyBadgerMPC<F>
+impl<F, N> PreprocessingMPCProtocol<F, NonRobustShamirShare<F>, N> for HoneyBadgerMPC<F>
 where
-    R: RBC,
     N: Network,
     F: FftField,
 {
@@ -121,8 +159,12 @@ where
 
     async fn run_preprocessing(
         &mut self,
+        network: Arc<N>,
         opts: Self::PreprocessingOpts,
-    ) -> Vec<Self::PreprocessingType> {
+    ) -> Vec<Self::PreprocessingType>
+    where
+        N: 'async_trait,
+    {
         todo!()
     }
 }
