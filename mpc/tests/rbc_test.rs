@@ -3,7 +3,7 @@ mod tests {
     use rand::Rng;
     use std::sync::Arc;
     use std::time::Duration;
-    use stoffelmpc_common::{
+    use stoffelmpc_mpc::common::{
         rbc::{
             rbc::{Avid, Bracha, Dealer, Network, ABA, ACS},
             rbc_store::{GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAcs, MsgTypeAvid},

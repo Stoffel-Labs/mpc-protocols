@@ -1,6 +1,9 @@
 pub mod messages;
 
-use crate::honeybadger::batch_recon::batch_recon::{apply_vandermonde, make_vandermonde};
+use crate::{common::{share::shamir::NonRobustShare, SecretSharingScheme}, honeybadger::{
+    batch_recon::batch_recon::{apply_vandermonde, make_vandermonde},
+    robust_interpolate::InterpolateError,
+}};
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
@@ -8,7 +11,6 @@ use messages::{
     InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
 };
 use std::{collections::HashMap, sync::Arc};
-use stoffelmpc_common::share::shamir::ShamirSecretSharing;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -27,6 +29,8 @@ pub enum RanDouShaError {
     ArkDeserialization(SerializationError),
     #[error("error while serializing the object into bytes: {0:?}")]
     SerializationError(Box<ErrorKind>),
+    #[error("inner error: {0}")]
+    Inner(#[from] InterpolateError),
     /// The protocol received an abort signal.
     #[error("received abort singal")]
     Abort,
@@ -39,15 +43,15 @@ pub enum RanDouShaError {
 #[derive(Clone)]
 pub struct RanDouShaStore<F: FftField> {
     /// Vector that stores the received degree t shares of r.
-    pub received_r_shares_degree_t: HashMap<PartyId, ShamirSecretSharing<F>>,
+    pub received_r_shares_degree_t: HashMap<PartyId, NonRobustShare<F>>,
     /// Vector that stores the received degree 2t shares of r.
-    pub received_r_shares_degree_2t: HashMap<PartyId, ShamirSecretSharing<F>>,
+    pub received_r_shares_degree_2t: HashMap<PartyId, NonRobustShare<F>>,
     /// Vector of r shares of degree t computed as a result of multiplying the Vandermonde matrix
     /// with the shares of s.
-    pub computed_r_shares_degree_t: Vec<ShamirSecretSharing<F>>,
+    pub computed_r_shares_degree_t: Vec<NonRobustShare<F>>,
     /// Vector of r shares of degree 2t computed as a result of multiplying the Vandermonde matrix
     /// with the shares of s.
-    pub computed_r_shares_degree_2t: Vec<ShamirSecretSharing<F>>,
+    pub computed_r_shares_degree_2t: Vec<NonRobustShare<F>>,
     /// Vector that stores the nodes who have sent the output ok msg.
     pub received_ok_msg: Vec<usize>,
 
@@ -148,64 +152,26 @@ where
             self.id, params.session_id
         );
         // todo - should check sender.id == self?
-        let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties);
-        let share_values_deg_t: Vec<F> = init_msg
-            .s_shares_deg_t
-            .iter()
-            .map(|share| share.share)
-            .collect();
-        let share_values_deg_2t: Vec<F> = init_msg
-            .s_shares_deg_2t
-            .iter()
-            .map(|share| share.share)
-            .collect();
-
+        let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties - 1)?;
         // Implementation of Step 1.
-        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &share_values_deg_t);
+        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_t)?;
 
         // Implementation of Step 2.
-        let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &share_values_deg_2t);
+        let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_2t)?;
 
         // Save the shares of r of degree t and 2t into the storage.
         let bind_store = self.get_or_create_store(params).await;
         let mut store = bind_store.lock().await;
-        store.computed_r_shares_degree_t = r_deg_t
-            .iter()
-            .map(|share_value| {
-                ShamirSecretSharing::new(
-                    share_value.clone(),
-                    F::from(self.id as u64),
-                    params.threshold,
-                )
-            })
-            .collect();
-        store.computed_r_shares_degree_2t = r_deg_2t
-            .iter()
-            .map(|share_value| {
-                ShamirSecretSharing::new(
-                    share_value.clone(),
-                    F::from(self.id as u64),
-                    2 * params.threshold,
-                )
-            })
-            .collect();
+        store.computed_r_shares_degree_t = r_deg_t.clone();
+        store.computed_r_shares_degree_2t = r_deg_2t.clone();
 
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
         let network_locked = network.lock().await;
         for party in network_locked.parties() {
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
-                let share_deg_t = ShamirSecretSharing::new(
-                    r_deg_t[party.id() - 1],
-                    F::from(self.id as u64),
-                    params.threshold,
-                );
-                let share_deg_2t = ShamirSecretSharing::new(
-                    r_deg_2t[party.id() - 1],
-                    F::from(self.id as u64),
-                    2 * params.threshold,
-                );
-
+                let share_deg_t = r_deg_t[party.id() - 1].clone();
+                let share_deg_2t = r_deg_2t[party.id() - 1].clone();
                 let reconst_message =
                     ReconstructionMessage::new(self.id, share_deg_t, share_deg_2t);
 
@@ -284,8 +250,8 @@ where
             if store.received_r_shares_degree_t.len() >= params.threshold + 1
                 && store.received_r_shares_degree_2t.len() >= 2 * params.threshold + 1
             {
-                let mut shares_t_for_recon: Vec<ShamirSecretSharing<F>> = Vec::new();
-                let mut shares_2t_for_recon: Vec<ShamirSecretSharing<F>> = Vec::new();
+                let mut shares_t_for_recon: Vec<NonRobustShare<F>> = Vec::new();
+                let mut shares_2t_for_recon: Vec<NonRobustShare<F>> = Vec::new();
 
                 for (_, share) in store.received_r_shares_degree_t.iter() {
                     shares_t_for_recon.push(share.clone());
@@ -296,8 +262,8 @@ where
 
                 // (5) Perform reconstruction for both degrees.
                 // ShamirSecretSharing::reconstruct expects a vector of shares.
-                let reconstructed_r_t = ShamirSecretSharing::recover_secret(&shares_t_for_recon);
-                let reconstructed_r_2t = ShamirSecretSharing::recover_secret(&shares_2t_for_recon);
+                let reconstructed_r_t = NonRobustShare::recover_secret(&shares_t_for_recon);
+                let reconstructed_r_2t = NonRobustShare::recover_secret(&shares_2t_for_recon);
 
                 // if the reconstruction fails, broadcast false
                 let mut output_message = OutputMessage::new(self.id, true);
@@ -307,7 +273,7 @@ where
                 }
                 // (6) Check that their 0-evaluation is the same.
                 // This means checking if the reconstructed values are equal.
-                let verify = reconstructed_r_t.unwrap() == reconstructed_r_2t.unwrap();
+                let verify = reconstructed_r_t.unwrap().1 == reconstructed_r_2t.unwrap().1;
 
                 if !verify {
                     // if the verification fails, broadcast false(aka. Abort)
@@ -348,7 +314,7 @@ where
         &mut self,
         message: &OutputMessage,
         params: &RanDouShaParams,
-    ) -> Result<(Vec<ShamirSecretSharing<F>>, Vec<ShamirSecretSharing<F>>), RanDouShaError> {
+    ) -> Result<(Vec<NonRobustShare<F>>, Vec<NonRobustShare<F>>), RanDouShaError> {
         info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, params.session_id, message.sender_id, message.msg);
         // todo - add randousha status so we can omit output_handler
         // abort randousha once received the abort message
@@ -391,7 +357,7 @@ where
         message: &RanDouShaMessage,
         params: &RanDouShaParams,
         network: Arc<Mutex<N>>,
-    ) -> Result<Option<(Vec<ShamirSecretSharing<F>>, Vec<ShamirSecretSharing<F>>)>, RanDouShaError>
+    ) -> Result<Option<(Vec<NonRobustShare<F>>, Vec<NonRobustShare<F>>)>, RanDouShaError>
     where
         N: Network,
     {
