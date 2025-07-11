@@ -1,12 +1,12 @@
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
-
 use tokio::sync::Notify;
 
 /// Generic message type used in Reliable Broadcast (RBC) communication.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Msg {
     pub sender_id: u32,           // ID of the sender node
     pub session_id: u32,          // Unique session ID for each broadcast instance
@@ -43,7 +43,7 @@ impl Msg {
         }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GenericMsgType {
     Bracha(MsgType),
     Avid(MsgTypeAvid),
@@ -64,7 +64,7 @@ impl fmt::Display for GenericMsgType {
 
 ///--------------------------Bracha RBC--------------------------
 /// Enum to interpret message types in Bracha's protocol.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MsgType {
     Init,
     Echo,
@@ -176,7 +176,7 @@ impl BrachaStore {
 
 ///--------------------------AVID RBC--------------------------
 /// Enum to interpret message types in AVID's protocol.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MsgTypeAvid {
     Send,
     Echo,
@@ -290,7 +290,7 @@ impl AvidStore {
 
 ///--------------------------ABA--------------------------
 /// Enum to interpret message types in ABA protocol.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MsgTypeAba {
     Est,
     Aux,
@@ -537,7 +537,7 @@ impl CoinStore {
 }
 
 /// Stores the internal state for each ACS session at a party.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MsgTypeAcs {
     Acs,
     Unknown(String),

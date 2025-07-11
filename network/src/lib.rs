@@ -39,7 +39,7 @@ pub trait Message: Serialize + for<'a> Deserialize<'a> + Sized {
 /// Trait that represents a network used to communicate messages during the execution of a
 /// protocol.
 #[async_trait]
-pub trait Network {
+pub trait Network: Send + Sync {
     /// Type of the node in the network.
     type NodeType: Node;
     /// Configuration of the network.

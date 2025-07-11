@@ -1,3 +1,4 @@
+use crate::common::rbc::ShardError;
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use rs_merkle::*;
 use sha2::{Digest, Sha256};
@@ -8,10 +9,10 @@ pub fn encode_rs(
     payload: Vec<u8>,
     data_shards: usize,
     parity_shards: usize,
-) -> Result<Vec<Vec<u8>>, String> {
+) -> Result<Vec<Vec<u8>>, ShardError> {
     // Validate input parameters
     if data_shards == 0 || parity_shards == 0 {
-        return Err("Data and parity shards must be greater than zero".to_string());
+        return Err(ShardError::Config("Shard counts must be > 0".to_string()));
     }
 
     // Make sure the payload is divisible across data shards
@@ -40,11 +41,11 @@ pub fn encode_rs(
 
     // Create Reed-Solomon instance
     let r = ReedSolomon::new(data_shards, parity_shards)
-        .map_err(|e| format!("Invalid shard configuration: {}", e))?;
+        .map_err(|e| ShardError::Config(e.to_string()))?;
 
     // Encode to generate parity
     r.encode(&mut shards)
-        .map_err(|e| format!("Encoding failed: {}", e))?;
+        .map_err(|e| ShardError::Failed(e.to_string()))?;
 
     Ok(shards)
 }
@@ -53,11 +54,11 @@ pub fn decode_rs(
     shards_map: HashMap<u32, Vec<u8>>,
     data_shards: usize,
     parity_shards: usize,
-) -> Result<Vec<Vec<u8>>, String> {
+) -> Result<Vec<Vec<u8>>, ShardError> {
     let total_shards = data_shards + parity_shards;
     // Initialize the Reed-Solomon decoder
     let r = ReedSolomon::new(data_shards, parity_shards)
-        .map_err(|e| format!("Invalid shard configuration: {}", e))?;
+        .map_err(|e| ShardError::Config(e.to_string()))?;
 
     // Create a list of shard slots (None = missing)
     let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
@@ -66,21 +67,17 @@ pub fn decode_rs(
         if (idx as usize) < total_shards {
             shards[idx as usize] = Some(shard.clone());
         } else {
-            return Err(format!(
-                "Shard index {} out of range (max {})",
-                idx,
-                total_shards - 1
-            ));
+            return Err(ShardError::OutOfBounds(idx, total_shards - 1));
         }
     }
     // Attempt to reconstruct missing shards
     r.reconstruct(&mut shards)
-        .map_err(|e| format!("Reconstruction failed: {}", e))?;
+        .map_err(|e| ShardError::Failed(e.to_string()))?;
 
     // Ensure all shards are present and unwrap them
-    let result: Result<Vec<Vec<u8>>, String> = shards
+    let result: Result<Vec<Vec<u8>>, _> = shards
         .into_iter()
-        .map(|opt| opt.ok_or_else(|| "Missing shard after reconstruction".to_string()))
+        .map(|opt| opt.ok_or(ShardError::Incomplete))
         .collect();
     result
 }
@@ -89,9 +86,9 @@ pub fn reconstruct_payload(
     decoded_shards: Vec<Vec<u8>>,
     original_len: usize,
     data_shards: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, ShardError> {
     if decoded_shards.len() < data_shards {
-        return Err("Not enough data shards to reconstruct payload".to_string());
+        return Err(ShardError::Incomplete);
     }
     // Concatenate only the data shards to form the original message
     let mut payload = decoded_shards
@@ -101,7 +98,9 @@ pub fn reconstruct_payload(
         .collect::<Vec<u8>>();
     // Validate and truncate to the original message length
     if original_len > payload.len() {
-        return Err("Original length is larger than reconstructed payload".to_string());
+        return Err(ShardError::Config(
+            "Original length exceeds payload".to_string(),
+        ));
     }
     // Truncate to original message length
     payload.truncate(original_len);
@@ -132,21 +131,22 @@ pub fn gen_merkletree(shards: Vec<Vec<u8>>) -> MerkleTree<Sha256Algorithm> {
     MerkleTree::<Sha256Algorithm>::from_leaves(&leaves)
 }
 /// Deserialize a Merkle proof from raw bytes (excluding the root).
-pub fn get_merkle_proof(proof: Vec<u8>) -> Result<MerkleProof<Sha256Algorithm>, String> {
+pub fn get_merkle_proof(proof: Vec<u8>) -> Result<MerkleProof<Sha256Algorithm>, ShardError> {
     if proof.len() <= 32 {
-        return Err("Fingerprint too short to contain a valid proof".to_string());
+        return Err(ShardError::Merkle("Invalid fingerprint length".to_string()));
     }
+
     MerkleProof::<Sha256Algorithm>::try_from(&proof[32..])
-        .map_err(|e| format!("Failed to parse Merkle proof: {:?}", e))
+        .map_err(|e| ShardError::Merkle(e.to_string()))
 }
 /// Verify a Merkle proof for a given shard and index.
-pub fn verify_merkle(id: u32, n: u32, proof: Vec<u8>, shard: Vec<u8>) -> Result<bool, String> {
+pub fn verify_merkle(id: u32, n: u32, proof: Vec<u8>, shard: Vec<u8>) -> Result<bool, ShardError> {
     if proof.len() < 32 {
-        return Err("Invalid fingerprint length".to_string());
+        return Err(ShardError::Merkle("Invalid fingerprint length".to_string()));
     }
     let root: [u8; 32] = proof[0..32]
         .try_into()
-        .map_err(|_| format!("Failed to extract Merkle root"))?;
+        .map_err(|_| ShardError::Merkle("Failed to extract Merkle root".to_string()))?;
     let proof = get_merkle_proof(proof)?;
     let leaf_hash = hash(shard.clone());
 
@@ -157,12 +157,14 @@ pub fn verify_merkle(id: u32, n: u32, proof: Vec<u8>, shard: Vec<u8>) -> Result<
 pub fn generate_merkle_proofs_map(
     shards: Vec<Vec<u8>>,
     n: usize,
-) -> Result<HashMap<usize, Vec<u8>>, String> {
+) -> Result<HashMap<usize, Vec<u8>>, ShardError> {
     let tree = gen_merkletree(shards);
 
     // ensure tree is valid
     if tree.root().is_none() {
-        return Err("Failed to get Merkle root".to_string());
+        return Err(ShardError::Merkle(
+            "Failed to extract Merkle root".to_string(),
+        ));
     }
 
     let mut proofs_map = HashMap::with_capacity(n);

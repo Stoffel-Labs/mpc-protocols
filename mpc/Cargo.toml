@@ -22,6 +22,7 @@ sha2.workspace = true
 rs_merkle.workspace = true
 reed-solomon-erasure.workspace = true
 rand.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 once_cell = "1.21.3"

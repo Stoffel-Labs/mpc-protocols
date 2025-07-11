@@ -10,22 +10,21 @@ use ark_std::rand::Rng;
 
 #[derive(Clone, Debug)]
 pub struct NonRobust;
-pub type NonRobustShare<T> = ShamirShare<T, 1, NonRobust>;
+pub type NonRobustShamirShare<T> = ShamirShare<T, 1, NonRobust>;
 
-impl<F: FftField> NonRobustShare<F> {
+impl<F: FftField> NonRobustShamirShare<F> {
     pub fn new(share: F, id: usize, degree: usize) -> Self {
         ShamirShare {
             share: [share],
-            id: id,
-            degree: degree,
+            id,
+            degree,
             _sharetype: PhantomData,
         }
     }
 }
 
-impl<F: FftField> SecretSharingScheme<F, 1> for NonRobustShare<F> {
+impl<F: FftField> SecretSharingScheme<F> for NonRobustShamirShare<F> {
     type SecretType = F;
-    type Sharetype = NonRobust;
     type Error = ShareError;
 
     // compute the shamir shares of all ids for a secret
@@ -46,7 +45,7 @@ impl<F: FftField> SecretSharingScheme<F, 1> for NonRobustShare<F> {
                     .map(|id| {
                         let x = F::from(*id as u64);
                         let y = poly.evaluate(&x);
-                        NonRobustShare::new(y, *id, degree)
+                        NonRobustShamirShare::new(y, *id, degree)
                     })
                     .collect();
                 Ok(shares)
@@ -91,8 +90,9 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let shares = NonRobustShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
-        let (_, recovered_secret) = NonRobustShare::recover_secret(&shares).unwrap();
+        let shares =
+            NonRobustShamirShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
+        let (_, recovered_secret) = NonRobustShamirShare::recover_secret(&shares).unwrap();
         assert!(recovered_secret == secret);
     }
 
@@ -102,14 +102,16 @@ mod test {
         let secret2 = Fr::from(20);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let shares_1 = NonRobustShare::compute_shares(secret1, 6, 5, Some(ids), &mut rng).unwrap();
-        let shares_2 = NonRobustShare::compute_shares(secret2, 6, 5, Some(ids), &mut rng).unwrap();
+        let shares_1 =
+            NonRobustShamirShare::compute_shares(secret1, 6, 5, Some(ids), &mut rng).unwrap();
+        let shares_2 =
+            NonRobustShamirShare::compute_shares(secret2, 6, 5, Some(ids), &mut rng).unwrap();
 
         let added_shares: Vec<_> = zip(shares_1, shares_2)
             .map(|(a, b)| a + b)
             .collect::<Result<_, _>>() // Handles errors cleanly
             .unwrap();
-        let (_, recovered_secret) = NonRobustShare::recover_secret(&added_shares).unwrap();
+        let (_, recovered_secret) = NonRobustShamirShare::recover_secret(&added_shares).unwrap();
         assert!(recovered_secret == secret1 + secret2);
     }
 
@@ -118,13 +120,14 @@ mod test {
         let secret = Fr::from(55);
         let ids = &[1, 2, 3, 4, 5, 6, 7, 20];
         let mut rng = test_rng();
-        let shares = NonRobustShare::compute_shares(secret, 8, 5, Some(ids), &mut rng).unwrap();
+        let shares =
+            NonRobustShamirShare::compute_shares(secret, 8, 5, Some(ids), &mut rng).unwrap();
         let tripled_shares = shares
             .iter()
             .map(|share| share.clone() * Fr::from(3))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        let (_, recovered_secret) = NonRobustShare::recover_secret(&tripled_shares).unwrap();
+        let (_, recovered_secret) = NonRobustShamirShare::recover_secret(&tripled_shares).unwrap();
         assert!(recovered_secret == secret * Fr::from(3));
     }
 
@@ -133,10 +136,11 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3, 4, 5, 6];
         let mut rng = test_rng();
-        let mut shares = NonRobustShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
+        let mut shares =
+            NonRobustShamirShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
 
         shares[2].degree = 4;
-        let recovered_secret = NonRobustShare::recover_secret(&shares).unwrap_err();
+        let recovered_secret = NonRobustShamirShare::recover_secret(&shares).unwrap_err();
         match recovered_secret {
             ShareError::InsufficientShares => panic!("incorrect error type"),
             ShareError::DegreeMismatch => (),
@@ -151,8 +155,9 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3];
         let mut rng = test_rng();
-        let shares = NonRobustShare::compute_shares(secret, 3, 5, Some(ids), &mut rng).unwrap();
-        let recovered_secret = NonRobustShare::recover_secret(&shares).unwrap_err();
+        let shares =
+            NonRobustShamirShare::compute_shares(secret, 3, 5, Some(ids), &mut rng).unwrap();
+        let recovered_secret = NonRobustShamirShare::recover_secret(&shares).unwrap_err();
         match recovered_secret {
             ShareError::InsufficientShares => (),
             ShareError::DegreeMismatch => panic!("incorrect error type"),
@@ -169,8 +174,10 @@ mod test {
         let ids1 = &[1, 2, 3, 4, 5, 6];
         let ids2 = &[7, 8, 9, 4, 5, 6];
         let mut rng = test_rng();
-        let shares_1 = NonRobustShare::compute_shares(secret1, 6, 5, Some(ids1), &mut rng).unwrap();
-        let shares_2 = NonRobustShare::compute_shares(secret2, 6, 5, Some(ids2), &mut rng).unwrap();
+        let shares_1 =
+            NonRobustShamirShare::compute_shares(secret1, 6, 5, Some(ids1), &mut rng).unwrap();
+        let shares_2 =
+            NonRobustShamirShare::compute_shares(secret2, 6, 5, Some(ids2), &mut rng).unwrap();
 
         let err = (shares_1[0].clone() + shares_2[0].clone()).unwrap_err();
         match err {

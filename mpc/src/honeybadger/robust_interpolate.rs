@@ -35,22 +35,21 @@ pub enum InterpolateError {
 
 #[derive(Clone, Debug)]
 pub struct Robust;
-pub type RobustShamirShare<T> = ShamirShare<T, 1, Robust>;
+pub type RobustShamirShare<F> = ShamirShare<F, 1, Robust>;
 
 impl<F: FftField> RobustShamirShare<F> {
     pub fn new(share: F, id: usize, degree: usize) -> Self {
         ShamirShare {
             share: [share],
-            id: id,
-            degree: degree,
+            id,
+            degree,
             _sharetype: PhantomData,
         }
     }
 }
 
-impl<F: FftField> SecretSharingScheme<F, 1> for RobustShamirShare<F> {
+impl<F: FftField> SecretSharingScheme<F> for RobustShamirShare<F> {
     type SecretType = F;
-    type Sharetype = Robust;
     type Error = InterpolateError;
     /// Generates `n` secret shares for a `value` using a degree `t` polynomial,
     /// such that `f(0) = value`. Any `t + 1` shares can reconstruct the secret.

@@ -1,9 +1,12 @@
 pub mod messages;
 
-use crate::{common::{share::shamir::NonRobustShare, SecretSharingScheme}, honeybadger::{
-    batch_recon::batch_recon::{apply_vandermonde, make_vandermonde},
-    robust_interpolate::InterpolateError,
-}};
+use crate::{
+    common::{share::shamir::NonRobustShamirShare, SecretSharingScheme},
+    honeybadger::{
+        batch_recon::batch_recon::{apply_vandermonde, make_vandermonde},
+        robust_interpolate::InterpolateError,
+    },
+};
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
@@ -43,15 +46,15 @@ pub enum RanDouShaError {
 #[derive(Clone)]
 pub struct RanDouShaStore<F: FftField> {
     /// Vector that stores the received degree t shares of r.
-    pub received_r_shares_degree_t: HashMap<PartyId, NonRobustShare<F>>,
+    pub received_r_shares_degree_t: HashMap<PartyId, NonRobustShamirShare<F>>,
     /// Vector that stores the received degree 2t shares of r.
-    pub received_r_shares_degree_2t: HashMap<PartyId, NonRobustShare<F>>,
+    pub received_r_shares_degree_2t: HashMap<PartyId, NonRobustShamirShare<F>>,
     /// Vector of r shares of degree t computed as a result of multiplying the Vandermonde matrix
     /// with the shares of s.
-    pub computed_r_shares_degree_t: Vec<NonRobustShare<F>>,
+    pub computed_r_shares_degree_t: Vec<NonRobustShamirShare<F>>,
     /// Vector of r shares of degree 2t computed as a result of multiplying the Vandermonde matrix
     /// with the shares of s.
-    pub computed_r_shares_degree_2t: Vec<NonRobustShare<F>>,
+    pub computed_r_shares_degree_2t: Vec<NonRobustShamirShare<F>>,
     /// Vector that stores the nodes who have sent the output ok msg.
     pub received_ok_msg: Vec<usize>,
 
@@ -250,8 +253,8 @@ where
             if store.received_r_shares_degree_t.len() >= params.threshold + 1
                 && store.received_r_shares_degree_2t.len() >= 2 * params.threshold + 1
             {
-                let mut shares_t_for_recon: Vec<NonRobustShare<F>> = Vec::new();
-                let mut shares_2t_for_recon: Vec<NonRobustShare<F>> = Vec::new();
+                let mut shares_t_for_recon: Vec<NonRobustShamirShare<F>> = Vec::new();
+                let mut shares_2t_for_recon: Vec<NonRobustShamirShare<F>> = Vec::new();
 
                 for (_, share) in store.received_r_shares_degree_t.iter() {
                     shares_t_for_recon.push(share.clone());
@@ -262,8 +265,8 @@ where
 
                 // (5) Perform reconstruction for both degrees.
                 // ShamirSecretSharing::reconstruct expects a vector of shares.
-                let reconstructed_r_t = NonRobustShare::recover_secret(&shares_t_for_recon);
-                let reconstructed_r_2t = NonRobustShare::recover_secret(&shares_2t_for_recon);
+                let reconstructed_r_t = NonRobustShamirShare::recover_secret(&shares_t_for_recon);
+                let reconstructed_r_2t = NonRobustShamirShare::recover_secret(&shares_2t_for_recon);
 
                 // if the reconstruction fails, broadcast false
                 let mut output_message = OutputMessage::new(self.id, true);
@@ -314,7 +317,7 @@ where
         &mut self,
         message: &OutputMessage,
         params: &RanDouShaParams,
-    ) -> Result<(Vec<NonRobustShare<F>>, Vec<NonRobustShare<F>>), RanDouShaError> {
+    ) -> Result<(Vec<NonRobustShamirShare<F>>, Vec<NonRobustShamirShare<F>>), RanDouShaError> {
         info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, params.session_id, message.sender_id, message.msg);
         // todo - add randousha status so we can omit output_handler
         // abort randousha once received the abort message
@@ -357,7 +360,7 @@ where
         message: &RanDouShaMessage,
         params: &RanDouShaParams,
         network: Arc<Mutex<N>>,
-    ) -> Result<Option<(Vec<NonRobustShare<F>>, Vec<NonRobustShare<F>>)>, RanDouShaError>
+    ) -> Result<Option<(Vec<NonRobustShamirShare<F>>, Vec<NonRobustShamirShare<F>>)>, RanDouShaError>
     where
         N: Network,
     {
