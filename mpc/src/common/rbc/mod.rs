@@ -2,9 +2,9 @@ pub mod rbc;
 pub mod rbc_store;
 pub mod utils;
 
+use bincode::ErrorKind;
 use stoffelmpc_network::NetworkError;
 use thiserror::Error;
-use bincode::ErrorKind;
 
 #[derive(Error, Debug)]
 pub enum ShardError {
@@ -47,6 +47,6 @@ pub enum RbcError {
     #[error("error while serializing the object into bytes: {0:?}")]
     SerializationError(Box<ErrorKind>),
 
-     #[error("inner error: {0}")]
+    #[error("inner error: {0}")]
     Inner(#[from] ShardError),
 }
