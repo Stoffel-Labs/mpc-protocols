@@ -167,22 +167,26 @@ where
     where
         N: 'async_trait,
     {
-        let mut randousha_pair = self
+        let randousha_pair = self
             .preprocessing_material
             .randousha_pairs
             .pop()
             .ok_or(ProtocolError::NotEnoughPreprocessing)?;
         let mult_share_deg_2t = a.share_mul(b)?;
-        let open_share = mult_share_deg_2t - randousha_pair.degree_2t;
+        let _open_share = mult_share_deg_2t - randousha_pair.degree_2t;
 
         // TODO: Implement the opening.
 
         todo!();
     }
 
-    fn init(&mut self, network: Arc<N>, opts: HoneyBadgerMPCOpts) {
+    async fn init(&mut self, network: Arc<N>, opts: HoneyBadgerMPCOpts)
+    where
+        N: 'async_trait,
+    {
         let network = Arc::clone(&network);
-        self.run_preprocessing(network, opts.init_preproc_opts);
+        self.run_preprocessing(network, opts.init_preproc_opts)
+            .await;
     }
 }
 

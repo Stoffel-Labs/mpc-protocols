@@ -226,7 +226,9 @@ where
     /// Defines the information needed to run and define the MPC protocol.
     type MPCOpts;
 
-    fn init(&mut self, network: Arc<N>, opts: Self::MPCOpts);
+    async fn init(&mut self, network: Arc<N>, opts: Self::MPCOpts)
+    where
+        N: 'async_trait;
 
     async fn mul(&mut self, a: S, b: S, network: Arc<N>) -> Result<S, ProtocolError>
     where
