@@ -57,7 +57,7 @@ pub struct RanDouShaStore<F: FftField> {
     pub computed_r_shares_degree_2t: Vec<NonRobustShamirShare<F>>,
     /// Vector that stores the nodes who have sent the output ok msg.
     pub received_ok_msg: Vec<usize>,
-
+    /// Current state of the protocol.
     pub state: RanDouShaState,
 }
 

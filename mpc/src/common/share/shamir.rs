@@ -30,7 +30,10 @@ impl<F: FftField> SecretSharingScheme<F> for NonRobustShamirShare<F> {
     // compute the shamir shares of all ids for a secret
     fn compute_shares(
         secret: Self::SecretType,
+
+        // TODO: Remove this.
         _n: usize,
+
         degree: usize,
         ids: Option<&[usize]>,
         rng: &mut impl Rng,
@@ -38,6 +41,7 @@ impl<F: FftField> SecretSharingScheme<F> for NonRobustShamirShare<F> {
         let mut poly = DensePolynomial::rand(degree, rng);
         poly[0] = secret;
 
+        // TODO: Why is ids an Option type?
         match ids {
             Some(id_list) => {
                 let shares = id_list

@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use rbc::RbcError;
 use std::{
     marker::PhantomData,
-    ops::{Add, Mul},
+    ops::{Add, Mul, Sub},
     sync::Arc,
     usize,
 };
@@ -29,6 +29,8 @@ use tokio::sync::mpsc::Receiver;
 pub enum ProtocolError {
     #[error("there is no preprocessing available to perform the operation")]
     NotEnoughPreprocessing,
+    #[error("there is an error with share computation")]
+    ShareError(#[from] ShareError),
 }
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
@@ -113,6 +115,29 @@ impl<F: FftField, const N: usize, P> Add for ShamirShare<F, N, P> {
         })
     }
 }
+
+impl<F: FftField, const N: usize, P> Sub for ShamirShare<F, N, P> {
+    type Output = Result<Self, ShareError>;
+    fn sub(self, other: Self) -> Self::Output {
+        if self.degree != other.degree {
+            return Err(ShareError::DegreeMismatch);
+        }
+
+        if self.id != other.id {
+            return Err(ShareError::IdMismatch);
+        }
+
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] - other.share[i]);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+            _sharetype: PhantomData,
+        })
+    }
+}
+
 impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
     type Output = Result<Self, ShareError>;
 
@@ -123,6 +148,26 @@ impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
             share: new_share,
             id: self.id,
             degree: self.degree,
+            _sharetype: PhantomData,
+        })
+    }
+}
+
+impl<F, const N: usize, P> ShamirShare<F, N, P>
+where
+    F: FftField,
+{
+    pub fn share_mul(self, other: Self) -> Result<Self, ShareError> {
+        if self.id != other.id {
+            return Err(ShareError::IdMismatch);
+        }
+
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] * other.share[i]);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree + other.degree,
             _sharetype: PhantomData,
         })
     }

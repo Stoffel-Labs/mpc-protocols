@@ -131,6 +131,7 @@ impl RBC for Bracha {
         Ok(())
     }
 }
+
 impl Bracha {
     // Handlers
     /// Handles the "INIT" message. Responds by broadcasting an "ECHO" message if necessary.

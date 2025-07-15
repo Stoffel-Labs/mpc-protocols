@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use ark_ff::FftField;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use async_trait::async_trait;
 use stoffelmpc_network::Network;
 
@@ -23,12 +24,40 @@ pub mod batch_recon;
 /// Application to Anonymous Communication".
 pub mod ran_dou_sha;
 
+/// Implementation for the protocol of double share generation.
+pub mod double_share_generation;
+
+/// Information pertaining the HoneyBadgerMPC protocol.
 pub struct HoneyBadgerMPC<F: FftField> {
+    /// Preprocessing material used in the protocol execution.
     preprocessing_material: HoneyBadgerMPCPreprocMaterial<F>,
+    /// Random double shares to execute RanDouSha.
+    randousha_input_shares: DoubleShamirShare<F>,
 }
 
+#[derive(CanonicalSerialize, CanonicalDeserialize)]
+pub struct DoubleShamirShare<F: FftField> {
+    /// Share of degree 2t.
+    pub degree_2t: NonRobustShamirShare<F>,
+    // Share of degree t.
+    pub degree_t: NonRobustShamirShare<F>,
+}
+
+impl<F: FftField> DoubleShamirShare<F> {
+    pub fn new(degree_t: NonRobustShamirShare<F>, degree_2t: NonRobustShamirShare<F>) -> Self {
+        assert!(degree_t.id == degree_2t.id);
+        Self {
+            degree_2t,
+            degree_t,
+        }
+    }
+}
+
+/// Preprocessing material for the HoneyBadgerMPC protocol.
 pub struct HoneyBadgerMPCPreprocMaterial<F: FftField> {
-    randousha_pairs: Vec<(NonRobustShamirShare<F>, NonRobustShamirShare<F>)>,
+    /// A pool of random double shares used for secure multiplication.
+    randousha_pairs: Vec<DoubleShamirShare<F>>,
+    /// A pool of random shares used for inputing private data for the protocol.
     random_shares: Vec<NonRobustShamirShare<F>>,
 }
 
@@ -44,9 +73,10 @@ where
         }
     }
 
+    /// Adds the provided new preprocessing material to the current pool.
     pub fn add(
         &mut self,
-        mut ran_dou_sha_pair: Option<Vec<(NonRobustShamirShare<F>, NonRobustShamirShare<F>)>>,
+        mut ran_dou_sha_pair: Option<Vec<DoubleShamirShare<F>>>,
         mut random_shares: Option<Vec<NonRobustShamirShare<F>>>,
     ) {
         if let Some(pairs) = &mut ran_dou_sha_pair {
@@ -58,15 +88,14 @@ where
         }
     }
 
+    /// Returns the number of random double share pairs, and the number of random shares
+    /// respectively.
     pub fn len(&self) -> (usize, usize) {
         (self.randousha_pairs.len(), self.random_shares.len())
     }
 
     /// Take up to n pairs of random double sharings from the preprocessing material.
-    pub fn take_randousha_pair(
-        &mut self,
-        n_pairs: usize,
-    ) -> Vec<(NonRobustShamirShare<F>, NonRobustShamirShare<F>)> {
+    pub fn take_randousha_pair(&mut self, n_pairs: usize) -> Vec<DoubleShamirShare<F>> {
         let pairs = n_pairs.min(self.randousha_pairs.len());
         self.randousha_pairs.drain(0..pairs).collect()
     }
@@ -78,6 +107,7 @@ where
     }
 }
 
+/// Configuration options for the HoneyBadgerMPC protocol.
 pub struct HoneyBadgerMPCOpts {
     /// Number of parties in the protocol.
     pub n_parties: usize,
@@ -88,6 +118,7 @@ pub struct HoneyBadgerMPCOpts {
 }
 
 impl HoneyBadgerMPCOpts {
+    /// Creates a new struct of initialization options for the HoneyBadgerMPC protocol.
     pub fn new(
         n_parties: usize,
         threshold: usize,
@@ -101,6 +132,7 @@ impl HoneyBadgerMPCOpts {
     }
 }
 
+/// Configuration options for the HoneyBadgerMPC preprocessing.
 pub struct HoneyBadgerMPCPreprocOpts {
     /// Number of random double sharing pairs that need to be generated.
     pub n_randousha_pairs: usize,
@@ -109,6 +141,7 @@ pub struct HoneyBadgerMPCPreprocOpts {
 }
 
 impl HoneyBadgerMPCPreprocOpts {
+    /// Creates new configuration options for the HoneyBadgerMPC preprocessing.
     pub fn new(n_randousha_pairs: usize, n_random_shares: usize) -> Self {
         Self {
             n_randousha_pairs,
@@ -139,6 +172,11 @@ where
             .randousha_pairs
             .pop()
             .ok_or(ProtocolError::NotEnoughPreprocessing)?;
+        let mult_share_deg_2t = a.share_mul(b)?;
+        let open_share = mult_share_deg_2t - randousha_pair.degree_2t;
+
+        // TODO: Implement the opening.
+
         todo!();
     }
 
@@ -165,6 +203,13 @@ where
     where
         N: 'async_trait,
     {
+        // TODO: We need:
+        // - Generate random shares for preprocessing result for input.
+        // - Generate double random shares for randousha.
+        // - Call setup function to instatiate the nodes for randousha.
+        // - Execute randousha with the shares from the previous step.
+        //     - Listen to messages comming from other parties and process them.
+
         todo!()
     }
 }
