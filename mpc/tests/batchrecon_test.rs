@@ -256,7 +256,7 @@ mod tests {
             let mut recv = receivers.remove(0);
 
             handles.push(tokio::spawn(async move {
-                match node.init_batch_reconstruct(&shares, &net_clone).await {
+                match node.init_batch_reconstruct(&shares, net_clone.clone()).await {
                     Ok(()) => {}
                     Err(e) => warn!(id =i,error = ?e,"Sending failure"),
                 }
@@ -264,7 +264,7 @@ mod tests {
                 while node.secrets.is_none() {
                     let msg = timeout(Duration::from_secs(2), recv.recv()).await;
                     match msg {
-                        Ok(Some(msg)) => match node.process(msg, &net_clone).await {
+                        Ok(Some(msg)) => match node.process(msg, net_clone.clone()).await {
                             Ok(()) => {}
                             Err(e) => warn!(id =i,error = ?e ,"Broadcasting failure"),
                         },

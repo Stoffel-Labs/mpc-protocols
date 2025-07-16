@@ -9,13 +9,13 @@ use stoffelmpc_network::NetworkError;
 use thiserror::Error;
 
 /// Represents message type exchanged between network nodes during the batch reconstruction protocol.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum BatchReconMsgType {
     Eval,   // sent in the first round
     Reveal, // sent in the second round
 }
 ///Message exchanged between network nodes during the batch reconstruction protocol.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct BatchReconMsg {
     pub sender_id: usize,            //Sender id
     pub msg_type: BatchReconMsgType, //Message type

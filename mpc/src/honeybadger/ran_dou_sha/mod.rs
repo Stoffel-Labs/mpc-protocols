@@ -1,9 +1,17 @@
 pub mod messages;
 
-use crate::{common::{share::shamir::NonRobustShare, SecretSharingScheme}, honeybadger::{
-    batch_recon::batch_recon::{apply_vandermonde, make_vandermonde},
-    robust_interpolate::InterpolateError,
-}};
+use crate::{
+    common::{
+        rbc::{rbc::Avid, RbcError},
+        share::shamir::NonRobustShare,
+        SecretSharingScheme, RBC,
+    },
+    honeybadger::{
+        batch_recon::batch_recon::{apply_vandermonde, make_vandermonde},
+        robust_interpolate::InterpolateError,
+        WrappedMessage,
+    },
+};
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
@@ -31,6 +39,8 @@ pub enum RanDouShaError {
     SerializationError(Box<ErrorKind>),
     #[error("inner error: {0}")]
     Inner(#[from] InterpolateError),
+    #[error("Rbc error: {0}")]
+    RbcError(RbcError),
     /// The protocol received an abort signal.
     #[error("received abort singal")]
     Abort,
@@ -106,6 +116,8 @@ pub struct RanDouShaNode<F: FftField> {
     pub id: PartyId,
     /// Storage of the node.
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
+    ///Avid instance for RBC
+    pub rbc: Avid,
 }
 
 impl<F> RanDouShaNode<F>
@@ -142,7 +154,7 @@ where
         &mut self,
         init_msg: &InitMessage<F>,
         params: &RanDouShaParams,
-        network: Arc<Mutex<N>>,
+        network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
         N: Network,
@@ -164,11 +176,10 @@ where
         let mut store = bind_store.lock().await;
         store.computed_r_shares_degree_t = r_deg_t.clone();
         store.computed_r_shares_degree_2t = r_deg_2t.clone();
-
+        drop(store);
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
-        let network_locked = network.lock().await;
-        for party in network_locked.parties() {
+        for party in network.parties() {
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
                 let share_deg_t = r_deg_t[party.id() - 1].clone();
                 let share_deg_2t = r_deg_2t[party.id() - 1].clone();
@@ -180,17 +191,18 @@ where
                 reconst_message
                     .serialize_compressed(&mut bytes_rec_message)
                     .map_err(RanDouShaError::ArkSerialization)?;
-                let generic_message = RanDouShaMessage::new(
+                let rds_message = RanDouShaMessage::new(
                     self.id,
                     RanDouShaMessageType::ReconstructMessage,
                     &bytes_rec_message,
                 );
-                let bytes_generic_message = bincode::serialize(&generic_message)
-                    .map_err(RanDouShaError::SerializationError)?;
+                let wrapped = WrappedMessage::RanDouSha(rds_message);
 
+                let bytes_wrapped =
+                    bincode::serialize(&wrapped).map_err(RanDouShaError::SerializationError)?;
                 // Sending the generic message to the network.
-                network_locked
-                    .send(party.id(), &bytes_generic_message)
+                network
+                    .send(party.id(), &bytes_wrapped)
                     .await
                     .map_err(RanDouShaError::NetworkError)?;
             }
@@ -211,10 +223,10 @@ where
         &mut self,
         rec_msg: &ReconstructionMessage<F>,
         params: &RanDouShaParams,
-        network: Arc<Mutex<N>>,
+        network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
         info!(
             "Node {} (session {}) - Starting reconstruction_handler for message from sender {}.",
@@ -259,7 +271,7 @@ where
                 for (_, share) in store.received_r_shares_degree_2t.iter() {
                     shares_2t_for_recon.push(share.clone());
                 }
-
+                drop(store);
                 // (5) Perform reconstruction for both degrees.
                 // ShamirSecretSharing::reconstruct expects a vector of shares.
                 let reconstructed_r_t = NonRobustShare::recover_secret(&shares_t_for_recon);
@@ -285,21 +297,24 @@ where
                 output_message
                     .serialize_compressed(&mut bytes_out_message)
                     .map_err(RanDouShaError::ArkSerialization)?;
-                let generic_message = RanDouShaMessage::new(
+                let rds_message = RanDouShaMessage::new(
                     self.id,
                     RanDouShaMessageType::OutputMessage,
                     &bytes_out_message,
                 );
-                let bytes_generic_message = bincode::serialize(&generic_message)
-                    .map_err(RanDouShaError::SerializationError)?;
+                let wrapped = WrappedMessage::RanDouSha(rds_message);
+                let bytes_wrapped =
+                    bincode::serialize(&wrapped).map_err(RanDouShaError::SerializationError)?;
 
                 // if the verification succeeds, broadcast true (aka. OK)
-                network
-                    .lock()
+                self.rbc
+                    .init(
+                        bytes_wrapped,
+                        (params.session_id + self.id) as u32, // A unique session id per node
+                        Arc::clone(&network),
+                    )
                     .await
-                    .broadcast(&bytes_generic_message)
-                    .await
-                    .map_err(RanDouShaError::NetworkError)?;
+                    .map_err(|e| RanDouShaError::RbcError(e))?;
             }
         }
 
@@ -354,13 +369,19 @@ where
 
     pub async fn process<N>(
         &mut self,
-        message: &RanDouShaMessage,
+        wrapped_message: &WrappedMessage,
         params: &RanDouShaParams,
-        network: Arc<Mutex<N>>,
+        network: Arc<N>,
     ) -> Result<Option<(Vec<NonRobustShare<F>>, Vec<NonRobustShare<F>>)>, RanDouShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
+        let message = match wrapped_message {
+            WrappedMessage::RanDouSha(m) => m,
+            // If you also embed Bracha/AVID etc. you can handle them here
+            _ => return Ok(None),
+        };
+
         match message.msg_type {
             messages::RanDouShaMessageType::InitMessage => {
                 let init_message =
