@@ -134,10 +134,12 @@ where
     }
 }
 
+/// Storage for the faulty double share protocol.
 pub struct DouShaStorage<F>
 where
     F: FftField,
 {
+    /// Double shares resulting from the execution of the protocol.
     pub shares: Vec<DoubleShamirShare<F>>,
 }
 
@@ -145,9 +147,15 @@ impl<F> DouShaStorage<F>
 where
     F: FftField,
 {
+    /// Creates an empty storage.
     pub fn empty() -> Self {
         Self { shares: Vec::new() }
     }
+}
+
+pub struct DouShaParams {
+    pub n_parties: usize,
+    pub threshold: usize,
 }
 
 /// Node participating in a non-robust double share protocol.
@@ -155,7 +163,9 @@ pub struct DoubleShareNode<F>
 where
     F: FftField,
 {
+    /// ID of the party.
     pub id: PartyId,
+    /// Storage of the party.
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<DouShaStorage<F>>>>>>,
 }
 
@@ -178,9 +188,8 @@ where
 
     pub async fn init_handler<N, R>(
         &self,
-        n: usize,
-        t: usize,
         init_msg: InitMessage,
+        params: DouShaParams,
         rng: &mut R,
         network: Arc<N>,
     ) -> Result<(), DouShaError>
@@ -192,9 +201,20 @@ where
 
         let secret = F::rand(rng);
 
-        let shares_deg_t = NonRobustShamirShare::compute_shares(secret, n, t, Some(&ids), rng)?;
-        let shares_deg_2t =
-            NonRobustShamirShare::compute_shares(secret, n, 2 * t, Some(&ids), rng)?;
+        let shares_deg_t = NonRobustShamirShare::compute_shares(
+            secret,
+            params.n_parties,
+            params.threshold,
+            Some(&ids),
+            rng,
+        )?;
+        let shares_deg_2t = NonRobustShamirShare::compute_shares(
+            secret,
+            params.n_parties,
+            2 * params.threshold,
+            Some(&ids),
+            rng,
+        )?;
 
         for (share_t, share_2t) in shares_deg_t.into_iter().zip(shares_deg_2t) {
             // Create and serialize the payload.

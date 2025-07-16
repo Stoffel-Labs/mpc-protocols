@@ -209,7 +209,6 @@ where
     {
         // TODO: We need:
         // - Generate random shares for preprocessing result for input.
-        // - Generate double random shares for randousha.
         // - Call setup function to instatiate the nodes for randousha.
         // - Execute randousha with the shares from the previous step.
         //     - Listen to messages comming from other parties and process them.
