@@ -66,7 +66,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn init_batch_reconstruct<N: Network>(
         &self,
         shares: &[RobustShamirShare<F>], // this party's shares of x_0 to x_t
-        net: &Arc<N>,
+        net: Arc<N>,
     ) -> Result<(), BatchReconError> {
         if shares.len() < self.t + 1 {
             return Err(BatchReconError::InvalidInput(
@@ -109,7 +109,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn batch_recon_handler<N: Network>(
         &mut self,
         msg: BatchReconMsg,
-        net: &Arc<N>,
+        net: Arc<N>,
     ) -> Result<(), BatchReconError> {
         match msg.msg_type {
             BatchReconMsgType::Eval => {
@@ -214,7 +214,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn process<N: Network>(
         &mut self,
         raw_msg: Vec<u8>,
-        net: &Arc<N>,
+        net: Arc<N>,
     ) -> Result<(), BatchReconError> {
         let msg: BatchReconMsg =
             bincode::deserialize(&raw_msg).map_err(|e| BatchReconError::SerializationError(e))?;
