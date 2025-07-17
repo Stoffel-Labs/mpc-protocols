@@ -2,12 +2,13 @@ use std::{collections::HashMap, sync::Arc};
 
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::Rng;
+use ark_std::rand::{Rng, RngCore};
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use stoffelmpc_network::{Message, Network, NetworkError, Node, PartyId, SessionId};
 use thiserror::Error;
 use tokio::sync::Mutex;
+use tracing::info;
 
 use crate::common::{
     share::{shamir::NonRobustShamirShare, ShareError},
@@ -153,7 +154,9 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct DouShaParams {
+    pub session_id: SessionId,
     pub n_parties: usize,
     pub threshold: usize,
 }
@@ -173,6 +176,41 @@ impl<F> DoubleShareNode<F>
 where
     F: FftField,
 {
+    pub async fn proccess<R, N>(
+        &mut self,
+        params: &DouShaParams,
+        message: &DouShaMessage,
+        rng: &mut R,
+        network: Arc<N>,
+    ) -> Result<(), DouShaError>
+    where
+        R: Rng,
+        N: Network,
+    {
+        match message.msg_type {
+            DouShaMessageType::Initialize => {
+                let init_message = bincode::deserialize(&message.payload)?;
+                self.init_handler(&init_message, params, rng, network)
+                    .await?;
+                Ok(())
+            }
+            DouShaMessageType::Receive => {
+                let receive_message =
+                    ReceiveMessage::deserialize_compressed(message.payload.as_slice())?;
+                self.receive_double_shares_handler(&receive_message).await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Creates a new node for the faulty double share protocol.
+    pub fn new(id: PartyId) -> Self {
+        Self {
+            id,
+            storage: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
     pub async fn get_or_create_store(
@@ -188,8 +226,8 @@ where
 
     pub async fn init_handler<N, R>(
         &self,
-        init_msg: InitMessage,
-        params: DouShaParams,
+        init_msg: &InitMessage,
+        params: &DouShaParams,
         rng: &mut R,
         network: Arc<N>,
     ) -> Result<(), DouShaError>
@@ -197,6 +235,11 @@ where
         N: Network,
         R: Rng,
     {
+        info!(
+            "Receiving init message for double share faulty generation from {:?}",
+            init_msg.sender
+        );
+
         let ids: Vec<PartyId> = network.parties().iter().map(|party| party.id()).collect();
 
         let secret = F::rand(rng);
@@ -232,6 +275,10 @@ where
             );
             let bytes_generic_msg = bincode::serialize(&generic_message)?;
 
+            info!(
+                "sending shares from {:?} to {:?}",
+                self.id, message.double_share.degree_t.id
+            );
             network
                 .send(message.double_share.degree_t.id, &bytes_generic_msg)
                 .await?;
@@ -242,11 +289,17 @@ where
 
     pub async fn receive_double_shares_handler(
         &mut self,
-        recv_message: ReceiveMessage<F>,
+        recv_message: &ReceiveMessage<F>,
     ) -> Result<(), DouShaError> {
+        info!(
+            "party {:?} receiving shares from {:?}",
+            self.id, recv_message.sender_id
+        );
         let binding = self.get_or_create_store(recv_message.session_id).await;
         let mut dousha_storage = binding.lock().await;
-        dousha_storage.shares.push(recv_message.double_share);
+        dousha_storage
+            .shares
+            .push(recv_message.double_share.clone());
         Ok(())
     }
 }

@@ -35,7 +35,7 @@ pub struct HoneyBadgerMPC<F: FftField> {
     randousha_input_shares: DoubleShamirShare<F>,
 }
 
-#[derive(CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct DoubleShamirShare<F: FftField> {
     /// Share of degree 2t.
     pub degree_2t: NonRobustShamirShare<F>,

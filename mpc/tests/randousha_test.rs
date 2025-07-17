@@ -380,7 +380,7 @@ async fn randousha_e2e() {
         HashMap::<usize, (Vec<NonRobustShamirShare<Fr>>, Vec<NonRobustShamirShare<Fr>>)>::new();
     while let Some((id, final_shares)) = fin_recv.recv().await {
         final_results.insert(id, final_shares);
-        if final_results.len() == 10 {
+        if final_results.len() == n_parties {
             // check final_shares consist of correct shares
             for (id, (shares_t, shares_2t)) in final_results {
                 let _ = shares_t.iter().zip(shares_2t).map(|(s_t, s_2t)| {
