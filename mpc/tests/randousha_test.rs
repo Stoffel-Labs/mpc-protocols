@@ -383,6 +383,8 @@ async fn randousha_e2e() {
         if final_results.len() == n_parties {
             // check final_shares consist of correct shares
             for (id, (shares_t, shares_2t)) in final_results {
+                assert_eq!(shares_t.len(), shares_2t.len());
+                assert_eq!(shares_t.len(), params.threshold + 1);
                 let _ = shares_t.iter().zip(shares_2t).map(|(s_t, s_2t)| {
                     assert_eq!(s_t.degree, params.threshold);
                     assert_eq!(s_2t.degree, 2 * params.threshold);

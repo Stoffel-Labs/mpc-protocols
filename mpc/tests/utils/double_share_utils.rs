@@ -6,7 +6,7 @@ use std::{
 use ark_bls12_381::Fr;
 use ark_std::test_rng;
 use stoffelmpc_mpc::honeybadger::{
-    double_share_generation::{DouShaMessage, DouShaParams, DoubleShareNode},
+    double_share_generation::{DouShaMessage, DouShaParams, DoubleShareNode, ProtocolState},
     DoubleShamirShare,
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
@@ -76,22 +76,21 @@ pub fn spawn_receiver_tasks(
 
                 match result {
                     Ok(_) => {
-                        let resulting_double_shares = dousha_node
-                            .lock()
-                            .await
-                            .storage
-                            .lock()
-                            .await
-                            .get(&params.session_id)
-                            .unwrap()
-                            .lock()
-                            .await
-                            .shares
-                            .clone();
-                        final_result_data_chan
-                            .send((dousha_node.lock().await.id, resulting_double_shares))
-                            .await
-                            .unwrap();
+                        let dousha_node_lock = dousha_node.lock().await;
+                        let storage_lock = dousha_node_lock.storage.lock().await;
+                        let node_storage =
+                            storage_lock.get(&params.session_id).unwrap().lock().await;
+                        if node_storage
+                            .reception_tracker
+                            .iter()
+                            .all(|&received| received)
+                        {
+                            let resulting_double_shares = node_storage.shares.clone();
+                            final_result_data_chan
+                                .send((dousha_node_lock.id, resulting_double_shares))
+                                .await
+                                .unwrap();
+                        }
                     }
                     Err(e) => {
                         error!("Encountered an error: {:?}", e);

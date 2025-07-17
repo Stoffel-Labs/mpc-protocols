@@ -91,6 +91,13 @@ pub enum DouShaMessageType {
     Receive,
 }
 
+#[derive(PartialEq)]
+pub enum ProtocolState {
+    Initialized,
+    Finished,
+    NotInitialized,
+}
+
 /// Initialization message for the faulty double share protocol.
 #[derive(Serialize, Deserialize)]
 pub struct InitMessage {
@@ -142,6 +149,8 @@ where
 {
     /// Double shares resulting from the execution of the protocol.
     pub shares: Vec<DoubleShamirShare<F>>,
+    /// Current state of the protocol
+    pub reception_tracker: Vec<bool>,
 }
 
 impl<F> DouShaStorage<F>
@@ -149,8 +158,11 @@ where
     F: FftField,
 {
     /// Creates an empty storage.
-    pub fn empty() -> Self {
-        Self { shares: Vec::new() }
+    pub fn empty(n_parties: usize) -> Self {
+        Self {
+            shares: Vec::new(),
+            reception_tracker: vec![false; n_parties],
+        }
     }
 }
 
@@ -197,7 +209,8 @@ where
             DouShaMessageType::Receive => {
                 let receive_message =
                     ReceiveMessage::deserialize_compressed(message.payload.as_slice())?;
-                self.receive_double_shares_handler(&receive_message).await?;
+                self.receive_double_shares_handler(&params, &receive_message)
+                    .await?;
                 Ok(())
             }
         }
@@ -215,17 +228,18 @@ where
     /// not been created yet, the function will create an empty storage and return it.
     pub async fn get_or_create_store(
         &mut self,
+        n_parties: usize,
         session_id: SessionId,
     ) -> Arc<Mutex<DouShaStorage<F>>> {
         let mut storage = self.storage.lock().await;
         storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(DouShaStorage::empty())))
+            .or_insert(Arc::new(Mutex::new(DouShaStorage::empty(n_parties))))
             .clone()
     }
 
     pub async fn init_handler<N, R>(
-        &self,
+        &mut self,
         init_msg: &InitMessage,
         params: &DouShaParams,
         rng: &mut R,
@@ -284,22 +298,32 @@ where
                 .await?;
         }
 
+        self.get_or_create_store(params.n_parties, params.session_id)
+            .await;
+
         Ok(())
     }
 
     pub async fn receive_double_shares_handler(
         &mut self,
+        params: &DouShaParams,
         recv_message: &ReceiveMessage<F>,
     ) -> Result<(), DouShaError> {
-        info!(
-            "party {:?} receiving shares from {:?}",
-            self.id, recv_message.sender_id
-        );
-        let binding = self.get_or_create_store(recv_message.session_id).await;
+        let binding = self
+            .get_or_create_store(params.n_parties, recv_message.session_id)
+            .await;
         let mut dousha_storage = binding.lock().await;
         dousha_storage
             .shares
             .push(recv_message.double_share.clone());
+        info!(
+            session_id = recv_message.session_id,
+            share_amount = dousha_storage.shares.len(),
+            "party {:?} received shares from {:?}",
+            self.id,
+            recv_message.sender_id,
+        );
+        dousha_storage.reception_tracker[recv_message.sender_id] = true;
         Ok(())
     }
 }

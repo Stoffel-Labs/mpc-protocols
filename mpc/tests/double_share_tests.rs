@@ -14,8 +14,8 @@ pub mod utils;
 #[tokio::test]
 async fn generate_faulty_double_shares_e2e() {
     setup_tracing();
-    let n_parties = 10;
-    let threshold = 3;
+    let n_parties = 5;
+    let threshold = 2;
     let session_id = 1111;
 
     let (params, network, receivers) = test_setup(n_parties, threshold, session_id);
@@ -39,7 +39,7 @@ async fn generate_faulty_double_shares_e2e() {
 
     // Initialize nodes.
     for node in &dou_sha_nodes {
-        let node_locked = node.lock().await;
+        let mut node_locked = node.lock().await;
         let init_msg = InitMessage::new(node_locked.id, params.session_id);
         node_locked
             .init_handler(&init_msg, &params, &mut rng, Arc::clone(&network))
@@ -54,13 +54,9 @@ async fn generate_faulty_double_shares_e2e() {
     while let Some((id, shares)) = final_result_receiver.recv().await {
         resulting_shares.insert(id, shares);
         if resulting_shares.len() == n_parties {
-            info!(
-                amount = resulting_shares.len(),
-                "all parties received the shares"
-            );
-
             // Assert that the shares received have the correct properties.
             for (id, final_double_shares) in &resulting_shares {
+                assert_eq!(final_double_shares.len(), n_parties);
                 for double_share in final_double_shares {
                     assert_eq!(*id, double_share.degree_t.id);
                     assert_eq!(*id, double_share.degree_2t.id);
@@ -68,7 +64,6 @@ async fn generate_faulty_double_shares_e2e() {
                     assert_eq!(double_share.degree_2t.degree, 2 * params.threshold);
                 }
             }
-
             break;
         }
     }
