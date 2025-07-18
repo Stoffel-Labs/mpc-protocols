@@ -149,27 +149,39 @@ where
 {
     /// Double shares resulting from the execution of the protocol.
     pub shares: Vec<DoubleShamirShare<F>>,
-    /// Current state of the protocol
-    pub reception_tracker: Vec<bool>,
+
+    /// Current state of the protocol.
+    pub state: ProtocolState,
+
+    /// Tracker for the received shares.
+    ///
+    /// Each time tha a party receives a share, the boolean vector in its position is set to
+    /// `true`. The protocol is finished once all the flags of the vector are `true`.
+    reception_tracker: Vec<bool>,
 }
 
 impl<F> DouShaStorage<F>
 where
     F: FftField,
 {
-    /// Creates an empty storage.
+    /// Creates an empty storage. The
     pub fn empty(n_parties: usize) -> Self {
         Self {
             shares: Vec::new(),
             reception_tracker: vec![false; n_parties],
+            state: ProtocolState::NotInitialized,
         }
     }
 }
 
+/// Parameters for the faulty double share protocol.
 #[derive(Debug, Clone)]
 pub struct DouShaParams {
+    /// ID of the session.
     pub session_id: SessionId,
+    /// Number of parties participating in the protocol.
     pub n_parties: usize,
+    /// Threshold for the corrupted parties.
     pub threshold: usize,
 }
 
@@ -298,8 +310,12 @@ where
                 .await?;
         }
 
-        self.get_or_create_store(params.n_parties, params.session_id)
+        // Update the state of the protocol to Initialized.
+        let storage_access = self
+            .get_or_create_store(params.n_parties, params.session_id)
             .await;
+        let mut storage = storage_access.lock().await;
+        storage.state = ProtocolState::Initialized;
 
         Ok(())
     }
@@ -324,6 +340,16 @@ where
             recv_message.sender_id,
         );
         dousha_storage.reception_tracker[recv_message.sender_id] = true;
+
+        // Check if the protocol has reached an end
+        if dousha_storage
+            .reception_tracker
+            .iter()
+            .all(|&received| received)
+        {
+            dousha_storage.state = ProtocolState::Finished;
+        }
+
         Ok(())
     }
 }
