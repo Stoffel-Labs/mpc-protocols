@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::{Rng, RngCore};
+use ark_std::rand::Rng;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use stoffelmpc_network::{Message, Network, NetworkError, Node, PartyId, SessionId};
@@ -183,6 +183,18 @@ pub struct DouShaParams {
     pub n_parties: usize,
     /// Threshold for the corrupted parties.
     pub threshold: usize,
+}
+
+impl DouShaParams {
+    /// Creates a new double share parameter set.
+    pub fn new(session_id: SessionId, n_parties: usize, threshold: usize) -> Self {
+        assert!(threshold < n_parties);
+        Self {
+            session_id,
+            n_parties,
+            threshold,
+        }
+    }
 }
 
 /// Node participating in a non-robust double share protocol.

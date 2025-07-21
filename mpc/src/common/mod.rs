@@ -23,7 +23,6 @@ use std::{
 };
 use stoffelmpc_network::Network;
 use thiserror::Error;
-use tokio::sync::mpsc::Receiver;
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -116,9 +115,9 @@ impl<F: FftField, const N: usize, P> Add for ShamirShare<F, N, P> {
     }
 }
 
-impl<F: FftField, const N: usize, P> Sub for ShamirShare<F, N, P> {
+impl<F: FftField, const N: usize, P> Sub<&Self> for ShamirShare<F, N, P> {
     type Output = Result<Self, ShareError>;
-    fn sub(self, other: Self) -> Self::Output {
+    fn sub(self, other: &Self) -> Self::Output {
         if self.degree != other.degree {
             return Err(ShareError::DegreeMismatch);
         }
@@ -157,7 +156,7 @@ impl<F, const N: usize, P> ShamirShare<F, N, P>
 where
     F: FftField,
 {
-    pub fn share_mul(self, other: Self) -> Result<Self, ShareError> {
+    pub fn share_mul(&self, other: &Self) -> Result<Self, ShareError> {
         if self.id != other.id {
             return Err(ShareError::IdMismatch);
         }

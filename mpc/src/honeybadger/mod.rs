@@ -1,14 +1,3 @@
-use std::sync::Arc;
-
-use ark_ff::FftField;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use async_trait::async_trait;
-use stoffelmpc_network::Network;
-
-use crate::common::{
-    share::shamir::NonRobustShamirShare, MPCProtocol, PreprocessingMPCProtocol, ProtocolError, RBC,
-};
-
 /// This module contains the implementation of the Robust interpolate protocol presented in
 /// Figure 1 in the paper "HoneyBadgerMPC and AsynchroMix: Practical AsynchronousMPC and its
 /// Application to Anonymous Communication".
@@ -26,6 +15,20 @@ pub mod ran_dou_sha;
 
 /// Implementation for the protocol of double share generation.
 pub mod double_share_generation;
+
+/// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
+pub mod triple_generation;
+
+use std::sync::Arc;
+
+use ark_ff::FftField;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use async_trait::async_trait;
+use stoffelmpc_network::Network;
+
+use crate::common::{
+    share::shamir::NonRobustShamirShare, MPCProtocol, PreprocessingMPCProtocol, ProtocolError, RBC,
+};
 
 /// Information pertaining the HoneyBadgerMPC protocol.
 pub struct HoneyBadgerMPC<F: FftField> {
@@ -172,8 +175,8 @@ where
             .randousha_pairs
             .pop()
             .ok_or(ProtocolError::NotEnoughPreprocessing)?;
-        let mult_share_deg_2t = a.share_mul(b)?;
-        let _open_share = mult_share_deg_2t - randousha_pair.degree_2t;
+        let mult_share_deg_2t = a.share_mul(&b)?;
+        let _open_share = mult_share_deg_2t - &randousha_pair.degree_2t;
 
         // TODO: Implement the opening.
 
