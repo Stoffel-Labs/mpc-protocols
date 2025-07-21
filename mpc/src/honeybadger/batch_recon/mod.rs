@@ -20,6 +20,7 @@ pub struct BatchReconMsg {
     pub msg_type: BatchReconMsgType, //Message type
     pub payload: Vec<u8>,            //field element
 }
+
 impl BatchReconMsg {
     pub fn new(sender_id: usize, msg_type: BatchReconMsgType, payload: Vec<u8>) -> Self {
         BatchReconMsg {

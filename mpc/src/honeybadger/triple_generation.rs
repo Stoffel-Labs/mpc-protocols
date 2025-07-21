@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, ops::Sub, sync::Arc};
 
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
@@ -8,11 +8,15 @@ use itertools::izip;
 use serde::{Deserialize, Serialize};
 use stoffelmpc_network::{Message, Network, NetworkError, Node, PartyId, SessionId};
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task::JoinError};
 
 use crate::common::share::{shamir::NonRobustShamirShare, ShareError};
 
-use super::DoubleShamirShare;
+use super::{
+    batch_recon::{batch_recon::BatchReconNode, BatchReconError},
+    robust_interpolate::RobustShamirShare,
+    DoubleShamirShare,
+};
 
 #[derive(Debug, Error)]
 pub enum TripleGenError {
@@ -26,6 +30,12 @@ pub enum TripleGenError {
     BincodeSerializationError(#[from] Box<ErrorKind>),
     #[error("error during the serialization using bincode: {0:?}")]
     ArkSerializationError(#[from] SerializationError),
+    #[error("wrong ammount of shares")]
+    NotEnoughShares,
+    #[error("batch reconstruction error: {0:?}")]
+    BatchReconError(#[from] BatchReconError),
+    #[error("async error: {0:?}")]
+    AsyncError(#[from] JoinError),
 }
 
 pub struct ShamirBeaverTriple<F: FftField> {
@@ -81,8 +91,8 @@ where
     F: FftField,
 {
     pub ran_dou_sha: Vec<DoubleShamirShare<F>>,
-    pub shares_a: Vec<NonRobustShamirShare<F>>,
-    pub shares_b: Vec<NonRobustShamirShare<F>>,
+    pub shares_a: Vec<RobustShamirShare<F>>,
+    pub shares_b: Vec<RobustShamirShare<F>>,
 }
 
 impl<F> TripleGenStorage<F>
@@ -129,7 +139,7 @@ impl Message for TripleGenMessage {
 pub struct ShareMessage<F: FftField> {
     pub sender_id: PartyId,
     pub session_id: SessionId,
-    pub shares: Vec<NonRobustShamirShare<F>>,
+    pub shares: Vec<RobustShamirShare<F>>,
 }
 
 impl<F> ShareMessage<F>
@@ -139,7 +149,7 @@ where
     pub fn new(
         sender_id: PartyId,
         session_id: SessionId,
-        shares: Vec<NonRobustShamirShare<F>>,
+        shares: Vec<RobustShamirShare<F>>,
     ) -> Self {
         Self {
             sender_id,
@@ -174,11 +184,11 @@ impl<F: FftField> TripleGenNode<F> {
 
     pub async fn init<R: Rng, N: Network>(
         &mut self,
-        random_shares_a: Vec<NonRobustShamirShare<F>>,
-        random_shares_b: Vec<NonRobustShamirShare<F>>,
+        random_shares_a: Vec<RobustShamirShare<F>>,
+        random_shares_b: Vec<RobustShamirShare<F>>,
         randousha_pairs: Vec<DoubleShamirShare<F>>,
         network: Arc<N>,
-    ) -> Result<(), TripleGenError> {
+    ) -> Result<Vec<NonRobustShamirShare<F>>, TripleGenError> {
         // Validates that there are enough random double shares and random shares to perform the
         // operation.
         if randousha_pairs.len() != self.params.n_triples
@@ -189,55 +199,37 @@ impl<F: FftField> TripleGenNode<F> {
         }
 
         let mut sub_shares_deg_2t = Vec::new();
-        for ((share_a, share_b), ran_dou_sha) in random_shares_a
-            .iter()
-            .zip(&random_shares_b)
-            .zip(&randousha_pairs)
+        for (share_a, share_b, ran_dou_sha) in
+            izip!(&random_shares_a, &random_shares_b, &randousha_pairs)
         {
             let mult_share_deg_2t = share_a.share_mul(share_b)?;
-            let sub_share_deg_2t = (mult_share_deg_2t - &ran_dou_sha.degree_2t)?;
+            let sub_share_deg_2t =
+                (mult_share_deg_2t - &RobustShamirShare::from(ran_dou_sha.degree_2t.clone()))?;
             sub_shares_deg_2t.push(sub_share_deg_2t);
         }
 
-        // Store the provided random shares to be used in the second step of the protocol.
-        let storage_binder = self.get_or_create_store(self.params.session_id).await;
-        let mut storage = storage_binder.lock().await;
-        storage.ran_dou_sha = randousha_pairs;
-        storage.shares_a = random_shares_a;
-        storage.shares_b = random_shares_b;
+        // Call to Batch Reconstruction.
+        let batch_recon_node =
+            BatchReconNode::<F>::new(self.id, self.params.n_parties, self.params.threshold)?;
+        batch_recon_node
+            .init_batch_reconstruct(&sub_shares_deg_2t, Arc::clone(&network))
+            .await?;
 
-        let share_message = ShareMessage::new(self.id, self.params.session_id, sub_shares_deg_2t);
-        let mut bytes_share_msg = Vec::new();
-        share_message.serialize_compressed(&mut bytes_share_msg)?;
+        let sub_values_clean = tokio::spawn(async move {
+            loop {
+                match batch_recon_node.secrets {
+                    None => continue,
+                    Some(rbc_result) => return rbc_result,
+                };
+            }
+        })
+        .await?;
 
-        let generic_share_message =
-            TripleGenMessage::new(self.id, self.params.session_id, bytes_share_msg);
-        let bytes_generic_msg = bincode::serialize(&generic_share_message)?;
-
-        network.broadcast(&bytes_generic_msg).await?;
-
-        Ok(())
-    }
-
-    pub async fn share_handler(
-        &mut self,
-        share_message: ShareMessage<F>,
-    ) -> Result<Vec<ShamirBeaverTriple<F>>, TripleGenError> {
-        let storage_binder = self.get_or_create_store(self.params.session_id).await;
-        let storage = storage_binder.lock().await;
-
-        let mut result_triples = Vec::with_capacity(self.params.n_triples);
-        for (share_a, share_b, mult_plus_r, randousha_pair) in izip!(
-            &storage.shares_a,
-            &storage.shares_b,
-            &share_message.shares,
-            &storage.ran_dou_sha
-        ) {
-            let mult_result = (mult_plus_r.clone() - &randousha_pair.degree_t)?;
-            let triple = ShamirBeaverTriple::new(share_a.clone(), share_b.clone(), mult_result);
-            result_triples.push(triple);
+        let mut result_shares = Vec::new();
+        for (sub_value, pair) in sub_values_clean.into_iter().zip(randousha_pairs) {
+            let result_share = (pair.degree_t + &sub_value)?;
+            result_shares.push(result_share);
         }
-
-        Ok(result_triples)
+        Ok(result_shares)
     }
 }

@@ -23,6 +23,17 @@ impl<F: FftField> NonRobustShamirShare<F> {
     }
 }
 
+impl<F: FftField> Default for NonRobustShamirShare<F> {
+    fn default() -> Self {
+        Self {
+            share: [F::ZERO],
+            id: 0,
+            degree: 0,
+            _sharetype: PhantomData,
+        }
+    }
+}
+
 impl<F: FftField> SecretSharingScheme<F> for NonRobustShamirShare<F> {
     type SecretType = F;
     type Error = ShareError;

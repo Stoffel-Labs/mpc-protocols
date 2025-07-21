@@ -1,4 +1,8 @@
-use crate::common::{lagrange_interpolate, share::ShareError, SecretSharingScheme, ShamirShare};
+use crate::common::{
+    lagrange_interpolate,
+    share::{shamir::NonRobustShamirShare, ShareError},
+    SecretSharingScheme, ShamirShare,
+};
 use ark_ff::{FftField, Zero};
 use ark_poly::{
     univariate::{DenseOrSparsePolynomial, DensePolynomial},
@@ -43,6 +47,20 @@ impl<F: FftField> RobustShamirShare<F> {
             share: [share],
             id,
             degree,
+            _sharetype: PhantomData,
+        }
+    }
+}
+
+impl<F> From<NonRobustShamirShare<F>> for RobustShamirShare<F>
+where
+    F: FftField,
+{
+    fn from(value: NonRobustShamirShare<F>) -> Self {
+        Self {
+            share: value.share,
+            id: value.id,
+            degree: value.degree,
             _sharetype: PhantomData,
         }
     }

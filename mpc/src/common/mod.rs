@@ -59,6 +59,7 @@ pub trait SecretSharingScheme<F: FftField>: Sized {
         shares: &[Self],
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), Self::Error>;
 }
+
 /// Interpolates a polynomial from `(x, y)` pairs using Lagrange interpolation.
 ///
 /// # Errors
@@ -105,6 +106,21 @@ impl<F: FftField, const N: usize, P> Add for ShamirShare<F, N, P> {
         }
 
         let new_share: [F; N] = std::array::from_fn(|i| self.share[i] + other.share[i]);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+            _sharetype: PhantomData,
+        })
+    }
+}
+
+impl<F: FftField, const N: usize, P> Add<&F> for ShamirShare<F, N, P> {
+    type Output = Result<Self, ShareError>;
+
+    fn add(self, other: &F) -> Self::Output {
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] + other);
 
         Ok(Self {
             share: new_share,

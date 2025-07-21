@@ -1,6 +1,7 @@
 use std::{
     marker::PhantomData,
     ops::{Add, Mul},
+    sync::Arc,
 };
 
 use super::*;
@@ -10,8 +11,9 @@ use crate::{
 };
 use ark_ff::FftField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+use stoffelmpc_network::Network;
 // use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// --------------------------BatchRecPub--------------------------
 ///
@@ -64,10 +66,10 @@ impl<F: FftField> BatchReconNode<F> {
     /// Initiates the batch reconstruction protocol for a given node.
     ///
     /// Each party computes its `y_j_share` for all `j` and sends it to party `P_j`.
-    pub async fn init_batch_reconstruct(
+    pub async fn init_batch_reconstruct<N: Network>(
         &self,
         shares: &[RobustShamirShare<F>], // this party's shares of x_0 to x_t
-                                         //net: &Arc<N>,
+        net: Arc<N>,
     ) -> Result<(), BatchReconError> {
         if shares.len() < self.t + 1 {
             return Err(BatchReconError::InvalidInput(
@@ -200,7 +202,7 @@ impl<F: FftField> BatchReconNode<F> {
                             info!(self_id = self.id, "Secrets successfully reconstructed");
                         }
                         Err(e) => {
-                            warn!(
+                            error!(
                                 self_id = self.id, error = ?e,
                                 "Final secrets interpolation failed "
                             );
