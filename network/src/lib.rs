@@ -32,8 +32,8 @@ pub type Timeout = usize;
 pub trait Message: Serialize + for<'a> Deserialize<'a> + Sized {
     /// Returns the ID of the sender of the message.
     fn sender_id(&self) -> PartyId;
-    /// Returns the message as little endiand bytes.
-    fn bytes(&self) -> &[u8];
+     /// Returns the sessionID of the sender of the message.
+    fn session(&self) -> SessionId;
 }
 
 /// Trait that represents a network used to communicate messages during the execution of a
@@ -63,7 +63,7 @@ pub trait Network {
 }
 
 /// Participant of an MPC protocol.
-pub trait Node {
+pub trait Node : Send + Sync {
     /// Returns the ID of this node.
     fn id(&self) -> PartyId;
     /// Returns the ID of this node as a field element for protocol specific usage.

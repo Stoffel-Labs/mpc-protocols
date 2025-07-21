@@ -84,10 +84,9 @@ impl RBC for Bracha {
     /// Processes incoming messages based on their type.
     async fn process<N: Network + Send + Sync>(
         &self,
-        msg: Vec<u8>,
+        msg: Msg,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        let msg: Msg = bincode::deserialize(&msg).map_err(|e| RbcError::SerializationError(e))?;
         match &msg.msg_type {
             GenericMsgType::Bracha(msg_type) => match msg_type {
                 MsgType::Init => self.init_handler(msg, net).await?,
@@ -106,7 +105,8 @@ impl RBC for Bracha {
         msg: Msg,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        let encoded = bincode::serialize(&msg).map_err(RbcError::SerializationError)?;
+        let wrap_msg = WrappedMessage::Rbc(msg);
+        let encoded = bincode::serialize(&wrap_msg).map_err(RbcError::SerializationError)?;
         net.broadcast(&encoded)
             .await
             .map_err(|e| RbcError::NetworkError(e))?;
@@ -119,7 +119,8 @@ impl RBC for Bracha {
         net: Arc<N>,
         recv: u32,
     ) -> Result<(), RbcError> {
-        let encoded = bincode::serialize(&msg).map_err(RbcError::SerializationError)?;
+        let wrap_msg = WrappedMessage::Rbc(msg);
+        let encoded = bincode::serialize(&wrap_msg).map_err(RbcError::SerializationError)?;
         net.send((recv as usize) + 1, &encoded)
             .await
             .map_err(|e| RbcError::NetworkError(e))?;
@@ -335,6 +336,9 @@ impl Bracha {
                     output = ?msg.payload,
                     "Consensus achieved; RBC instance ended"
                 );
+                net.send((self.id as usize) + 1, &msg.payload)
+                    .await
+                    .map_err(|e| RbcError::NetworkError(e))?;
             }
         }
         Ok(())
@@ -505,28 +509,19 @@ impl RBC for Avid {
     /// Processes incoming messages based on their type.
     async fn process<N: Network + Send + Sync>(
         &self,
-        msg: Vec<u8>,
+        msg: Msg,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        let wrapped: WrappedMessage =
-            bincode::deserialize(&msg).map_err(RbcError::SerializationError)?;
-        match wrapped {
-            WrappedMessage::Rbc(msg) => {
-                match &msg.msg_type {
-                    GenericMsgType::Avid(msg_type) => match msg_type {
-                        MsgTypeAvid::Send => self.send_handler(msg, net).await?,
-                        MsgTypeAvid::Echo => self.echo_handler(msg, net).await?,
-                        MsgTypeAvid::Ready => self.ready_handler(msg, net).await?,
-                        MsgTypeAvid::Unknown(tag) => {
-                            return Err(RbcError::UnknownMsgType(tag.clone()))
-                        }
-                    },
-                    _ => return Err(RbcError::UnknownMsgType("non-Avid".into())),
-                }
-                Ok(())
-            }
-            _ => Ok(()),
+        match &msg.msg_type {
+            GenericMsgType::Avid(msg_type) => match msg_type {
+                MsgTypeAvid::Send => self.send_handler(msg, net).await?,
+                MsgTypeAvid::Echo => self.echo_handler(msg, net).await?,
+                MsgTypeAvid::Ready => self.ready_handler(msg, net).await?,
+                MsgTypeAvid::Unknown(tag) => return Err(RbcError::UnknownMsgType(tag.clone())),
+            },
+            _ => return Err(RbcError::UnknownMsgType("non-Avid".into())),
         }
+        Ok(())
     }
     /// Broadcast messages to other nodes.
     async fn broadcast<N: Network + Send + Sync>(
@@ -1052,10 +1047,9 @@ impl RBC for ABA {
     /// Processes incoming messages based on their type.
     async fn process<N: Network + Send + Sync + 'static>(
         &self,
-        msg: Vec<u8>,
+        msg: Msg,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        let msg: Msg = bincode::deserialize(&msg).map_err(|e| RbcError::SerializationError(e))?;
         match &msg.msg_type {
             GenericMsgType::ABA(msg_type) => match msg_type {
                 MsgTypeAba::Est => self.est_handler(msg, net).await?,
@@ -1073,7 +1067,8 @@ impl RBC for ABA {
         msg: Msg,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        let encoded = bincode::serialize(&msg).map_err(RbcError::SerializationError)?;
+        let wrapped = WrappedMessage::Rbc(msg);
+        let encoded = bincode::serialize(&wrapped).map_err(RbcError::SerializationError)?;
         net.broadcast(&encoded)
             .await
             .map_err(|e| RbcError::NetworkError(e))?;
@@ -1086,7 +1081,8 @@ impl RBC for ABA {
         net: Arc<N>,
         recv: u32,
     ) -> Result<(), RbcError> {
-        let encoded = bincode::serialize(&msg).map_err(RbcError::SerializationError)?;
+        let wrapped = WrappedMessage::Rbc(msg);
+        let encoded = bincode::serialize(&wrapped).map_err(RbcError::SerializationError)?;
         net.send((recv as usize) + 1, &encoded)
             .await
             .map_err(|e| RbcError::NetworkError(e))?;
@@ -1700,7 +1696,8 @@ impl Dealer {
             );
 
             //let _ = net.senders[i as usize].send(key_msg).await;
-            let encoded = bincode::serialize(&key_msg).map_err(RbcError::SerializationError)?;
+            let wrap = WrappedMessage::Rbc(key_msg);
+            let encoded = bincode::serialize(&wrap).map_err(RbcError::SerializationError)?;
             net.send((i as usize) + 1, &encoded)
                 .await
                 .map_err(|e| RbcError::NetworkError(e))?;

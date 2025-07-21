@@ -13,6 +13,7 @@ mod tests {
         honeybadger::{
             batch_recon::{batch_recon::BatchReconNode, BatchReconMsg, BatchReconMsgType},
             robust_interpolate::robust_interpolate::RobustShamirShare,
+            WrappedMessage,
         },
     };
     use tokio::time::timeout;
@@ -168,22 +169,37 @@ mod tests {
             let mut recv = receivers.remove(0);
 
             handles.push(tokio::spawn(async move {
-                match node.init_batch_reconstruct(&shares, net_clone.clone()).await {
+                match node
+                    .init_batch_reconstruct(&shares, net_clone.clone())
+                    .await
+                {
                     Ok(()) => {}
                     Err(e) => warn!(id =i,error = ?e,"Sending failure"),
                 }
 
                 while node.secrets.is_none() {
                     let msg = timeout(Duration::from_secs(2), recv.recv()).await;
-                    match msg {
-                        Ok(Some(msg)) => match node.process(msg, net_clone.clone()).await {
-                            Ok(()) => {}
-                            Err(e) => warn!(id =i,error = ?e ,"Broadcasting failure"),
-                        },
-                        Ok(None) => break, // Channel closed
+                    // Attempt to deserialize into WrappedMessage
+                    let brmsg = match msg {
+                        Ok(m) => m.unwrap(),
+                        Err(_) => todo!(),
+                    };
+                    let wrapped: WrappedMessage = match bincode::deserialize(&brmsg) {
+                        Ok(m) => m,
                         Err(_) => {
-                            panic!("Node {} timed out waiting for a message", i);
+                            warn!("Malformed or unrecognized message format.");
+                            continue;
                         }
+                    };
+                    match wrapped {
+                        WrappedMessage::BatchRecon(m) => {
+                            match node.process(m, net_clone.clone()).await {
+                                Ok(()) => {}
+                                Err(e) => warn!(id =i,error = ?e ,"Broadcasting failure"),
+                            }
+                        }
+                        WrappedMessage::RanDouSha(_) => todo!(),
+                        WrappedMessage::Rbc(_) => todo!(),
                     }
                 }
 

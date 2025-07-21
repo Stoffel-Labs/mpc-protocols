@@ -6,7 +6,7 @@ use crate::{
         share::{apply_vandermonde, make_vandermonde},
         SecretSharingScheme,
     },
-    honeybadger::robust_interpolate::robust_interpolate::RobustShamirShare,
+    honeybadger::{robust_interpolate::robust_interpolate::RobustShamirShare, WrappedMessage},
 };
 use ark_ff::FftField;
 use std::sync::Arc;
@@ -89,10 +89,11 @@ impl<F: FftField> BatchReconNode<F> {
                 .serialize_compressed(&mut payload)
                 .map_err(|e| BatchReconError::ArkSerialization(e))?;
             let msg = BatchReconMsg::new(self.id, BatchReconMsgType::Eval, payload);
-
+            //Wrap the msg in global enum
+            let wrapped = WrappedMessage::BatchRecon(msg);
             //Send share y_j to each Party j
             let encoded_msg =
-                bincode::serialize(&msg).map_err(BatchReconError::SerializationError)?;
+                bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
 
             let _ = net
                 .send(j + 1, &encoded_msg)
@@ -151,9 +152,10 @@ impl<F: FftField> BatchReconNode<F> {
                                 .map_err(|e| BatchReconError::ArkSerialization(e))?;
                             let new_msg =
                                 BatchReconMsg::new(self.id, BatchReconMsgType::Reveal, payload);
-
+                            //Wrap the msg in global enum
+                            let wrapped = WrappedMessage::BatchRecon(new_msg);
                             // Broadcast our computed `y_j` to all other parties.
-                            let encoded = bincode::serialize(&new_msg)
+                            let encoded = bincode::serialize(&wrapped)
                                 .map_err(BatchReconError::SerializationError)?;
                             let _ = net
                                 .broadcast(&encoded)
@@ -213,12 +215,9 @@ impl<F: FftField> BatchReconNode<F> {
     }
     pub async fn process<N: Network>(
         &mut self,
-        raw_msg: Vec<u8>,
+        msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
-        let msg: BatchReconMsg =
-            bincode::deserialize(&raw_msg).map_err(|e| BatchReconError::SerializationError(e))?;
-
         self.batch_recon_handler(msg, net).await?;
         Ok(())
     }

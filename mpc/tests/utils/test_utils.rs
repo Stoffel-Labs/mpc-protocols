@@ -2,39 +2,27 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use once_cell::sync::Lazy;
-use stoffelmpc_mpc::honeybadger::WrappedMessage;
-use std::{
-    collections::HashMap, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec,
-};
+use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
 use stoffelmpc_mpc::common::{SecretSharingScheme, RBC};
+use stoffelmpc_mpc::honeybadger::WrappedMessage;
 use tracing::warn;
 
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::InitMessage;
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaParams};
+use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-use stoffelmpc_network::NetworkError;
+use stoffelmpc_network::{NetworkError, SessionId};
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::FmtSubscriber;
 
-pub fn test_setup(
-    n: usize,
-    t: usize,
-    session_id: usize,
-) -> (RanDouShaParams, Arc<FakeNetwork>, Vec<Receiver<Vec<u8>>>) {
+pub fn test_setup(n: usize) -> (Arc<FakeNetwork>, Vec<Receiver<Vec<u8>>>) {
     let config = FakeNetworkConfig::new(500);
     let (network, receivers) = FakeNetwork::new(n, config);
     let network = Arc::new(network);
-    let params = RanDouShaParams {
-        session_id,
-        n_parties: n,
-        threshold: t,
-    };
-    (params, network, receivers)
+    (network, receivers)
 }
 
 pub fn get_reconstruct_input(
@@ -82,28 +70,27 @@ pub fn construct_e2e_input(
     return (secrets, n_shares_t, n_shares_2t);
 }
 
-pub fn initialize_node(node_id: usize, n: usize, t: usize) -> RanDouShaNode<Fr> {
-    let rbc = Avid::new((node_id -1) as u32, n as u32, t as u32, (t as u32) + 1).unwrap();
-    RanDouShaNode {
-        id: node_id,
-        store: Arc::new(Mutex::new(HashMap::new())),
-        rbc,
-    }
+pub fn initialize_node(node_id: usize, n: usize, t: usize, k: usize) -> RanDouShaNode<Fr, Avid> {
+    RanDouShaNode::new(node_id, n, t, k).unwrap()
 }
 
 /// Initializes all RanDouSha nodes and returns them wrapped in `Arc<Mutex<_>>`.
-pub fn create_nodes(n_parties: usize, t: usize) -> Vec<Arc<Mutex<RanDouShaNode<Fr>>>> {
+pub fn create_nodes(
+    n_parties: usize,
+    t: usize,
+    k: usize,
+) -> Vec<Arc<Mutex<RanDouShaNode<Fr, Avid>>>> {
     (1..=n_parties)
-        .map(|id| Arc::new(Mutex::new(initialize_node(id, n_parties, t))))
+        .map(|id| Arc::new(Mutex::new(initialize_node(id, n_parties, t, k))))
         .collect()
 }
 
 /// Initializes all nodes with their respective shares.
 pub async fn initialize_all_nodes(
-    nodes: &[Arc<Mutex<RanDouShaNode<Fr>>>],
+    nodes: &[Arc<Mutex<RanDouShaNode<Fr, Avid>>>],
     n_shares_t: &[Vec<NonRobustShare<Fr>>],
     n_shares_2t: &[Vec<NonRobustShare<Fr>>],
-    params: &RanDouShaParams,
+    session_id: SessionId,
     network: Arc<FakeNetwork>,
 ) {
     assert!(nodes.len() == n_shares_t.len());
@@ -111,13 +98,14 @@ pub async fn initialize_all_nodes(
 
     for node in nodes {
         let node_locked = &mut node.lock().await;
-        let init_msg = InitMessage {
-            sender_id: node_locked.id,
-            s_shares_deg_t: n_shares_t[node_locked.id - 1].clone(),
-            s_shares_deg_2t: n_shares_2t[node_locked.id - 1].clone(),
-        };
+        let node_id = node_locked.id;
         match node_locked
-            .init_handler(&init_msg, params, Arc::clone(&network))
+            .init(
+                n_shares_t[node_id - 1].clone(),
+                n_shares_2t[node_id - 1].clone(),
+                session_id,
+                Arc::clone(&network),
+            )
             .await
         {
             Ok(()) => (),
@@ -144,9 +132,8 @@ pub async fn initialize_all_nodes(
 /// In the case of Abort, the node is dropped from the network and the task is cancelled
 /// For the rest of the errors, we panic
 pub fn spawn_receiver_tasks(
-    nodes: Vec<Arc<Mutex<RanDouShaNode<Fr>>>>,
+    nodes: Vec<Arc<Mutex<RanDouShaNode<Fr, Avid>>>>,
     mut receivers: Vec<Receiver<Vec<u8>>>,
-    params: RanDouShaParams,
     network: Arc<FakeNetwork>,
     fin_send: mpsc::Sender<(usize, (Vec<NonRobustShare<Fr>>, Vec<NonRobustShare<Fr>>))>,
     abort_counter: Option<Arc<AtomicUsize>>,
@@ -158,7 +145,6 @@ pub fn spawn_receiver_tasks(
         let net_clone = Arc::clone(&network);
         let fin_send = fin_send.clone();
         let abort_count = abort_counter.clone();
-        let params = params.clone();
 
         set.spawn(async move {
             while let Some(msg_bytes) = receiver.recv().await {
@@ -170,14 +156,13 @@ pub fn spawn_receiver_tasks(
                         continue;
                     }
                 };
-
                 // Match the message type and route it appropriately
                 match &wrapped {
-                    WrappedMessage::RanDouSha(_) => {
+                    WrappedMessage::RanDouSha(rds) => {
                         let result = randousha_node
                             .lock()
                             .await
-                            .process(&wrapped, &params, Arc::clone(&net_clone))
+                            .process(rds.clone(), Arc::clone(&net_clone))
                             .await;
 
                         match result {
@@ -209,12 +194,12 @@ pub fn spawn_receiver_tasks(
                             }
                         }
                     }
-                    WrappedMessage::Rbc(_) => {
+                    WrappedMessage::Rbc(msg) => {
                         if let Err(e) = randousha_node
                             .lock()
                             .await
                             .rbc
-                            .process(msg_bytes, Arc::clone(&net_clone))
+                            .process(msg.clone(), Arc::clone(&net_clone))
                             .await
                         {
                             warn!("Rbc processing error: {e}");

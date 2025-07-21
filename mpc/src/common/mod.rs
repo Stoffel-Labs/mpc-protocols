@@ -147,7 +147,7 @@ pub trait RBC: Send + Sync {
     ///Processing messages sent by other nodes based on their type
     async fn process<N: Network + Send + Sync + 'static>(
         &self,
-        msg: Vec<u8>,
+        msg: Msg,
         parties: Arc<N>,
     ) -> Result<(), RbcError>;
     /// Broadcast messages to other nodes.
@@ -168,7 +168,7 @@ pub trait RBC: Send + Sync {
 /// Now, it's time to define the MPC Protocol trait.
 /// Given an underlying secret sharing protocol and a reliable broadcast protocol,
 /// you can define an MPC protocol.
-trait MPCProtocol<F: FftField, const N: usize, S: SecretSharingScheme<F, N>, R: RBC>
+pub trait MPCProtocol<F: FftField, const N: usize, S: SecretSharingScheme<F, N>, R: RBC>
 where
     F: FftField,
 {
@@ -176,6 +176,7 @@ where
     type MPCOpts;
 
     type ShareType;
+    type Node: MPCNode<F, R>;
 
     fn init(opts: Self::MPCOpts);
 
@@ -187,7 +188,7 @@ where
 }
 
 /// Some MPC protocols require preprocessing before they can be used
-trait PreprocessingMPCProtocol<F: FftField, const N: usize, S: SecretSharingScheme<F, N>, R: RBC>:
+pub trait PreprocessingMPCProtocol<F: FftField, const N: usize, S: SecretSharingScheme<F, N>, R: RBC>:
     MPCProtocol<F, N, S, R>
 {
     /// Defines the information needed to run the preprocessing phase of an MPC protocol
@@ -195,4 +196,24 @@ trait PreprocessingMPCProtocol<F: FftField, const N: usize, S: SecretSharingSche
 
     /// Runs the offline/preprocessing phase for an MPC protocol
     fn run_preprocessing(opts: Self::PreprocessingOpts);
+}
+
+#[async_trait]
+pub trait MPCNode<F: FftField, R: RBC>: Send + Sync {
+    fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        k: usize, // used by RBC
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>
+    where
+        Self: Sized;
+
+    fn id(&self) -> usize;
+
+    async fn process<N: Network + Send + Sync + 'static>(
+        &mut self,
+        raw_msg: Vec<u8>,
+        net: Arc<N>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }

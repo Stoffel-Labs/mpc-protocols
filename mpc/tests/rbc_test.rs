@@ -2,14 +2,17 @@
 mod tests {
     use rand::Rng;
     use std::{collections::HashMap, sync::Arc, time::Duration};
-    use stoffelmpc_mpc::common::{
-        rbc::{
-            rbc::{Avid, Bracha, Dealer, ABA},
-            rbc_store::{AbaStore, GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAvid},
-            utils::set_value_round,
-            RbcError,
+    use stoffelmpc_mpc::{
+        common::{
+            rbc::{
+                rbc::{Avid, Bracha, Dealer, ABA},
+                rbc_store::{AbaStore, GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAvid},
+                utils::set_value_round,
+                RbcError,
+            },
+            RBC,
         },
-        RBC,
+        honeybadger::WrappedMessage,
     };
     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
     use stoffelmpc_network::Network;
@@ -51,8 +54,21 @@ mod tests {
 
             tokio::spawn(async move {
                 while let Some(msg) = rx.recv().await {
-                    if let Err(e) = rbc.process(msg, Arc::clone(&net_clone)).await {
-                        warn!(error = %e, "Message processing failed");
+                    let wrapped: WrappedMessage = match bincode::deserialize(&msg) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            warn!("Malformed or unrecognized message format.");
+                            continue;
+                        }
+                    };
+                    match wrapped {
+                        WrappedMessage::RanDouSha(_) => todo!(),
+                        WrappedMessage::Rbc(msg) => {
+                            if let Err(e) = rbc.process(msg, Arc::clone(&net_clone)).await {
+                                warn!(error = %e, "Message processing failed");
+                            }
+                        },
+                        WrappedMessage::BatchRecon(_) => todo!(),
                     }
                 }
             });
