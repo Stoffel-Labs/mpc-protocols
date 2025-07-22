@@ -165,19 +165,37 @@ impl Message for TripleGenMessage {
     }
 }
 
-/// Represents a node in the Triple generation protocol.
+#[derive(Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShareMessage<F: FftField> {
+    pub sender_id: PartyId,
+    pub session_id: SessionId,
+    pub shares: Vec<RobustShamirShare<F>>,
+}
+
+impl<F> ShareMessage<F>
+where
+    F: FftField,
+{
+    pub fn new(
+        sender_id: PartyId,
+        session_id: SessionId,
+        shares: Vec<RobustShamirShare<F>>,
+    ) -> Self {
+        Self {
+            sender_id,
+            session_id,
+            shares,
+        }
+    }
+}
+
 pub struct TripleGenNode {
-    /// ID of the node.
     pub id: PartyId,
-    /// Parameters of the protocol.
     pub params: TripleGenParams,
-    /// Internal storage of the node.
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStorage>>>>>,
 }
 
 impl TripleGenNode {
-    /// Accesses the storage of the node, and in case that the storage does not exists yet for the
-    /// given `session_id`, it is created in place and returned.
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
@@ -189,8 +207,6 @@ impl TripleGenNode {
             .clone()
     }
 
-    /// Initializes the protocol to generate random triples based on previously generated shares
-    /// and random double shares.
     pub async fn init<F: FftField, R: Rng, N: Network>(
         &mut self,
         random_shares_a: Vec<RobustShamirShare<F>>,
@@ -198,13 +214,6 @@ impl TripleGenNode {
         randousha_pairs: Vec<DoubleShamirShare<F>>,
         network: Arc<N>,
     ) -> Result<Vec<NonRobustShamirShare<F>>, TripleGenError> {
-        // First, we mark the protocol as initialized.
-        {
-            let storage_bind = self.get_or_create_store(self.params.session_id).await;
-            let mut storage = storage_bind.lock().await;
-            storage.protocol_state = ProtocolState::Initialized;
-        }
-
         // Validates that there are enough random double shares and random shares to perform the
         // operation.
         if randousha_pairs.len() != self.params.n_triples
@@ -246,13 +255,6 @@ impl TripleGenNode {
             let result_share = (pair.degree_t + &sub_value)?;
             result_shares.push(result_share);
         }
-
-        {
-            let storage_bind = self.get_or_create_store(self.params.session_id).await;
-            let mut storage = storage_bind.lock().await;
-            storage.protocol_state = ProtocolState::Finished;
-        }
-
         Ok(result_shares)
     }
 }
