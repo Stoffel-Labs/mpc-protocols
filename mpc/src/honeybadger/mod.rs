@@ -24,10 +24,11 @@ use std::sync::Arc;
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use async_trait::async_trait;
-use stoffelmpc_network::Network;
+use stoffelmpc_network::{Network, NetworkError};
+use thiserror::Error;
 
 use crate::common::{
-    share::shamir::NonRobustShamirShare, MPCProtocol, PreprocessingMPCProtocol, ProtocolError, RBC,
+    share::shamir::NonRobustShamirShare, MPCProtocol, PreprocessingMPCProtocol, ProtocolError,
 };
 
 /// Information pertaining the HoneyBadgerMPC protocol.
@@ -36,6 +37,21 @@ pub struct HoneyBadgerMPC<F: FftField> {
     preprocessing_material: HoneyBadgerMPCPreprocMaterial<F>,
     /// Random double shares to execute RanDouSha.
     randousha_input_shares: DoubleShamirShare<F>,
+}
+
+#[derive(Error, Debug)]
+pub enum HoneyBadgerError {
+    #[error("network error: {0:?}")]
+    NetworkError(#[from] NetworkError),
+}
+
+impl<F> HoneyBadgerMPC<F>
+where
+    F: FftField,
+{
+    fn init_mul() -> Result<(), HoneyBadgerError> {
+        todo!()
+    }
 }
 
 #[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
@@ -163,22 +179,14 @@ where
 
     async fn mul(
         &mut self,
-        a: NonRobustShamirShare<F>,
-        b: NonRobustShamirShare<F>,
+        a: Vec<NonRobustShamirShare<F>>,
+        b: Vec<NonRobustShamirShare<F>>,
         network: Arc<N>,
     ) -> Result<NonRobustShamirShare<F>, ProtocolError>
     where
         N: 'async_trait,
     {
-        let randousha_pair = self
-            .preprocessing_material
-            .randousha_pairs
-            .pop()
-            .ok_or(ProtocolError::NotEnoughPreprocessing)?;
-        let mult_share_deg_2t = a.share_mul(&b)?;
-        let _open_share = mult_share_deg_2t - &randousha_pair.degree_2t;
-
-        // TODO: Implement the opening.
+        // TODO: Implement multiplication.
 
         todo!();
     }

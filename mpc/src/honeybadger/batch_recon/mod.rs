@@ -4,8 +4,17 @@ use crate::honeybadger::robust_interpolate::InterpolateError;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelmpc_network::NetworkError;
+use stoffelmpc_network::{NetworkError, PartyId, SessionId};
 use thiserror::Error;
+
+/// Content type of the batch reconstruction message.
+#[derive(Copy, Clone, Serialize, Deserialize)]
+pub enum BatchReconContentType {
+    /// The message is for the triple generation protocol.
+    TripleGenMessage,
+    /// The message is for the multiplication protocol.
+    MultiplicationMessage,
+}
 
 /// Represents message type exchanged between network nodes during the batch reconstruction protocol.
 #[derive(Clone, Serialize, Deserialize)]
@@ -16,17 +25,27 @@ pub enum BatchReconMsgType {
 ///Message exchanged between network nodes during the batch reconstruction protocol.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BatchReconMsg {
-    pub sender_id: usize,            //Sender id
-    pub msg_type: BatchReconMsgType, //Message type
-    pub payload: Vec<u8>,            //field element
+    pub session_id: SessionId,
+    pub sender_id: PartyId,                  // Sender id
+    pub msg_type: BatchReconMsgType,         // Message type
+    pub content_type: BatchReconContentType, // Content type
+    pub payload: Vec<u8>,                    // Field element
 }
 
 impl BatchReconMsg {
-    pub fn new(sender_id: usize, msg_type: BatchReconMsgType, payload: Vec<u8>) -> Self {
+    pub fn new(
+        sender_id: PartyId,
+        session_id: SessionId,
+        msg_type: BatchReconMsgType,
+        content_type: BatchReconContentType,
+        payload: Vec<u8>,
+    ) -> Self {
         BatchReconMsg {
             sender_id,
+            session_id,
             msg_type,
             payload,
+            content_type,
         }
     }
 }
@@ -42,7 +61,7 @@ pub enum BatchReconError {
     #[error("error while serializing an arkworks object: {0:?}")]
     ArkDeserialization(SerializationError),
     #[error("error while serializing the object into bytes: {0:?}")]
-    SerializationError(Box<ErrorKind>),
+    SerializationError(#[from] Box<ErrorKind>),
     /// Errors specific to invalid input parameters or conditions.
     #[error("Invalid input: {0}")]
     InvalidInput(String),

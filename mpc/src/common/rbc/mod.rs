@@ -1,5 +1,6 @@
 use bincode::ErrorKind;
-use stoffelmpc_network::NetworkError;
+use serde::{Deserialize, Serialize};
+use stoffelmpc_network::{NetworkError, SessionId};
 use thiserror::Error;
 
 pub mod rbc;
@@ -17,7 +18,7 @@ pub enum ShardError {
     #[error("Missing shards")]
     Incomplete,
 
-    #[error("Merkle error")]
+    #[error("Merkle error: {0}")]
     Merkle(String),
 
     #[error("Index {0} is out of bounds (max {1})")]
@@ -50,4 +51,3 @@ pub enum RbcError {
     #[error("inner error: {0}")]
     Inner(#[from] ShardError),
 }
-

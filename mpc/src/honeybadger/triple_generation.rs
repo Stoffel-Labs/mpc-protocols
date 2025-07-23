@@ -13,7 +13,9 @@ use tokio::{sync::Mutex, task::JoinError};
 use crate::common::share::{shamir::NonRobustShamirShare, ShareError};
 
 use super::{
-    batch_recon::{batch_recon::BatchReconNode, BatchReconError},
+    batch_recon::{
+        self, batch_recon::BatchReconNode, BatchReconContentType, BatchReconError, BatchReconMsg,
+    },
     robust_interpolate::RobustShamirShare,
     DoubleShamirShare,
 };
@@ -47,6 +49,9 @@ pub enum TripleGenError {
     /// Error during the execution of async operations.
     #[error("async error: {0:?}")]
     AsyncError(#[from] JoinError),
+    /// The session ID of the parameters and the received message does not match.
+    #[error("the session IDs do not match")]
+    SessionIdMismatch,
 }
 
 /// Represents a Beaver triple of non-robus Shamir shares.
@@ -114,16 +119,24 @@ pub enum ProtocolState {
 }
 
 /// Storage necessary for the triple generation protocol.
-pub struct TripleGenStorage {
+pub struct TripleGenStorage<F>
+where
+    F: FftField,
+{
     /// Current state of the protocol execution.
     pub protocol_state: ProtocolState,
+    pub randousha_pairs: Vec<DoubleShamirShare<F>>,
 }
 
-impl TripleGenStorage {
+impl<F> TripleGenStorage<F>
+where
+    F: FftField,
+{
     /// Creates an empty state for the protocol.
     pub fn empty() -> Self {
         Self {
             protocol_state: ProtocolState::NotInitialized,
+            randousha_pairs: Vec::new(),
         }
     }
 }
@@ -155,6 +168,23 @@ impl TripleGenMessage {
     }
 }
 
+#[derive(Clone, CanonicalDeserialize, CanonicalSerialize)]
+pub struct BatchReconFinishMessage<F: FftField> {
+    pub content: Vec<F>,
+    pub sender_id: PartyId,
+    pub session_id: SessionId,
+}
+
+impl<F: FftField> BatchReconFinishMessage<F> {
+    pub fn new(content: Vec<F>, sender_id: PartyId, session_id: SessionId) -> Self {
+        Self {
+            content,
+            sender_id,
+            session_id,
+        }
+    }
+}
+
 impl Message for TripleGenMessage {
     fn sender_id(&self) -> PartyId {
         self.sender_id
@@ -166,22 +196,28 @@ impl Message for TripleGenMessage {
 }
 
 /// Represents a node in the Triple generation protocol.
-pub struct TripleGenNode {
+pub struct TripleGenNode<F>
+where
+    F: FftField,
+{
     /// ID of the node.
     pub id: PartyId,
     /// Parameters of the protocol.
     pub params: TripleGenParams,
     /// Internal storage of the node.
-    pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStorage>>>>>,
+    pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStorage<F>>>>>>,
 }
 
-impl TripleGenNode {
+impl<F> TripleGenNode<F>
+where
+    F: FftField,
+{
     /// Accesses the storage of the node, and in case that the storage does not exists yet for the
     /// given `session_id`, it is created in place and returned.
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
-    ) -> Arc<Mutex<TripleGenStorage>> {
+    ) -> Arc<Mutex<TripleGenStorage<F>>> {
         let mut storage = self.storage.lock().await;
         storage
             .entry(session_id)
@@ -191,20 +227,13 @@ impl TripleGenNode {
 
     /// Initializes the protocol to generate random triples based on previously generated shares
     /// and random double shares.
-    pub async fn init<F: FftField, R: Rng, N: Network>(
+    pub async fn init<R: Rng, N: Network>(
         &mut self,
         random_shares_a: Vec<RobustShamirShare<F>>,
         random_shares_b: Vec<RobustShamirShare<F>>,
         randousha_pairs: Vec<DoubleShamirShare<F>>,
         network: Arc<N>,
-    ) -> Result<Vec<NonRobustShamirShare<F>>, TripleGenError> {
-        // First, we mark the protocol as initialized.
-        {
-            let storage_bind = self.get_or_create_store(self.params.session_id).await;
-            let mut storage = storage_bind.lock().await;
-            storage.protocol_state = ProtocolState::Initialized;
-        }
-
+    ) -> Result<(), TripleGenError> {
         // Validates that there are enough random double shares and random shares to perform the
         // operation.
         if randousha_pairs.len() != self.params.n_triples
@@ -212,6 +241,14 @@ impl TripleGenNode {
             || random_shares_b.len() != self.params.n_triples
         {
             return Err(TripleGenError::NotEnoughPreprocessing);
+        }
+
+        // First, we mark the protocol as initialized.
+        {
+            let storage_bind = self.get_or_create_store(self.params.session_id).await;
+            let mut storage = storage_bind.lock().await;
+            storage.protocol_state = ProtocolState::Initialized;
+            storage.randousha_pairs = randousha_pairs.clone();
         }
 
         let mut sub_shares_deg_2t = Vec::new();
@@ -228,31 +265,52 @@ impl TripleGenNode {
         let batch_recon_node =
             BatchReconNode::<F>::new(self.id, self.params.n_parties, self.params.threshold)?;
         batch_recon_node
-            .init_batch_reconstruct(&sub_shares_deg_2t, Arc::clone(&network))
+            .init_batch_reconstruct(
+                &sub_shares_deg_2t,
+                self.params.session_id,
+                BatchReconContentType::TripleGenMessage,
+                Arc::clone(&network),
+            )
             .await?;
+        Ok(())
+    }
 
-        let sub_values_clean = tokio::spawn(async move {
-            loop {
-                match batch_recon_node.secrets {
-                    None => continue,
-                    Some(rbc_result) => return rbc_result,
-                };
-            }
-        })
-        .await?;
+    pub async fn batch_recon_finish_handler(
+        &mut self,
+        batch_recon_message: BatchReconFinishMessage<F>,
+    ) -> Result<Vec<NonRobustShamirShare<F>>, TripleGenError> {
+        if batch_recon_message.session_id != self.params.session_id {
+            return Err(TripleGenError::SessionIdMismatch);
+        }
+        let storage_bind = self.get_or_create_store(self.params.session_id).await;
+        let storage = storage_bind.lock().await;
 
         let mut result_shares = Vec::new();
-        for (sub_value, pair) in sub_values_clean.into_iter().zip(randousha_pairs) {
-            let result_share = (pair.degree_t + &sub_value)?;
+        for (sub_value, pair) in batch_recon_message
+            .content
+            .into_iter()
+            .zip(&storage.randousha_pairs)
+        {
+            let result_share = (pair.degree_t.clone() + &sub_value)?;
             result_shares.push(result_share);
         }
 
-        {
-            let storage_bind = self.get_or_create_store(self.params.session_id).await;
-            let mut storage = storage_bind.lock().await;
-            storage.protocol_state = ProtocolState::Finished;
-        }
+        // First, we mark the protocol as initialized.
+        let storage_bind = self.get_or_create_store(self.params.session_id).await;
+        let mut storage = storage_bind.lock().await;
+        storage.protocol_state = ProtocolState::Finished;
 
         Ok(result_shares)
+    }
+
+    pub async fn process<N: Network>(
+        &mut self,
+        message: &TripleGenMessage,
+    ) -> Result<(), TripleGenError> {
+        let batch_recon_finished_msg =
+            BatchReconFinishMessage::deserialize_compressed(message.payload.as_slice())?;
+        self.batch_recon_finish_handler(batch_recon_finished_msg)
+            .await?;
+        Ok(())
     }
 }

@@ -245,7 +245,7 @@ where
     where
         N: 'async_trait;
 
-    async fn mul(&mut self, a: S, b: S, network: Arc<N>) -> Result<S, ProtocolError>
+    async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<S, ProtocolError>
     where
         N: 'async_trait;
 }

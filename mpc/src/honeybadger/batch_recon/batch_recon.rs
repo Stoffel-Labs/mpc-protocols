@@ -4,14 +4,19 @@ use std::{
     sync::Arc,
 };
 
+use ark_serialize::CanonicalSerialize;
+
 use super::*;
 use crate::{
     common::{share::ShareError, SecretSharingScheme, ShamirShare},
-    honeybadger::robust_interpolate::*,
+    honeybadger::{
+        robust_interpolate::*,
+        triple_generation::{BatchReconFinishMessage, TripleGenMessage},
+    },
 };
 use ark_ff::FftField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
-use stoffelmpc_network::Network;
+use stoffelmpc_network::{Network, SessionId};
 // use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -69,6 +74,8 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn init_batch_reconstruct<N: Network>(
         &self,
         shares: &[RobustShamirShare<F>], // this party's shares of x_0 to x_t
+        session_id: SessionId,
+        content_type: BatchReconContentType,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
         if shares.len() < self.t + 1 {
@@ -91,7 +98,13 @@ impl<F: FftField> BatchReconNode<F> {
             y_j_share.share[0]
                 .serialize_compressed(&mut payload)
                 .map_err(|e| BatchReconError::ArkSerialization(e))?;
-            let msg = BatchReconMsg::new(self.id, BatchReconMsgType::Eval, payload);
+            let msg = BatchReconMsg::new(
+                self.id,
+                session_id,
+                BatchReconMsgType::Eval,
+                content_type,
+                payload,
+            );
 
             //Send share y_j to each Party j
             let _encoded_msg =
@@ -109,10 +122,10 @@ impl<F: FftField> BatchReconNode<F> {
     ///
     /// This function processes `Eval` messages (first round) and `Reveal` messages (second round)
     /// to collectively reconstruct the original secrets.
-    pub async fn batch_recon_handler(
+    pub async fn batch_recon_handler<N: Network>(
         &mut self,
         msg: BatchReconMsg,
-        //net: &Arc<N>,
+        net: &Arc<N>,
     ) -> Result<(), BatchReconError> {
         match msg.msg_type {
             BatchReconMsgType::Eval => {
@@ -152,8 +165,13 @@ impl<F: FftField> BatchReconNode<F> {
                             value
                                 .serialize_compressed(&mut payload)
                                 .map_err(|e| BatchReconError::ArkSerialization(e))?;
-                            let new_msg =
-                                BatchReconMsg::new(self.id, BatchReconMsgType::Reveal, payload);
+                            let new_msg = BatchReconMsg::new(
+                                self.id,
+                                msg.session_id,
+                                BatchReconMsgType::Reveal,
+                                msg.content_type,
+                                payload,
+                            );
 
                             // Broadcast our computed `y_j` to all other parties.
                             let _encoded = bincode::serialize(&new_msg)
@@ -198,8 +216,34 @@ impl<F: FftField> BatchReconNode<F> {
                             let mut result = poly;
                             // Resize the coefficient vector to `t + 1` to get all secrets.
                             result.resize(self.t + 1, F::zero());
-                            self.secrets = Some(result);
+                            self.secrets = Some(result.clone());
                             info!(self_id = self.id, "Secrets successfully reconstructed");
+
+                            // Send the finalization message back to the triple generation or the
+                            // multiplication protocol.
+                            match msg.content_type {
+                                BatchReconContentType::TripleGenMessage => {
+                                    let triple_gen_message = BatchReconFinishMessage::new(
+                                        result,
+                                        self.id,
+                                        msg.session_id,
+                                    );
+                                    let mut bytes_message = Vec::new();
+                                    triple_gen_message.serialize_compressed(&mut bytes_message);
+                                    let triple_gen_generic_msg = TripleGenMessage::new(
+                                        self.id,
+                                        msg.session_id,
+                                        bytes_message,
+                                    );
+                                    let bytes_generic_msg =
+                                        bincode::serialize(&triple_gen_generic_msg)?;
+                                    net.send(self.id, &bytes_generic_msg);
+                                }
+                                BatchReconContentType::MultiplicationMessage => {
+                                    // TODO: Complete this section.
+                                    todo!()
+                                }
+                            }
                         }
                         Err(e) => {
                             error!(
@@ -416,7 +460,9 @@ mod tests {
 
         let t = 1;
         let n = 4;
+        let session_id = 111;
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(4u64)];
+        let content_type = BatchReconContentType::TripleGenMessage;
         assert_eq!(secrets.len(), t + 1);
 
         // Step 0: Generate shares
@@ -437,7 +483,13 @@ mod tests {
                     .share
                     .serialize_compressed(&mut payload)
                     .expect("serialization should not fail");
-                let msg = BatchReconMsg::new(i, BatchReconMsgType::Eval, payload);
+                let msg = BatchReconMsg::new(
+                    i,
+                    session_id,
+                    BatchReconMsgType::Eval,
+                    content_type,
+                    payload,
+                );
 
                 inboxes[j].push(msg);
             }
