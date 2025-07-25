@@ -54,7 +54,7 @@ pub enum TripleGenError {
     SessionIdMismatch,
 }
 
-/// Represents a Beaver triple of non-robus Shamir shares.
+/// Represents a Beaver triple of non-robust Shamir shares.
 pub struct ShamirBeaverTriple<F: FftField> {
     /// First random value of the triple.
     pub a: NonRobustShamirShare<F>,
@@ -70,6 +70,7 @@ where
 {
     /// Creates a new Shamir Beaver triple with `a` and `b` being the random values of the triple
     /// and `mult` is the multiplication of `a` and `b`.
+    //NOTE - add checks for degree?
     pub fn new(
         a: NonRobustShamirShare<F>,
         b: NonRobustShamirShare<F>,
@@ -80,6 +81,7 @@ where
 }
 
 /// Parameters for the Beaver triple generation protocol.
+#[derive(Clone)]
 pub struct TripleGenParams {
     /// The ID of the session.
     pub session_id: SessionId,
@@ -295,7 +297,7 @@ where
             result_shares.push(result_share);
         }
 
-        // First, we mark the protocol as initialized.
+        // We mark the protocol as finished.
         let storage_bind = self.get_or_create_store(self.params.session_id).await;
         let mut storage = storage_bind.lock().await;
         storage.protocol_state = ProtocolState::Finished;
