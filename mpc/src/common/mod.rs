@@ -28,6 +28,7 @@ use stoffelmpc_network::Network;
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
     pub share: [F; N],
+    ///index of the share(x-values),can be different from the reciever ID
     pub id: usize,
     pub degree: usize,
     pub _sharetype: PhantomData<fn() -> P>,
@@ -132,16 +133,16 @@ impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
 #[async_trait]
 pub trait RBC: Send + Sync {
     /// Creates a new instance
-    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, RbcError>
+    fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError>
     where
         Self: Sized;
     /// Returns the unique identifier of the current party.
-    fn id(&self) -> u32;
+    fn id(&self) -> usize;
     /// Required for initiating the broadcast
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: u32,
+        session_id: usize,
         parties: Arc<N>,
     ) -> Result<(), RbcError>;
     ///Processing messages sent by other nodes based on their type
@@ -161,7 +162,7 @@ pub trait RBC: Send + Sync {
         &self,
         msg: Msg,
         net: Arc<N>,
-        recv: u32,
+        recv: usize,
     ) -> Result<(), RbcError>;
 }
 
@@ -188,8 +189,12 @@ where
 }
 
 /// Some MPC protocols require preprocessing before they can be used
-pub trait PreprocessingMPCProtocol<F: FftField, const N: usize, S: SecretSharingScheme<F, N>, R: RBC>:
-    MPCProtocol<F, N, S, R>
+pub trait PreprocessingMPCProtocol<
+    F: FftField,
+    const N: usize,
+    S: SecretSharingScheme<F, N>,
+    R: RBC,
+>: MPCProtocol<F, N, S, R>
 {
     /// Defines the information needed to run the preprocessing phase of an MPC protocol
     type PreprocessingOpts;

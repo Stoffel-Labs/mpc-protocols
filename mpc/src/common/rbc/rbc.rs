@@ -29,16 +29,16 @@ use tracing::{debug, error, info, warn};
 /// 4. Party on recieving 2t+1 (READY, m) output m and terminate
 #[derive(Clone)]
 pub struct Bracha {
-    pub id: u32,                                                  // The ID of the initiator
-    pub n: u32, // Total number of parties in the network
-    pub t: u32, // Number of allowed malicious parties
-    pub k: u32, //threshold (Not really used in Bracha)
-    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
+    pub id: usize, // The ID of the initiator
+    pub n: usize,  // Total number of parties in the network
+    pub t: usize,  // Number of allowed malicious parties
+    pub k: usize,  //threshold (Not really used in Bracha)
+    pub store: Arc<Mutex<HashMap<usize, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
 }
 #[async_trait]
 impl RBC for Bracha {
     /// Creates a new Bracha instance with the given parameters.
-    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, RbcError> {
+    fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
             return Err(RbcError::InvalidThreshold(t, n));
@@ -52,14 +52,14 @@ impl RBC for Bracha {
         })
     }
     /// Returns the unique identifier of the current party.
-    fn id(&self) -> u32 {
+    fn id(&self) -> usize {
         self.id
     }
     /// This initiates the Bracha protocol.
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: u32,
+        session_id: usize,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         // Create an INIT message with the given payload and session ID.
@@ -117,11 +117,11 @@ impl RBC for Bracha {
         &self,
         msg: Msg,
         net: Arc<N>,
-        recv: u32,
+        recv: usize,
     ) -> Result<(), RbcError> {
         let wrap_msg = WrappedMessage::Rbc(msg);
         let encoded = bincode::serialize(&wrap_msg).map_err(RbcError::SerializationError)?;
-        net.send((recv as usize) + 1, &encoded)
+        net.send(recv, &encoded)
             .await
             .map_err(|e| RbcError::NetworkError(e))?;
         Ok(())
@@ -336,14 +336,14 @@ impl Bracha {
                     output = ?msg.payload,
                     "Consensus achieved; RBC instance ended"
                 );
-                net.send((self.id as usize) + 1, &msg.payload)
+                net.send(self.id, &msg.payload)
                     .await
                     .map_err(|e| RbcError::NetworkError(e))?;
             }
         }
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: u32) -> Arc<Mutex<BrachaStore>> {
+    async fn get_or_create_store(&self, session_id: usize) -> Arc<Mutex<BrachaStore>> {
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store
@@ -426,16 +426,16 @@ impl Bracha {
 
 #[derive(Clone)]
 pub struct Avid {
-    pub id: u32,                                                //Initiators ID
-    pub n: u32,                                                 //Network size
-    pub t: u32,                                                 //No. of malicious parties
-    pub k: u32,                                                 //Threshold
-    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
+    pub id: usize,                                                //Initiators ID
+    pub n: usize,                                                 //Network size
+    pub t: usize,                                                 //No. of malicious parties
+    pub k: usize,                                                 //Threshold
+    pub store: Arc<Mutex<HashMap<usize, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
 }
 #[async_trait]
 impl RBC for Avid {
     /// Creates a new Avid instance with the given parameters.
-    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, RbcError> {
+    fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
             return Err(RbcError::InvalidThreshold(t, n));
@@ -455,14 +455,14 @@ impl RBC for Avid {
             store: Arc::new(Mutex::new(HashMap::new())),
         })
     }
-    fn id(&self) -> u32 {
+    fn id(&self) -> usize {
         self.id
     }
     ///This initiates the Avid protocol.
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: u32,
+        session_id: usize,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -473,7 +473,7 @@ impl RBC for Avid {
         );
 
         //Generating shards for the message to be broadcasted, here we are using Reed Solomon erasure coding
-        let shards = encode_rs(payload.clone(), self.k as usize, (self.n - self.k) as usize)?;
+        let shards = encode_rs(payload.clone(), self.k, self.n - self.k)?;
         //Generating the merkle tree out of the shards
         let tree = gen_merkletree(shards.clone());
         let root = tree.root().ok_or_else(|| {
@@ -482,13 +482,12 @@ impl RBC for Avid {
 
         // Generating fingerprint for each server and sending it to them along with root and respective shard
         for i in 0..self.n {
-            let i_usize = i as usize;
-            let fingerprint = tree.proof(&[i_usize]).to_bytes();
+            let fingerprint = tree.proof(&[i]).to_bytes();
             let mut fp = Vec::with_capacity(root.len() + fingerprint.len());
             fp.extend_from_slice(&root);
             fp.extend_from_slice(&fingerprint);
 
-            let shard = shards[i_usize].clone();
+            let shard = shards[i].clone();
             // Create an SEND message with the given fingerprint,root,shard and session ID.
             let msg = Msg::new(
                 self.id,
@@ -541,11 +540,11 @@ impl RBC for Avid {
         &self,
         msg: Msg,
         net: Arc<N>,
-        recv: u32,
+        recv: usize,
     ) -> Result<(), RbcError> {
         let wrapped = WrappedMessage::Rbc(msg);
         let encoded = bincode::serialize(&wrapped).map_err(RbcError::SerializationError)?;
-        net.send((recv as usize) + 1, &encoded)
+        net.send(recv, &encoded)
             .await
             .map_err(|e| RbcError::NetworkError(e))?;
         Ok(())
@@ -679,7 +678,7 @@ impl Avid {
                     let echo_count = store.get_echo_count(root);
                     let ready_count = store.get_ready_count(root);
                     //compact way to compute ceil((n + t + 1) / 2) using integer arithmetic
-                    let threshold = u32::max((self.n + self.t + 2) / 2, self.k);
+                    let threshold = usize::max((self.n + self.t + 2) / 2, self.k);
                     // READY broadcast logic
                     if echo_count == threshold && ready_count < self.k {
                         //Send ready logic
@@ -771,7 +770,7 @@ impl Avid {
                     let echo_count = store.get_echo_count(root);
                     let ready_count = store.get_ready_count(root);
                     //compact way to compute ceil((n + t + 1) / 2) using integer arithmetic
-                    let threshold = u32::max((self.n + self.t + 2) / 2, self.k);
+                    let threshold = usize::max((self.n + self.t + 2) / 2, self.k);
 
                     // READY broadcast logic
                     if echo_count < threshold && ready_count == self.k {
@@ -785,11 +784,11 @@ impl Avid {
                     if ready_count == (self.k + self.t) {
                         let shards = decode_rs(
                             store.get_shards_for_root(&root.to_vec()),
-                            self.k as usize,
-                            (self.n - self.k) as usize,
+                            self.k,
+                            self.n - self.k,
                         )?;
                         //Reconstruct the original message to be broadcasted
-                        let output = reconstruct_payload(shards, msg.msg_len, self.k as usize)?;
+                        let output = reconstruct_payload(shards, msg.msg_len, self.k)?;
                         store.mark_ended(); //Terminate broadcast
                         store.set_output(output.clone()); //store the output
 
@@ -799,7 +798,7 @@ impl Avid {
                             output = ?output,
                             "Consensus achieved; AVID instance ended"
                         );
-                        net.send((self.id as usize) + 1, &output)
+                        net.send(self.id, &output)
                             .await
                             .map_err(|e| RbcError::NetworkError(e))?;
                     }
@@ -833,29 +832,26 @@ impl Avid {
     async fn send_ready<N: Network + Send + Sync>(
         &self,
         msg: Msg,
-        shards_map: HashMap<u32, Vec<u8>>,
+        shards_map: HashMap<usize, Vec<u8>>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         let root = &msg.metadata[0..32];
         let handler_type = msg.msg_type;
         // Reconstruct all shards from existing shards
-        let shards = decode_rs(shards_map, self.k as usize, (self.n - self.k) as usize)?;
+        let shards = decode_rs(shards_map, self.k, self.n - self.k)?;
         //Setting up payload and fingerprint for creating a message later
-        let payload = shards[self.id as usize].clone();
+        let payload = shards[self.id].clone();
         let mut fingerprint = root.to_vec();
 
         // When a server reconstructs a shard, it also reconstructs the corresponding
         // hashes on the path from j to the root, and uses them for later verification
-        match generate_merkle_proofs_map(shards.clone(), self.n as usize) {
+        match generate_merkle_proofs_map(shards.clone(), self.n) {
             Ok(proof_map) => {
                 // Get fingerprint for self, for creating message later
-                let self_proof = proof_map
-                    .get(&(self.id as usize))
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        tracing::warn!(index = self.id, "Missing Merkle proof");
-                        Vec::new()
-                    });
+                let self_proof = proof_map.get(&(self.id)).cloned().unwrap_or_else(|| {
+                    tracing::warn!(index = self.id, "Missing Merkle proof");
+                    Vec::new()
+                });
                 fingerprint.extend(self_proof);
 
                 // Verify each proof per shard reconstructed
@@ -863,7 +859,7 @@ impl Avid {
                     let mut fp = root.to_vec();
                     fp.extend(proof);
 
-                    match verify_merkle(id as u32, self.n, fp, shards[id as usize].clone()) {
+                    match verify_merkle(id, self.n, fp, shards[id].clone()) {
                         Ok(true) => {}
                         Ok(false) => {
                             error!(
@@ -920,7 +916,7 @@ impl Avid {
         self.broadcast(ready_msg, net).await?;
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: u32) -> Arc<Mutex<AvidStore>> {
+    async fn get_or_create_store(&self, session_id: usize) -> Arc<Mutex<AvidStore>> {
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store
@@ -965,19 +961,19 @@ impl Avid {
 
 #[derive(Clone)]
 pub struct ABA {
-    pub id: u32,                                               // The ID of the initiator
-    pub n: u32,                          // Total number of parties in the network
-    pub t: u32,                          // Number of allowed malicious parties
-    pub k: u32,                          //threshold
+    pub id: usize,                                               // The ID of the initiator
+    pub n: usize,                        // Total number of parties in the network
+    pub t: usize,                        // Number of allowed malicious parties
+    pub k: usize,                        //threshold
     pub skshare: Arc<OnceCell<Vec<u8>>>, //Secret key share
     pub pkset: Arc<OnceCell<Vec<u8>>>,   //Public key set
-    pub store: Arc<Mutex<HashMap<u32, Arc<Mutex<AbaStore>>>>>, // Stores the ABA session state
-    pub coin: Arc<Mutex<HashMap<u32, Arc<Mutex<CoinStore>>>>>, // Stores the common coin session state
+    pub store: Arc<Mutex<HashMap<usize, Arc<Mutex<AbaStore>>>>>, // Stores the ABA session state
+    pub coin: Arc<Mutex<HashMap<usize, Arc<Mutex<CoinStore>>>>>, // Stores the common coin session state
 }
 #[async_trait]
 impl RBC for ABA {
     /// Creates a new ABA instance with the given parameters.
-    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, RbcError> {
+    fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
             return Err(RbcError::InvalidThreshold(t, n));
@@ -993,14 +989,14 @@ impl RBC for ABA {
             coin: Arc::new(Mutex::new(HashMap::new())),
         })
     }
-    fn id(&self) -> u32 {
+    fn id(&self) -> usize {
         self.id
     }
     /// This initiates the ABA protocol.
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: u32,
+        session_id: usize,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -1026,7 +1022,7 @@ impl RBC for ABA {
         let msg = Msg::new(
             self.id,
             session_id,
-            v_r.1,             //[round ID]
+            v_r.1 as usize,             //[round ID]
             vec![v_r.0 as u8], // [value]
             vec![],
             GenericMsgType::ABA(MsgTypeAba::Est),
@@ -1079,11 +1075,11 @@ impl RBC for ABA {
         &self,
         msg: Msg,
         net: Arc<N>,
-        recv: u32,
+        recv: usize,
     ) -> Result<(), RbcError> {
         let wrapped = WrappedMessage::Rbc(msg);
         let encoded = bincode::serialize(&wrapped).map_err(RbcError::SerializationError)?;
-        net.send((recv as usize) + 1, &encoded)
+        net.send(recv, &encoded)
             .await
             .map_err(|e| RbcError::NetworkError(e))?;
         Ok(())
@@ -1236,7 +1232,7 @@ impl ABA {
             store.insert_values(msg.round_id, msg.sender_id, value); //Store aux value against sender
 
             //Get aux message sender count
-            let count = store.get_sender_count(msg.round_id) as u32;
+            let count = store.get_sender_count(msg.round_id);
             //Get bin_value set
             let bin_val = store.get_bin_values(msg.round_id);
             //Get values set
@@ -1372,7 +1368,12 @@ impl ABA {
     }
 
     //Function to wait and get notified when the coin is ready
-    async fn wait_for_coin(&self, session_id: u32, round_id: u32, timeout_ms: u64) -> Option<bool> {
+    async fn wait_for_coin(
+        &self,
+        session_id: usize,
+        round_id: usize,
+        timeout_ms: u64,
+    ) -> Option<bool> {
         let coin_store = self.get_or_create_coinstore(session_id).await;
 
         let notify = {
@@ -1408,7 +1409,7 @@ impl ABA {
         }
     }
 
-    async fn get_or_create_store(&self, session_id: u32) -> Arc<Mutex<AbaStore>> {
+    async fn get_or_create_store(&self, session_id: usize) -> Arc<Mutex<AbaStore>> {
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store
@@ -1417,7 +1418,7 @@ impl ABA {
             .clone()
     }
 
-    async fn get_or_create_coinstore(&self, session_id: u32) -> Arc<Mutex<CoinStore>> {
+    async fn get_or_create_coinstore(&self, session_id: usize) -> Arc<Mutex<CoinStore>> {
         let mut store = self.coin.lock().await;
         // Get or create the session state for the current session.
         store
@@ -1430,7 +1431,7 @@ impl ABA {
     async fn send_est_for_next_round<N: Network + Send + Sync>(
         &self,
         msg: &Msg,
-        round: u32,
+        round: usize,
         value: bool,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
@@ -1617,7 +1618,7 @@ impl ABA {
                             let array: &[u8; 96] = bytes.as_slice().try_into().ok()?;
                             SignatureShare::from_bytes(array)
                                 .ok()
-                                .map(|s| (sender_id as usize, s))
+                                .map(|s| (sender_id, s))
                         })
                         .collect();
 
@@ -1664,18 +1665,18 @@ impl ABA {
 /// Might replace with a DKG.
 ///To do: Replace threshold signature crate with a more reliable option or build from scratch
 pub struct Dealer {
-    n: u32,
-    t: u32,
+    n: usize,
+    t: usize,
 }
 impl Dealer {
-    pub fn new(n: u32, t: u32) -> Self {
+    pub fn new(n: usize, t: usize) -> Self {
         Dealer { n, t }
     }
 
     /// Perform key generation and send shares to all parties
     pub async fn distribute_keys<N: Network>(&self, msg: Msg, net: Arc<N>) -> Result<(), RbcError> {
         let mut rng = rand::thread_rng();
-        let skset = SecretKeySet::random(self.t as usize, &mut rng);
+        let skset = SecretKeySet::random(self.t, &mut rng);
         let pkset = skset.public_keys();
 
         let pkset_serial = bincode::serialize(&pkset).expect("Failed to serialize pkset");
@@ -1695,10 +1696,9 @@ impl Dealer {
                 msg.msg_len,
             );
 
-            //let _ = net.senders[i as usize].send(key_msg).await;
             let wrap = WrappedMessage::Rbc(key_msg);
             let encoded = bincode::serialize(&wrap).map_err(RbcError::SerializationError)?;
-            net.send((i as usize) + 1, &encoded)
+            net.send(i, &encoded)
                 .await
                 .map_err(|e| RbcError::NetworkError(e))?;
         }
@@ -1715,17 +1715,17 @@ impl Dealer {
 /// the common subset
 #[derive(Clone)]
 pub struct ACS {
-    pub id: u32,                     // The ID of the initiator
-    pub n: u32,                      // Total number of parties in the network
-    pub t: u32,                      // Number of allowed malicious parties
-    pub k: u32,                      // threshold
+    pub id: usize,                   // The ID of the initiator
+    pub n: usize,                    // Total number of parties in the network
+    pub t: usize,                    // Number of allowed malicious parties
+    pub k: usize,                    // threshold
     pub store: Arc<Mutex<AcsStore>>, // Stores the ACS session state
     pub aba: ABA,                    //ABA instance for the common subset
 }
 
 impl ACS {
     /// Creates a new ACS instance with the given parameters.
-    pub fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, RbcError> {
+    pub fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
             return Err(RbcError::InvalidThreshold(t, n));
@@ -1870,12 +1870,12 @@ impl ACS {
     async fn check_and_finalize_output(&self, session_store: Arc<Mutex<AcsStore>>) {
         let mut store = session_store.lock().await;
         // If not all ABA instances have outputs, return early
-        if store.aba_output.len() < self.n as usize {
+        if store.aba_output.len() < self.n {
             return;
         }
 
         // Gather indices where ABA output is 1
-        let mut consensus_indices: Vec<u32> = store
+        let mut consensus_indices: Vec<usize> = store
             .aba_output
             .iter()
             .filter(|(_, &v)| v)

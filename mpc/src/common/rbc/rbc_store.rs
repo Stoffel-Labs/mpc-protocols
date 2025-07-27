@@ -8,9 +8,9 @@ use tokio::sync::Notify;
 /// Generic message type used in Reliable Broadcast (RBC) communication.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Msg {
-    pub sender_id: u32,           // ID of the sender node
-    pub session_id: u32,          // Unique session ID for each broadcast instance
-    pub round_id: u32,            //Round ID
+    pub sender_id: usize,           // ID of the sender node
+    pub session_id: usize,          // Unique session ID for each broadcast instance
+    pub round_id: usize,            //Round ID
     pub payload: Vec<u8>, // Actual data being broadcasted (e.g., bytes of a secret or message)
     pub metadata: Vec<u8>, // info related to the message shared
     pub msg_type: GenericMsgType, // Type of message like INIT, ECHO, or READY
@@ -24,9 +24,9 @@ fn hash_message(message: &[u8]) -> Vec<u8> {
 impl Msg {
     /// Constructor to create a new message.
     pub fn new(
-        sender_id: u32,
-        session_id: u32,
-        round_id: u32,
+        sender_id: usize,
+        session_id: usize,
+        round_id: usize,
         payload: Vec<u8>,
         metadata: Vec<u8>,
         msg_type: GenericMsgType,
@@ -87,10 +87,10 @@ impl fmt::Display for MsgType {
 /// Bracha's RBC involves thresholds for ECHO and READY messages to achieve consensus.
 #[derive(Default)]
 pub struct BrachaStore {
-    pub echo_senders: HashMap<u32, bool>, // Which parties sent ECHO (sender_id -> true)
-    pub ready_senders: HashMap<u32, bool>, // Which parties sent READY (sender_id -> true)
-    pub echo_count: HashMap<Vec<u8>, u32>, // Count of ECHO messages per payload
-    pub ready_count: HashMap<Vec<u8>, u32>, // Count of READY messages per payload
+    pub echo_senders: HashMap<usize, bool>, // Which parties sent ECHO (sender_id -> true)
+    pub ready_senders: HashMap<usize, bool>, // Which parties sent READY (sender_id -> true)
+    pub echo_count: HashMap<Vec<u8>, usize>, // Count of ECHO messages per payload
+    pub ready_count: HashMap<Vec<u8>, usize>, // Count of READY messages per payload
     pub ended: bool,                      // True if consensus is reached and protocol ended
     pub echo: bool,                       // True if this party already sent an ECHO
     pub ready: bool,                      // True if this party already sent a READY
@@ -112,21 +112,21 @@ impl BrachaStore {
         }
     }
     /// Returns true if the given sender_id has sent an echo (i.e., is set to true in echo_senders).
-    pub fn has_echo(&self, sender_id: u32) -> bool {
+    pub fn has_echo(&self, sender_id: usize) -> bool {
         self.echo_senders.get(&sender_id).copied().unwrap_or(false)
     }
     /// Returns true if the given sender_id has sent a ready (i.e., is set to true in ready_senders).
-    pub fn has_ready(&self, sender_id: u32) -> bool {
+    pub fn has_ready(&self, sender_id: usize) -> bool {
         self.ready_senders.get(&sender_id).copied().unwrap_or(false)
     }
 
     /// Marks that an echo was sent by a given node
-    pub fn set_echo_sent(&mut self, node_id: u32) {
+    pub fn set_echo_sent(&mut self, node_id: usize) {
         self.echo_senders.insert(node_id, true);
     }
 
     /// Marks that a ready was sent by a given node
-    pub fn set_ready_sent(&mut self, node_id: u32) {
+    pub fn set_ready_sent(&mut self, node_id: usize) {
         self.ready_senders.insert(node_id, true);
     }
 
@@ -143,13 +143,13 @@ impl BrachaStore {
     }
 
     /// Gets echo count for a message
-    pub fn get_echo_count(&self, message: &[u8]) -> u32 {
+    pub fn get_echo_count(&self, message: &[u8]) -> usize {
         let hash = hash_message(message);
         *self.echo_count.get(&hash).unwrap_or(&0)
     }
 
     /// Gets ready count for a message
-    pub fn get_ready_count(&self, message: &[u8]) -> u32 {
+    pub fn get_ready_count(&self, message: &[u8]) -> usize {
         let hash = hash_message(message);
         *self.ready_count.get(&hash).unwrap_or(&0)
     }
@@ -197,12 +197,12 @@ impl fmt::Display for MsgTypeAvid {
 /// Stores the internal state for each RBC session at a party.
 #[derive(Default)]
 pub struct AvidStore {
-    pub shards: HashMap<Vec<u8>, HashMap<u32, Vec<u8>>>, // Merkle root → (shard ID → shard data).
-    pub fingerprint: HashMap<Vec<u8>, HashMap<u32, Vec<u8>>>, // Merkle root → (shard ID → Merkle proof/fingerprint).
-    pub echo_senders: HashMap<u32, bool>, // Which parties sent ECHO (sender_id -> true)
-    pub ready_senders: HashMap<u32, bool>, // Which parties sent READY (sender_id -> true)
-    pub echo_count: HashMap<Vec<u8>, u32>, // Count of ECHO messages per root
-    pub ready_count: HashMap<Vec<u8>, u32>, // Count of READY messages per root
+    pub shards: HashMap<Vec<u8>, HashMap<usize, Vec<u8>>>, // Merkle root → (shard ID → shard data).
+    pub fingerprint: HashMap<Vec<u8>, HashMap<usize, Vec<u8>>>, // Merkle root → (shard ID → Merkle proof/fingerprint).
+    pub echo_senders: HashMap<usize, bool>, // Which parties sent ECHO (sender_id -> true)
+    pub ready_senders: HashMap<usize, bool>, // Which parties sent READY (sender_id -> true)
+    pub echo_count: HashMap<Vec<u8>, usize>, // Count of ECHO messages per root
+    pub ready_count: HashMap<Vec<u8>, usize>, // Count of READY messages per root
     pub ended: bool,                      // True if consensus is reached and protocol ended
     pub echo: bool,                       // True if this party already sent an ECHO
     pub output: Vec<u8>,                  // Agreed value after consensus
@@ -223,19 +223,19 @@ impl AvidStore {
         }
     }
     /// Returns true if the given sender_id has sent an echo (i.e., is set to true in echo_senders).
-    pub fn has_echo(&self, sender_id: u32) -> bool {
+    pub fn has_echo(&self, sender_id: usize) -> bool {
         self.echo_senders.get(&sender_id).copied().unwrap_or(false)
     }
     /// Returns true if the given sender_id has sent an ready (i.e., is set to true in ready_senders).
-    pub fn has_ready(&self, sender_id: u32) -> bool {
+    pub fn has_ready(&self, sender_id: usize) -> bool {
         self.ready_senders.get(&sender_id).copied().unwrap_or(false)
     }
     /// Marks that an echo was sent by a given node
-    pub fn set_echo_sent(&mut self, node_id: u32) {
+    pub fn set_echo_sent(&mut self, node_id: usize) {
         self.echo_senders.insert(node_id, true);
     }
     /// Marks that an ready was sent by a given node
-    pub fn set_ready_sent(&mut self, node_id: u32) {
+    pub fn set_ready_sent(&mut self, node_id: usize) {
         self.ready_senders.insert(node_id, true);
     }
     /// Increments echo count for a given root
@@ -247,11 +247,11 @@ impl AvidStore {
         *self.ready_count.entry(root.to_vec()).or_insert(0) += 1;
     }
     /// Gets echo count for a root
-    pub fn get_echo_count(&self, root: &[u8]) -> u32 {
+    pub fn get_echo_count(&self, root: &[u8]) -> usize {
         *self.echo_count.get(root).unwrap_or(&0)
     }
     /// Gets ready count for a root
-    pub fn get_ready_count(&self, root: &[u8]) -> u32 {
+    pub fn get_ready_count(&self, root: &[u8]) -> usize {
         *self.ready_count.get(root).unwrap_or(&0)
     }
     /// Sets echo flag to true
@@ -268,7 +268,7 @@ impl AvidStore {
     }
 
     /// Inserts a shard for a given root and sender ID
-    pub fn insert_shard(&mut self, root: Vec<u8>, sender_id: u32, shard: Vec<u8>) {
+    pub fn insert_shard(&mut self, root: Vec<u8>, sender_id: usize, shard: Vec<u8>) {
         self.shards
             .entry(root)
             .or_default()
@@ -276,14 +276,14 @@ impl AvidStore {
     }
 
     /// Inserts fingerprint/merkle proof  for a given root and sender ID
-    pub fn insert_fingerprint(&mut self, root: Vec<u8>, sender_id: u32, proof: Vec<u8>) {
+    pub fn insert_fingerprint(&mut self, root: Vec<u8>, sender_id: usize, proof: Vec<u8>) {
         self.fingerprint
             .entry(root)
             .or_default()
             .insert(sender_id, proof);
     }
     /// Returns the set of shards associated with a given Merkle root.
-    pub fn get_shards_for_root(&self, root: &Vec<u8>) -> HashMap<u32, Vec<u8>> {
+    pub fn get_shards_for_root(&self, root: &Vec<u8>) -> HashMap<usize, Vec<u8>> {
         self.shards.get(root).cloned().unwrap_or_else(HashMap::new)
     }
 }
@@ -315,15 +315,15 @@ impl fmt::Display for MsgTypeAba {
 #[derive(Default)]
 pub struct AbaStore {
     //  roundid => Sender => [bool,bool] , to check if a sender has sent an est value either 0 or 1
-    pub est_senders: HashMap<u32, HashMap<u32, [bool; 2]>>,
+    pub est_senders: HashMap<usize, HashMap<usize, [bool; 2]>>,
     //  roundid => Sender => [bool,bool], to check if a sender has sent an aux value either 0 or 1
-    pub aux_senders: HashMap<u32, HashMap<u32, [bool; 2]>>,
-    pub est_count: HashMap<u32, [u32; 2]>, // roundid => est value count[0 count ,1 count]
-    pub est: HashMap<u32, [bool; 2]>,      // roundid => [sent 0 value , sent 1 value]
-    pub aux: HashMap<u32, [bool; 2]>,      // roundid => aux value
+    pub aux_senders: HashMap<usize, HashMap<usize, [bool; 2]>>,
+    pub est_count: HashMap<usize, [usize; 2]>, // roundid => est value count[0 count ,1 count]
+    pub est: HashMap<usize, [bool; 2]>,      // roundid => [sent 0 value , sent 1 value]
+    pub aux: HashMap<usize, [bool; 2]>,      // roundid => aux value
     // roundid => Sender => [bool,bool] , set of values shared by sender
-    pub values: HashMap<u32, HashMap<u32, HashSet<bool>>>,
-    pub bin_values: HashMap<u32, HashSet<bool>>, // roundid => {bool}
+    pub values: HashMap<usize, HashMap<usize, HashSet<bool>>>,
+    pub bin_values: HashMap<usize, HashSet<bool>>, // roundid => {bool}
     pub ended: bool,                             //ABA session ended or not
     pub output: bool,                            // Agreed value after consensus
     pub notify: Arc<Notify>,
@@ -331,25 +331,25 @@ pub struct AbaStore {
 
 impl AbaStore {
     /// Set the estimate value for a given round id
-    pub fn mark_est(&mut self, round: u32, value: bool) {
+    pub fn mark_est(&mut self, round: usize, value: bool) {
         let est = self.est.entry(round).or_insert([false; 2]);
         est[value as usize] = true;
     }
 
     /// Get the estimate value for a given round id, defaulting to `false` if not set
-    pub fn get_est(&self, round: u32, value: bool) -> bool {
+    pub fn get_est(&self, round: usize, value: bool) -> bool {
         self.est
             .get(&round)
             .map(|arr| arr[value as usize])
             .unwrap_or(false)
     }
     /// Mark the aux value for a given round id
-    pub fn mark_aux(&mut self, round: u32, value: bool) {
+    pub fn mark_aux(&mut self, round: usize, value: bool) {
         let aux_arr = self.aux.entry(round).or_insert([false; 2]);
         aux_arr[value as usize] = true;
     }
     /// Get the aux value for a given round id, defaulting to `false` if not set
-    pub fn get_aux(&self, round: u32, value: bool) -> bool {
+    pub fn get_aux(&self, round: usize, value: bool) -> bool {
         self.aux
             .get(&round)
             .map(|arr| arr[value as usize])
@@ -357,7 +357,7 @@ impl AbaStore {
     }
 
     /// Check if a sender has already sent an estimate(0 or 1) in a given round
-    pub fn has_sent_est(&self, round: u32, sender: u32, value: bool) -> bool {
+    pub fn has_sent_est(&self, round: usize, sender: usize, value: bool) -> bool {
         self.est_senders
             .get(&round)
             .and_then(|senders| senders.get(&sender))
@@ -366,7 +366,7 @@ impl AbaStore {
     }
 
     /// Mark a sender as having sent an estimate(0 or 1) in a given round
-    pub fn set_est_sent(&mut self, round: u32, sender: u32, value: bool) {
+    pub fn set_est_sent(&mut self, round: usize, sender: usize, value: bool) {
         self.est_senders
             .entry(round)
             .or_default()
@@ -375,7 +375,7 @@ impl AbaStore {
     }
 
     /// Increase the est count of 0s or 1s received in a round
-    pub fn increment_est(&mut self, round: u32, value: bool) {
+    pub fn increment_est(&mut self, round: usize, value: bool) {
         let counts = self.est_count.entry(round).or_insert([0, 0]);
         if value {
             counts[1] += 1;
@@ -385,11 +385,11 @@ impl AbaStore {
     }
 
     /// Get the current estimate count ([0s, 1s]) for a round
-    pub fn get_est_count(&self, round: u32) -> [u32; 2] {
+    pub fn get_est_count(&self, round: usize) -> [usize; 2] {
         self.est_count.get(&round).copied().unwrap_or([0, 0])
     }
     /// Insert a binary value into the bin_values set for a given round ID
-    pub fn insert_bin_value(&mut self, round: u32, value: bool) {
+    pub fn insert_bin_value(&mut self, round: usize, value: bool) {
         self.bin_values
             .entry(round)
             .or_insert_with(HashSet::new)
@@ -397,12 +397,12 @@ impl AbaStore {
     }
 
     //Get the bin_values set for a given round
-    pub fn get_bin_values(&self, round: u32) -> HashSet<bool> {
+    pub fn get_bin_values(&self, round: usize) -> HashSet<bool> {
         self.bin_values.get(&round).cloned().unwrap_or_default()
     }
 
     /// Check if a sender has already sent an aux value either 0 or 1 in a given round
-    pub fn has_sent_aux(&self, round: u32, sender: u32, value: bool) -> bool {
+    pub fn has_sent_aux(&self, round: usize, sender: usize, value: bool) -> bool {
         self.aux_senders
             .get(&round)
             .and_then(|senders| senders.get(&sender))
@@ -411,7 +411,7 @@ impl AbaStore {
     }
 
     /// Mark a sender as having sent an value either 0 or 1 in a given round
-    pub fn set_aux_sent(&mut self, round: u32, sender: u32, value: bool) {
+    pub fn set_aux_sent(&mut self, round: usize, sender: usize, value: bool) {
         self.aux_senders
             .entry(round)
             .or_default()
@@ -420,7 +420,7 @@ impl AbaStore {
     }
 
     /// Insert a binary value into the values set for a given round ID and given sender
-    pub fn insert_values(&mut self, round: u32, sender: u32, value: bool) {
+    pub fn insert_values(&mut self, round: usize, sender: usize, value: bool) {
         self.values
             .entry(round)
             .or_insert_with(HashMap::new)
@@ -430,7 +430,7 @@ impl AbaStore {
     }
 
     /// Get the current count of senders who sent aux messages for a given round
-    pub fn get_sender_count(&self, round: u32) -> usize {
+    pub fn get_sender_count(&self, round: usize) -> usize {
         self.values
             .get(&round)
             .map(|sender_map| sender_map.len())
@@ -438,7 +438,7 @@ impl AbaStore {
     }
 
     // Get the union of all the values set for a given round
-    pub fn get_all_values(&self, round: u32) -> HashSet<bool> {
+    pub fn get_all_values(&self, round: usize) -> HashSet<bool> {
         self.values
             .get(&round)
             .map(|sender_map| {
@@ -464,16 +464,16 @@ impl AbaStore {
 /// Stores the internal state for each Common coin session at a party.
 #[derive(Default)]
 pub struct CoinStore {
-    pub sign_senders: HashMap<u32, HashMap<u32, bool>>, //roundid => Sender => bool, check if signature shares were sent
-    pub sign_count: HashMap<u32, u32>,                  // roundid => signature share count
-    pub sign_shares: HashMap<u32, HashMap<u32, Vec<u8>>>, // roundid => sender_id => Signature share
-    pub coins: HashMap<u32, bool>,                      //roundid => Coin
-    pub start: HashMap<u32, bool>, //roundid => yes or no , checks if common coin has been initiated yet
-    pub notifiers: HashMap<u32, Arc<Notify>>, // round_id => Notify ,Checks if common coin is ready to be used
+    pub sign_senders: HashMap<usize, HashMap<usize, bool>>, //roundid => Sender => bool, check if signature shares were sent
+    pub sign_count: HashMap<usize, usize>,                  // roundid => signature share count
+    pub sign_shares: HashMap<usize, HashMap<usize, Vec<u8>>>, // roundid => sender_id => Signature share
+    pub coins: HashMap<usize, bool>,                      //roundid => Coin
+    pub start: HashMap<usize, bool>, //roundid => yes or no , checks if common coin has been initiated yet
+    pub notifiers: HashMap<usize, Arc<Notify>>, // round_id => Notify ,Checks if common coin is ready to be used
 }
 impl CoinStore {
     /// Check if a sender has already sent a signature share in a given round
-    pub fn has_sent_sign(&self, round: u32, sender: u32) -> bool {
+    pub fn has_sent_sign(&self, round: usize, sender: usize) -> bool {
         self.sign_senders
             .get(&round)
             .and_then(|senders| senders.get(&sender))
@@ -482,12 +482,12 @@ impl CoinStore {
     }
 
     /// Increase the count of signature shares received in a round
-    pub fn increment_sign(&mut self, round: u32) {
+    pub fn increment_sign(&mut self, round: usize) {
         *self.sign_count.entry(round).or_insert(0) += 1;
     }
 
     /// Mark a sender as having sent a signature share in a given round
-    pub fn set_sign_sent(&mut self, round: u32, sender: u32) {
+    pub fn set_sign_sent(&mut self, round: usize, sender: usize) {
         self.sign_senders
             .entry(round)
             .or_default()
@@ -495,12 +495,12 @@ impl CoinStore {
     }
 
     /// Get the current signature share count for a round
-    pub fn get_sign_count(&self, round: u32) -> u32 {
+    pub fn get_sign_count(&self, round: usize) -> usize {
         self.sign_count.get(&round).copied().unwrap_or(0)
     }
 
     /// Insert a signature share for a given round
-    pub fn insert_share(&mut self, round_id: u32, sender_id: u32, share: Vec<u8>) {
+    pub fn insert_share(&mut self, round_id: usize, sender_id: usize, share: Vec<u8>) {
         self.sign_shares
             .entry(round_id)
             .or_insert_with(HashMap::new)
@@ -508,12 +508,12 @@ impl CoinStore {
     }
 
     //Get the signature share map for a given round
-    pub fn get_shares_map(&self, round_id: u32) -> Option<&HashMap<u32, Vec<u8>>> {
+    pub fn get_shares_map(&self, round_id: usize) -> Option<&HashMap<usize, Vec<u8>>> {
         self.sign_shares.get(&round_id)
     }
 
     //Set the common coin as ready to be used and notify waiter
-    pub fn set_coin(&mut self, round_id: u32, value: bool) {
+    pub fn set_coin(&mut self, round_id: usize, value: bool) {
         self.coins.insert(round_id, value);
         if let Some(notify) = self.notifiers.remove(&round_id) {
             notify.notify_waiters(); // Wake up all waiting tasks
@@ -521,17 +521,17 @@ impl CoinStore {
     }
 
     /// Get the coin value for a given round, if it exists.
-    pub fn coin(&self, round: u32) -> Option<bool> {
+    pub fn coin(&self, round: usize) -> Option<bool> {
         self.coins.get(&round).copied()
     }
 
     //Marks the start of common coin generation
-    pub fn set_start(&mut self, round_id: u32) {
+    pub fn set_start(&mut self, round_id: usize) {
         self.start.insert(round_id, true);
     }
 
     //Checks if common coin generation has started
-    pub fn get_start(&self, round: u32) -> bool {
+    pub fn get_start(&self, round: usize) -> bool {
         *self.start.get(&round).unwrap_or(&false)
     }
 }
@@ -553,40 +553,40 @@ impl fmt::Display for MsgTypeAcs {
 }
 #[derive(Default, Clone)]
 pub struct AcsStore {
-    pub aba_input: HashMap<u32, bool>,     //Session id => aba input
-    pub aba_output: HashMap<u32, bool>,    //Session id => aba output
-    pub rbc_output: HashMap<u32, Vec<u8>>, //Session id => rbc output
+    pub aba_input: HashMap<usize, bool>,     //Session id => aba input
+    pub aba_output: HashMap<usize, bool>,    //Session id => aba output
+    pub rbc_output: HashMap<usize, Vec<u8>>, //Session id => rbc output
     pub ended: bool,
     pub commonsubset: Vec<Vec<u8>>,
 }
 
 impl AcsStore {
     /// Checks if ABA input is stored for the given session ID.
-    pub fn has_aba_input(&self, session_id: u32) -> bool {
+    pub fn has_aba_input(&self, session_id: usize) -> bool {
         self.aba_input.contains_key(&session_id)
     }
     /// Sets the ABA input for a given session ID.
-    pub fn set_aba_input(&mut self, session_id: u32, value: bool) {
+    pub fn set_aba_input(&mut self, session_id: usize, value: bool) {
         self.aba_input.insert(session_id, value);
     }
     /// Sets the ABA output for a given session ID.
-    pub fn set_aba_output(&mut self, session_id: u32, value: bool) {
+    pub fn set_aba_output(&mut self, session_id: usize, value: bool) {
         self.aba_output.insert(session_id, value);
     }
     /// Get the ABA output 1 count
-    pub fn get_aba_output_one_count(&mut self) -> u32 {
-        self.aba_output.iter().filter(|&(_, &val)| val).count() as u32
+    pub fn get_aba_output_one_count(&mut self) -> usize {
+        self.aba_output.iter().filter(|&(_, &val)| val).count()
     }
     /// Checks if RBC output is stored for the given session ID.
-    pub fn has_rbc_output(&self, session_id: u32) -> bool {
+    pub fn has_rbc_output(&self, session_id: usize) -> bool {
         self.rbc_output.contains_key(&session_id)
     }
     /// Sets the RBC output for a given session ID.
-    pub fn set_rbc_output(&mut self, session_id: u32, output: Vec<u8>) {
+    pub fn set_rbc_output(&mut self, session_id: usize, output: Vec<u8>) {
         self.rbc_output.insert(session_id, output);
     }
     /// Get the RBC output for a given session ID.
-    pub fn get_rbc_output(&mut self, session_id: u32) -> Option<&Vec<u8>> {
+    pub fn get_rbc_output(&mut self, session_id: usize) -> Option<&Vec<u8>> {
         self.rbc_output.get(&session_id)
     }
 

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{error::Error, sync::Arc};
 
 use ark_ff::FftField;
 use async_trait::async_trait;
@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 use stoffelmpc_network::Network;
 
 use crate::{
-    common::{rbc::{rbc::ACS, rbc_store::Msg}, MPCNode, RBC},
+    common::{
+        rbc::{rbc::ACS, rbc_store::Msg},
+        MPCNode, RBC,
+    },
     honeybadger::{
         batch_recon::{batch_recon::BatchReconNode, BatchReconMsg},
         ran_dou_sha::{messages::RanDouShaMessage, RanDouShaNode},
@@ -38,7 +41,7 @@ pub enum WrappedMessage {
 pub struct Node<F: FftField, R: RBC> {
     pub id: usize,
     pub rbc: R,
-    pub acs : ACS,
+    pub acs: ACS,
     pub batch_recon: BatchReconNode<F>,
     pub randousha: RanDouShaNode<F, R>,
 }
@@ -55,9 +58,9 @@ where
         k: usize, // used by RBC
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Create RBC instance
-        let rbc = R::new(id as u32, n as u32, t as u32, k as u32)?;
+        let rbc = R::new(id, n, t, k)?;
         //Create ACS instance
-        let acs = ACS::new(id as u32, n as u32, t as u32, k as u32)?;
+        let acs = ACS::new(id, n, t, k)?;
         // Create BatchReconNode
         let batch_recon = BatchReconNode::new(id, n, t)?;
         // Create RanDouShaNode
@@ -79,7 +82,7 @@ where
         &mut self,
         raw_msg: Vec<u8>,
         net: Arc<N>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)
             .map_err(|e| format!("Failed to deserialize WrappedMessage: {e}"))?;
 

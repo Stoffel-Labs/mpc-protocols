@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{collections::HashSet, marker::PhantomData};
 
 /// This file contains the more common secret sharing protocols used in MPC.
 /// You can reuse them for the MPC protocols that you aim to implement.
@@ -36,37 +36,64 @@ impl<F: FftField> SecretSharingScheme<F, 1> for NonRobustShare<F> {
         ids: Option<&[usize]>,
         rng: &mut impl Rng,
     ) -> Result<Vec<Self>, ShareError> {
+        let id_list = match ids {
+            Some(ids) => ids,
+            None => return Err(ShareError::InvalidInput),
+        };
+
+        // Enough IDs to construct a degree-d polynomial
+        if id_list.len() < degree + 1 {
+            return Err(ShareError::InsufficientShares);
+        }
+
+        // All IDs are non-zero (optional, depending on your protocol)
+        if id_list.iter().any(|&id| id == 0) {
+            return Err(ShareError::InvalidInput);
+        }
+
+        // All IDs are unique
+        let mut seen = HashSet::new();
+        if !id_list.iter().all(|id| seen.insert(id)) {
+            return Err(ShareError::InvalidInput);
+        }
+
+        // Generate the random polynomial of degree `degree` with `secret` as constant term
         let mut poly = DensePolynomial::rand(degree, rng);
         poly[0] = secret;
 
-        match ids {
-            Some(id_list) => {
-                let shares = id_list
-                    .iter()
-                    .map(|id| {
-                        let x = F::from(*id as u64);
-                        let y = poly.evaluate(&x);
-                        NonRobustShare::new(y, *id, degree)
-                    })
-                    .collect();
-                Ok(shares)
-            }
-            None => {
-                return Err(ShareError::InvalidInput);
-            }
-        }
+        // Evaluate the polynomial at each `id`
+        let shares = id_list
+            .iter()
+            .map(|id| {
+                let x = F::from(*id as u64);
+                let y = poly.evaluate(&x);
+                NonRobustShare::new(y, *id, degree)
+            })
+            .collect();
+
+        Ok(shares)
     }
 
     // recover the secret of the input shares
     fn recover_secret(
         shares: &[Self],
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), ShareError> {
+        if shares.is_empty() {
+            return Err(ShareError::InvalidInput);
+        }
+        let mut seen = HashSet::new();
+        if !shares.iter().all(|s| seen.insert(s.id)) {
+            return Err(ShareError::InvalidInput);
+        }
         let deg = shares[0].degree;
         if !shares.iter().all(|share| share.degree == deg) {
             return Err(ShareError::DegreeMismatch);
         };
         if shares.len() < deg + 1 {
             return Err(ShareError::InsufficientShares);
+        }
+        if shares.iter().any(|share| share.id == 0) {
+            return Err(ShareError::InvalidInput);
         }
         let (x_vals, y_vals): (Vec<F>, Vec<F>) = shares
             .iter()
@@ -151,8 +178,8 @@ mod test {
         let secret = Fr::from(918520);
         let ids = &[1, 2, 3];
         let mut rng = test_rng();
-        let shares = NonRobustShare::compute_shares(secret, 3, 5, Some(ids), &mut rng).unwrap();
-        let recovered_secret = NonRobustShare::recover_secret(&shares).unwrap_err();
+        let shares = NonRobustShare::compute_shares(secret, 3, 2, Some(ids), &mut rng).unwrap();
+        let recovered_secret = NonRobustShare::recover_secret(&shares[1..]).unwrap_err();
         match recovered_secret {
             ShareError::InsufficientShares => (),
             ShareError::DegreeMismatch => panic!("incorrect error type"),

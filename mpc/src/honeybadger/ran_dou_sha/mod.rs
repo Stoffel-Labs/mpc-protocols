@@ -19,7 +19,7 @@ use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use stoffelmpc_network::{Network, NetworkError, Node, PartyId, SessionId};
+use stoffelmpc_network::{Network, NetworkError, PartyId, SessionId};
 use tracing::info;
 
 /// Error that occurs during the execution of the Random Double Share Error.
@@ -121,13 +121,7 @@ where
         threshold: usize,
         k: usize, // for RBC init
     ) -> Result<Self, RanDouShaError> {
-        let rbc = R::new(
-            (id - 1) as u32,
-            n_parties as u32,
-            threshold as u32,
-            k as u32,
-        )
-        .map_err(|e| RanDouShaError::RbcError(e))?;
+        let rbc = R::new(id, n_parties, threshold, k).map_err(|e| RanDouShaError::RbcError(e))?;
 
         Ok(Self {
             id,
@@ -193,10 +187,10 @@ where
         drop(store);
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
-        for party in network.parties() {
-            if party.id() > self.threshold + 1 && party.id() <= self.n_parties {
-                let share_deg_t = r_deg_t[party.id() - 1].clone();
-                let share_deg_2t = r_deg_2t[party.id() - 1].clone();
+        for i in 0..self.n_parties {
+            if i >= self.threshold + 1 && i < self.n_parties {
+                let share_deg_t = r_deg_t[i].clone();
+                let share_deg_2t = r_deg_2t[i].clone();
                 let reconst_message = ReconstructionMessage::new(share_deg_t, share_deg_2t);
 
                 // Serializing the reconstruction message and wrapping it into a generic message.
@@ -216,7 +210,7 @@ where
                     bincode::serialize(&wrapped).map_err(RanDouShaError::SerializationError)?;
                 // Sending the generic message to the network.
                 network
-                    .send(party.id(), &bytes_wrapped)
+                    .send(i, &bytes_wrapped)
                     .await
                     .map_err(RanDouShaError::NetworkError)?;
             }
@@ -273,7 +267,7 @@ where
 
         // (2) Check if this party (self.id) is one of the designated checking parties.
         // Condition from the protocol: `t + 1 < i <= n`
-        if self.id > self.threshold + 1 && self.id <= self.n_parties {
+        if self.id >= self.threshold + 1 && self.id < self.n_parties {
             // (3) Check if enough shares have been received to reconstruct.
             // To reconstruct a (t) degree polynomial, you need t+1 distinct shares.
             // To reconstruct a (2t) degree polynomial, you need 2t+1 distinct shares.
@@ -326,7 +320,7 @@ where
                 self.rbc
                     .init(
                         bytes_wrapped,
-                        (msg.session_id + self.id) as u32, // A unique session id per node
+                        msg.session_id + self.id, // A unique session id per node
                         Arc::clone(&network),
                     )
                     .await

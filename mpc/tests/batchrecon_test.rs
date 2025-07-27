@@ -1,10 +1,11 @@
+pub mod utils;
 #[cfg(test)]
 mod tests {
+    use crate::utils::test_utils::{generate_independent_shares, setup_tracing};
     use ark_bls12_381::Fr;
-    use ark_ff::{FftField, Zero};
+    use ark_ff::Zero;
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-    use ark_std::test_rng;
-    use std::{marker::PhantomData, time::Duration};
+    use std::time::Duration;
     use stoffelmpc_mpc::{
         common::{
             share::{apply_vandermonde, make_vandermonde},
@@ -19,45 +20,9 @@ mod tests {
     use tokio::time::timeout;
     use tracing::warn;
 
-    /// Generate secret shares where each secret is shared independently using a random polynomial
-    /// with that secret as the constant term (f(0) = secret), and evaluated using FFT-based domain.
-    pub fn generate_independent_shares<F: FftField>(
-        secrets: &[F],
-        t: usize,
-        n: usize,
-    ) -> Vec<Vec<RobustShamirShare<F>>> {
-        let mut rng = test_rng();
-        let mut shares = vec![
-            vec![
-                RobustShamirShare {
-                    share: [F::zero()],
-                    id: 0,
-                    degree: t,
-                    _sharetype: PhantomData
-                };
-                secrets.len()
-            ];
-            n
-        ];
-        for (j, secret) in secrets.iter().enumerate() {
-            // Call gen_shares to create 'n' shares for the current 'secret'
-            let ids: Vec<usize> = (0..n).collect();
-            let secret_shares =
-                RobustShamirShare::compute_shares(*secret, n, t, Some(&ids), &mut rng).unwrap();
-            for i in 0..n {
-                shares[i][j] = secret_shares[i].clone(); // Party i receives evaluation of f_j at α_i
-            }
-        }
-
-        shares
-    }
-
     #[test]
     fn test_batch_reconstruct_sequential() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         let t = 1;
         let n = 4;
@@ -145,10 +110,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_batch_reconstruction() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
         use std::sync::Arc;
         use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
 
@@ -198,8 +160,7 @@ mod tests {
                                 Err(e) => warn!(id =i,error = ?e ,"Broadcasting failure"),
                             }
                         }
-                        WrappedMessage::RanDouSha(_) => todo!(),
-                        WrappedMessage::Rbc(_) => todo!(),
+                        _ => todo!(),
                     }
                 }
 

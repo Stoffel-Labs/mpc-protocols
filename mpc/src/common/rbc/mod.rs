@@ -21,16 +21,16 @@ pub enum ShardError {
     Merkle(String),
 
     #[error("Index {0} is out of bounds (max {1})")]
-    OutOfBounds(u32, usize),
+    OutOfBounds(usize, usize),
 }
 
 #[derive(Debug, Error)]
 pub enum RbcError {
     #[error("Invalid threshold t={0} for n={1}, must satisfy t < ceil(n / 3)")]
-    InvalidThreshold(u32, u32),
+    InvalidThreshold(usize, usize),
 
     #[error("Session {0} already ended")]
-    SessionEnded(u32),
+    SessionEnded(usize),
 
     #[error("Unknown Bracha message type: {0}")]
     UnknownMsgType(String),

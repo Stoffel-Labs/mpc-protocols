@@ -20,7 +20,6 @@ use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
 };
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
 use stoffelmpc_mpc::honeybadger::WrappedMessage;
-use stoffelmpc_network::{Network, Node};
 use tokio::sync::mpsc::{self};
 use tokio::task::JoinSet;
 use tracing::warn;
@@ -37,15 +36,15 @@ async fn test_init_reconstruct_flow() {
     let (network, mut receivers) = test_setup(n_parties);
     let (_, shares_si_t, shares_si_2t) = construct_e2e_input(n_parties, degree_t);
 
-    let sender_id = 1;
+    let sender_id = 0;
 
     // create randousha nodes
     let mut randousha_nodes = vec![];
     for i in 0..n_parties {
-        randousha_nodes.push(initialize_node(i + 1, n_parties, threshold, threshold + 1));
+        randousha_nodes.push(initialize_node(i, n_parties, threshold, threshold + 1));
     }
 
-    let mut sender = randousha_nodes.get(sender_id - 1).unwrap().clone();
+    let mut sender = randousha_nodes.get(sender_id).unwrap().clone();
 
     sender
         .init(
@@ -57,15 +56,14 @@ async fn test_init_reconstruct_flow() {
         .await
         .unwrap();
 
-    for party in network.parties() {
+    for i in 0..n_parties {
         // check only designated parties are receiving messages
-        if party.id() > threshold + 1 && party.id() <= n_parties {
-            let received_message = receivers[party.id() - 1].try_recv().unwrap();
+        if i >= threshold + 1 && i < n_parties {
+            let received_message = receivers[i].try_recv().unwrap();
             let wrapped: WrappedMessage = bincode::deserialize(&received_message).unwrap();
             let rdsmsg = match wrapped {
                 WrappedMessage::RanDouSha(ran_dou_sha_message) => ran_dou_sha_message,
-                WrappedMessage::Rbc(_) => todo!(),
-                WrappedMessage::BatchRecon(_) => todo!(),
+                _ => todo!(),
             };
 
             let msg_type = rdsmsg.msg_type;
@@ -74,12 +72,12 @@ async fn test_init_reconstruct_flow() {
         }
         // check that rest does not receive messages
         else {
-            assert!(receivers[party.id() - 1].try_recv().is_err());
+            assert!(receivers[i].try_recv().is_err());
         }
 
         // check all stores should be empty except for the sender's store
         let store = randousha_nodes
-            .get(party.id() - 1)
+            .get(i)
             .unwrap()
             .clone()
             .get_or_create_store(session_id)
@@ -87,7 +85,7 @@ async fn test_init_reconstruct_flow() {
             .lock()
             .await
             .clone();
-        if party.id() != sender_id {
+        if i != sender_id {
             assert!(store.computed_r_shares_degree_t.len() == 0);
             assert!(store.computed_r_shares_degree_2t.len() == 0);
             assert!(store.received_r_shares_degree_t.len() == 0);
@@ -96,7 +94,7 @@ async fn test_init_reconstruct_flow() {
             assert!(store.state == RanDouShaState::Initialized);
         }
 
-        if party.id() == sender_id {
+        if i == sender_id {
             assert!(store.computed_r_shares_degree_t.len() == n_parties);
             assert!(store.computed_r_shares_degree_2t.len() == n_parties);
             assert!(store.received_r_shares_degree_t.len() == 0);
@@ -120,7 +118,7 @@ async fn test_reconstruct_handler() {
 
     // initialize RanDouShaNode
     let mut randousha_nodes = vec![];
-    for i in 1..=n_parties {
+    for i in 0..n_parties {
         randousha_nodes.push(initialize_node(i, n_parties, threshold, threshold + 1));
     }
 
@@ -128,7 +126,7 @@ async fn test_reconstruct_handler() {
     let receiver_id = threshold + 2;
 
     // receiver randousha node
-    let mut randousha_node = randousha_nodes.get(receiver_id - 1).unwrap().clone();
+    let mut randousha_node = randousha_nodes.get(receiver_id).unwrap().clone();
 
     // receiver nodes received 2t+1 ReconstructionMessage
     for i in 0..2 * threshold + 1 {
@@ -139,7 +137,7 @@ async fn test_reconstruct_handler() {
             .map_err(RanDouShaError::ArkSerialization)
             .unwrap();
         let rds_message = RanDouShaMessage::new(
-            i + 1,
+            i,
             RanDouShaMessageType::ReconstructMessage,
             session_id,
             RanDouShaPayload::Reconstruct(bytes_rec_message),
@@ -152,9 +150,9 @@ async fn test_reconstruct_handler() {
 
     // check all parties received OutputMessage Ok sent by the receiver of the ReconstructionMessage
     let mut set = JoinSet::new();
-    for party in network.parties() {
+    for i in 0..n_parties {
         let mut receiver = receivers.remove(0);
-        let randousha_node = randousha_nodes[party.id() - 1].clone();
+        let randousha_node = randousha_nodes[i].clone();
         let net = Arc::clone(&network);
         let receiver_id = receiver_id; // capture from outer scope
 
@@ -174,12 +172,11 @@ async fn test_reconstruct_handler() {
                         }
                     }
                     WrappedMessage::Rbc(msg) => {
-                        if let Err(e) = randousha_node.rbc.process(msg, Arc::clone(&net)).await
-                        {
+                        if let Err(e) = randousha_node.rbc.process(msg, Arc::clone(&net)).await {
                             warn!("Rbc processing error: {e}");
                         }
                     }
-                    WrappedMessage::BatchRecon(_) => continue,
+                    _ => continue,
                 }
             }
         });
@@ -211,7 +208,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let degree_t = 3;
     let degree_2t = 6;
 
-    let ids: Vec<usize> = network.parties().iter().map(|p| p.id()).collect();
+    let ids: Vec<usize> = (1..=n_parties).collect();
     // receiver id receives recconstruct messages from other party
     let receiver_id = threshold + 2;
 
@@ -225,12 +222,12 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
             .unwrap();
     // initialize RanDouShaNode
     let mut randousha_nodes = vec![];
-    for i in 1..=n_parties {
+    for i in 0..n_parties {
         randousha_nodes.push(initialize_node(i, n_parties, threshold, threshold + 1));
     }
 
     // receiver randousha node
-    let mut randousha_node = randousha_nodes.get(receiver_id - 1).unwrap().clone();
+    let mut randousha_node = randousha_nodes.get(receiver_id).unwrap().clone();
 
     // Send 2t+1 reconstruction messages to the receiver node
     for i in 0..2 * threshold + 1 {
@@ -241,7 +238,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
             .map_err(RanDouShaError::ArkSerialization)
             .unwrap();
         let rds_message = RanDouShaMessage::new(
-            i + 1,
+            i,
             RanDouShaMessageType::ReconstructMessage,
             session_id,
             RanDouShaPayload::Reconstruct(bytes_rec_message),
@@ -254,9 +251,9 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
 
     // check all parties received OutputMessage Ok sent by the receiver of the ReconstructionMessage
     let mut set = JoinSet::new();
-    for party in network.parties() {
+    for i in 0..n_parties {
         let mut receiver = receivers.remove(0);
-        let randousha_node = randousha_nodes[party.id() - 1].clone();
+        let randousha_node = randousha_nodes[i].clone();
         let net = Arc::clone(&network);
         let receiver_id = receiver_id;
 
@@ -275,12 +272,11 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
                         }
                     }
                     WrappedMessage::Rbc(msg) => {
-                        if let Err(e) = randousha_node.rbc.process(msg, Arc::clone(&net)).await
-                        {
+                        if let Err(e) = randousha_node.rbc.process(msg, Arc::clone(&net)).await {
                             warn!("Rbc processing error: {e}");
                         }
                     }
-                    WrappedMessage::BatchRecon(_) => continue,
+                    _ => continue,
                 }
             }
         });
@@ -334,7 +330,7 @@ async fn test_output_handler() {
     // first n-(t+1)-1 message should return error
     for i in 0..n_parties - (threshold + 2) {
         let output_message = RanDouShaMessage::new(
-            i + 1,
+            i,
             RanDouShaMessageType::OutputMessage,
             session_id,
             RanDouShaPayload::Output(true),
@@ -439,11 +435,11 @@ async fn randousha_e2e() {
         if final_results.len() == 10 {
             // check final_shares consist of correct shares
             for (id, (shares_t, shares_2t)) in final_results {
-                let _ = shares_t.iter().zip(shares_2t).map(|(s_t, s_2t)| {
+                shares_t.iter().zip(shares_2t).for_each(|(s_t, s_2t)| {
                     assert_eq!(s_t.degree, threshold);
                     assert_eq!(s_2t.degree, 2 * threshold);
-                    assert_eq!(s_t.id, id);
-                    assert_eq!(s_2t.id, id);
+                    assert_eq!(s_t.id, id + 1);
+                    assert_eq!(s_2t.id, id + 1);
                 });
             }
             break;

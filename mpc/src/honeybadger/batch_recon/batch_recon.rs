@@ -96,7 +96,7 @@ impl<F: FftField> BatchReconNode<F> {
                 bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
 
             let _ = net
-                .send(j + 1, &encoded_msg)
+                .send(j, &encoded_msg)
                 .await
                 .map_err(|e| BatchReconError::NetworkError(e))?;
         }
