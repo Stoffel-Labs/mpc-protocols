@@ -354,3 +354,59 @@ pub fn receive<F, R, N>(
         });
     }
 }
+
+pub fn create_global_nodes<F: FftField, R: RBC + 'static>(
+    n_parties: usize,
+    t: usize,
+    k: usize,
+) -> Vec<Node<F, R>> {
+    (0..n_parties)
+        .map(|id| Node::new(id, n_parties, t, k).unwrap())
+        .collect()
+}
+
+/// Initializes all global nodes with their respective shares for randousha.
+pub async fn initialize_global_nodes_randousha<F, R, N>(
+    nodes: Vec<Node<F, R>>,
+    n_shares_t: &[Vec<NonRobustShare<F>>],
+    n_shares_2t: &[Vec<NonRobustShare<F>>],
+    session_id: SessionId,
+    network: Arc<N>,
+) where
+    F: FftField,
+    R: RBC + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    assert!(nodes.len() == n_shares_t.len());
+    assert!(nodes.len() == n_shares_2t.len());
+
+    for node in nodes {
+        let mut node_rds = node.preprocessing.randousha;
+        let node_id = node_rds.id;
+        match node_rds
+            .init(
+                n_shares_t[node_id].clone(),
+                n_shares_2t[node_id].clone(),
+                session_id,
+                Arc::clone(&network),
+            )
+            .await
+        {
+            Ok(()) => (),
+            Err(e) => {
+                if let RanDouShaError::NetworkError(NetworkError::SendError) = e {
+                    // allow for SendError because of Abort
+                    eprintln!(
+                        "Test: Init handler for node {} got expected SendError: {:?}",
+                        node_id, e
+                    );
+                } else {
+                    panic!(
+                        "Test: Unexpected error during init_handler for node {}: {:?}",
+                        node_id, e
+                    );
+                }
+            }
+        }
+    }
+}

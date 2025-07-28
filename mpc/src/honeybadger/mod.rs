@@ -7,11 +7,11 @@ use stoffelmpc_network::Network;
 
 use crate::{
     common::{
-        rbc::{rbc::ACS, rbc_store::Msg},
+        rbc::rbc_store::Msg,
         MPCNode, RBC,
     },
     honeybadger::{
-        batch_recon::{batch_recon::BatchReconNode, BatchReconMsg},
+        batch_recon::BatchReconMsg,
         ran_dou_sha::{messages::RanDouShaMessage, RanDouShaNode},
     },
 };
@@ -37,14 +37,36 @@ pub enum WrappedMessage {
     Rbc(Msg),
     BatchRecon(BatchReconMsg),
 }
-
+#[derive(Clone)]
 pub struct Node<F: FftField, R: RBC> {
     pub id: usize,
-    pub rbc: R,
-    pub acs: ACS,
-    pub batch_recon: BatchReconNode<F>,
-    pub randousha: RanDouShaNode<F, R>,
+    pub n: usize,
+    pub t: usize,
+    pub preprocessing: PreprocessingEngine<F, R>,
+    //pub input: Input<F>,
+    //pub operation: Operations<F>,
+    //pub output: Output<F>,
 }
+#[derive(Clone)]
+pub struct PreprocessingEngine<F: FftField, R: RBC> {
+    //pub share_gen: ShareGenerator<F>,
+    //pub double_share_gen: DoubleShareGenerator<F>,
+    pub randousha: RanDouShaNode<F, R>,
+    //pub beaver: BeaverTripleGen<F>,
+}
+
+// pub struct Operations<F: FftField> {
+//     pub mul_operation: MulOperation<F>,
+// }
+
+// pub struct Input<F: FftField> {
+//     pub id: usize,
+// }
+
+// pub struct Output<F: FftField> {
+//     pub interpolator: RobustInterpolator<F>,
+// }
+
 #[async_trait]
 impl<F, R> MPCNode<F, R> for Node<F, R>
 where
@@ -57,21 +79,15 @@ where
         t: usize,
         k: usize, // used by RBC
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // Create RBC instance
-        let rbc = R::new(id, n, t, k)?;
-        //Create ACS instance
-        let acs = ACS::new(id, n, t, k)?;
-        // Create BatchReconNode
-        let batch_recon = BatchReconNode::new(id, n, t)?;
         // Create RanDouShaNode
         let randousha = RanDouShaNode::new(id, n, t, k)?;
+        let preprocessing = PreprocessingEngine { randousha };
 
         Ok(Self {
             id,
-            rbc,
-            acs,
-            batch_recon,
-            randousha,
+            n,
+            t,
+            preprocessing,
         })
     }
     fn id(&self) -> usize {
@@ -88,15 +104,19 @@ where
 
         match wrapped {
             WrappedMessage::Rbc(rbc_msg) => {
-                self.rbc.process(rbc_msg, net).await?;
+                self.preprocessing
+                    .randousha
+                    .rbc
+                    .process(rbc_msg, net)
+                    .await?;
             }
 
-            WrappedMessage::BatchRecon(batch_msg) => {
-                self.batch_recon.process(batch_msg, net).await?;
+            WrappedMessage::BatchRecon(_) => {
+                todo!()
             }
 
             WrappedMessage::RanDouSha(rds_msg) => {
-                self.randousha.process(rds_msg, net).await?;
+                self.preprocessing.randousha.process(rds_msg, net).await?;
             }
         }
 
