@@ -8,8 +8,6 @@ use crate::common::share::shamir::NonRobustShamirShare;
 /// Types for the all the possible messages sent during the Random Double Sharing protocol.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum RanDouShaMessageType {
-    /// Tag for the message received by the initialization handler.
-    InitMessage,
     /// Tag for the message received by the reconstruction handler.
     ReconstructMessage,
     /// Tag for the message received by the output handler.
@@ -76,18 +74,6 @@ where
             r_share_deg_2t: r_deg_2t,
         }
     }
-}
-
-/// Message that represent the initialization message in the Random Double Sharing protocol. This
-/// message represents a payload for the Initialization message.
-#[derive(CanonicalDeserialize, CanonicalSerialize)]
-pub struct InitMessage<F: FftField> {
-    /// ID of the sender of the message.
-    pub sender_id: PartyId,
-    /// Shares of s of degree t provided as input for the protocol.
-    pub s_shares_deg_t: Vec<NonRobustShamirShare<F>>,
-    /// Shares of s of degree 2t provided as input for the protocol.
-    pub s_shares_deg_2t: Vec<NonRobustShamirShare<F>>,
 }
 
 /// This struct represents an output message in the Random Double Sharing protocol.

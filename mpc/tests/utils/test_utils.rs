@@ -8,7 +8,7 @@ use std::{
 use stoffelmpc_mpc::common::share::shamir::NonRobustShamirShare;
 use stoffelmpc_mpc::common::SecretSharingScheme;
 
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{InitMessage, RanDouShaMessage};
+use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::RanDouShaMessage;
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaParams};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
 use stoffelmpc_network::NetworkError;

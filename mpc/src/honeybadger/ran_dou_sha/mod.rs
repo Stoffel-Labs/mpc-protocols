@@ -10,15 +10,16 @@ use crate::{
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
-use messages::{
-    InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
-};
+use messages::{OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage};
+use sha2::digest::crypto_common::KeyInit;
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
 use stoffelmpc_network::{Network, NetworkError, Node, PartyId, SessionId};
 use tracing::info;
+
+use super::DoubleShamirShare;
 
 /// Error that occurs during the execution of the Random Double Share Error.
 #[derive(Debug, Error)]
@@ -102,6 +103,16 @@ pub struct RanDouShaParams {
     pub session_id: SessionId,
 }
 
+impl RanDouShaParams {
+    pub fn new(n_parties: usize, threshold: usize, session_id: SessionId) -> Self {
+        Self {
+            n_parties,
+            threshold,
+            session_id,
+        }
+    }
+}
+
 /// Node representation for the Random Double Share protocol.
 #[derive(Clone)]
 pub struct RanDouShaNode<F: FftField> {
@@ -115,6 +126,13 @@ impl<F> RanDouShaNode<F>
 where
     F: FftField,
 {
+    pub fn new(id: PartyId) -> Self {
+        Self {
+            id,
+            store: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
     pub async fn get_or_create_store(
@@ -141,11 +159,12 @@ where
     /// # Errors
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
-    pub async fn init_handler<N>(
+    pub async fn init<N>(
         &mut self,
-        init_msg: &InitMessage<F>,
+        s_shares_deg_t: Vec<NonRobustShamirShare<F>>,
+        s_shares_deg_2t: Vec<NonRobustShamirShare<F>>,
         params: &RanDouShaParams,
-        network: Arc<Mutex<N>>,
+        network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
         N: Network,
@@ -157,10 +176,10 @@ where
         // todo - should check sender.id == self?
         let vandermonde_matrix = make_vandermonde(params.n_parties, params.n_parties - 1)?;
         // Implementation of Step 1.
-        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_t)?;
+        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &s_shares_deg_t)?;
 
         // Implementation of Step 2.
-        let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &init_msg.s_shares_deg_2t)?;
+        let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &s_shares_deg_2t)?;
 
         // Save the shares of r of degree t and 2t into the storage.
         let bind_store = self.get_or_create_store(params).await;
@@ -170,8 +189,7 @@ where
 
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
-        let network_locked = network.lock().await;
-        for party in network_locked.parties() {
+        for party in network.parties() {
             if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
                 let share_deg_t = r_deg_t[party.id() - 1].clone();
                 let share_deg_2t = r_deg_2t[party.id() - 1].clone();
@@ -192,7 +210,7 @@ where
                     .map_err(RanDouShaError::SerializationError)?;
 
                 // Sending the generic message to the network.
-                network_locked
+                network
                     .send(party.id(), &bytes_generic_message)
                     .await
                     .map_err(RanDouShaError::NetworkError)?;
@@ -214,7 +232,7 @@ where
         &mut self,
         rec_msg: &ReconstructionMessage<F>,
         params: &RanDouShaParams,
-        network: Arc<Mutex<N>>,
+        network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
         N: Network,
@@ -298,8 +316,6 @@ where
 
                 // if the verification succeeds, broadcast true (aka. OK)
                 network
-                    .lock()
-                    .await
                     .broadcast(&bytes_generic_message)
                     .await
                     .map_err(RanDouShaError::NetworkError)?;
@@ -317,7 +333,7 @@ where
         &mut self,
         message: &OutputMessage,
         params: &RanDouShaParams,
-    ) -> Result<(Vec<NonRobustShamirShare<F>>, Vec<NonRobustShamirShare<F>>), RanDouShaError> {
+    ) -> Result<Vec<DoubleShamirShare<F>>, RanDouShaError> {
         info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, params.session_id, message.sender_id, message.msg);
         // todo - add randousha status so we can omit output_handler
         // abort randousha once received the abort message
@@ -350,43 +366,42 @@ where
         // create vector for share [r_1]_2t ... [r_t+1]_2t
         let output_r_2t = store.computed_r_shares_degree_2t[0..params.threshold + 1].to_vec();
 
+        let output_double_share = output_r_t
+            .into_iter()
+            .zip(output_r_2t)
+            .map(|(share_deg_t, share_deg_2t)| DoubleShamirShare::new(share_deg_t, share_deg_2t))
+            .collect();
+
         // computation is done so set state to Finished
         store.state = RanDouShaState::Finished;
-        Ok((output_r_t, output_r_2t))
+        Ok(output_double_share)
     }
 
     pub async fn process<N>(
         &mut self,
         message: &RanDouShaMessage,
         params: &RanDouShaParams,
-        network: Arc<Mutex<N>>,
-    ) -> Result<Option<(Vec<NonRobustShamirShare<F>>, Vec<NonRobustShamirShare<F>>)>, RanDouShaError>
+        network: Arc<N>,
+    ) -> Result<(), RanDouShaError>
     where
         N: Network,
     {
         match message.msg_type {
-            messages::RanDouShaMessageType::InitMessage => {
-                let init_message =
-                    InitMessage::<F>::deserialize_compressed(message.payload.as_slice())
-                        .map_err(RanDouShaError::ArkDeserialization)?;
-                self.init_handler(&init_message, params, network).await?;
-                return Ok(None);
-            }
             messages::RanDouShaMessageType::OutputMessage => {
                 let output_message =
                     OutputMessage::deserialize_compressed(message.payload.as_slice())
                         .map_err(RanDouShaError::ArkDeserialization)?;
-                let result = self.output_handler(&output_message, params).await?;
-                return Ok(Some(result));
+                self.output_handler(&output_message, params).await?;
+                return Ok(());
             }
             messages::RanDouShaMessageType::ReconstructMessage => {
                 let reconstr_message = ark_serialize::CanonicalDeserialize::deserialize_compressed(
                     message.payload.as_slice(),
                 )
                 .map_err(RanDouShaError::ArkDeserialization)?;
-                self.reconstruction_handler(&reconstr_message, params, network)
+                self.reconstruction_handler(&reconstr_message, params, Arc::clone(&network))
                     .await?;
-                return Ok(None);
+                return Ok(());
             }
         }
     }

@@ -258,17 +258,15 @@ where
     F: FftField,
     S: SecretSharingScheme<F>,
 {
-    /// Defines the information needed to run the preprocessing phase of an MPC protocol
-    type PreprocessingOpts;
-
-    type PreprocessingType;
+    type ProtocolError: std::error::Error;
 
     /// Runs the offline/preprocessing phase for an MPC protocol
-    async fn run_preprocessing(
+    async fn init_preprocessing<R>(
         &mut self,
         network: Arc<N>,
-        opts: Self::PreprocessingOpts,
-    ) -> Vec<Self::PreprocessingType>
+        rng: &mut R,
+    ) -> Result<(), Self::ProtocolError>
     where
-        N: 'async_trait;
+        N: 'async_trait,
+        R: Rng + Send;
 }

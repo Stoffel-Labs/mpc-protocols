@@ -81,8 +81,6 @@ where
 
 /// Parameters for the Beaver triple generation protocol.
 pub struct TripleGenParams {
-    /// The ID of the session.
-    pub session_id: SessionId,
     /// The number of parties participating in the triple generation protocol.
     pub n_parties: usize,
     /// The upper bound of corrupt parties participating in the triple generation protocol.
@@ -93,14 +91,8 @@ pub struct TripleGenParams {
 
 impl TripleGenParams {
     /// Creates a new set of parameters for the triple generation protocol.
-    pub fn new(
-        session_id: SessionId,
-        n_parties: usize,
-        threshold: usize,
-        n_triples: usize,
-    ) -> Self {
+    pub fn new(n_parties: usize, threshold: usize, n_triples: usize) -> Self {
         Self {
-            session_id,
             n_parties,
             threshold,
             n_triples,
@@ -212,6 +204,14 @@ impl<F> TripleGenNode<F>
 where
     F: FftField,
 {
+    pub fn new(id: PartyId, params: TripleGenParams) -> Self {
+        Self {
+            id,
+            params,
+            storage: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
     /// Accesses the storage of the node, and in case that the storage does not exists yet for the
     /// given `session_id`, it is created in place and returned.
     pub async fn get_or_create_store(
@@ -232,6 +232,7 @@ where
         random_shares_a: Vec<RobustShamirShare<F>>,
         random_shares_b: Vec<RobustShamirShare<F>>,
         randousha_pairs: Vec<DoubleShamirShare<F>>,
+        session_id: SessionId,
         network: Arc<N>,
     ) -> Result<(), TripleGenError> {
         // Validates that there are enough random double shares and random shares to perform the
@@ -245,7 +246,7 @@ where
 
         // First, we mark the protocol as initialized.
         {
-            let storage_bind = self.get_or_create_store(self.params.session_id).await;
+            let storage_bind = self.get_or_create_store(session_id).await;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.randousha_pairs = randousha_pairs.clone();
@@ -267,7 +268,7 @@ where
         batch_recon_node
             .init_batch_reconstruct(
                 &sub_shares_deg_2t,
-                self.params.session_id,
+                session_id,
                 BatchReconContentType::TripleGenMessage,
                 Arc::clone(&network),
             )
@@ -279,10 +280,9 @@ where
         &mut self,
         batch_recon_message: BatchReconFinishMessage<F>,
     ) -> Result<Vec<NonRobustShamirShare<F>>, TripleGenError> {
-        if batch_recon_message.session_id != self.params.session_id {
-            return Err(TripleGenError::SessionIdMismatch);
-        }
-        let storage_bind = self.get_or_create_store(self.params.session_id).await;
+        let storage_bind = self
+            .get_or_create_store(batch_recon_message.session_id)
+            .await;
         let storage = storage_bind.lock().await;
 
         let mut result_shares = Vec::new();
@@ -296,7 +296,9 @@ where
         }
 
         // First, we mark the protocol as initialized.
-        let storage_bind = self.get_or_create_store(self.params.session_id).await;
+        let storage_bind = self
+            .get_or_create_store(batch_recon_message.session_id)
+            .await;
         let mut storage = storage_bind.lock().await;
         storage.protocol_state = ProtocolState::Finished;
 

@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc, thread, time::Duration};
 
 use ark_std::test_rng;
-use stoffelmpc_mpc::honeybadger::double_share_generation::InitMessage;
 use tokio::sync::mpsc;
 use tracing::info;
 use utils::{
@@ -40,9 +39,8 @@ async fn generate_faulty_double_shares_e2e() {
     // Initialize nodes.
     for node in &dou_sha_nodes {
         let mut node_locked = node.lock().await;
-        let init_msg = InitMessage::new(node_locked.id, params.session_id);
         node_locked
-            .init_handler(&init_msg, &params, &mut rng, Arc::clone(&network))
+            .init(session_id, &params, &mut rng, Arc::clone(&network))
             .await
             .unwrap();
     }

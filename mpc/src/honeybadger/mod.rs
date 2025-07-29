@@ -19,38 +19,127 @@ pub mod double_share_generation;
 /// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
 pub mod triple_generation;
 
+pub mod messages;
+
 use std::sync::Arc;
 
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_std::rand::Rng;
 use async_trait::async_trait;
-use stoffelmpc_network::{Network, NetworkError};
+use double_share_generation::{DouShaError, DouShaParams, DoubleShareNode};
+use messages::{
+    DouShaFinishedMessage, HoneyBadgerMessage, HoneyBadgerMessageType, RanDouShaFinishedMessage,
+    TripleGenFinishedMessage,
+};
+use ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaParams};
+use robust_interpolate::RobustShamirShare;
+use sha2::digest::crypto_common::KeyInit;
+use stoffelmpc_network::{Network, NetworkError, PartyId, SessionId};
 use thiserror::Error;
+use triple_generation::{ShamirBeaverTriple, TripleGenError, TripleGenNode, TripleGenParams};
 
 use crate::common::{
     share::shamir::NonRobustShamirShare, MPCProtocol, PreprocessingMPCProtocol, ProtocolError,
 };
 
-/// Information pertaining the HoneyBadgerMPC protocol.
+/// Information pertaining a HoneyBadgerMPC protocol participant.
 pub struct HoneyBadgerMPC<F: FftField> {
+    /// ID of the current execution node.
+    pub id: PartyId,
     /// Preprocessing material used in the protocol execution.
-    preprocessing_material: HoneyBadgerMPCPreprocMaterial<F>,
+    pub preprocessing_material: HoneyBadgerMPCPreprocMaterial<F>,
     /// Random double shares to execute RanDouSha.
-    randousha_input_shares: DoubleShamirShare<F>,
+    pub randousha_input_shares: DoubleShamirShare<F>,
+    pub online_opts: HoneyBadgerMPCOpts,
+    pub preprocessing_opts: HoneyBadgerMPCPreprocOpts,
 }
 
 #[derive(Error, Debug)]
 pub enum HoneyBadgerError {
     #[error("network error: {0:?}")]
     NetworkError(#[from] NetworkError),
+    #[error("error in faulty double share generation: {0:?}")]
+    DouShaError(#[from] DouShaError),
+    #[error("error in random double share generation: {0:?}")]
+    RanDouShaError(#[from] RanDouShaError),
+    #[error("there is not enough preprocessing to complete the protocol")]
+    NotEnoughPreprocessing,
+    #[error("error in triple generation protocol: {0:?}")]
+    TripleGenError(#[from] TripleGenError),
 }
 
 impl<F> HoneyBadgerMPC<F>
 where
     F: FftField,
 {
-    fn init_mul() -> Result<(), HoneyBadgerError> {
-        todo!()
+    pub fn process(&mut self, message: HoneyBadgerMessage) {
+        match message.message_type {
+            HoneyBadgerMessageType::DouShaFinished => {
+                todo!();
+            }
+            HoneyBadgerMessageType::TripleGenFinished => {
+                todo!();
+            }
+        }
+    }
+
+    pub async fn dou_sha_gen_finished_handler<N>(
+        &mut self,
+        dou_sha_finished_msg: DouShaFinishedMessage<F>,
+        network: Arc<N>,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network,
+    {
+        let ran_dou_sha_params = RanDouShaParams::new(
+            self.preprocessing_opts.n_parties,
+            self.preprocessing_opts.threshold,
+            dou_sha_finished_msg.session_id,
+        );
+
+        // Initialize the random double sharing protocol.
+        let mut ran_dou_sha_node = RanDouShaNode::new(self.id);
+        let s_shares_deg_t = dou_sha_finished_msg
+            .faulty_dou_sha
+            .iter()
+            .map(|dou_sha| dou_sha.degree_t.clone())
+            .collect();
+        let s_shares_deg_2t = dou_sha_finished_msg
+            .faulty_dou_sha
+            .iter()
+            .map(|dou_sha| dou_sha.degree_2t.clone())
+            .collect();
+        ran_dou_sha_node
+            .init(
+                s_shares_deg_t,
+                s_shares_deg_2t,
+                &ran_dou_sha_params,
+                Arc::clone(&network),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn ran_dou_sha_finished_handler<N>(
+        &mut self,
+        ran_dou_sha_finished_msg: RanDouShaFinishedMessage<F>,
+        network: Arc<N>,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network,
+    {
+        let triple_gen_params = TripleGenParams::new(
+            self.preprocessing_opts.n_parties,
+            self.preprocessing_opts.threshold,
+            self.preprocessing_opts.n_triples,
+        );
+        let triple_gen_node = TripleGenNode::new(self.id, triple_gen_params);
+
+        // TODO: Store the results in the local memory.
+
+        Ok(())
     }
 }
 
@@ -75,7 +164,7 @@ impl<F: FftField> DoubleShamirShare<F> {
 /// Preprocessing material for the HoneyBadgerMPC protocol.
 pub struct HoneyBadgerMPCPreprocMaterial<F: FftField> {
     /// A pool of random double shares used for secure multiplication.
-    randousha_pairs: Vec<DoubleShamirShare<F>>,
+    beaver_triples: Vec<ShamirBeaverTriple<F>>,
     /// A pool of random shares used for inputing private data for the protocol.
     random_shares: Vec<NonRobustShamirShare<F>>,
 }
@@ -88,18 +177,18 @@ where
     pub fn empty() -> Self {
         Self {
             random_shares: Vec::new(),
-            randousha_pairs: Vec::new(),
+            beaver_triples: Vec::new(),
         }
     }
 
     /// Adds the provided new preprocessing material to the current pool.
     pub fn add(
         &mut self,
-        mut ran_dou_sha_pair: Option<Vec<DoubleShamirShare<F>>>,
+        mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
         mut random_shares: Option<Vec<NonRobustShamirShare<F>>>,
     ) {
-        if let Some(pairs) = &mut ran_dou_sha_pair {
-            self.randousha_pairs.append(pairs);
+        if let Some(pairs) = &mut triples {
+            self.beaver_triples.append(pairs);
         }
 
         if let Some(shares) = &mut random_shares {
@@ -110,13 +199,13 @@ where
     /// Returns the number of random double share pairs, and the number of random shares
     /// respectively.
     pub fn len(&self) -> (usize, usize) {
-        (self.randousha_pairs.len(), self.random_shares.len())
+        (self.beaver_triples.len(), self.random_shares.len())
     }
 
     /// Take up to n pairs of random double sharings from the preprocessing material.
-    pub fn take_randousha_pair(&mut self, n_pairs: usize) -> Vec<DoubleShamirShare<F>> {
-        let pairs = n_pairs.min(self.randousha_pairs.len());
-        self.randousha_pairs.drain(0..pairs).collect()
+    pub fn take_beaver_triple(&mut self, n_pairs: usize) -> Vec<ShamirBeaverTriple<F>> {
+        let pairs = n_pairs.min(self.beaver_triples.len());
+        self.beaver_triples.drain(0..pairs).collect()
     }
 
     /// Take up to n random shares from the preprocessing material.
@@ -154,17 +243,32 @@ impl HoneyBadgerMPCOpts {
 /// Configuration options for the HoneyBadgerMPC preprocessing.
 pub struct HoneyBadgerMPCPreprocOpts {
     /// Number of random double sharing pairs that need to be generated.
-    pub n_randousha_pairs: usize,
+    pub n_triples: usize,
     /// Number of random shares needed.
     pub n_random_shares: usize,
+    /// Session ID
+    pub session_id: SessionId,
+    /// Number of parties participating in the preprocessing,
+    pub n_parties: usize,
+    /// Upper bound of corrupted parties
+    pub threshold: usize,
 }
 
 impl HoneyBadgerMPCPreprocOpts {
     /// Creates new configuration options for the HoneyBadgerMPC preprocessing.
-    pub fn new(n_randousha_pairs: usize, n_random_shares: usize) -> Self {
+    pub fn new(
+        n_triples: usize,
+        n_random_shares: usize,
+        session_id: SessionId,
+        n_parties: usize,
+        threshold: usize,
+    ) -> Self {
         Self {
-            n_randousha_pairs,
+            n_triples,
             n_random_shares,
+            session_id,
+            n_parties,
+            threshold,
         }
     }
 }
@@ -191,13 +295,12 @@ where
         todo!();
     }
 
-    async fn init(&mut self, network: Arc<N>, opts: HoneyBadgerMPCOpts)
+    async fn init(&mut self, network: Arc<N>, opts: Self::MPCOpts)
     where
         N: 'async_trait,
     {
         let network = Arc::clone(&network);
-        self.run_preprocessing(network, opts.init_preproc_opts)
-            .await;
+        todo!();
     }
 }
 
@@ -207,23 +310,37 @@ where
     N: Network,
     F: FftField,
 {
-    type PreprocessingOpts = HoneyBadgerMPCPreprocOpts;
-    type PreprocessingType = HoneyBadgerMPCPreprocMaterial<F>;
+    type ProtocolError = HoneyBadgerError;
 
-    async fn run_preprocessing(
+    async fn init_preprocessing<R>(
         &mut self,
         network: Arc<N>,
-        opts: Self::PreprocessingOpts,
-    ) -> Vec<Self::PreprocessingType>
+        rng: &mut R,
+    ) -> Result<(), Self::ProtocolError>
     where
         N: 'async_trait,
+        R: Rng + Send,
     {
         // TODO: We need:
-        // - Generate random shares for preprocessing result for input.
+        // - Generate random double shares for preprocessing for input to randousha.
         // - Call setup function to instatiate the nodes for randousha.
         // - Execute randousha with the shares from the previous step.
         //     - Listen to messages comming from other parties and process them.
 
-        todo!()
+        let mut double_faulty_share_node: DoubleShareNode<F> = DoubleShareNode::new(self.id);
+        let dou_sha_params = DouShaParams::new(
+            self.preprocessing_opts.session_id,
+            self.preprocessing_opts.n_parties,
+            self.preprocessing_opts.threshold,
+        );
+        double_faulty_share_node
+            .init(
+                self.preprocessing_opts.session_id,
+                &dou_sha_params,
+                rng,
+                Arc::clone(&network),
+            )
+            .await?;
+        Ok(())
     }
 }
