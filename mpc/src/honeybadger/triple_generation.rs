@@ -1,14 +1,19 @@
-use std::{collections::HashMap, ops::Sub, sync::Arc};
+use std::{collections::HashMap, ops::Sub, result, sync::Arc};
 
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
-use ark_std::rand::Rng;
 use bincode::ErrorKind;
 use itertools::izip;
 use serde::{Deserialize, Serialize};
-use stoffelmpc_network::{Message, Network, NetworkError, Node, PartyId, SessionId};
+use stoffelmpc_network::{Message, Network, NetworkError, PartyId, SessionId};
 use thiserror::Error;
-use tokio::{sync::Mutex, task::JoinError};
+use tokio::{
+    sync::{
+        mpsc::{error::SendError, Sender},
+        Mutex,
+    },
+    task::JoinError,
+};
 
 use crate::common::share::{shamir::NonRobustShamirShare, ShareError};
 
@@ -52,14 +57,17 @@ pub enum TripleGenError {
     /// The session ID of the parameters and the received message does not match.
     #[error("the session IDs do not match")]
     SessionIdMismatch,
+    #[error("error sending the thread asynchronously")]
+    SendError(#[from] SendError<SessionId>),
 }
 
 /// Represents a Beaver triple of non-robus Shamir shares.
+#[derive(Clone)]
 pub struct ShamirBeaverTriple<F: FftField> {
     /// First random value of the triple.
-    pub a: NonRobustShamirShare<F>,
+    pub a: RobustShamirShare<F>,
     /// Second random value of the triple.
-    pub b: NonRobustShamirShare<F>,
+    pub b: RobustShamirShare<F>,
     /// Multiplication of both random values.
     pub mult: NonRobustShamirShare<F>,
 }
@@ -71,8 +79,8 @@ where
     /// Creates a new Shamir Beaver triple with `a` and `b` being the random values of the triple
     /// and `mult` is the multiplication of `a` and `b`.
     pub fn new(
-        a: NonRobustShamirShare<F>,
-        b: NonRobustShamirShare<F>,
+        a: RobustShamirShare<F>,
+        b: RobustShamirShare<F>,
         mult: NonRobustShamirShare<F>,
     ) -> Self {
         Self { a, b, mult }
@@ -118,6 +126,9 @@ where
     /// Current state of the protocol execution.
     pub protocol_state: ProtocolState,
     pub randousha_pairs: Vec<DoubleShamirShare<F>>,
+    pub random_shares_a_input: Vec<RobustShamirShare<F>>,
+    pub random_shares_b_input: Vec<RobustShamirShare<F>>,
+    pub protocol_output: Vec<ShamirBeaverTriple<F>>,
 }
 
 impl<F> TripleGenStorage<F>
@@ -129,6 +140,9 @@ where
         Self {
             protocol_state: ProtocolState::NotInitialized,
             randousha_pairs: Vec::new(),
+            random_shares_a_input: Vec::new(),
+            random_shares_b_input: Vec::new(),
+            protocol_output: Vec::new(),
         }
     }
 }
@@ -198,17 +212,19 @@ where
     pub params: TripleGenParams,
     /// Internal storage of the node.
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStorage<F>>>>>>,
+    pub output_sender: Sender<SessionId>,
 }
 
 impl<F> TripleGenNode<F>
 where
     F: FftField,
 {
-    pub fn new(id: PartyId, params: TripleGenParams) -> Self {
+    pub fn new(id: PartyId, params: TripleGenParams, output_sender: Sender<SessionId>) -> Self {
         Self {
             id,
             params,
             storage: Arc::new(Mutex::new(HashMap::new())),
+            output_sender,
         }
     }
 
@@ -227,7 +243,7 @@ where
 
     /// Initializes the protocol to generate random triples based on previously generated shares
     /// and random double shares.
-    pub async fn init<R: Rng, N: Network>(
+    pub async fn init<N: Network>(
         &mut self,
         random_shares_a: Vec<RobustShamirShare<F>>,
         random_shares_b: Vec<RobustShamirShare<F>>,
@@ -244,14 +260,6 @@ where
             return Err(TripleGenError::NotEnoughPreprocessing);
         }
 
-        // First, we mark the protocol as initialized.
-        {
-            let storage_bind = self.get_or_create_store(session_id).await;
-            let mut storage = storage_bind.lock().await;
-            storage.protocol_state = ProtocolState::Initialized;
-            storage.randousha_pairs = randousha_pairs.clone();
-        }
-
         let mut sub_shares_deg_2t = Vec::new();
         for (share_a, share_b, ran_dou_sha) in
             izip!(&random_shares_a, &random_shares_b, &randousha_pairs)
@@ -260,6 +268,16 @@ where
             let sub_share_deg_2t =
                 (mult_share_deg_2t - &RobustShamirShare::from(ran_dou_sha.degree_2t.clone()))?;
             sub_shares_deg_2t.push(sub_share_deg_2t);
+        }
+
+        // We mark the protocol as initialized and store the input shares.
+        {
+            let storage_bind = self.get_or_create_store(session_id).await;
+            let mut storage = storage_bind.lock().await;
+            storage.protocol_state = ProtocolState::Initialized;
+            storage.randousha_pairs = randousha_pairs;
+            storage.random_shares_a_input = random_shares_a;
+            storage.random_shares_b_input = random_shares_b;
         }
 
         // Call to Batch Reconstruction.
@@ -279,30 +297,36 @@ where
     pub async fn batch_recon_finish_handler(
         &mut self,
         batch_recon_message: BatchReconFinishMessage<F>,
-    ) -> Result<Vec<NonRobustShamirShare<F>>, TripleGenError> {
-        let storage_bind = self
-            .get_or_create_store(batch_recon_message.session_id)
-            .await;
-        let storage = storage_bind.lock().await;
-
-        let mut result_shares = Vec::new();
-        for (sub_value, pair) in batch_recon_message
-            .content
-            .into_iter()
-            .zip(&storage.randousha_pairs)
-        {
-            let result_share = (pair.degree_t.clone() + &sub_value)?;
-            result_shares.push(result_share);
-        }
-
-        // First, we mark the protocol as initialized.
+    ) -> Result<(), TripleGenError> {
         let storage_bind = self
             .get_or_create_store(batch_recon_message.session_id)
             .await;
         let mut storage = storage_bind.lock().await;
-        storage.protocol_state = ProtocolState::Finished;
 
-        Ok(result_shares)
+        let mut result_triples = Vec::new();
+        for (sub_value, pair, share_a, share_b) in izip!(
+            batch_recon_message.content.into_iter(),
+            &storage.randousha_pairs,
+            &storage.random_shares_a_input,
+            &storage.random_shares_b_input,
+        ) {
+            let result_share = (pair.degree_t.clone() + &sub_value)?;
+            result_triples.push(ShamirBeaverTriple::new(
+                share_a.clone(),
+                share_b.clone(),
+                result_share,
+            ));
+        }
+
+        // First, we mark the protocol as initialized.
+        storage.protocol_state = ProtocolState::Finished;
+        self.output_sender
+            .send(batch_recon_message.session_id)
+            .await?;
+
+        // Store the result in the inner memory of the node.
+        storage.protocol_output = result_triples;
+        Ok(())
     }
 
     pub async fn process<N: Network>(

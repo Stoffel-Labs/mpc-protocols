@@ -8,7 +8,10 @@ use itertools::izip;
 use serde::{Deserialize, Serialize};
 use stoffelmpc_network::{Message, Network, NetworkError, Node, PartyId, SessionId};
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{
+    mpsc::{error::SendError, Sender},
+    Mutex,
+};
 use tracing::info;
 
 use crate::common::{
@@ -41,6 +44,8 @@ pub enum DouShaError {
     /// Error during a network operation.
     #[error("error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
+    #[error("error sending the output of the protocol execution: {0:?}")]
+    SendError(#[from] SendError<SessionId>),
 }
 
 /// Generic message for the faulty double share distribution protocol.
@@ -131,7 +136,7 @@ where
     F: FftField,
 {
     /// Double shares resulting from the execution of the protocol.
-    pub shares: Vec<DoubleShamirShare<F>>,
+    pub protocol_output: Vec<DoubleShamirShare<F>>,
 
     /// Current state of the protocol.
     pub state: ProtocolState,
@@ -150,7 +155,7 @@ where
     /// Creates an empty storage. The
     pub fn empty(n_parties: usize) -> Self {
         Self {
-            shares: Vec::new(),
+            protocol_output: Vec::new(),
             reception_tracker: vec![false; n_parties],
             state: ProtocolState::NotInitialized,
         }
@@ -189,23 +194,40 @@ where
     pub id: PartyId,
     /// Storage of the party.
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<DouShaStorage<F>>>>>>,
+    pub output_sender: Sender<SessionId>,
 }
 
 impl<F> DoubleShareNode<F>
 where
     F: FftField,
 {
-    pub async fn proccess<R, N>(
+    pub async fn pop_finished_protocol_result(&self) -> Option<Vec<DoubleShamirShare<F>>> {
+        let mut storage = self.storage.lock().await;
+        let mut finished_sid = None;
+        let mut output = Vec::new();
+        for (sid, storage_mutex) in storage.iter() {
+            let storage_bind = storage_mutex.lock().await;
+            if storage_bind.state == ProtocolState::Finished {
+                finished_sid = Some(*sid);
+                output = storage_bind.protocol_output.clone();
+                break;
+            }
+        }
+        match finished_sid {
+            Some(sid) => {
+                // Remove the entry from the storage
+                storage.remove(&sid);
+                Some(output)
+            }
+            None => None,
+        }
+    }
+
+    pub async fn proccess(
         &mut self,
         params: &DouShaParams,
         message: &DouShaMessage,
-        rng: &mut R,
-        network: Arc<N>,
-    ) -> Result<(), DouShaError>
-    where
-        R: Rng,
-        N: Network,
-    {
+    ) -> Result<(), DouShaError> {
         match message.msg_type {
             DouShaMessageType::Receive => {
                 let receive_message =
@@ -218,10 +240,11 @@ where
     }
 
     /// Creates a new node for the faulty double share protocol.
-    pub fn new(id: PartyId) -> Self {
+    pub fn new(id: PartyId, output_sender: Sender<SessionId>) -> Self {
         Self {
             id,
             storage: Arc::new(Mutex::new(HashMap::new())),
+            output_sender,
         }
     }
 
@@ -312,11 +335,11 @@ where
             .await;
         let mut dousha_storage = binding.lock().await;
         dousha_storage
-            .shares
+            .protocol_output
             .push(recv_message.double_share.clone());
         info!(
             session_id = recv_message.session_id,
-            share_amount = dousha_storage.shares.len(),
+            share_amount = dousha_storage.protocol_output.len(),
             "party {:?} received shares from {:?}",
             self.id,
             recv_message.sender_id,
@@ -330,6 +353,7 @@ where
             .all(|&received| received)
         {
             dousha_storage.state = ProtocolState::Finished;
+            self.output_sender.send(recv_message.session_id).await?;
         }
 
         Ok(())

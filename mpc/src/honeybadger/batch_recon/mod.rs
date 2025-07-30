@@ -55,9 +55,9 @@ impl BatchReconMsg {
 pub enum BatchReconError {
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
-    NetworkError(NetworkError),
+    NetworkError(#[from] NetworkError),
     #[error("error while serializing an arkworks object: {0:?}")]
-    ArkSerialization(SerializationError),
+    ArkSerialization(#[from] SerializationError),
     #[error("error while serializing an arkworks object: {0:?}")]
     ArkDeserialization(SerializationError),
     #[error("error while serializing the object into bytes: {0:?}")]

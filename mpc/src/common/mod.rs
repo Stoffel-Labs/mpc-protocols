@@ -7,7 +7,10 @@ pub mod rbc;
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
 
-use crate::common::{rbc::rbc_store::Msg, share::ShareError};
+use crate::{
+    common::{rbc::rbc_store::Msg, share::ShareError},
+    honeybadger::triple_generation::ShamirBeaverTriple,
+};
 
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
@@ -261,11 +264,11 @@ where
     type ProtocolError: std::error::Error;
 
     /// Runs the offline/preprocessing phase for an MPC protocol
-    async fn init_preprocessing<R>(
+    async fn run_preprocessing<R>(
         &mut self,
         network: Arc<N>,
         rng: &mut R,
-    ) -> Result<(), Self::ProtocolError>
+    ) -> Result<Vec<ShamirBeaverTriple<F>>, Self::ProtocolError>
     where
         N: 'async_trait,
         R: Rng + Send;

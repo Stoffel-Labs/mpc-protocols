@@ -1,7 +1,7 @@
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use serde::{Deserialize, Serialize};
-use stoffelmpc_network::{Message, PartyId};
+use stoffelmpc_network::{Message, PartyId, SessionId};
 
 use crate::common::share::shamir::NonRobustShamirShare;
 
@@ -81,6 +81,8 @@ where
 /// protocol finishes correctly. This message represents a payload for the Output message.
 #[derive(Debug, Clone, CanonicalDeserialize, CanonicalSerialize)]
 pub struct OutputMessage {
+    /// ID of the session
+    pub session_id: SessionId,
     /// ID of the sender of the message.
     pub sender_id: PartyId,
     /// Status of the protocol. If this field is `false`, this means that the protocol aborted,
@@ -90,7 +92,11 @@ pub struct OutputMessage {
 
 impl OutputMessage {
     /// Constructs a new output message.
-    pub fn new(sender_id: PartyId, msg: bool) -> Self {
-        Self { sender_id, msg }
+    pub fn new(session_id: SessionId, sender_id: PartyId, msg: bool) -> Self {
+        Self {
+            sender_id,
+            msg,
+            session_id,
+        }
     }
 }

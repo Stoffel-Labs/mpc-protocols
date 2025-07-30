@@ -11,10 +11,13 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
 use messages::{OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage};
-use sha2::digest::crypto_common::KeyInit;
+use sha2::digest::{crypto_common::KeyInit, typenum::Double};
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{
+    mpsc::{error::SendError, Sender},
+    Mutex, MutexGuard,
+};
 
 use stoffelmpc_network::{Network, NetworkError, Node, PartyId, SessionId};
 use tracing::info;
@@ -41,6 +44,8 @@ pub enum RanDouShaError {
     /// The party is waiting for confirmations.
     #[error("waiting for more confirmations")]
     WaitForOk,
+    #[error("error sending information to other async tasks: {0:?}")]
+    SendError(#[from] SendError<SessionId>),
 }
 
 /// Storage for the Random Double Sharing protocol.
@@ -60,6 +65,7 @@ pub struct RanDouShaStore<F: FftField> {
     pub received_ok_msg: Vec<usize>,
     /// Current state of the protocol.
     pub state: RanDouShaState,
+    pub protocol_output: Vec<DoubleShamirShare<F>>,
 }
 
 /// State of the Random Double Sharing protocol.
@@ -88,6 +94,7 @@ where
             computed_r_shares_degree_2t: Vec::new(),
             received_ok_msg: Vec::new(),
             state: RanDouShaState::Initialized,
+            protocol_output: Vec::new(),
         }
     }
 }
@@ -120,16 +127,40 @@ pub struct RanDouShaNode<F: FftField> {
     pub id: PartyId,
     /// Storage of the node.
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
+    pub output_sender: Sender<SessionId>,
 }
 
 impl<F> RanDouShaNode<F>
 where
     F: FftField,
 {
-    pub fn new(id: PartyId) -> Self {
+    pub fn new(id: PartyId, output_sender: Sender<SessionId>) -> Self {
         Self {
             id,
             store: Arc::new(Mutex::new(HashMap::new())),
+            output_sender,
+        }
+    }
+
+    pub async fn pop_finished_protocol_result(&self) -> Option<Vec<DoubleShamirShare<F>>> {
+        let mut storage = self.store.lock().await;
+        let mut finished_sid = None;
+        let mut output = Vec::new();
+        for (sid, storage_mutex) in storage.iter() {
+            let storage_bind = storage_mutex.lock().await;
+            if storage_bind.state == RanDouShaState::Finished {
+                finished_sid = Some(*sid);
+                output = storage_bind.protocol_output.clone();
+                break;
+            }
+        }
+        match finished_sid {
+            Some(sid) => {
+                // Remove the entry from the storage
+                storage.remove(&sid);
+                Some(output)
+            }
+            None => None,
         }
     }
 
@@ -287,10 +318,10 @@ where
                 let reconstructed_r_2t = NonRobustShamirShare::recover_secret(&shares_2t_for_recon);
 
                 // if the reconstruction fails, broadcast false
-                let mut output_message = OutputMessage::new(self.id, true);
+                let mut output_message = OutputMessage::new(params.session_id, self.id, true);
 
                 if reconstructed_r_t.is_err() || reconstructed_r_2t.is_err() {
-                    output_message = OutputMessage::new(self.id, false);
+                    output_message = OutputMessage::new(params.session_id, self.id, false);
                 }
                 // (6) Check that their 0-evaluation is the same.
                 // This means checking if the reconstructed values are equal.
@@ -298,7 +329,7 @@ where
 
                 if !verify {
                     // if the verification fails, broadcast false(aka. Abort)
-                    output_message = OutputMessage::new(self.id, false);
+                    output_message = OutputMessage::new(params.session_id, self.id, false);
                 }
 
                 // Serializing the output message and wrapping it into a generic message.
@@ -333,7 +364,7 @@ where
         &mut self,
         message: &OutputMessage,
         params: &RanDouShaParams,
-    ) -> Result<Vec<DoubleShamirShare<F>>, RanDouShaError> {
+    ) -> Result<(), RanDouShaError> {
         info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, params.session_id, message.sender_id, message.msg);
         // todo - add randousha status so we can omit output_handler
         // abort randousha once received the abort message
@@ -372,9 +403,12 @@ where
             .map(|(share_deg_t, share_deg_2t)| DoubleShamirShare::new(share_deg_t, share_deg_2t))
             .collect();
 
-        // computation is done so set state to Finished
+        // Computation is done so set state to Finished
         store.state = RanDouShaState::Finished;
-        Ok(output_double_share)
+        store.protocol_output = output_double_share;
+        self.output_sender.send(message.session_id).await?;
+
+        Ok(())
     }
 
     pub async fn process<N>(

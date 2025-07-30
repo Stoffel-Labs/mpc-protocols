@@ -41,7 +41,7 @@ pub trait Message: Serialize + for<'a> Deserialize<'a> + Sized {
 #[async_trait]
 pub trait Network: Send + Sync {
     /// Type of the node in the network.
-    type NodeType: Node;
+    type NodeType: Node + Send + Sync;
     /// Configuration of the network.
     type NetworkConfig;
     /// Send a message through the network to the given party. The function returns the number of

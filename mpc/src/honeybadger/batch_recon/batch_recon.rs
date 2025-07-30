@@ -229,7 +229,7 @@ impl<F: FftField> BatchReconNode<F> {
                                         msg.session_id,
                                     );
                                     let mut bytes_message = Vec::new();
-                                    triple_gen_message.serialize_compressed(&mut bytes_message);
+                                    triple_gen_message.serialize_compressed(&mut bytes_message)?;
                                     let triple_gen_generic_msg = TripleGenMessage::new(
                                         self.id,
                                         msg.session_id,
@@ -237,7 +237,7 @@ impl<F: FftField> BatchReconNode<F> {
                                     );
                                     let bytes_generic_msg =
                                         bincode::serialize(&triple_gen_generic_msg)?;
-                                    net.send(self.id, &bytes_generic_msg);
+                                    net.send(self.id, &bytes_generic_msg).await?;
                                 }
                                 BatchReconContentType::MultiplicationMessage => {
                                     // TODO: Complete this section.

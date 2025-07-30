@@ -9,7 +9,10 @@ use stoffelmpc_mpc::honeybadger::{
     double_share_generation::{DouShaMessage, DouShaParams, DoubleShareNode, ProtocolState},
     DoubleShamirShare,
 };
-use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+use stoffelmpc_network::{
+    fake_network::{FakeNetwork, FakeNetworkConfig},
+    SessionId,
+};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tokio::{sync::mpsc::Receiver, task::JoinSet};
 use tracing::error;
@@ -31,9 +34,13 @@ pub fn test_setup(
 }
 
 /// Initializes all RanDouSha nodes and returns them wrapped in `Arc<Mutex<_>>`.
-pub fn create_nodes(n_parties: usize) -> Vec<Arc<Mutex<DoubleShareNode<Fr>>>> {
+pub fn create_nodes(
+    n_parties: usize,
+    senders: Vec<Sender<SessionId>>,
+) -> Vec<Arc<Mutex<DoubleShareNode<Fr>>>> {
     (1..=n_parties)
-        .map(|id| Arc::new(Mutex::new(DoubleShareNode::new(id))))
+        .zip(senders.into_iter())
+        .map(|(id, sender)| Arc::new(Mutex::new(DoubleShareNode::new(id, sender))))
         .collect()
 }
 
@@ -71,7 +78,7 @@ pub fn spawn_receiver_tasks(
                 let result = dousha_node
                     .lock()
                     .await
-                    .proccess(&params, &deserialized_msg, &mut rng, Arc::clone(&network))
+                    .proccess(&params, &deserialized_msg)
                     .await;
 
                 match result {
@@ -81,7 +88,7 @@ pub fn spawn_receiver_tasks(
                         let node_storage =
                             storage_lock.get(&params.session_id).unwrap().lock().await;
                         if node_storage.state == ProtocolState::Finished {
-                            let resulting_double_shares = node_storage.shares.clone();
+                            let resulting_double_shares = node_storage.protocol_output.clone();
                             final_result_data_chan
                                 .send((dousha_node_lock.id, resulting_double_shares))
                                 .await

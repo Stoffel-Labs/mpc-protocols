@@ -2,17 +2,22 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use once_cell::sync::Lazy;
+use sha2::digest::typenum::Double;
 use std::{
     collections::HashMap, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec,
 };
 use stoffelmpc_mpc::common::share::shamir::NonRobustShamirShare;
 use stoffelmpc_mpc::common::SecretSharingScheme;
+use stoffelmpc_mpc::honeybadger::DoubleShamirShare;
+use tracing::info;
 
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::RanDouShaMessage;
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaParams};
+use stoffelmpc_mpc::honeybadger::ran_dou_sha::{
+    RanDouShaError, RanDouShaNode, RanDouShaParams, RanDouShaState,
+};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-use stoffelmpc_network::NetworkError;
-use tokio::sync::mpsc::{self, Receiver};
+use stoffelmpc_network::{NetworkError, SessionId};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing_subscriber::EnvFilter;
@@ -22,14 +27,10 @@ pub fn test_setup(
     n: usize,
     t: usize,
     session_id: usize,
-) -> (
-    RanDouShaParams,
-    Arc<Mutex<FakeNetwork>>,
-    Vec<Receiver<Vec<u8>>>,
-) {
+) -> (RanDouShaParams, Arc<FakeNetwork>, Vec<Receiver<Vec<u8>>>) {
     let config = FakeNetworkConfig::new(500);
     let (network, receivers) = FakeNetwork::new(n, config);
-    let network = Arc::new(Mutex::new(network));
+    let network = Arc::new(network);
     let params = RanDouShaParams {
         session_id,
         n_parties: n,
@@ -90,17 +91,22 @@ pub fn construct_e2e_input(
     return (secrets, n_shares_t, n_shares_2t);
 }
 
-pub fn initialize_node(node_id: usize) -> RanDouShaNode<Fr> {
+pub fn initialize_node(node_id: usize, sender: Sender<SessionId>) -> RanDouShaNode<Fr> {
     RanDouShaNode {
         id: node_id,
         store: Arc::new(Mutex::new(HashMap::new())),
+        output_sender: sender,
     }
 }
 
 /// Initializes all RanDouSha nodes and returns them wrapped in `Arc<Mutex<_>>`.
-pub fn create_nodes(n_parties: usize) -> Vec<Arc<Mutex<RanDouShaNode<Fr>>>> {
+pub fn create_nodes(
+    n_parties: usize,
+    senders: Vec<Sender<SessionId>>,
+) -> Vec<Arc<Mutex<RanDouShaNode<Fr>>>> {
     (1..=n_parties)
-        .map(|id| Arc::new(Mutex::new(initialize_node(id))))
+        .zip(senders.into_iter())
+        .map(|(id, sender)| Arc::new(Mutex::new(initialize_node(id, sender))))
         .collect()
 }
 
@@ -110,20 +116,21 @@ pub async fn initialize_all_nodes(
     n_shares_t: &[Vec<NonRobustShamirShare<Fr>>],
     n_shares_2t: &[Vec<NonRobustShamirShare<Fr>>],
     params: &RanDouShaParams,
-    network: Arc<Mutex<FakeNetwork>>,
+    network: Arc<FakeNetwork>,
 ) {
     assert!(nodes.len() == n_shares_t.len());
     assert!(nodes.len() == n_shares_2t.len());
 
     for node in nodes {
-        let node_locked = &mut node.lock().await;
-        let init_msg = InitMessage {
-            sender_id: node_locked.id,
-            s_shares_deg_t: n_shares_t[node_locked.id - 1].clone(),
-            s_shares_deg_2t: n_shares_2t[node_locked.id - 1].clone(),
-        };
+        let mut node_locked = node.lock().await;
+        let node_id = node_locked.id;
         match node_locked
-            .init_handler(&init_msg, params, Arc::clone(&network))
+            .init(
+                n_shares_t[node_id - 1].clone(),
+                n_shares_2t[node_id - 1].clone(),
+                params,
+                Arc::clone(&network),
+            )
             .await
         {
             Ok(()) => (),
@@ -153,11 +160,8 @@ pub fn spawn_receiver_tasks(
     nodes: Vec<Arc<Mutex<RanDouShaNode<Fr>>>>,
     mut receivers: Vec<Receiver<Vec<u8>>>,
     params: RanDouShaParams,
-    network: Arc<Mutex<FakeNetwork>>,
-    fin_send: mpsc::Sender<(
-        usize,
-        (Vec<NonRobustShamirShare<Fr>>, Vec<NonRobustShamirShare<Fr>>),
-    )>,
+    network: Arc<FakeNetwork>,
+    fin_send: mpsc::Sender<(usize, Vec<DoubleShamirShare<Fr>>)>,
     abort_counter: Option<Arc<AtomicUsize>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -185,13 +189,15 @@ pub fn spawn_receiver_tasks(
                     .await;
 
                 match result {
-                    Ok(Some(final_shares)) => {
-                        fin_send
-                            .send((randousha_node.lock().await.id, final_shares))
-                            .await
-                            .unwrap();
+                    Ok(()) => {
+                        let node = randousha_node.lock().await;
+                        let storage_db = node.store.lock().await;
+                        let storage = storage_db.get(&params.session_id).unwrap().lock().await;
+                        if storage.state == RanDouShaState::Finished {
+                            let final_shares = storage.protocol_output.clone();
+                            fin_send.send((node.id, final_shares)).await.unwrap();
+                        }
                     }
-                    Ok(None) => continue,
                     Err(RanDouShaError::Abort) => {
                         println!("RanDouSha Aborted by node {}", node.lock().await.id);
                         if let Some(counter) = abort_count {
@@ -235,4 +241,5 @@ static TRACING_INIT: Lazy<()> = Lazy::new(|| {
 
 pub fn setup_tracing() {
     Lazy::force(&TRACING_INIT);
+    info!("tracing set up")
 }
