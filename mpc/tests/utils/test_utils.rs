@@ -50,7 +50,7 @@ pub async fn setup_network_and_parties<T: RBC, N: Network>(
 
     let mut parties = Vec::with_capacity(n as usize);
     for i in 0..n {
-        let rbc = T::new(i as u32, n as u32, t as u32, k as u32)?; // Create a new RBC instance for each party
+        let rbc = T::new(i, n, t, k)?; // Create a new RBC instance for each party
         parties.push(rbc);
     }
     Ok((parties, net, receivers))

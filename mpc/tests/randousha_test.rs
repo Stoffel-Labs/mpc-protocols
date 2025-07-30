@@ -230,7 +230,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let mut randousha_node = randousha_nodes.get(receiver_id).unwrap().clone();
 
     // Send 2t+1 reconstruction messages to the receiver node
-    for i in 0..2 * threshold + 1 {
+    for i in 0..n_parties {
         let rec_msg = ReconstructionMessage::new(shares_ri_t[i].clone(), shares_ri_2t[i].clone());
         let mut bytes_rec_message = Vec::new();
         rec_msg
@@ -293,8 +293,8 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
         .lock()
         .await
         .clone();
-    assert_eq!(store.received_r_shares_degree_t.len(), 2 * threshold + 1);
-    assert_eq!(store.received_r_shares_degree_2t.len(), 2 * threshold + 1);
+    assert_eq!(store.received_r_shares_degree_t.len(), n_parties);
+    assert_eq!(store.received_r_shares_degree_2t.len(), n_parties);
     assert_eq!(store.received_ok_msg.len(), 0);
     assert_eq!(store.state, RanDouShaState::Reconstruction);
 }

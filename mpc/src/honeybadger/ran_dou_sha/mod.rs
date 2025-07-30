@@ -3,7 +3,7 @@ pub mod messages;
 use crate::{
     common::{
         rbc::RbcError,
-        share::{apply_vandermonde, make_vandermonde, shamir::NonRobustShare},
+        share::{apply_vandermonde, make_vandermonde, shamir::NonRobustShare, ShareError},
         SecretSharingScheme, RBC,
     },
     honeybadger::{
@@ -12,6 +12,7 @@ use crate::{
     },
 };
 use ark_ff::FftField;
+use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
 use messages::{RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage};
@@ -38,6 +39,8 @@ pub enum RanDouShaError {
     Inner(#[from] InterpolateError),
     #[error("Rbc error: {0}")]
     RbcError(RbcError),
+    #[error("Share error: {0}")]
+    ShareError(ShareError),
     /// The protocol received an abort signal.
     #[error("received abort singal")]
     Abort,
@@ -272,9 +275,8 @@ where
             // To reconstruct a (t) degree polynomial, you need t+1 distinct shares.
             // To reconstruct a (2t) degree polynomial, you need 2t+1 distinct shares.
 
-            // TODO: do we need to wait for all n shares?
-            if store.received_r_shares_degree_t.len() >= self.threshold + 1
-                && store.received_r_shares_degree_2t.len() >= 2 * self.threshold + 1
+            if store.received_r_shares_degree_t.len() == self.n_parties
+                && store.received_r_shares_degree_2t.len() == self.n_parties
             {
                 let mut shares_t_for_recon: Vec<NonRobustShare<F>> = Vec::new();
                 let mut shares_2t_for_recon: Vec<NonRobustShare<F>> = Vec::new();
@@ -288,31 +290,24 @@ where
                 drop(store);
                 // (5) Perform reconstruction for both degrees.
                 // ShamirSecretSharing::reconstruct expects a vector of shares.
-                let reconstructed_r_t = NonRobustShare::recover_secret(&shares_t_for_recon);
-                let reconstructed_r_2t = NonRobustShare::recover_secret(&shares_2t_for_recon);
+                let reconstructed_r_t = NonRobustShare::recover_secret(&shares_t_for_recon)
+                    .map_err(|e| RanDouShaError::ShareError(e))?;
+                let reconstructed_r_2t = NonRobustShare::recover_secret(&shares_2t_for_recon)
+                    .map_err(|e| RanDouShaError::ShareError(e))?;
+                let poly1 = DensePolynomial::from_coefficients_slice(&reconstructed_r_t.0);
+                let poly2 = DensePolynomial::from_coefficients_slice(&reconstructed_r_2t.0);
 
-                // if the reconstruction fails, broadcast false
-                let mut output_message = RanDouShaMessage::new(
+                let ok = (self.threshold == poly1.degree())
+                    && (2 * self.threshold == poly2.degree())
+                    && (reconstructed_r_t.1 == reconstructed_r_2t.1);
+
+                let wrapped = WrappedMessage::RanDouSha(RanDouShaMessage::new(
                     self.id,
                     RanDouShaMessageType::OutputMessage,
                     msg.session_id,
-                    RanDouShaPayload::Output(true),
-                );
+                    RanDouShaPayload::Output(ok),
+                ));
 
-                if reconstructed_r_t.is_err() || reconstructed_r_2t.is_err() {
-                    output_message.payload = RanDouShaPayload::Output(false);
-                }
-                // (6) Check that their 0-evaluation is the same.
-                // This means checking if the reconstructed values are equal.
-                let verify = reconstructed_r_t.unwrap().1 == reconstructed_r_2t.unwrap().1;
-
-                if !verify {
-                    // if the verification fails, broadcast false(aka. Abort)
-                    output_message.payload = RanDouShaPayload::Output(false);
-                }
-
-                // Serializing the output message and wrapping it into a generic message.
-                let wrapped = WrappedMessage::RanDouSha(output_message);
                 let bytes_wrapped =
                     bincode::serialize(&wrapped).map_err(RanDouShaError::SerializationError)?;
 
