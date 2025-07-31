@@ -1,8 +1,8 @@
 pub mod utils;
 
 use crate::utils::test_utils::{
-    construct_e2e_input, construct_input, create_nodes, initialize_all_nodes, initialize_node,
-    setup_tracing, spawn_receiver_tasks, test_setup,
+    construct_e2e_input, create_nodes, get_reconstruct_input, initialize_all_nodes,
+    initialize_node, setup_tracing, spawn_receiver_tasks, test_setup,
 };
 use ark_bls12_381::Fr;
 use ark_ff::{Field, UniformRand};
@@ -11,7 +11,8 @@ use std::{
     collections::HashMap, iter::zip, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc,
     time::Duration, vec,
 };
-use stoffelmpc_common::share::shamir::{self, ShamirSecretSharing};
+use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
+use stoffelmpc_mpc::common::SecretSharingScheme;
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
     InitMessage, OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
 };
@@ -32,14 +33,14 @@ async fn test_init_reconstruct_flow() {
     let degree_t = 3;
 
     let (params, network, mut receivers) = test_setup(n_parties, threshold, session_id);
-    let (_, shares_si_t, shares_si_2t) = construct_input(n_parties, degree_t);
+    let (_, shares_si_t, shares_si_2t) = construct_e2e_input(n_parties, degree_t);
 
     let sender_id = 1;
 
     let init_msg = InitMessage {
         sender_id: sender_id,
-        s_shares_deg_t: shares_si_t.clone(),
-        s_shares_deg_2t: shares_si_2t.clone(),
+        s_shares_deg_t: shares_si_t[sender_id].clone(),
+        s_shares_deg_2t: shares_si_2t[sender_id].clone(),
     };
 
     // create randousha nodes
@@ -79,7 +80,7 @@ async fn test_init_reconstruct_flow() {
 
         // check all stores should be empty except for the sender's store
         let store = randousha_nodes
-            .get(party.id - 1)
+            .get(party.id() - 1)
             .unwrap()
             .clone()
             .get_or_create_store(&params)
@@ -87,7 +88,7 @@ async fn test_init_reconstruct_flow() {
             .lock()
             .await
             .clone();
-        if party.id != sender_id {
+        if party.id() != sender_id {
             assert!(store.computed_r_shares_degree_t.len() == 0);
             assert!(store.computed_r_shares_degree_2t.len() == 0);
             assert!(store.received_r_shares_degree_t.len() == 0);
@@ -96,7 +97,7 @@ async fn test_init_reconstruct_flow() {
             assert!(store.state == RanDouShaState::Initialized);
         }
 
-        if party.id == sender_id {
+        if party.id() == sender_id {
             assert!(store.computed_r_shares_degree_t.len() == n_parties);
             assert!(store.computed_r_shares_degree_2t.len() == n_parties);
             assert!(store.received_r_shares_degree_t.len() == 0);
@@ -116,7 +117,7 @@ async fn test_reconstruct_handler() {
     let degree_t = 3;
 
     let (params, network, mut receivers) = test_setup(n_parties, threshold, session_id);
-    let (_, shares_ri_t, shares_ri_2t) = construct_input(n_parties, degree_t);
+    let (_, shares_ri_t, shares_ri_2t) = get_reconstruct_input(n_parties, degree_t);
 
     // initialize RanDouShaNode
     let mut randousha_nodes = vec![];
@@ -132,7 +133,8 @@ async fn test_reconstruct_handler() {
 
     // receiver nodes received 2t+1 ReconstructionMessage
     for i in 0..2 * threshold + 1 {
-        let rec_msg = ReconstructionMessage::new(i + 1, shares_ri_t[i], shares_ri_2t[i]);
+        let rec_msg =
+            ReconstructionMessage::new(i + 1, shares_ri_t[i].clone(), shares_ri_2t[i].clone());
         randousha_node
             .reconstruction_handler(&rec_msg, &params, Arc::clone(&network))
             .await
@@ -182,23 +184,23 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let degree_t = 3;
     let degree_2t = 6;
 
-    let ids: Vec<Fr> = network
+    let ids: Vec<usize> = network
         .lock()
         .await
         .parties()
         .iter()
-        .map(|p| p.scalar_id())
+        .map(|p| p.id())
         .collect();
     // receiver id receives recconstruct messages from other party
     let receiver_id = threshold + 2;
 
     let mut rng = test_rng();
     // ri_t created by each party i
-    let (shares_ri_t, _) =
-        shamir::ShamirSecretSharing::compute_shares(secret, degree_t, &ids, &mut rng);
+    let shares_ri_t =
+        NonRobustShare::compute_shares(secret, n_parties, degree_t, Some(&ids), &mut rng).unwrap();
     // ri_2t created by each party i
-    let (shares_ri_2t, _) =
-        shamir::ShamirSecretSharing::compute_shares(secret_2t, degree_2t, &ids, &mut rng);
+    let shares_ri_2t =
+        NonRobustShare::compute_shares(secret_2t, n_parties, degree_2t, Some(&ids), &mut rng).unwrap();
 
     // create receiver randousha node
     let mut randousha_node: RanDouShaNode<Fr> = RanDouShaNode {
@@ -207,7 +209,8 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     };
     // receiver nodes received t+1 ReconstructionMessage
     for i in 0..2 * threshold + 1 {
-        let rec_msg = ReconstructionMessage::new(i + 1, shares_ri_t[i], shares_ri_2t[i]);
+        let rec_msg =
+            ReconstructionMessage::new(i + 1, shares_ri_t[i].clone(), shares_ri_2t[i].clone());
         randousha_node
             .reconstruction_handler(&rec_msg, &params, Arc::clone(&network))
             .await
@@ -253,14 +256,14 @@ async fn test_output_handler() {
     let session_id = 1111;
     let degree_t = 3;
 
-    let (params, network, receivers) = test_setup(n_parties, threshold, session_id);
-    let (_, shares_si_t, shares_si_2t) = construct_input(n_parties, degree_t);
+    let (params, network, _receivers) = test_setup(n_parties, threshold, session_id);
+    let (_, shares_si_t, shares_si_2t) = construct_e2e_input(n_parties, degree_t);
     let receiver_id = 1;
 
     let init_msg = InitMessage {
         sender_id: receiver_id,
-        s_shares_deg_t: shares_si_t.clone(),
-        s_shares_deg_2t: shares_si_2t.clone(),
+        s_shares_deg_t: shares_si_t[receiver_id].clone(),
+        s_shares_deg_2t: shares_si_2t[receiver_id].clone(),
     };
 
     // create receiver randousha node
@@ -347,10 +350,8 @@ async fn randousha_e2e() {
 
     // create randousha nodes
     let randousha_nodes = create_nodes(n_parties);
-    let (fin_send, mut fin_recv) = mpsc::channel::<(
-        usize,
-        (Vec<ShamirSecretSharing<Fr>>, Vec<ShamirSecretSharing<Fr>>),
-    )>(100);
+    let (fin_send, mut fin_recv) =
+        mpsc::channel::<(usize, (Vec<NonRobustShare<Fr>>, Vec<NonRobustShare<Fr>>))>(100);
     // spawn tasks to process received messages
     let _set = spawn_receiver_tasks(
         randousha_nodes.clone(),
@@ -371,8 +372,7 @@ async fn randousha_e2e() {
     )
     .await;
 
-    let mut final_results =
-        HashMap::<usize, (Vec<ShamirSecretSharing<Fr>>, Vec<ShamirSecretSharing<Fr>>)>::new();
+    let mut final_results = HashMap::<usize, (Vec<NonRobustShare<Fr>>, Vec<NonRobustShare<Fr>>)>::new();
     while let Some((id, final_shares)) = fin_recv.recv().await {
         final_results.insert(id, final_shares);
         if final_results.len() == 10 {
@@ -381,8 +381,8 @@ async fn randousha_e2e() {
                 let _ = shares_t.iter().zip(shares_2t).map(|(s_t, s_2t)| {
                     assert_eq!(s_t.degree, params.threshold);
                     assert_eq!(s_2t.degree, 2 * params.threshold);
-                    assert_eq!(s_t.id, Fr::from(id as u64));
-                    assert_eq!(s_2t.id, Fr::from(id as u64));
+                    assert_eq!(s_t.id, id);
+                    assert_eq!(s_2t.id, id);
                 });
             }
             break;
@@ -414,15 +414,13 @@ async fn test_e2e_reconstruct_mismatch() {
     // lets corrupt the shares of party 1 so that the shares reconstruct different values
     let rng = &mut test_rng();
     n_shares_t[0][0] =
-        ShamirSecretSharing::new(Fr::rand(rng), n_shares_t[0][0].id, n_shares_t[0][0].degree);
+        NonRobustShare::new(Fr::rand(rng), n_shares_t[0][0].id, n_shares_t[0][0].degree);
 
     // create randousha nodes
     let randousha_nodes = create_nodes(n_parties);
 
-    let (fin_send, mut fin_recv) = mpsc::channel::<(
-        usize,
-        (Vec<ShamirSecretSharing<Fr>>, Vec<ShamirSecretSharing<Fr>>),
-    )>(100);
+    let (fin_send, mut fin_recv) =
+        mpsc::channel::<(usize, (Vec<NonRobustShare<Fr>>, Vec<NonRobustShare<Fr>>))>(100);
 
     // Keep track of aborts
     let abort_count = Arc::new(AtomicUsize::new(0));
@@ -485,16 +483,15 @@ async fn test_e2e_wrong_degree() {
     // p(x) = s + a_1 * x + ... + a_t * x^t.
     // q(x) = s + x^2 * p(x) = s + x^2 * s + a_1 x^3 + ... + a_t * x^{t + 2}
     for j in 0..n_parties {
-        n_shares_t[j][idx_mod].share = secrets[idx_mod]
-            + n_shares_t[j][idx_mod].id.pow([0, 0, 0, 2]) * n_shares_t[j][idx_mod].share;
+        let id_fr = Fr::from(n_shares_t[j][idx_mod].id as u64);
+        n_shares_t[j][idx_mod].share[0] =
+            secrets[idx_mod] + id_fr.pow([0, 0, 0, 2]) * n_shares_t[j][idx_mod].share[0];
     }
 
     let randousha_nodes = create_nodes(n_parties);
 
-    let (fin_send, mut fin_recv) = mpsc::channel::<(
-        usize,
-        (Vec<ShamirSecretSharing<Fr>>, Vec<ShamirSecretSharing<Fr>>),
-    )>(100);
+    let (fin_send, mut fin_recv) =
+        mpsc::channel::<(usize, (Vec<NonRobustShare<Fr>>, Vec<NonRobustShare<Fr>>))>(100);
 
     // Keep track of aborts
     let abort_count = Arc::new(AtomicUsize::new(0));

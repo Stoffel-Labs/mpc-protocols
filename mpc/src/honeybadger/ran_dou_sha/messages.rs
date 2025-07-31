@@ -1,8 +1,9 @@
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use serde::{Deserialize, Serialize};
-use stoffelmpc_common::share::shamir::ShamirSecretSharing;
 use stoffelmpc_network::{Message, PartyId};
+
+use crate::common::share::shamir::NonRobustShare;
 
 /// Types for the all the possible messages sent during the Random Double Sharing protocol.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -54,9 +55,9 @@ pub struct ReconstructionMessage<F: FftField> {
     /// ID of the sender of the message.
     pub sender_id: PartyId,
     /// Share of r of degree t.
-    pub r_share_deg_t: ShamirSecretSharing<F>,
+    pub r_share_deg_t: NonRobustShare<F>,
     /// Share of r of degree 2t.
-    pub r_share_deg_2t: ShamirSecretSharing<F>,
+    pub r_share_deg_2t: NonRobustShare<F>,
 }
 
 impl<F> ReconstructionMessage<F>
@@ -66,8 +67,8 @@ where
     /// Creates a message for the reconstruction phase.
     pub fn new(
         sender_id: PartyId,
-        r_deg_t: ShamirSecretSharing<F>,
-        r_deg_2t: ShamirSecretSharing<F>,
+        r_deg_t: NonRobustShare<F>,
+        r_deg_2t: NonRobustShare<F>,
     ) -> Self {
         Self {
             sender_id,
@@ -84,9 +85,9 @@ pub struct InitMessage<F: FftField> {
     /// ID of the sender of the message.
     pub sender_id: PartyId,
     /// Shares of s of degree t provided as input for the protocol.
-    pub s_shares_deg_t: Vec<ShamirSecretSharing<F>>,
+    pub s_shares_deg_t: Vec<NonRobustShare<F>>,
     /// Shares of s of degree 2t provided as input for the protocol.
-    pub s_shares_deg_2t: Vec<ShamirSecretSharing<F>>,
+    pub s_shares_deg_2t: Vec<NonRobustShare<F>>,
 }
 
 /// This struct represents an output message in the Random Double Sharing protocol.
