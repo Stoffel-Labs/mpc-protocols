@@ -21,7 +21,7 @@ use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{
     mpsc::{error::SendError, Sender},
-    Mutex, MutexGuard,
+    Mutex,
 };
 
 use stoffelmpc_network::{Network, NetworkError, Node, PartyId, SessionId};

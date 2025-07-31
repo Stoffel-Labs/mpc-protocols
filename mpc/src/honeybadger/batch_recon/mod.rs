@@ -23,6 +23,7 @@ pub enum BatchReconMsgType {
     Eval,   // sent in the first round
     Reveal, // sent in the second round
 }
+
 ///Message exchanged between network nodes during the batch reconstruction protocol.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct BatchReconMsg {

@@ -1,6 +1,7 @@
 use std::{
     marker::PhantomData,
     ops::{Add, Mul},
+    result,
     sync::Arc,
 };
 
@@ -80,7 +81,7 @@ impl<F: FftField> BatchReconNode<F> {
     ) -> Result<(), BatchReconError> {
         if shares.len() < self.t + 1 {
             return Err(BatchReconError::InvalidInput(
-                "Too little shares to start batch reconstruct".to_string(),
+                "too little shares to start batch reconstruct".to_string(),
             ));
         }
         let vandermonde = make_vandermonde::<F>(self.n, self.t)?;
@@ -88,7 +89,7 @@ impl<F: FftField> BatchReconNode<F> {
 
         info!(
             id = self.id,
-            "Initialized batch reconstruction with Vandermonde transform"
+            "initialized batch reconstruction with Vandermonde transform"
         );
 
         for (j, y_j_share) in y_shares.into_iter().enumerate() {
@@ -237,7 +238,7 @@ impl<F: FftField> BatchReconNode<F> {
                                     );
                                     let bytes_generic_msg =
                                         bincode::serialize(&triple_gen_generic_msg)?;
-                                    net.send(self.id, &bytes_generic_msg).await?;
+                                    net.send(self.id + 1, &bytes_generic_msg).await?;
                                 }
                                 BatchReconContentType::MultiplicationMessage => {
                                     // TODO: Complete this section.
@@ -258,6 +259,7 @@ impl<F: FftField> BatchReconNode<F> {
             }
         }
     }
+
     pub async fn process<N: Network>(
         &mut self,
         raw_msg: Vec<u8>,
