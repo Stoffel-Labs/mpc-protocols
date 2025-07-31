@@ -21,7 +21,7 @@ use super::{
     batch_recon::{
         self, batch_recon::BatchReconNode, BatchReconContentType, BatchReconError, BatchReconMsg,
     },
-    robust_interpolate::RobustShamirShare,
+    robust_interpolate::robust_interpolate::RobustShamirShare,
     DoubleShamirShare,
 };
 

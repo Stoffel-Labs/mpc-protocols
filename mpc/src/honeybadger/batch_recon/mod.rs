@@ -1,4 +1,5 @@
 pub mod batch_recon;
+pub use batch_recon::{apply_vandermonde, make_vandermonde};
 
 use crate::honeybadger::robust_interpolate::InterpolateError;
 use ark_serialize::SerializationError;
@@ -8,7 +9,7 @@ use stoffelmpc_network::{NetworkError, PartyId, SessionId};
 use thiserror::Error;
 
 /// Content type of the batch reconstruction message.
-#[derive(Copy, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 pub enum BatchReconContentType {
     /// The message is for the triple generation protocol.
     TripleGenMessage,
@@ -17,13 +18,13 @@ pub enum BatchReconContentType {
 }
 
 /// Represents message type exchanged between network nodes during the batch reconstruction protocol.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum BatchReconMsgType {
     Eval,   // sent in the first round
     Reveal, // sent in the second round
 }
 ///Message exchanged between network nodes during the batch reconstruction protocol.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct BatchReconMsg {
     pub session_id: SessionId,
     pub sender_id: PartyId,                  // Sender id

@@ -10,7 +10,7 @@ use super::*;
 use crate::{
     common::{share::ShareError, SecretSharingScheme, ShamirShare},
     honeybadger::{
-        robust_interpolate::*,
+        robust_interpolate::{robust_interpolate::RobustShamirShare, *},
         triple_generation::{BatchReconFinishMessage, TripleGenMessage},
     },
 };
@@ -107,13 +107,13 @@ impl<F: FftField> BatchReconNode<F> {
             );
 
             //Send share y_j to each Party j
-            let _encoded_msg =
+            let encoded_msg =
                 bincode::serialize(&msg).map_err(BatchReconError::SerializationError)?;
 
-            // let _ = net
-            //     .send(j + 1, &encoded_msg)
-            //     .await
-            //     .map_err(|e| BatchReconError::NetworkError(e))?;
+            let _ = net
+                .send(j + 1, &encoded_msg)
+                .await
+                .map_err(|e| BatchReconError::NetworkError(e))?;
         }
         Ok(())
     }
@@ -125,7 +125,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn batch_recon_handler<N: Network>(
         &mut self,
         msg: BatchReconMsg,
-        net: &Arc<N>,
+        net: Arc<N>,
     ) -> Result<(), BatchReconError> {
         match msg.msg_type {
             BatchReconMsgType::Eval => {
@@ -174,12 +174,12 @@ impl<F: FftField> BatchReconNode<F> {
                             );
 
                             // Broadcast our computed `y_j` to all other parties.
-                            let _encoded = bincode::serialize(&new_msg)
+                            let encoded = bincode::serialize(&new_msg)
                                 .map_err(BatchReconError::SerializationError)?;
-                            // let _ = net
-                            //     .broadcast(&encoded)
-                            //     .await
-                            //     .map_err(|e| BatchReconError::NetworkError(e))?;
+                            let _ = net
+                                .broadcast(&encoded)
+                                .await
+                                .map_err(|e| BatchReconError::NetworkError(e))?;
                         }
                         Err(e) => {
                             warn!(self_id = self.id, "Interpolation of y_j failed: {:?}", e);
@@ -258,17 +258,17 @@ impl<F: FftField> BatchReconNode<F> {
             }
         }
     }
-    // pub async fn process<N: Network>(
-    //     &mut self,
-    //     raw_msg: Vec<u8>,
-    //     net: &Arc<N>,
-    // ) -> Result<(), BatchReconError> {
-    //     let msg: BatchReconMsg =
-    //         bincode::deserialize(&raw_msg).map_err(|e| BatchReconError::SerializationError(e))?;
+    pub async fn process<N: Network>(
+        &mut self,
+        raw_msg: Vec<u8>,
+        net: Arc<N>,
+    ) -> Result<(), BatchReconError> {
+        let msg: BatchReconMsg =
+            bincode::deserialize(&raw_msg).map_err(|e| BatchReconError::SerializationError(e))?;
 
-    //     self.batch_recon_handler(msg, net).await?;
-    //     Ok(())
-    // }
+        self.batch_recon_handler(msg, net).await?;
+        Ok(())
+    }
 }
 
 /// Creates a Vandermonde matrix `V` of size `n x (t+1)`.

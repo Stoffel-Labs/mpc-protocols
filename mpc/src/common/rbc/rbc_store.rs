@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 
 /// Generic message type used in Reliable Broadcast (RBC) communication.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Msg {
     pub sender_id: u32,           // ID of the sender node
     pub session_id: u32,          // Unique session ID for each broadcast instance

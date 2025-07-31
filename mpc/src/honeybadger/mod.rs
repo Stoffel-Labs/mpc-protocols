@@ -1,3 +1,11 @@
+use robust_interpolate::robust_interpolate::RobustShamirShare;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    common::rbc::{rbc::Avid, rbc_store::Msg, RbcError},
+    honeybadger::{batch_recon::BatchReconMsg, ran_dou_sha::messages::RanDouShaMessage},
+};
+
 /// This module contains the implementation of the Robust interpolate protocol presented in
 /// Figure 1 in the paper "HoneyBadgerMPC and AsynchroMix: Practical AsynchronousMPC and its
 /// Application to Anonymous Communication".
@@ -27,7 +35,6 @@ use ark_std::rand::Rng;
 use async_trait::async_trait;
 use double_share_generation::{DouShaError, DouShaParams, DoubleShareNode};
 use ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaParams};
-use robust_interpolate::RobustShamirShare;
 use sha2::digest::crypto_common::KeyInit;
 use stoffelmpc_network::{Network, NetworkError, PartyId, SessionId};
 use thiserror::Error;
@@ -74,6 +81,8 @@ pub enum HoneyBadgerError {
     NotEnoughPreprocessing,
     #[error("error in triple generation protocol: {0:?}")]
     TripleGenError(#[from] TripleGenError),
+    #[error("error in the RBC: {0:?}")]
+    RbcError(#[from] RbcError),
 }
 
 impl<F> HoneyBadgerMPCNode<F>
@@ -84,22 +93,29 @@ where
         id: PartyId,
         online_opts: HoneyBadgerMPCNodeOpts,
         preprocessing_opts: HoneyBadgerMPCNodePreprocOpts,
-    ) -> Self {
+    ) -> Result<Self, HoneyBadgerError> {
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
         let (triple_sender, triple_receiver) = mpsc::channel(128);
 
+        let rbc = Avid::new(
+            id as u32,
+            preprocessing_opts.n_parties as u32,
+            preprocessing_opts.threshold as u32,
+            preprocessing_opts.threshold as u32 + 1,
+        )?;
+
         // Create nodes for preprocessing.
         let dousha_node = DoubleShareNode::new(id, dou_sha_sender);
-        let ran_dou_sha_node = RanDouShaNode::new(id, ran_dou_sha_sender);
+        let ran_dou_sha_node = RanDouShaNode::new(id, ran_dou_sha_sender, rbc);
         let triple_gen_params = TripleGenParams::new(
             preprocessing_opts.n_parties,
             preprocessing_opts.threshold,
             preprocessing_opts.n_triples,
         );
         let triple_gen_node = TripleGenNode::new(id, triple_gen_params, triple_sender);
-        Self {
+        Ok(Self {
             id,
             preprocessing_material: HoneyBadgerMPCNodePreprocMaterial::empty(),
             online_opts,
@@ -110,7 +126,7 @@ where
             dou_sha_channel: dou_sha_receiver,
             ran_dou_sha_channel: ran_dou_sha_receiver,
             triple_channel: triple_receiver,
-        }
+        })
     }
 }
 
@@ -387,4 +403,11 @@ where
 
         Ok(output_triples)
     }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum WrappedMessage {
+    RanDouSha(RanDouShaMessage),
+    Rbc(Msg),
+    BatchRecon(BatchReconMsg),
 }

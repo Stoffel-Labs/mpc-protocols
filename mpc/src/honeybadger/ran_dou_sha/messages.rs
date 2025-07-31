@@ -6,7 +6,7 @@ use stoffelmpc_network::{Message, PartyId, SessionId};
 use crate::common::share::shamir::NonRobustShamirShare;
 
 /// Types for the all the possible messages sent during the Random Double Sharing protocol.
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub enum RanDouShaMessageType {
     /// Tag for the message received by the reconstruction handler.
     ReconstructMessage,
@@ -15,7 +15,7 @@ pub enum RanDouShaMessageType {
 }
 
 /// Message sent in the Random Double Sharing protocol.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct RanDouShaMessage {
     /// ID of the sender of the message.
     pub sender_id: PartyId,

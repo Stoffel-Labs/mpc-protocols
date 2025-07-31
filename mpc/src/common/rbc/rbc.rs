@@ -1,11 +1,7 @@
 /// This file contains more common reliable broadcast protocols used in MPC.
 /// You can reuse them in your own custom MPC protocol implementations.
-use super::{rbc_store::*, RbcError};
-use crate::common::rbc::utils::{
-    decode_rs, encode_rs, gen_merkletree, generate_merkle_proofs_map, get_value, get_value_round,
-    reconstruct_payload, set_value_round, verify_merkle,
-};
-use crate::common::RBC;
+use super::{rbc_store::*, utils::*, RbcError};
+use crate::{common::RBC, honeybadger::WrappedMessage};
 use async_trait::async_trait;
 use bincode;
 use std::{collections::HashMap, sync::Arc};
@@ -508,24 +504,33 @@ impl RBC for Avid {
         }
         Ok(())
     }
+
     /// Processes incoming messages based on their type.
     async fn process<N: Network + Send + Sync>(
         &self,
         msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        let msg: Msg = bincode::deserialize(&msg).map_err(|e| RbcError::SerializationError(e))?;
+        let wrapped: WrappedMessage =
+            bincode::deserialize(&msg).map_err(RbcError::SerializationError)?;
+        match wrapped {
+            WrappedMessage::Rbc(msg) => {
+                match &msg.msg_type {
+                    GenericMsgType::Avid(msg_type) => match msg_type {
+                        MsgTypeAvid::Send => self.send_handler(msg, net).await?,
+                        MsgTypeAvid::Echo => self.echo_handler(msg, net).await?,
+                        MsgTypeAvid::Ready => self.ready_handler(msg, net).await?,
+                        MsgTypeAvid::Unknown(tag) => {
+                            return Err(RbcError::UnknownMsgType(tag.clone()))
+                        }
+                    },
+                    _ => return Err(RbcError::UnknownMsgType("non-Avid".into())),
+                }
 
-        match &msg.msg_type {
-            GenericMsgType::Avid(msg_type) => match msg_type {
-                MsgTypeAvid::Send => self.send_handler(msg, net).await?,
-                MsgTypeAvid::Echo => self.echo_handler(msg, net).await?,
-                MsgTypeAvid::Ready => self.ready_handler(msg, net).await?,
-                MsgTypeAvid::Unknown(tag) => return Err(RbcError::UnknownMsgType(tag.clone())),
-            },
-            _ => return Err(RbcError::UnknownMsgType("non-Avid".into())),
+                Ok(())
+            }
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     /// Broadcast messages to other nodes.
@@ -534,7 +539,8 @@ impl RBC for Avid {
         msg: Msg,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        let encoded = bincode::serialize(&msg).map_err(RbcError::SerializationError)?;
+        let wrapped = WrappedMessage::Rbc(msg);
+        let encoded = bincode::serialize(&wrapped).map_err(RbcError::SerializationError)?;
         net.broadcast(&encoded)
             .await
             .map_err(|e| RbcError::NetworkError(e))?;
@@ -547,7 +553,8 @@ impl RBC for Avid {
         net: Arc<N>,
         recv: u32,
     ) -> Result<(), RbcError> {
-        let encoded = bincode::serialize(&msg).map_err(RbcError::SerializationError)?;
+        let wrapped = WrappedMessage::Rbc(msg);
+        let encoded = bincode::serialize(&wrapped).map_err(RbcError::SerializationError)?;
         net.send((recv as usize) + 1, &encoded)
             .await
             .map_err(|e| RbcError::NetworkError(e))?;
@@ -780,7 +787,8 @@ impl Avid {
                     if echo_count < threshold && ready_count == self.k {
                         //Send ready logic
                         let shards_map = store.get_shards_for_root(&root.to_vec());
-                        self.send_ready(msg.clone(), shards_map, net).await?;
+                        self.send_ready(msg.clone(), shards_map, net.clone())
+                            .await?;
                     }
 
                     // Final consensus stage: enough READY messages to reconstruct
@@ -801,6 +809,9 @@ impl Avid {
                             output = ?output,
                             "Consensus achieved; AVID instance ended"
                         );
+                        net.send((self.id as usize) + 1, &output)
+                            .await
+                            .map_err(|e| RbcError::NetworkError(e))?;
                     }
                 }
                 Ok(false) => {

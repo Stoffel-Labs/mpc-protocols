@@ -12,21 +12,21 @@ use std::{
     collections::HashMap, iter::zip, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc,
     time::Duration, vec,
 };
+use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShamirShare;
-use stoffelmpc_mpc::common::SecretSharingScheme;
+use stoffelmpc_mpc::common::{SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
-    OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage,
+    OutputMessage, RanDouShaMessageType, ReconstructionMessage,
 };
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::{
-    self, RanDouShaError, RanDouShaNode, RanDouShaState,
-};
-use stoffelmpc_mpc::honeybadger::DoubleShamirShare;
+use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
+use stoffelmpc_mpc::honeybadger::{DoubleShamirShare, WrappedMessage};
 use stoffelmpc_network::{Network, Node};
 use tokio::sync::{
     mpsc::{self},
     Mutex,
 };
-use tracing::info;
+use tokio::task::JoinSet;
+use tracing::{info, warn};
 
 #[tokio::test]
 async fn test_init_reconstruct_flow() {
@@ -53,7 +53,7 @@ async fn test_init_reconstruct_flow() {
     // create randousha nodes
     let mut randousha_nodes = vec![];
     for (i, sender_ch) in (0..n_parties).zip(sender_channels) {
-        randousha_nodes.push(initialize_node(i + 1, sender_ch));
+        randousha_nodes.push(initialize_node(i + 1, n_parties, degree_t, sender_ch));
     }
 
     let mut sender = randousha_nodes.get(sender_id - 1).unwrap().clone();
@@ -72,10 +72,15 @@ async fn test_init_reconstruct_flow() {
         // check only designated parties are receiving messages
         if party.id() > params.threshold + 1 && party.id() <= params.n_parties {
             let received_message = receivers[party.id() - 1].try_recv().unwrap();
-            let deseralized_msg: RanDouShaMessage =
-                bincode::deserialize(received_message.as_slice()).unwrap();
-            let msg_type = deseralized_msg.msg_type;
-            let payload = deseralized_msg.payload;
+            let wrapped: WrappedMessage = bincode::deserialize(&received_message).unwrap();
+            let rdsmsg = match wrapped {
+                WrappedMessage::RanDouSha(ran_dou_sha_message) => ran_dou_sha_message,
+                WrappedMessage::Rbc(_) => todo!(),
+                WrappedMessage::BatchRecon(_) => todo!(),
+            };
+
+            let msg_type = rdsmsg.msg_type;
+            let payload = rdsmsg.payload;
 
             // check all the assertions
             let reconstruct_msg: ReconstructionMessage<Fr> =
@@ -142,7 +147,7 @@ async fn test_reconstruct_handler() {
     // create randousha nodes
     let mut randousha_nodes = vec![];
     for (i, sender_ch) in (0..n_parties).zip(sender_channels) {
-        randousha_nodes.push(initialize_node(i + 1, sender_ch));
+        randousha_nodes.push(initialize_node(i + 1, n_parties, threshold, sender_ch));
     }
 
     // receiver id receives reconstruct messages from other party
@@ -162,20 +167,44 @@ async fn test_reconstruct_handler() {
     }
 
     // check all parties received OutputMessage Ok sent by the receiver of the ReconstructionMessage
+    let mut set = JoinSet::new();
     for party in network.parties() {
-        let received_message = receivers[party.id() - 1].try_recv().unwrap();
-        let deseralized_msg: RanDouShaMessage =
-            bincode::deserialize(received_message.as_slice()).unwrap();
-        let msg_type = deseralized_msg.msg_type;
-        let payload = deseralized_msg.payload;
+        let mut receiver = receivers.remove(0);
+        let randousha_node = randousha_nodes[party.id() - 1].clone();
+        let net = Arc::clone(&network);
+        let receiver_id = receiver_id; // capture from outer scope
 
-        let reconstruct_msg: OutputMessage =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())
-                .expect("Should be able to deseralize the message");
+        set.spawn(async move {
+            while let Some(received) = receiver.recv().await {
+                let wrapped: WrappedMessage = match bincode::deserialize(&received) {
+                    Ok(w) => w,
+                    Err(_) => continue,
+                };
 
-        assert!(msg_type == RanDouShaMessageType::OutputMessage);
-        assert!(reconstruct_msg.sender_id == receiver_id);
-        assert!(reconstruct_msg.msg);
+                match wrapped {
+                    WrappedMessage::RanDouSha(msg) => {
+                        if msg.msg_type == RanDouShaMessageType::OutputMessage {
+                            let output_msg: OutputMessage =
+                                ark_serialize::CanonicalDeserialize::deserialize_compressed(
+                                    msg.payload.as_slice(),
+                                )
+                                .expect("Should be able to deserialize OutputMessage");
+
+                            assert_eq!(output_msg.sender_id, receiver_id);
+                            assert!(output_msg.msg);
+                            return; // we're done for this party
+                        }
+                    }
+                    WrappedMessage::Rbc(_) => {
+                        if let Err(e) = randousha_node.rbc.process(received, Arc::clone(&net)).await
+                        {
+                            warn!("Rbc processing error: {e}");
+                        }
+                    }
+                    WrappedMessage::BatchRecon(_) => continue,
+                }
+            }
+        });
     }
 
     // check the store
@@ -219,14 +248,16 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let shares_ri_2t =
         NonRobustShamirShare::compute_shares(secret_2t, n_parties, degree_2t, Some(&ids), &mut rng)
             .unwrap();
+    // initialize RanDouShaNode
+    let mut randousha_nodes = vec![];
+    for i in 1..=n_parties {
+        randousha_nodes.push(initialize_node(i, n_parties, threshold, sender_ch.clone()));
+    }
 
-    // create receiver randousha node
-    let mut randousha_node: RanDouShaNode<Fr> = RanDouShaNode {
-        id: receiver_id,
-        store: Arc::new(Mutex::new(HashMap::new())),
-        output_sender: sender_ch,
-    };
-    // receiver nodes received t+1 ReconstructionMessage
+    // receiver randousha node
+    let mut randousha_node = randousha_nodes.get(receiver_id - 1).unwrap().clone();
+
+    // Send 2t+1 reconstruction messages to the receiver node
     for i in 0..2 * threshold + 1 {
         let rec_msg =
             ReconstructionMessage::new(i + 1, shares_ri_t[i].clone(), shares_ri_2t[i].clone());
@@ -237,21 +268,48 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     }
 
     // check all parties received OutputMessage Ok sent by the receiver of the ReconstructionMessage
+    let mut set = JoinSet::new();
     for party in network.parties() {
-        let received_message = receivers[party.id() - 1].try_recv().unwrap();
-        let deseralized_msg: RanDouShaMessage =
-            bincode::deserialize(received_message.as_slice()).unwrap();
-        let msg_type = deseralized_msg.msg_type;
-        let payload = deseralized_msg.payload;
+        let mut receiver = receivers.remove(0);
+        let randousha_node = randousha_nodes[party.id() - 1].clone();
+        let net = Arc::clone(&network);
+        let receiver_id = receiver_id;
 
-        let reconstruct_msg: OutputMessage =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())
-                .expect("Should be able to deseralize the message");
+        set.spawn(async move {
+            while let Some(received) = receiver.recv().await {
+                let wrapped: WrappedMessage = match bincode::deserialize(&received) {
+                    Ok(w) => w,
+                    Err(_) => continue,
+                };
 
-        assert!(msg_type == RanDouShaMessageType::OutputMessage);
-        assert!(reconstruct_msg.sender_id == receiver_id);
-        // msg should be false causing by mismatch randoms
-        assert!(reconstruct_msg.msg == false);
+                match wrapped {
+                    WrappedMessage::RanDouSha(msg) => {
+                        if msg.msg_type == RanDouShaMessageType::OutputMessage {
+                            let output_msg: OutputMessage =
+                                ark_serialize::CanonicalDeserialize::deserialize_compressed(
+                                    msg.payload.as_slice(),
+                                )
+                                .expect("Should be able to deserialize OutputMessage");
+
+                            assert_eq!(output_msg.sender_id, receiver_id);
+                            assert!(!output_msg.msg); // mismatch => false
+                            return;
+                        }
+                    }
+                    WrappedMessage::Rbc(_) => {
+                        if let Err(e) = randousha_node.rbc.process(received, Arc::clone(&net)).await
+                        {
+                            warn!("Rbc processing error: {e}");
+                        }
+                    }
+                    WrappedMessage::BatchRecon(_) => continue,
+                }
+            }
+        });
+    }
+
+    while let Some(res) = set.join_next().await {
+        res.expect("Task panicked");
     }
 
     // check the store
@@ -261,10 +319,10 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
         .lock()
         .await
         .clone();
-    assert!(store.received_r_shares_degree_t.len() == 2 * threshold + 1);
-    assert!(store.received_r_shares_degree_2t.len() == 2 * threshold + 1);
-    assert!(store.received_ok_msg.len() == 0);
-    assert!(store.state == RanDouShaState::Reconstruction);
+    assert_eq!(store.received_r_shares_degree_t.len(), 2 * threshold + 1);
+    assert_eq!(store.received_r_shares_degree_2t.len(), 2 * threshold + 1);
+    assert_eq!(store.received_ok_msg.len(), 0);
+    assert_eq!(store.state, RanDouShaState::Reconstruction);
 }
 
 #[tokio::test]
@@ -286,6 +344,13 @@ async fn test_output_handler() {
         id: receiver_id,
         store: Arc::new(Mutex::new(HashMap::new())),
         output_sender: sender_ch,
+        rbc: Avid::new(
+            receiver_id as u32,
+            n_parties as u32,
+            threshold as u32,
+            threshold as u32 + 1,
+        )
+        .unwrap(),
     };
 
     // call init_handler to create random share
@@ -400,7 +465,7 @@ async fn randousha_e2e() {
     info!("channels created");
 
     // create randousha nodes
-    let randousha_nodes = create_nodes(n_parties, sender_channels);
+    let randousha_nodes = create_nodes(n_parties, sender_channels, degree_t);
     let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<DoubleShamirShare<Fr>>)>(100);
     // spawn tasks to process received messages
     let _set = spawn_receiver_tasks(
@@ -480,7 +545,7 @@ async fn test_e2e_reconstruct_mismatch() {
     }
 
     // create randousha nodes
-    let randousha_nodes = create_nodes(n_parties, sender_channels);
+    let randousha_nodes = create_nodes(n_parties, sender_channels, degree_t);
 
     let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<DoubleShamirShare<Fr>>)>(100);
 
@@ -506,7 +571,7 @@ async fn test_e2e_reconstruct_mismatch() {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
     let num_aborted_tasks = abort_count.load(Ordering::SeqCst);
 
@@ -557,7 +622,7 @@ async fn test_e2e_wrong_degree() {
         sender_channels.push(sender);
         receiver_channels.push(receiver);
     }
-    let randousha_nodes = create_nodes(n_parties, sender_channels);
+    let randousha_nodes = create_nodes(n_parties, sender_channels, degree_t);
 
     let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<DoubleShamirShare<Fr>>)>(100);
 
@@ -583,7 +648,7 @@ async fn test_e2e_wrong_degree() {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
     let num_aborted_tasks = abort_count.load(Ordering::SeqCst);
 
