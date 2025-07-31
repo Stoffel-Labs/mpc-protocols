@@ -1,9 +1,12 @@
 pub mod messages;
 
-use crate::{common::{share::shamir::NonRobustShare, SecretSharingScheme}, honeybadger::{
-    batch_recon::batch_recon::{apply_vandermonde, make_vandermonde},
-    robust_interpolate::InterpolateError,
-}};
+use crate::{
+    common::{
+        share::{apply_vandermonde, make_vandermonde, shamir::NonRobustShare},
+        SecretSharingScheme,
+    },
+    honeybadger::robust_interpolate::InterpolateError,
+};
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
