@@ -16,8 +16,10 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
 use messages::{OutputMessage, RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage};
-use sha2::digest::{crypto_common::KeyInit, typenum::Double};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use thiserror::Error;
 use tokio::sync::{
     mpsc::{error::SendError, Sender},
@@ -133,7 +135,7 @@ pub struct RanDouShaNode<F: FftField> {
     /// ID of the node.
     pub id: PartyId,
     /// Storage of the node.
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
+    pub store: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
     pub output_sender: Sender<SessionId>,
     ///Avid instance for RBC
     pub rbc: Avid,
@@ -146,7 +148,7 @@ where
     pub fn new(id: PartyId, output_sender: Sender<SessionId>, rbc: Avid) -> Self {
         Self {
             id,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(Mutex::new(BTreeMap::new())),
             output_sender,
             rbc,
         }

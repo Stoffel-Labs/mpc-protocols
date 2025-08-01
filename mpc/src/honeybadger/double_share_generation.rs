@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -193,7 +193,7 @@ where
     /// ID of the party.
     pub id: PartyId,
     /// Storage of the party.
-    pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<DouShaStorage<F>>>>>>,
+    pub storage: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<DouShaStorage<F>>>>>>,
     pub output_sender: Sender<SessionId>,
 }
 
@@ -243,7 +243,7 @@ where
     pub fn new(id: PartyId, output_sender: Sender<SessionId>) -> Self {
         Self {
             id,
-            storage: Arc::new(Mutex::new(HashMap::new())),
+            storage: Arc::new(Mutex::new(BTreeMap::new())),
             output_sender,
         }
     }

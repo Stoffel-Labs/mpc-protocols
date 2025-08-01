@@ -7,9 +7,9 @@ use crate::utils::test_utils::{
 use ark_bls12_381::Fr;
 use ark_ff::{Field, UniformRand};
 use ark_std::test_rng;
-use sha2::digest::typenum::Double;
+use std::collections::BTreeMap;
 use std::{
-    collections::HashMap, iter::zip, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc,
+    collections::HashMap, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc,
     time::Duration, vec,
 };
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
@@ -342,7 +342,7 @@ async fn test_output_handler() {
     // create receiver randousha node
     let mut randousha_node: RanDouShaNode<Fr> = RanDouShaNode {
         id: receiver_id,
-        store: Arc::new(Mutex::new(HashMap::new())),
+        store: Arc::new(Mutex::new(BTreeMap::new())),
         output_sender: sender_ch,
         rbc: Avid::new(
             receiver_id as u32,

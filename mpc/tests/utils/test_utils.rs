@@ -2,9 +2,8 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use once_cell::sync::Lazy;
-use std::{
-    collections::HashMap, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec,
-};
+use std::collections::BTreeMap;
+use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShamirShare;
 use stoffelmpc_mpc::common::{SecretSharingScheme, RBC};
@@ -100,7 +99,7 @@ pub fn initialize_node(
     RanDouShaNode {
         output_sender,
         id: node_id,
-        store: Arc::new(Mutex::new(HashMap::new())),
+        store: Arc::new(Mutex::new(BTreeMap::new())),
         rbc,
     }
 }
