@@ -1,6 +1,9 @@
 use std::{collections::HashMap, sync::Arc, thread, time::Duration};
 
+use ark_bls12_381::Fr;
 use ark_std::test_rng;
+use stoffelmpc_mpc::common::SecretSharingScheme;
+use stoffelmpc_mpc::common::{share::shamir::NonRobustShamirShare, ShamirShare};
 use tokio::sync::mpsc;
 use tracing::info;
 use utils::{
@@ -73,4 +76,34 @@ async fn generate_faulty_double_shares_e2e() {
             break;
         }
     }
+
+    // extracting all the shares for degree t and 2t from each party
+    // and recovering the secrets
+    // and asserting that recovered secrets are equal
+    let shares_t: Vec<ShamirShare<Fr, 1, _>> = resulting_shares
+        .values()
+        .map(|shares| {
+            shares
+                .iter()
+                .map(|s| s.degree_t.clone())
+                .collect::<Vec<_>>()
+        })
+        .map(|mut v| v.remove(0))
+        .collect();
+    let shares_2t: Vec<ShamirShare<Fr, 1, _>> = resulting_shares
+        .values()
+        .map(|shares| {
+            shares
+                .iter()
+                .map(|s| s.degree_2t.clone())
+                .collect::<Vec<_>>()
+        })
+        .map(|mut v| v.remove(0))
+        .collect();
+
+    let secret_t = NonRobustShamirShare::recover_secret(&shares_t);
+    let secret_2t = NonRobustShamirShare::recover_secret(&shares_2t);
+
+    // Assert that the recovered secrets are equal
+    assert_eq!(secret_t.unwrap().1, secret_2t.unwrap().1);
 }

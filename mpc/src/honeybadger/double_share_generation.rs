@@ -344,7 +344,7 @@ where
             self.id,
             recv_message.sender_id,
         );
-        dousha_storage.reception_tracker[recv_message.sender_id] = true;
+        dousha_storage.reception_tracker[recv_message.sender_id - 1] = true;
 
         // Check if the protocol has reached an end
         if dousha_storage

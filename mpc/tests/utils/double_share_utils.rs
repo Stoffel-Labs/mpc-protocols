@@ -61,11 +61,11 @@ pub fn spawn_receiver_tasks(
         let mut receiver = receivers.remove(0);
 
         let params = params.clone();
-        let network = Arc::clone(&network);
+        let _network = Arc::clone(&network);
         let final_result_data_chan = final_result_data_chan.clone();
 
         // Keep track of aborts
-        let mut rng = test_rng();
+        let mut _rng = test_rng();
 
         // spawn tasks to process received messages
         tokio::spawn(async move {

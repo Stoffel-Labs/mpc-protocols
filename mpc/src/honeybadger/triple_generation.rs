@@ -18,9 +18,7 @@ use tokio::{
 use crate::common::share::{shamir::NonRobustShamirShare, ShareError};
 
 use super::{
-    batch_recon::{
-        self, batch_recon::BatchReconNode, BatchReconContentType, BatchReconError, BatchReconMsg,
-    },
+    batch_recon::{batch_recon::BatchReconNode, BatchReconContentType, BatchReconError},
     robust_interpolate::robust_interpolate::RobustShamirShare,
     DoubleShamirShare,
 };
