@@ -86,6 +86,7 @@ where
 }
 
 /// Parameters for the Beaver triple generation protocol.
+#[derive(Clone, Copy)]
 pub struct TripleGenParams {
     /// The number of parties participating in the triple generation protocol.
     pub n_parties: usize,
