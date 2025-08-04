@@ -1,3 +1,15 @@
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    common::rbc::rbc_store::Msg,
+    honeybadger::{batch_recon::BatchReconMsg, ran_dou_sha::messages::RanDouShaMessage},
+};
+
+/// This module contains the implementation of the Robust interpolate protocol presented in
+/// Figure 1 in the paper "HoneyBadgerMPC and AsynchroMix: Practical AsynchronousMPC and its
+/// Application to Anonymous Communication".
+pub mod robust_interpolate;
+
 /// This module contains the implementation of the Batch Reconstruction protocol presented in
 /// Figure 2 in the paper "HoneyBadgerMPC and AsynchroMix: Practical AsynchronousMPC and its
 /// Application to Anonymous Communication".
@@ -7,6 +19,10 @@ pub mod batch_recon;
 /// Figure 3 in the paper "HoneyBadgerMPC and AsynchroMix: Practical AsynchronousMPC and its
 /// Application to Anonymous Communication".
 pub mod ran_dou_sha;
-pub mod robust_interpolate;
 
-pub struct HoneyBadgerMPC;
+#[derive(Serialize, Deserialize, Debug)]
+pub enum WrappedMessage {
+    RanDouSha(RanDouShaMessage),
+    Rbc(Msg),
+    BatchRecon(BatchReconMsg),
+}

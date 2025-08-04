@@ -77,48 +77,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::marker::PhantomData;
 
-    use crate::{common::SecretSharingScheme, honeybadger::robust_interpolate::RobustShamirShare};
-
+    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShamirShare;
     use super::*;
     use ark_bls12_381::Fr;
-    use ark_ff::{FftField, Field, One, Zero};
+    use ark_ff::{Field, One};
     use ark_poly::GeneralEvaluationDomain;
-    use ark_std::test_rng;
-
-    /// Generate secret shares where each secret is shared independently using a random polynomial
-    /// with that secret as the constant term (f(0) = secret), and evaluated using FFT-based domain.
-    pub fn generate_independent_shares<F: FftField>(
-        secrets: &[F],
-        t: usize,
-        n: usize,
-    ) -> Vec<Vec<RobustShamirShare<F>>> {
-        let mut rng = test_rng();
-        let mut shares = vec![
-            vec![
-                RobustShamirShare {
-                    share: [F::zero()],
-                    id: 0,
-                    degree: t,
-                    _sharetype: PhantomData
-                };
-                secrets.len()
-            ];
-            n
-        ];
-        for (j, secret) in secrets.iter().enumerate() {
-            // Call gen_shares to create 'n' shares for the current 'secret'
-            let ids: Vec<usize> = (0..n).collect();
-            let secret_shares =
-                RobustShamirShare::compute_shares(*secret, n, t, Some(&ids), &mut rng).unwrap();
-            for i in 0..n {
-                shares[i][j] = secret_shares[i].clone(); // Party i receives evaluation of f_j at α_i
-            }
-        }
-
-        shares
-    }
 
     #[test]
     fn test_make_vandermonde_basic() {

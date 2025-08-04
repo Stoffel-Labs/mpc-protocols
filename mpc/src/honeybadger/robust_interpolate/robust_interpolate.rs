@@ -8,31 +8,7 @@ use ark_std::rand::Rng;
 use std::collections::HashSet;
 use std::marker::PhantomData;
 
-use thiserror::Error;
-
-/// Custom Error type for polynomial operations.
-#[derive(Error, Debug)]
-pub enum InterpolateError {
-    /// Errors related to polynomial operations, potentially with an underlying cause.
-    #[error("Polynomial operation failed: {0}")]
-    PolynomialOperationError(String),
-
-    /// Errors specific to invalid input parameters or conditions.
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
-
-    /// Errors that occur during the decoding process.
-    #[error("Decoding failed: {0}")]
-    DecodingError(String),
-
-    /// No suitable FFT evaluation domain could be found.
-    #[error("No suitable FFT evaluation domain found for n={0}")]
-    NoSuitableDomain(usize),
-
-    #[error("inner error: {0}")]
-    Inner(#[from] ShareError),
-}
-
+use super::*;
 #[derive(Clone, Debug)]
 pub struct Robust;
 pub type RobustShamirShare<T> = ShamirShare<T, 1, Robust>;
@@ -514,10 +490,6 @@ mod tests {
         let ids: Vec<usize> = (0..n).collect();
         let shares = RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
 
-        // // Step 2: Create shares as (index, value)
-        // let shares_list: Vec<(usize, ShamirSecretSharing<Fr>)> =
-        //     shares.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-
         // Step 3: Corrupt up to t shares
         let _ = shares[2].clone()
             + RobustShamirShare {
@@ -562,10 +534,6 @@ mod tests {
         let secret = Fr::from(42u32);
         let ids: Vec<usize> = (0..n).collect();
         let shares = RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
-
-        // // Create shares as (index, value)
-        // let shares_list: Vec<(usize, ShamirSecretSharing<Fr>)> =
-        //     shares.iter().enumerate().map(|(i, &v)| (i, v)).collect();
 
         // Corrupt up to t shares
         let corruption_indices = [1, 4];

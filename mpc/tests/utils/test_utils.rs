@@ -2,13 +2,16 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use once_cell::sync::Lazy;
+use stoffelmpc_mpc::honeybadger::WrappedMessage;
 use std::{
     collections::HashMap, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec,
 };
+use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
-use stoffelmpc_mpc::common::SecretSharingScheme;
+use stoffelmpc_mpc::common::{SecretSharingScheme, RBC};
+use tracing::warn;
 
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{InitMessage, RanDouShaMessage};
+use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::InitMessage;
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaParams};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
 use stoffelmpc_network::NetworkError;
@@ -22,14 +25,10 @@ pub fn test_setup(
     n: usize,
     t: usize,
     session_id: usize,
-) -> (
-    RanDouShaParams,
-    Arc<Mutex<FakeNetwork>>,
-    Vec<Receiver<Vec<u8>>>,
-) {
+) -> (RanDouShaParams, Arc<FakeNetwork>, Vec<Receiver<Vec<u8>>>) {
     let config = FakeNetworkConfig::new(500);
     let (network, receivers) = FakeNetwork::new(n, config);
-    let network = Arc::new(Mutex::new(network));
+    let network = Arc::new(network);
     let params = RanDouShaParams {
         session_id,
         n_parties: n,
@@ -83,17 +82,19 @@ pub fn construct_e2e_input(
     return (secrets, n_shares_t, n_shares_2t);
 }
 
-pub fn initialize_node(node_id: usize) -> RanDouShaNode<Fr> {
+pub fn initialize_node(node_id: usize, n: usize, t: usize) -> RanDouShaNode<Fr> {
+    let rbc = Avid::new((node_id -1) as u32, n as u32, t as u32, (t as u32) + 1).unwrap();
     RanDouShaNode {
         id: node_id,
         store: Arc::new(Mutex::new(HashMap::new())),
+        rbc,
     }
 }
 
 /// Initializes all RanDouSha nodes and returns them wrapped in `Arc<Mutex<_>>`.
-pub fn create_nodes(n_parties: usize) -> Vec<Arc<Mutex<RanDouShaNode<Fr>>>> {
+pub fn create_nodes(n_parties: usize, t: usize) -> Vec<Arc<Mutex<RanDouShaNode<Fr>>>> {
     (1..=n_parties)
-        .map(|id| Arc::new(Mutex::new(initialize_node(id))))
+        .map(|id| Arc::new(Mutex::new(initialize_node(id, n_parties, t))))
         .collect()
 }
 
@@ -103,7 +104,7 @@ pub async fn initialize_all_nodes(
     n_shares_t: &[Vec<NonRobustShare<Fr>>],
     n_shares_2t: &[Vec<NonRobustShare<Fr>>],
     params: &RanDouShaParams,
-    network: Arc<Mutex<FakeNetwork>>,
+    network: Arc<FakeNetwork>,
 ) {
     assert!(nodes.len() == n_shares_t.len());
     assert!(nodes.len() == n_shares_2t.len());
@@ -146,7 +147,7 @@ pub fn spawn_receiver_tasks(
     nodes: Vec<Arc<Mutex<RanDouShaNode<Fr>>>>,
     mut receivers: Vec<Receiver<Vec<u8>>>,
     params: RanDouShaParams,
-    network: Arc<Mutex<FakeNetwork>>,
+    network: Arc<FakeNetwork>,
     fin_send: mpsc::Sender<(usize, (Vec<NonRobustShare<Fr>>, Vec<NonRobustShare<Fr>>))>,
     abort_counter: Option<Arc<AtomicUsize>>,
 ) -> JoinSet<()> {
@@ -154,64 +155,77 @@ pub fn spawn_receiver_tasks(
     for node in nodes {
         let randousha_node = Arc::clone(&node);
         let mut receiver = receivers.remove(0);
-        let network = Arc::clone(&network);
+        let net_clone = Arc::clone(&network);
         let fin_send = fin_send.clone();
-
-        // Keep track of aborts
         let abort_count = abort_counter.clone();
+        let params = params.clone();
 
-        // spawn tasks to process received messages
         set.spawn(async move {
-            loop {
-                let msg = match receiver.recv().await {
-                    Some(msg) => msg,
-                    None => break,
+            while let Some(msg_bytes) = receiver.recv().await {
+                // Attempt to deserialize into WrappedMessage
+                let wrapped: WrappedMessage = match bincode::deserialize(&msg_bytes) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        warn!("Malformed or unrecognized message format.");
+                        continue;
+                    }
                 };
-                let deserialized_msg: RanDouShaMessage = bincode::deserialize(&msg).unwrap();
-                let result = randousha_node
-                    .lock()
-                    .await
-                    .process(&deserialized_msg, &params, Arc::clone(&network))
-                    .await;
 
-                match result {
-                    Ok(Some(final_shares)) => {
-                        fin_send
-                            .send((randousha_node.lock().await.id, final_shares))
+                // Match the message type and route it appropriately
+                match &wrapped {
+                    WrappedMessage::RanDouSha(_) => {
+                        let result = randousha_node
+                            .lock()
                             .await
-                            .unwrap();
-                    }
-                    Ok(None) => continue,
-                    Err(RanDouShaError::Abort) => {
-                        println!("RanDouSha Aborted by node {}", node.lock().await.id);
-                        if let Some(counter) = abort_count {
-                            counter.fetch_add(1, Ordering::SeqCst);
-                        }
-                        break;
-                    }
-                    Err(RanDouShaError::WaitForOk) => {}
-                    Err(RanDouShaError::NetworkError(e)) => match e {
-                        NetworkError::SendError => {
-                            // we are allowing because Some parties will be dropped because of Abort
-                            eprintln!(
-                                "Party {} encountered SendError: {:?}",
-                                node.lock().await.id,
-                                e
-                            );
-                            continue;
-                        }
+                            .process(&wrapped, &params, Arc::clone(&net_clone))
+                            .await;
 
-                        _ => {
-                            panic!("{} Node encountered Error: {}", node.lock().await.id, e)
+                        match result {
+                            Ok(Some(final_shares)) => {
+                                let id = randousha_node.lock().await.id;
+                                fin_send.send((id, final_shares)).await.unwrap();
+                            }
+                            Ok(None) => {}
+                            Err(RanDouShaError::Abort) => {
+                                let id = randousha_node.lock().await.id;
+                                println!("RanDouSha aborted by node {id}");
+                                if let Some(c) = abort_count {
+                                    c.fetch_add(1, Ordering::SeqCst);
+                                }
+                                break;
+                            }
+                            Err(RanDouShaError::WaitForOk) => {}
+                            Err(RanDouShaError::NetworkError(NetworkError::SendError)) => {
+                                eprintln!(
+                                    "Party {} encountered SendError (ignored)",
+                                    randousha_node.lock().await.id
+                                );
+                            }
+                            Err(e) => {
+                                panic!(
+                                    "Node {} encountered unexpected error: {e}",
+                                    randousha_node.lock().await.id
+                                );
+                            }
                         }
-                    },
-                    Err(e) => {
-                        panic!("{} Node encountered Error: {}", node.lock().await.id, e)
                     }
+                    WrappedMessage::Rbc(_) => {
+                        if let Err(e) = randousha_node
+                            .lock()
+                            .await
+                            .rbc
+                            .process(msg_bytes, Arc::clone(&net_clone))
+                            .await
+                        {
+                            warn!("Rbc processing error: {e}");
+                        }
+                    }
+                    WrappedMessage::BatchRecon(_) => todo!(),
                 }
             }
         });
     }
+
     set
 }
 
