@@ -80,30 +80,24 @@ async fn generate_faulty_double_shares_e2e() {
     // extracting all the shares for degree t and 2t from each party
     // and recovering the secrets
     // and asserting that recovered secrets are equal
-    let shares_t: Vec<ShamirShare<Fr, 1, _>> = resulting_shares
-        .values()
-        .map(|shares| {
-            shares
-                .iter()
-                .map(|s| s.degree_t.clone())
-                .collect::<Vec<_>>()
-        })
-        .map(|mut v| v.remove(0))
-        .collect();
-    let shares_2t: Vec<ShamirShare<Fr, 1, _>> = resulting_shares
-        .values()
-        .map(|shares| {
-            shares
-                .iter()
-                .map(|s| s.degree_2t.clone())
-                .collect::<Vec<_>>()
-        })
-        .map(|mut v| v.remove(0))
-        .collect();
+    for i in 0..n_parties {
+        let shares_t: Vec<_> = resulting_shares
+            .values()
+            .map(|shares| shares[i].degree_t.clone())
+            .collect();
 
-    let secret_t = NonRobustShamirShare::recover_secret(&shares_t);
-    let secret_2t = NonRobustShamirShare::recover_secret(&shares_2t);
+        let shares_2t: Vec<_> = resulting_shares
+            .values()
+            .map(|shares| shares[i].degree_2t.clone())
+            .collect();
 
-    // Assert that the recovered secrets are equal
-    assert_eq!(secret_t.unwrap().1, secret_2t.unwrap().1);
+        let secret_t = NonRobustShamirShare::recover_secret(&shares_t);
+        let secret_2t = NonRobustShamirShare::recover_secret(&shares_2t);
+
+        assert_eq!(
+            secret_t.unwrap().1,
+            secret_2t.unwrap().1,
+            "Mismatch for secret {i}"
+        );
+    }
 }
