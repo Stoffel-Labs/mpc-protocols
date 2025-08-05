@@ -3,13 +3,16 @@ pub mod utils;
 mod tests {
     use rand::Rng;
     use std::{collections::HashMap, sync::Arc, time::Duration};
-    use stoffelmpc_mpc::common::{
-        rbc::{
-            rbc::{Avid, Bracha, Dealer, ABA},
-            rbc_store::{AbaStore, GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAvid},
-            utils::set_value_round,
+    use stoffelmpc_mpc::{
+        common::{
+            rbc::{
+                rbc::{Avid, Bracha, Dealer, ABA},
+                rbc_store::{AbaStore, GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAvid},
+                utils::set_value_round,
+            },
+            RBC,
         },
-        RBC,
+        honeybadger::{ProtocolType, SessionId},
     };
     use stoffelmpc_network::fake_network::FakeNetwork;
     use tokio::sync::Mutex;
@@ -26,7 +29,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let payload = b"Hello, MPC!".to_vec();
-        let session_id = 12;
+        let session_id = SessionId::new(ProtocolType::Rbc, 12);
 
         let (parties, net, receivers) =
             setup_network_and_parties::<Bracha, FakeNetwork>(n, t, t + 1, 500)
@@ -69,7 +72,11 @@ mod tests {
 
         let n = 4;
         let t = 1;
-        let session_ids = vec![101, 202, 303];
+        let session_ids = vec![
+            SessionId::new(ProtocolType::Rbc, 101),
+            SessionId::new(ProtocolType::Rbc, 102),
+            SessionId::new(ProtocolType::Rbc, 103),
+        ];
         let payloads = vec![
             b"Payload A".to_vec(),
             b"Payload B".to_vec(),
@@ -99,12 +106,14 @@ mod tests {
                 assert!(
                     s.ended,
                     "Session {} not completed at party {}",
-                    sid, bracha.id
+                    sid.as_u64(),
+                    bracha.id
                 );
                 assert_eq!(
-                    &s.output, &payloads[i],
+                    &s.output,
+                    &payloads[i],
                     "Incorrect payload for session {}",
-                    sid
+                    sid.as_u64()
                 );
             }
         }
@@ -115,7 +124,12 @@ mod tests {
 
         let n = 4;
         let t = 1;
-        let session_ids = vec![10, 20, 30, 40];
+        let session_ids = vec![
+            SessionId::new(ProtocolType::Rbc, 10),
+            SessionId::new(ProtocolType::Rbc, 20),
+            SessionId::new(ProtocolType::Rbc, 30),
+            SessionId::new(ProtocolType::Rbc, 40),
+        ];
         let payloads = vec![
             b"From Party 0".to_vec(),
             b"From Party 1".to_vec(),
@@ -146,12 +160,15 @@ mod tests {
                 assert!(
                     s.ended,
                     "Session {} not completed at party {}",
-                    session_id, bracha.id
+                    session_id.as_u64(),
+                    bracha.id
                 );
                 assert_eq!(
-                    &s.output, &payloads[i],
+                    &s.output,
+                    &payloads[i],
                     "Incorrect output at party {} for session {}",
-                    bracha.id, session_id
+                    bracha.id,
+                    session_id.as_u64()
                 );
             }
         }
@@ -162,7 +179,7 @@ mod tests {
 
         let n = 4;
         let t = 1;
-        let session_id = 11;
+        let session_id = SessionId::new(ProtocolType::Rbc, 11);
         let payload = b"out-of-order".to_vec();
 
         let (parties, net, receivers) =
@@ -175,8 +192,8 @@ mod tests {
         let sender_id = 1;
         let ready_msg = Msg::new(
             sender_id,
-            0,
             session_id,
+            0,
             payload.clone(),
             vec![],
             GenericMsgType::Bracha(MsgType::Ready),
@@ -228,7 +245,13 @@ mod tests {
         }
     }
 
-    async fn run_avid_rbc_test(n: usize, t: usize, k: usize, session_id: usize, payload: Vec<u8>) {
+    async fn run_avid_rbc_test(
+        n: usize,
+        t: usize,
+        k: usize,
+        session_id: SessionId,
+        payload: Vec<u8>,
+    ) {
         println!("Running Avid RBC with n={}, t={}, k={}", n, t, k);
 
         let (parties, net, receivers) =
@@ -284,7 +307,14 @@ mod tests {
         ];
 
         for (_, &(n, t, k)) in test_cases.iter().enumerate() {
-            run_avid_rbc_test(n, t, k, 100, payload.clone()).await;
+            run_avid_rbc_test(
+                n,
+                t,
+                k,
+                SessionId::new(ProtocolType::Rbc, 100),
+                payload.clone(),
+            )
+            .await;
         }
     }
 
@@ -295,7 +325,12 @@ mod tests {
         let n = 4;
         let t = 1;
 
-        let session_ids = vec![10, 20, 30, 40];
+        let session_ids = vec![
+            SessionId::new(ProtocolType::Rbc, 10),
+            SessionId::new(ProtocolType::Rbc, 20),
+            SessionId::new(ProtocolType::Rbc, 30),
+            SessionId::new(ProtocolType::Rbc, 40),
+        ];
         let payloads = vec![
             b"From Party 0".to_vec(),
             b"From Party 1".to_vec(),
@@ -326,12 +361,15 @@ mod tests {
                 assert!(
                     s.ended,
                     "Session {} not completed at party {}",
-                    session_id, avid.id
+                    session_id.as_u64(),
+                    avid.id
                 );
                 assert_eq!(
-                    &s.output, &payloads[i],
+                    &s.output,
+                    &payloads[i],
                     "Incorrect output at party {} for session {}",
-                    avid.id, session_id
+                    avid.id,
+                    session_id.as_u64()
                 );
             }
         }
@@ -343,7 +381,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = 2;
-        let session_id = 11;
+        let session_id = SessionId::new(ProtocolType::Rbc, 11);
         let payload = b"out-of-order".to_vec();
 
         let (parties, net, receivers) =
@@ -413,7 +451,7 @@ mod tests {
         let n = 7;
         let t = 2;
         let payload = b"crash fault test".to_vec();
-        let session_id = 2025;
+        let session_id = SessionId::new(ProtocolType::Rbc, 2025);
 
         let (parties, net, receivers) =
             setup_network_and_parties::<Bracha, FakeNetwork>(n, t, t + 1, 500)
@@ -456,7 +494,7 @@ mod tests {
         n: usize,
         t: usize,
         k: usize,
-        session_id: usize,
+        session_id: SessionId,
         payload: Vec<u8>,
     ) {
         println!(
@@ -520,7 +558,14 @@ mod tests {
 
         for (i, &(n, t, k)) in test_cases.iter().enumerate() {
             println!("--- Test case {} ---", i + 1);
-            test_avid_rbc_with_faulty_nodes(n, t, k, 100 + i, payload.clone()).await;
+            test_avid_rbc_with_faulty_nodes(
+                n,
+                t,
+                k,
+                SessionId::new(ProtocolType::Rbc, 100 + i as u64),
+                payload.clone(),
+            )
+            .await;
         }
     }
 
@@ -531,7 +576,8 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_id = 99;
+        let session_id = SessionId::new(ProtocolType::Rbc, 99);
+
         let round_id = 0;
 
         let (parties, net, receivers) = setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 500)
@@ -611,7 +657,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_id = 42;
+        let session_id = SessionId::new(ProtocolType::Rbc, 42);
         let round_id = 0;
 
         let (parties, net, receivers) =
@@ -716,8 +762,12 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_ids: Vec<usize> = vec![100, 101, 102, 103]; // One session per party
-
+        let session_ids = vec![
+            SessionId::new(ProtocolType::Rbc, 100),
+            SessionId::new(ProtocolType::Rbc, 101),
+            SessionId::new(ProtocolType::Rbc, 102),
+            SessionId::new(ProtocolType::Rbc, 103),
+        ];
         let (parties, net, receivers) =
             setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 1000)
                 .await
@@ -728,7 +778,7 @@ mod tests {
         let dealer = Dealer::new(n, t);
         let key_dist_msg = Msg::new(
             0,
-            0,
+            SessionId::new(ProtocolType::Rbc, 0),
             0,
             vec![],
             vec![],
@@ -757,7 +807,7 @@ mod tests {
         use std::collections::HashMap;
         let timeout_duration = Duration::from_secs(50);
         let poll_interval = Duration::from_millis(50);
-        let mut all_results: HashMap<usize, HashMap<usize, Arc<Mutex<AbaStore>>>> = HashMap::new();
+        let mut all_results: HashMap<SessionId, HashMap<usize, Arc<Mutex<AbaStore>>>> = HashMap::new();
 
         let result = timeout(timeout_duration, async {
             loop {
@@ -820,14 +870,14 @@ mod tests {
                     Some(expected) => assert_eq!(
                         output, expected,
                         "Mismatch in ABA output at party {} for session {}",
-                        aba.id, session_id
+                        aba.id, session_id.as_u64()
                     ),
                 }
             }
 
             println!(
                 "✅ Session {}: All parties agreed on value: {}",
-                session_id,
+                session_id.as_u64(),
                 agreed_value.unwrap()
             );
         }

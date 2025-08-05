@@ -4,14 +4,15 @@ use ark_ff::FftField;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use stoffelmpc_network::Network;
+use tracing::warn;
 
 use crate::{
-    common::{
-        rbc::rbc_store::Msg,
-        MPCNode, RBC,
-    },
+    common::{rbc::rbc_store::Msg, MPCNode, RBC},
     honeybadger::{
-        batch_recon::BatchReconMsg, input::InputMessage, ran_dou_sha::{messages::RanDouShaMessage, RanDouShaNode}, share_gen::RanShaMessage
+        batch_recon::BatchReconMsg,
+        input::{input::InputServer, InputMessage},
+        ran_dou_sha::{messages::RanDouShaMessage, RanDouShaNode},
+        share_gen::{share_gen::RanShaNode, RanShaMessage},
     },
 };
 
@@ -25,11 +26,11 @@ pub mod robust_interpolate;
 /// Application to Anonymous Communication".
 pub mod batch_recon;
 
+pub mod input;
 /// This module contains the implementation of the Batch Reconstruction protocol presented in
 /// Figure 3 in the paper "HoneyBadgerMPC and AsynchroMix: Practical AsynchronousMPC and its
 /// Application to Anonymous Communication".
 pub mod ran_dou_sha;
-pub mod input;
 pub mod share_gen;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -38,7 +39,7 @@ pub enum WrappedMessage {
     Rbc(Msg),
     BatchRecon(BatchReconMsg),
     Input(InputMessage),
-    RanSha(RanShaMessage)
+    RanSha(RanShaMessage),
 }
 #[derive(Clone)]
 pub struct Node<F: FftField, R: RBC> {
@@ -46,16 +47,16 @@ pub struct Node<F: FftField, R: RBC> {
     pub n: usize,
     pub t: usize,
     pub preprocessing: PreprocessingEngine<F, R>,
-    //pub input: Input<F>,
     //pub operation: Operations<F>,
     //pub output: Output<F>,
 }
 #[derive(Clone)]
 pub struct PreprocessingEngine<F: FftField, R: RBC> {
-    //pub share_gen: ShareGenerator<F>,
+    pub share_gen: RanShaNode<F, R>,
     //pub double_share_gen: DoubleShareGenerator<F>,
     pub randousha: RanDouShaNode<F, R>,
     //pub beaver: BeaverTripleGen<F>,
+    pub input: InputServer<F, R>,
 }
 
 // pub struct Operations<F: FftField> {
@@ -84,7 +85,13 @@ where
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Create RanDouShaNode
         let randousha = RanDouShaNode::new(id, n, t, k)?;
-        let preprocessing = PreprocessingEngine { randousha };
+        let share_gen = RanShaNode::new(id, n, t, k)?;
+        let input = InputServer::new(id, n, t)?;
+        let preprocessing = PreprocessingEngine {
+            share_gen,
+            randousha,
+            input,
+        };
 
         Ok(Self {
             id,
@@ -106,22 +113,43 @@ where
             .map_err(|e| format!("Failed to deserialize WrappedMessage: {e}"))?;
 
         match wrapped {
-            WrappedMessage::Rbc(rbc_msg) => {
-                self.preprocessing
-                    .randousha
-                    .rbc
-                    .process(rbc_msg, net)
-                    .await?;
-            }
+            WrappedMessage::Rbc(rbc_msg) => match rbc_msg.session_id.protocol() {
+                Some(ProtocolType::Randousha) => {
+                    self.preprocessing
+                        .randousha
+                        .rbc
+                        .process(rbc_msg, net)
+                        .await?
+                }
+                Some(ProtocolType::Ransha) => {
+                    self.preprocessing
+                        .share_gen
+                        .rbc
+                        .process(rbc_msg, net)
+                        .await?
+                }
+                Some(ProtocolType::Input) => {
+                    self.preprocessing.input.rbc.process(rbc_msg, net).await?
+                }
+                Some(ProtocolType::Rbc) => {
+                    todo!()
+                }
+                None => {
+                    warn!(
+                        "Unknown protocol ID in session ID: {:?}",
+                        rbc_msg.session_id
+                    );
+                }
+            },
 
             WrappedMessage::BatchRecon(_) => {
                 todo!()
             }
-            WrappedMessage::Input(_) => {
-                todo!()
+            WrappedMessage::Input(input) => {
+                self.preprocessing.input.process(input).await?;
             }
-            WrappedMessage::RanSha(_)=>{
-                todo!()
+            WrappedMessage::RanSha(rs_msg) => {
+                self.preprocessing.share_gen.process(rs_msg, net).await?;
             }
             WrappedMessage::RanDouSha(rds_msg) => {
                 self.preprocessing.randousha.process(rds_msg, net).await?;
@@ -129,5 +157,53 @@ where
         }
 
         Ok(())
+    }
+}
+
+///-----------------Session-ID-----------------
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProtocolType {
+    Randousha = 1,
+    Ransha = 2,
+    Input = 3,
+    Rbc = 4,
+}
+
+impl TryFrom<u16> for ProtocolType {
+    type Error = ();
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(ProtocolType::Randousha),
+            2 => Ok(ProtocolType::Ransha),
+            3 => Ok(ProtocolType::Input),
+            4 => Ok(ProtocolType::Rbc),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Hash)]
+pub struct SessionId(u64);
+
+impl SessionId {
+    pub fn new(protocol: ProtocolType, context_id: u64) -> Self {
+        // upper 16 bits = protocol, lower 48 bits = context id
+        let value = ((protocol as u64) << 48) | (context_id & 0x0000_FFFF_FFFF_FFFF);
+        SessionId(value)
+    }
+
+    pub fn protocol(self) -> Option<ProtocolType> {
+        let proto = ((self.0 >> 48) & 0xFFFF) as u16;
+        ProtocolType::try_from(proto).ok()
+    }
+
+    pub fn context_id(self) -> u64 {
+        self.0 & 0x0000_FFFF_FFFF_FFFF
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.0
     }
 }

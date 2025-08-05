@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use futures::future::join_all;
+use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
-use crate::{Network, NetworkError, Node, PartyId};
+use crate::{ClientId, Network, NetworkError, Node, PartyId};
 
 /// Simulates a network for testing purposes. The channels for the network are simulated as `tokio`
 /// channels.
@@ -13,11 +14,21 @@ pub struct FakeNetwork {
     config: FakeNetworkConfig,
     /// Fake nodes connected to the network
     nodes: Vec<FakeNode>,
+    /// Channels to send messages to clients.
+    client_channels: HashMap<ClientId, Sender<Vec<u8>>>,
 }
 
 impl FakeNetwork {
     /// Creates a new fake network for testing using the given number of nodes and configuration.
-    pub fn new(n_nodes: usize, config: FakeNetworkConfig) -> (Self, Vec<Receiver<Vec<u8>>>) {
+    pub fn new(
+        n_nodes: usize,
+        n_clients: Option<Vec<ClientId>>,
+        config: FakeNetworkConfig,
+    ) -> (
+        Self,
+        Vec<Receiver<Vec<u8>>>,
+        HashMap<ClientId, Receiver<Vec<u8>>>,
+    ) {
         let mut node_channels = Vec::new();
         let mut nodes = Vec::new();
         let mut receivers = Vec::new();
@@ -27,13 +38,26 @@ impl FakeNetwork {
             nodes.push(FakeNode::new(id));
             receivers.push(receiver);
         }
+        let mut client_channels = HashMap::new();
+        let mut client_receivers = HashMap::new();
+
+        if let Some(clients) = n_clients {
+            for id in clients {
+                let (client_tx, client_rx) = mpsc::channel(config.channel_buff_size);
+                client_channels.insert(id, client_tx);
+                client_receivers.insert(id, client_rx);
+            }
+        }
+
         (
             Self {
                 node_channels,
                 config,
                 nodes,
+                client_channels: client_channels.clone(),
             },
             receivers,
+            client_receivers,
         )
     }
 }
@@ -91,6 +115,32 @@ impl Network for FakeNetwork {
     fn config(&self) -> &Self::NetworkConfig {
         &self.config
     }
+
+    // --- New client communication methods ---
+
+    async fn send_to_client(
+        &self,
+        client: ClientId,
+        message: &[u8],
+    ) -> Result<usize, NetworkError> {
+        if let Some(sender) = self.client_channels.get(&client) {
+            sender
+                .send(message.to_vec())
+                .await
+                .map_err(|_| NetworkError::SendError)?;
+            Ok(message.len())
+        } else {
+            Err(NetworkError::ClientNotFound(client))
+        }
+    }
+
+    fn clients(&self) -> Vec<ClientId> {
+        self.client_channels.keys().copied().collect()
+    }
+
+    fn is_client_connected(&self, client: ClientId) -> bool {
+        self.client_channels.contains_key(&client)
+    }
 }
 
 /// Represents a node in the FakeNetwork.
@@ -147,7 +197,7 @@ mod tests {
     async fn test_fake_network_new() {
         let n_nodes = 5;
         let config = FakeNetworkConfig::new(100);
-        let (network, _) = FakeNetwork::new(n_nodes, config);
+        let (network, _, _) = FakeNetwork::new(n_nodes, None, config);
 
         let channels = network.node_channels.clone();
 
@@ -165,7 +215,7 @@ mod tests {
     async fn test_fake_network_send_and_receive() {
         let n_nodes = 3;
         let config = FakeNetworkConfig::new(100);
-        let (network, mut receivers) = FakeNetwork::new(n_nodes, config);
+        let (network, mut receivers, _) = FakeNetwork::new(n_nodes, None, config);
 
         let sender_id = 1;
         let recipient_id = 2;
@@ -197,7 +247,7 @@ mod tests {
     async fn test_fake_network_broadcast() {
         let n_nodes = 3;
         let config = FakeNetworkConfig::new(100);
-        let (network, mut receivers) = FakeNetwork::new(n_nodes, config);
+        let (network, mut receivers, _) = FakeNetwork::new(n_nodes, None, config);
         let network = Arc::new(Mutex::new(network));
 
         let message = b"broadcast";
@@ -234,7 +284,7 @@ mod tests {
     async fn test_network_error_on_send_failure() {
         let n_nodes = 2;
         let config = FakeNetworkConfig::new(100);
-        let (mut network, _) = FakeNetwork::new(n_nodes, config);
+        let (mut network, _, _) = FakeNetwork::new(n_nodes, None, config);
 
         let recipient_id = 1;
         let message = b"test";

@@ -117,7 +117,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let config = FakeNetworkConfig::new(100);
-        let (network, mut receivers) = FakeNetwork::new(n, config);
+        let (network, mut receivers, _) = FakeNetwork::new(n, None, config);
         let net = Arc::new(network);
 
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(6u64)];

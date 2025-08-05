@@ -19,7 +19,7 @@ use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
     RanDouShaMessage, RanDouShaMessageType, RanDouShaPayload, ReconstructionMessage,
 };
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
-use stoffelmpc_mpc::honeybadger::WrappedMessage;
+use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use tokio::sync::mpsc::{self};
 use tokio::task::JoinSet;
 use tracing::warn;
@@ -30,10 +30,10 @@ async fn test_init_reconstruct_flow() {
 
     let n_parties = 10;
     let threshold = 3;
-    let session_id = 1111;
+    let session_id = SessionId::new(ProtocolType::Randousha, 1111);
     let degree_t = 3;
 
-    let (network, mut receivers) = test_setup(n_parties);
+    let (network, mut receivers, _) = test_setup(n_parties, vec![]);
     let (_, shares_si_t, shares_si_2t) = construct_e2e_input(n_parties, degree_t);
 
     let sender_id = 0;
@@ -110,10 +110,10 @@ async fn test_reconstruct_handler() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = 1111;
+    let session_id = SessionId::new(ProtocolType::Randousha, 1111);
     let degree_t = 3;
 
-    let (network, mut receivers) = test_setup(n_parties);
+    let (network, mut receivers, _) = test_setup(n_parties, vec![]);
     let (_, shares_ri_t, shares_ri_2t) = get_reconstruct_input(n_parties, degree_t);
 
     // initialize RanDouShaNode
@@ -200,9 +200,9 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = 1111;
+    let session_id = SessionId::new(ProtocolType::Randousha, 1111);
 
-    let (network, mut receivers) = test_setup(n_parties);
+    let (network, mut receivers, _) = test_setup(n_parties, vec![]);
     let secret = Fr::from(1234);
     let secret_2t = Fr::from(4321);
     let degree_t = 3;
@@ -304,10 +304,10 @@ async fn test_output_handler() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = 1111;
+    let session_id = SessionId::new(ProtocolType::Randousha, 1111);
     let degree_t = 3;
 
-    let (network, _receivers) = test_setup(n_parties);
+    let (network, _receivers, _) = test_setup(n_parties, vec![]);
     let (_, shares_si_t, shares_si_2t) = construct_e2e_input(n_parties, degree_t);
     let receiver_id = 1;
 
@@ -399,10 +399,10 @@ async fn randousha_e2e() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = 1111;
+    let session_id = SessionId::new(ProtocolType::Randousha, 1111);
     let degree_t = 3;
 
-    let (network, receivers) = test_setup(n_parties);
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
     let (_, n_shares_t, n_shares_2t) = construct_e2e_input(n_parties, degree_t);
 
     // create randousha nodes
@@ -462,10 +462,10 @@ async fn test_e2e_reconstruct_mismatch() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = 1111;
+    let session_id = SessionId::new(ProtocolType::Randousha, 1111);
     let degree_t = 3;
 
-    let (network, receivers) = test_setup(n_parties);
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
     let (_, mut n_shares_t, n_shares_2t) = construct_e2e_input(n_parties, degree_t);
 
     // lets corrupt the shares of party 1 so that the shares reconstruct different values
@@ -523,11 +523,11 @@ async fn test_e2e_wrong_degree() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = 1111;
+    let session_id = SessionId::new(ProtocolType::Randousha, 1111);
     let degree_t = 3;
 
     // Generate the network and parameters.
-    let (network, receivers) = test_setup(n_parties);
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
     let (secrets, mut n_shares_t, n_shares_2t) = construct_e2e_input(n_parties, degree_t);
 
     // Modify the shares to obtain a sharing of different degree.

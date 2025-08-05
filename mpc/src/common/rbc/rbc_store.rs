@@ -5,12 +5,13 @@ use std::fmt;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+use crate::honeybadger::SessionId;
 /// Generic message type used in Reliable Broadcast (RBC) communication.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Msg {
-    pub sender_id: usize,           // ID of the sender node
-    pub session_id: usize,          // Unique session ID for each broadcast instance
-    pub round_id: usize,            //Round ID
+    pub sender_id: usize,         // ID of the sender node
+    pub session_id: SessionId,    // Unique session ID for each broadcast instance
+    pub round_id: usize,          //Round ID
     pub payload: Vec<u8>, // Actual data being broadcasted (e.g., bytes of a secret or message)
     pub metadata: Vec<u8>, // info related to the message shared
     pub msg_type: GenericMsgType, // Type of message like INIT, ECHO, or READY
@@ -25,7 +26,7 @@ impl Msg {
     /// Constructor to create a new message.
     pub fn new(
         sender_id: usize,
-        session_id: usize,
+        session_id: SessionId,
         round_id: usize,
         payload: Vec<u8>,
         metadata: Vec<u8>,
@@ -91,10 +92,10 @@ pub struct BrachaStore {
     pub ready_senders: HashMap<usize, bool>, // Which parties sent READY (sender_id -> true)
     pub echo_count: HashMap<Vec<u8>, usize>, // Count of ECHO messages per payload
     pub ready_count: HashMap<Vec<u8>, usize>, // Count of READY messages per payload
-    pub ended: bool,                      // True if consensus is reached and protocol ended
-    pub echo: bool,                       // True if this party already sent an ECHO
-    pub ready: bool,                      // True if this party already sent a READY
-    pub output: Vec<u8>,                  // Agreed value after consensus
+    pub ended: bool,                        // True if consensus is reached and protocol ended
+    pub echo: bool,                         // True if this party already sent an ECHO
+    pub ready: bool,                        // True if this party already sent a READY
+    pub output: Vec<u8>,                    // Agreed value after consensus
 }
 
 impl BrachaStore {
@@ -203,9 +204,9 @@ pub struct AvidStore {
     pub ready_senders: HashMap<usize, bool>, // Which parties sent READY (sender_id -> true)
     pub echo_count: HashMap<Vec<u8>, usize>, // Count of ECHO messages per root
     pub ready_count: HashMap<Vec<u8>, usize>, // Count of READY messages per root
-    pub ended: bool,                      // True if consensus is reached and protocol ended
-    pub echo: bool,                       // True if this party already sent an ECHO
-    pub output: Vec<u8>,                  // Agreed value after consensus
+    pub ended: bool,                        // True if consensus is reached and protocol ended
+    pub echo: bool,                         // True if this party already sent an ECHO
+    pub output: Vec<u8>,                    // Agreed value after consensus
 }
 impl AvidStore {
     /// Initializes an empty session store.
@@ -319,13 +320,13 @@ pub struct AbaStore {
     //  roundid => Sender => [bool,bool], to check if a sender has sent an aux value either 0 or 1
     pub aux_senders: HashMap<usize, HashMap<usize, [bool; 2]>>,
     pub est_count: HashMap<usize, [usize; 2]>, // roundid => est value count[0 count ,1 count]
-    pub est: HashMap<usize, [bool; 2]>,      // roundid => [sent 0 value , sent 1 value]
-    pub aux: HashMap<usize, [bool; 2]>,      // roundid => aux value
+    pub est: HashMap<usize, [bool; 2]>,        // roundid => [sent 0 value , sent 1 value]
+    pub aux: HashMap<usize, [bool; 2]>,        // roundid => aux value
     // roundid => Sender => [bool,bool] , set of values shared by sender
     pub values: HashMap<usize, HashMap<usize, HashSet<bool>>>,
     pub bin_values: HashMap<usize, HashSet<bool>>, // roundid => {bool}
-    pub ended: bool,                             //ABA session ended or not
-    pub output: bool,                            // Agreed value after consensus
+    pub ended: bool,                               //ABA session ended or not
+    pub output: bool,                              // Agreed value after consensus
     pub notify: Arc<Notify>,
 }
 
@@ -467,7 +468,7 @@ pub struct CoinStore {
     pub sign_senders: HashMap<usize, HashMap<usize, bool>>, //roundid => Sender => bool, check if signature shares were sent
     pub sign_count: HashMap<usize, usize>,                  // roundid => signature share count
     pub sign_shares: HashMap<usize, HashMap<usize, Vec<u8>>>, // roundid => sender_id => Signature share
-    pub coins: HashMap<usize, bool>,                      //roundid => Coin
+    pub coins: HashMap<usize, bool>,                          //roundid => Coin
     pub start: HashMap<usize, bool>, //roundid => yes or no , checks if common coin has been initiated yet
     pub notifiers: HashMap<usize, Arc<Notify>>, // round_id => Notify ,Checks if common coin is ready to be used
 }
@@ -553,24 +554,24 @@ impl fmt::Display for MsgTypeAcs {
 }
 #[derive(Default, Clone)]
 pub struct AcsStore {
-    pub aba_input: HashMap<usize, bool>,     //Session id => aba input
-    pub aba_output: HashMap<usize, bool>,    //Session id => aba output
-    pub rbc_output: HashMap<usize, Vec<u8>>, //Session id => rbc output
+    pub aba_input: HashMap<u64, bool>,     //Session id => aba input
+    pub aba_output: HashMap<u64, bool>,    //Session id => aba output
+    pub rbc_output: HashMap<u64, Vec<u8>>, //Session id => rbc output
     pub ended: bool,
     pub commonsubset: Vec<Vec<u8>>,
 }
 
 impl AcsStore {
     /// Checks if ABA input is stored for the given session ID.
-    pub fn has_aba_input(&self, session_id: usize) -> bool {
+    pub fn has_aba_input(&self, session_id: u64) -> bool {
         self.aba_input.contains_key(&session_id)
     }
     /// Sets the ABA input for a given session ID.
-    pub fn set_aba_input(&mut self, session_id: usize, value: bool) {
+    pub fn set_aba_input(&mut self, session_id: u64, value: bool) {
         self.aba_input.insert(session_id, value);
     }
     /// Sets the ABA output for a given session ID.
-    pub fn set_aba_output(&mut self, session_id: usize, value: bool) {
+    pub fn set_aba_output(&mut self, session_id: u64, value: bool) {
         self.aba_output.insert(session_id, value);
     }
     /// Get the ABA output 1 count
@@ -578,15 +579,15 @@ impl AcsStore {
         self.aba_output.iter().filter(|&(_, &val)| val).count()
     }
     /// Checks if RBC output is stored for the given session ID.
-    pub fn has_rbc_output(&self, session_id: usize) -> bool {
+    pub fn has_rbc_output(&self, session_id: u64) -> bool {
         self.rbc_output.contains_key(&session_id)
     }
     /// Sets the RBC output for a given session ID.
-    pub fn set_rbc_output(&mut self, session_id: usize, output: Vec<u8>) {
+    pub fn set_rbc_output(&mut self, session_id: u64, output: Vec<u8>) {
         self.rbc_output.insert(session_id, output);
     }
     /// Get the RBC output for a given session ID.
-    pub fn get_rbc_output(&mut self, session_id: usize) -> Option<&Vec<u8>> {
+    pub fn get_rbc_output(&mut self, session_id: u64) -> Option<&Vec<u8>> {
         self.rbc_output.get(&session_id)
     }
 

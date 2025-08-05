@@ -30,7 +30,7 @@ pub enum RbcError {
     InvalidThreshold(usize, usize),
 
     #[error("Session {0} already ended")]
-    SessionEnded(usize),
+    SessionEnded(u64),
 
     #[error("Unknown Bracha message type: {0}")]
     UnknownMsgType(String),

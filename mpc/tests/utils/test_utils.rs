@@ -2,6 +2,7 @@ use ark_bls12_381::Fr;
 use ark_ff::{FftField, UniformRand};
 use ark_std::test_rng;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
@@ -9,12 +10,13 @@ use stoffelmpc_mpc::common::rbc::RbcError;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
 use stoffelmpc_mpc::common::{MPCNode, SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShamirShare;
-use stoffelmpc_mpc::honeybadger::{Node, WrappedMessage};
+use stoffelmpc_mpc::honeybadger::share_gen::RanShaError;
+use stoffelmpc_mpc::honeybadger::{Node, SessionId, WrappedMessage};
 use tracing::warn;
 
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-use stoffelmpc_network::{Network, NetworkError, SessionId};
+use stoffelmpc_network::{ClientId, Network, NetworkError};
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -45,7 +47,7 @@ pub async fn setup_network_and_parties<T: RBC, N: Network>(
     buffer_size: usize,
 ) -> Result<(Vec<T>, Arc<FakeNetwork>, Vec<mpsc::Receiver<Vec<u8>>>), RbcError> {
     let config = FakeNetworkConfig::new(buffer_size);
-    let (network, receivers) = FakeNetwork::new(n as usize, config);
+    let (network, receivers, _) = FakeNetwork::new(n as usize, None, config);
     let net = Arc::new(network);
 
     let mut parties = Vec::with_capacity(n as usize);
@@ -93,11 +95,18 @@ pub async fn spawn_parties<T, N>(
 
 //--------------------------RANDOUSHA--------------------------
 
-pub fn test_setup(n: usize) -> (Arc<FakeNetwork>, Vec<Receiver<Vec<u8>>>) {
+pub fn test_setup(
+    n: usize,
+    clientid: Vec<ClientId>,
+) -> (
+    Arc<FakeNetwork>,
+    Vec<Receiver<Vec<u8>>>,
+    HashMap<usize, Receiver<Vec<u8>>>,
+) {
     let config = FakeNetworkConfig::new(500);
-    let (network, receivers) = FakeNetwork::new(n, config);
+    let (network, receivers, client_recv) = FakeNetwork::new(n, Some(clientid), config);
     let network = Arc::new(network);
-    (network, receivers)
+    (network, receivers, client_recv)
 }
 
 pub fn get_reconstruct_input(
@@ -395,6 +404,49 @@ pub async fn initialize_global_nodes_randousha<F, R, N>(
             Ok(()) => (),
             Err(e) => {
                 if let RanDouShaError::NetworkError(NetworkError::SendError) = e {
+                    // allow for SendError because of Abort
+                    eprintln!(
+                        "Test: Init handler for node {} got expected SendError: {:?}",
+                        node_id, e
+                    );
+                } else {
+                    panic!(
+                        "Test: Unexpected error during init_handler for node {}: {:?}",
+                        node_id, e
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Initializes all global nodes with their respective shares for ransha.
+pub async fn initialize_global_nodes_ransha<F, R, N>(
+    nodes: Vec<Node<F, R>>,
+    n_shares_t: &[Vec<NonRobustShare<F>>],
+    session_id: SessionId,
+    network: Arc<N>,
+) where
+    F: FftField,
+    R: RBC + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    assert!(nodes.len() == n_shares_t.len());
+
+    for node in nodes {
+        let mut node_rds = node.preprocessing.share_gen;
+        let node_id = node_rds.id;
+        match node_rds
+            .init(
+                n_shares_t[node_id].clone(),
+                session_id,
+                Arc::clone(&network),
+            )
+            .await
+        {
+            Ok(()) => (),
+            Err(e) => {
+                if let RanShaError::NetworkError(NetworkError::SendError) = e {
                     // allow for SendError because of Abort
                     eprintln!(
                         "Test: Init handler for node {} got expected SendError: {:?}",

@@ -7,8 +7,7 @@ use crate::{
         SecretSharingScheme, RBC,
     },
     honeybadger::{
-        ran_dou_sha::messages::RanDouShaPayload, robust_interpolate::InterpolateError,
-        WrappedMessage,
+        ran_dou_sha::messages::RanDouShaPayload, robust_interpolate::InterpolateError, ProtocolType, SessionId, WrappedMessage
     },
 };
 use ark_ff::FftField;
@@ -20,7 +19,7 @@ use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use stoffelmpc_network::{Network, NetworkError, PartyId, SessionId};
+use stoffelmpc_network::{Network, NetworkError, PartyId};
 use tracing::info;
 
 /// Error that occurs during the execution of the Random Double Share Error.
@@ -164,7 +163,7 @@ where
         &mut self,
         shares_deg_t: Vec<NonRobustShare<F>>,
         shares_deg_2t: Vec<NonRobustShare<F>>,
-        session_id: usize,
+        session_id: SessionId,
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
@@ -172,7 +171,8 @@ where
     {
         info!(
             "Node {} (session {}) - Starting init_handler.",
-            self.id, session_id
+            self.id,
+            session_id.as_u64()
         );
         // todo - should check sender.id == self?
         let vandermonde_matrix = make_vandermonde(self.n_parties, self.n_parties - 1)?;
@@ -240,7 +240,9 @@ where
     {
         info!(
             "Node {} (session {}) - Starting reconstruction_handler for message from sender {}.",
-            self.id, msg.session_id, msg.sender_id
+            self.id,
+            msg.session_id.as_u64(),
+            msg.sender_id
         );
         let payload = match msg.payload {
             RanDouShaPayload::Reconstruct(p) => p,
@@ -312,10 +314,14 @@ where
                     bincode::serialize(&wrapped).map_err(RanDouShaError::SerializationError)?;
 
                 // if the verification succeeds, broadcast true (aka. OK)
+                let sessionid = SessionId::new(
+                    ProtocolType::Randousha,
+                    msg.session_id.as_u64() + self.id as u64,
+                );
                 self.rbc
                     .init(
                         bytes_wrapped,
-                        msg.session_id + self.id, // A unique session id per node
+                        sessionid, // A unique session id per node
                         Arc::clone(&network),
                     )
                     .await
@@ -338,7 +344,7 @@ where
             RanDouShaPayload::Reconstruct(_) => return Err(RanDouShaError::Abort),
             RanDouShaPayload::Output(ok) => ok,
         };
-        info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, msg.session_id, msg.sender_id, output);
+        info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, msg.session_id.as_u64(), msg.sender_id, output);
         // todo - add randousha status so we can omit output_handler
         // abort randousha once received the abort message
         if !output {

@@ -2,15 +2,12 @@ use std::{collections::HashMap, sync::Arc};
 
 use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
-use ark_serialize::{CanonicalSerialize, SerializationError};
-use bincode::ErrorKind;
-use stoffelmpc_network::{Network, NetworkError, PartyId};
-use thiserror::Error;
+use ark_serialize::CanonicalSerialize;
+use stoffelmpc_network::{Network, PartyId};
 use tokio::sync::Mutex;
 
 use crate::{
     common::{
-        rbc::RbcError,
         share::{
             apply_vandermonde, make_vandermonde,
             shamir::{NonRobust, NonRobustShare},
@@ -19,68 +16,19 @@ use crate::{
         SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
-        robust_interpolate::InterpolateError,
-        share_gen::{RanShaMessage, RanShaMessageType, RanShaPayload},
-        WrappedMessage,
+        share_gen::{
+            RanShaError, RanShaMessage, RanShaMessageType, RanShaPayload, RanShaState, RanShaStore,
+        },
+        ProtocolType, SessionId, WrappedMessage,
     },
 };
-
-/// Error type for the Random Single Share (RanSha) protocol.
-#[derive(Debug, Error)]
-pub enum RanShaError {
-    #[error("there was an error in the network: {0:?}")]
-    NetworkError(NetworkError),
-    #[error("error while serializing an arkworks object: {0:?}")]
-    ArkSerialization(SerializationError),
-    #[error("error while serializing an arkworks object: {0:?}")]
-    ArkDeserialization(SerializationError),
-    #[error("error while serializing the object into bytes: {0:?}")]
-    SerializationError(Box<ErrorKind>),
-    #[error("inner error: {0}")]
-    Inner(#[from] InterpolateError),
-    #[error("Rbc error: {0}")]
-    RbcError(RbcError),
-    #[error("Share error: {0}")]
-    ShareError(ShareError),
-    #[error("received abort signal")]
-    Abort,
-    #[error("waiting for more confirmations")]
-    WaitForOk,
-}
-
-#[derive(Clone)]
-pub struct RanShaStore<F: FftField> {
-    pub received_r_shares: HashMap<usize, NonRobustShare<F>>,
-    pub computed_r_shares: Vec<NonRobustShare<F>>,
-    pub received_ok_msg: Vec<usize>,
-    pub state: RanShaState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RanShaState {
-    Initialized,
-    Reconstruction,
-    Output,
-    Finished,
-}
-
-impl<F: FftField> RanShaStore<F> {
-    pub fn empty() -> Self {
-        Self {
-            received_r_shares: HashMap::new(),
-            computed_r_shares: Vec::new(),
-            received_ok_msg: Vec::new(),
-            state: RanShaState::Initialized,
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct RanShaNode<F: FftField, R: RBC> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub store: Arc<Mutex<HashMap<usize, Arc<Mutex<RanShaStore<F>>>>>>,
+    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanShaStore<F>>>>>>,
     pub rbc: R,
 }
 
@@ -105,7 +53,10 @@ where
         })
     }
 
-    pub async fn get_or_create_store(&mut self, session_id: usize) -> Arc<Mutex<RanShaStore<F>>> {
+    pub async fn get_or_create_store(
+        &mut self,
+        session_id: SessionId,
+    ) -> Arc<Mutex<RanShaStore<F>>> {
         let mut storage = self.store.lock().await;
         storage
             .entry(session_id)
@@ -116,7 +67,7 @@ where
     pub async fn init<N>(
         &mut self,
         shares_deg_t: Vec<NonRobustShare<F>>,
-        session_id: usize,
+        session_id: SessionId,
         network: Arc<N>,
     ) -> Result<(), RanShaError>
     where
@@ -194,8 +145,12 @@ where
                 RanShaPayload::Output(ok),
             ));
             let bytes = bincode::serialize(&result).map_err(RanShaError::SerializationError)?;
+            let sessionid = SessionId::new(
+                ProtocolType::Ransha,
+                msg.session_id.as_u64() + self.id as u64,
+            );
             self.rbc
-                .init(bytes, msg.session_id + self.id, Arc::clone(&network))
+                .init(bytes, sessionid, Arc::clone(&network))
                 .await
                 .map_err(RanShaError::RbcError)?;
         }

@@ -1,7 +1,10 @@
 /// This file contains more common reliable broadcast protocols used in MPC.
 /// You can reuse them in your own custom MPC protocol implementations.
 use super::{rbc_store::*, utils::*, RbcError};
-use crate::{common::RBC, honeybadger::WrappedMessage};
+use crate::{
+    common::RBC,
+    honeybadger::{SessionId, WrappedMessage},
+};
 use async_trait::async_trait;
 use bincode;
 use std::{collections::HashMap, sync::Arc};
@@ -33,7 +36,7 @@ pub struct Bracha {
     pub n: usize,  // Total number of parties in the network
     pub t: usize,  // Number of allowed malicious parties
     pub k: usize,  //threshold (Not really used in Bracha)
-    pub store: Arc<Mutex<HashMap<usize, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
+    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
 }
 #[async_trait]
 impl RBC for Bracha {
@@ -59,7 +62,7 @@ impl RBC for Bracha {
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: usize,
+        session_id: SessionId,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         // Create an INIT message with the given payload and session ID.
@@ -74,7 +77,7 @@ impl RBC for Bracha {
         );
         info!(
             id = self.id,
-            session_id,
+            session_id = session_id.as_u64(),
             msg_type = "INIT",
             "Broadcasting INIT message"
         );
@@ -137,7 +140,7 @@ impl Bracha {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling INIT message"
@@ -162,7 +165,7 @@ impl Bracha {
             store.mark_echo(); // Mark that ECHO has been sent.
             info!(
                 id = self.id,
-                session_id = msg.session_id,
+                session_id = msg.session_id.as_u64(),
                 msg_type = "ECHO",
                 "Broadcasting ECHO in response to INIT"
             );
@@ -179,7 +182,7 @@ impl Bracha {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling ECHO message"
@@ -193,10 +196,10 @@ impl Bracha {
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id,
+                session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring ECHO"
             );
-            return Err(RbcError::SessionEnded(msg.session_id));
+            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
         }
 
         // If this sender has not already sent an ECHO, process it.
@@ -219,7 +222,7 @@ impl Bracha {
                     );
                     info!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         msg_type = "READY",
                         "Broadcasting READY after ECHO threshold met"
                     );
@@ -239,7 +242,7 @@ impl Bracha {
                     );
                     info!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         msg_type = "ECHO",
                         "Re-broadcasting ECHO due to threshold"
                     );
@@ -258,7 +261,7 @@ impl Bracha {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling READY message"
@@ -273,10 +276,10 @@ impl Bracha {
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id,
+                session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring READY"
             );
-            return Err(RbcError::SessionEnded(msg.session_id));
+            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
         }
 
         // If this sender hasn't sent READY yet, process it.
@@ -300,7 +303,7 @@ impl Bracha {
                     );
                     info!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         msg_type = "READY",
                         "Broadcasting READY after t+1 threshold"
                     );
@@ -320,7 +323,7 @@ impl Bracha {
                     );
                     info!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         msg_type = "ECHO",
                         "Broadcasting ECHO along with READY"
                     );
@@ -332,7 +335,7 @@ impl Bracha {
                 store.set_output(msg.payload.clone());
                 info!(
                     id = self.id,
-                    session_id = msg.session_id,
+                    session_id = msg.session_id.as_u64(),
                     output = ?msg.payload,
                     "Consensus achieved; RBC instance ended"
                 );
@@ -343,7 +346,7 @@ impl Bracha {
         }
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: usize) -> Arc<Mutex<BrachaStore>> {
+    async fn get_or_create_store(&self, session_id: SessionId) -> Arc<Mutex<BrachaStore>> {
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store
@@ -426,11 +429,11 @@ impl Bracha {
 
 #[derive(Clone)]
 pub struct Avid {
-    pub id: usize,                                                //Initiators ID
-    pub n: usize,                                                 //Network size
-    pub t: usize,                                                 //No. of malicious parties
-    pub k: usize,                                                 //Threshold
-    pub store: Arc<Mutex<HashMap<usize, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
+    pub id: usize,                                                    //Initiators ID
+    pub n: usize,                                                     //Network size
+    pub t: usize,                                                     //No. of malicious parties
+    pub k: usize,                                                     //Threshold
+    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
 }
 #[async_trait]
 impl RBC for Avid {
@@ -462,12 +465,12 @@ impl RBC for Avid {
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: usize,
+        session_id: SessionId,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id,
+            session_id = session_id.as_u64(),
             msg_type = "SEND",
             "Sending SEND message for AVID to all parties"
         );
@@ -477,7 +480,10 @@ impl RBC for Avid {
         //Generating the merkle tree out of the shards
         let tree = gen_merkletree(shards.clone());
         let root = tree.root().ok_or_else(|| {
-            RbcError::Internal(format!("Merkle root missing for session {}", session_id))
+            RbcError::Internal(format!(
+                "Merkle root missing for session {}",
+                session_id.as_u64()
+            ))
         })?;
 
         // Generating fingerprint for each server and sending it to them along with root and respective shard
@@ -562,7 +568,7 @@ impl Avid {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling SEND message"
@@ -593,7 +599,7 @@ impl Avid {
                     store.mark_echo(); // Mark that ECHO has been sent to avoid resending it
                     info!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         msg_type = "ECHO",
                         "Broadcasting ECHO in response to SEND"
                     );
@@ -604,7 +610,7 @@ impl Avid {
                 Ok(false) => {
                     error!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         sender = msg.sender_id,
                         "Merkle proof verification failed on SEND message"
                     );
@@ -613,7 +619,7 @@ impl Avid {
                 Err(e) => {
                     error!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         sender = msg.sender_id,
                         error = %e,
                         "Error during Merkle proof verification"
@@ -632,7 +638,7 @@ impl Avid {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling ECHO message"
@@ -649,10 +655,10 @@ impl Avid {
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id,
+                session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring ECHO"
             );
-            return Err(RbcError::SessionEnded(msg.session_id));
+            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
         }
         // If this sender has not already sent an ECHO, process it.
         if !store.has_echo(msg.sender_id) {
@@ -690,7 +696,7 @@ impl Avid {
                 Ok(false) => {
                     warn!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         sender = msg.sender_id,
                         "Merkle verification failed for ECHO"
                     );
@@ -701,7 +707,7 @@ impl Avid {
                 Err(e) => {
                     warn!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         sender = msg.sender_id,
                         error = %e,
                         "Merkle verification threw error"
@@ -720,7 +726,7 @@ impl Avid {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling READY message"
@@ -737,10 +743,10 @@ impl Avid {
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id,
+                session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring READY"
             );
-            return Err(RbcError::SessionEnded(msg.session_id));
+            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
         }
         // If this sender has not already sent an READY, process it.
         if !store.has_ready(msg.sender_id) {
@@ -794,7 +800,7 @@ impl Avid {
 
                         info!(
                             id = self.id,
-                            session_id = msg.session_id,
+                            session_id = msg.session_id.as_u64(),
                             output = ?output,
                             "Consensus achieved; AVID instance ended"
                         );
@@ -806,7 +812,7 @@ impl Avid {
                 Ok(false) => {
                     warn!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         sender = msg.sender_id,
                         "Merkle verification failed in READY handler"
                     );
@@ -817,7 +823,7 @@ impl Avid {
                 Err(e) => {
                     warn!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         sender = msg.sender_id,
                         error = %e,
                         "Error during Merkle verification in READY handler"
@@ -864,7 +870,7 @@ impl Avid {
                         Ok(false) => {
                             error!(
                                 id = self.id,
-                                session_id = msg.session_id,
+                                session_id = msg.session_id.as_u64(),
                                 "Merkle proof generation failed in {handler_type} handler. Aborting."
                             );
                             return Err(RbcError::Internal(format!(
@@ -875,7 +881,7 @@ impl Avid {
                         Err(e) => {
                             error!(
                                 id = self.id,
-                                session_id = msg.session_id,
+                                session_id = msg.session_id.as_u64(),
                                 error = %e,
                                 "Error during Merkle verification in {handler_type} handler"
                             );
@@ -887,7 +893,7 @@ impl Avid {
             Err(e) => {
                 error!(
                     id = self.id,
-                    session_id = msg.session_id,
+                    session_id = msg.session_id.as_u64(),
                     error = %e,
                     "Failed to generate Merkle proof map in {handler_type} handler"
                 );
@@ -907,7 +913,7 @@ impl Avid {
         );
         info!(
             id = self.id,
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             msg_type = "READY",
             "Broadcasting READY in response to a {handler_type}"
         );
@@ -916,7 +922,7 @@ impl Avid {
         self.broadcast(ready_msg, net).await?;
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: usize) -> Arc<Mutex<AvidStore>> {
+    async fn get_or_create_store(&self, session_id: SessionId) -> Arc<Mutex<AvidStore>> {
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store
@@ -961,14 +967,14 @@ impl Avid {
 
 #[derive(Clone)]
 pub struct ABA {
-    pub id: usize,                                               // The ID of the initiator
+    pub id: usize,                       // The ID of the initiator
     pub n: usize,                        // Total number of parties in the network
     pub t: usize,                        // Number of allowed malicious parties
     pub k: usize,                        //threshold
     pub skshare: Arc<OnceCell<Vec<u8>>>, //Secret key share
     pub pkset: Arc<OnceCell<Vec<u8>>>,   //Public key set
-    pub store: Arc<Mutex<HashMap<usize, Arc<Mutex<AbaStore>>>>>, // Stores the ABA session state
-    pub coin: Arc<Mutex<HashMap<usize, Arc<Mutex<CoinStore>>>>>, // Stores the common coin session state
+    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<AbaStore>>>>>, // Stores the ABA session state
+    pub coin: Arc<Mutex<HashMap<SessionId, Arc<Mutex<CoinStore>>>>>, // Stores the common coin session state
 }
 #[async_trait]
 impl RBC for ABA {
@@ -996,12 +1002,12 @@ impl RBC for ABA {
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: usize,
+        session_id: SessionId,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id,
+            session_id = session_id.as_u64(),
             msg_type = "EST",
             "Broadcasting EST message"
         );
@@ -1010,7 +1016,7 @@ impl RBC for ABA {
             None => {
                 error!(
                     id = self.id,
-                    session_id = session_id,
+                    session_id = session_id.as_u64(),
                     "Error while getting roundid at init"
                 );
                 return Err(RbcError::Internal(
@@ -1022,7 +1028,7 @@ impl RBC for ABA {
         let msg = Msg::new(
             self.id,
             session_id,
-            v_r.1 as usize,             //[round ID]
+            v_r.1 as usize,    //[round ID]
             vec![v_r.0 as u8], // [value]
             vec![],
             GenericMsgType::ABA(MsgTypeAba::Est),
@@ -1095,7 +1101,7 @@ impl ABA {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             id = self.id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
@@ -1111,10 +1117,10 @@ impl ABA {
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id,
+                session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring est"
             );
-            return Err(RbcError::SessionEnded(msg.session_id));
+            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
         }
 
         //Get est value
@@ -1123,7 +1129,7 @@ impl ABA {
             None => {
                 warn!(
                     id = self.id,
-                    session_id = msg.session_id,
+                    session_id = msg.session_id.as_u64(),
                     "Error while getting value at est handler"
                 );
                 return Err(RbcError::Internal(
@@ -1182,7 +1188,7 @@ impl ABA {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling AUX message for round {}",msg.round_id
@@ -1199,7 +1205,7 @@ impl ABA {
             None => {
                 warn!(
                     id = self.id,
-                    session_id = msg.session_id,
+                    session_id = msg.session_id.as_u64(),
                     "Error while getting value at aux handler"
                 );
                 return Err(RbcError::Internal(
@@ -1212,10 +1218,10 @@ impl ABA {
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id,
+                session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring aux"
             );
-            return Err(RbcError::SessionEnded(msg.session_id));
+            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
         }
         let bin_val = store.get_bin_values(msg.round_id);
 
@@ -1266,7 +1272,7 @@ impl ABA {
                         None => {
                             error!(
                                 id = cloned_self.id,
-                                session_id = cloned_msg.session_id,
+                                session_id = cloned_msg.session_id.as_u64(),
                                 round = cloned_msg.round_id,
                                 "Failed to get coin value in time"
                             );
@@ -1282,7 +1288,7 @@ impl ABA {
                     if store.ended {
                         debug!(
                             id = cloned_self.id,
-                            session_id = cloned_msg.session_id,
+                            session_id = cloned_msg.session_id.as_u64(),
                             "Session already ended, ignoring coin result"
                         );
                         return;
@@ -1294,7 +1300,7 @@ impl ABA {
                             None => {
                                 error!(
                                     id = cloned_self.id,
-                                    session_id = cloned_msg.session_id,
+                                    session_id = cloned_msg.session_id.as_u64(),
                                     round = cloned_msg.round_id,
                                     "Could not get the value from values set"
                                 );
@@ -1306,7 +1312,7 @@ impl ABA {
                             store.set_output(v);
                             info!(
                                 id = cloned_self.id,
-                                session_id = cloned_msg.session_id,
+                                session_id = cloned_msg.session_id.as_u64(),
                                 output = ?cloned_msg.payload,
                                 "Binary agreement achieved; ABA instance ended at round {}",msg.round_id
                             );
@@ -1314,7 +1320,7 @@ impl ABA {
                             //adopts v as its new estimate
                             info!(
                                 id = cloned_self.id,
-                                session_id = cloned_msg.session_id,
+                                session_id = cloned_msg.session_id.as_u64(),
                                 "Entering round {} with value",
                                 msg.round_id + 1
                             );
@@ -1329,7 +1335,7 @@ impl ABA {
                                 .map_err(|err| {
                                     error!(
                                         id = cloned_self.id,
-                                        session_id = cloned_msg.session_id,
+                                        session_id = cloned_msg.session_id.as_u64(),
                                         error = ?err,
                                         "Starting next round failed"
                                     );
@@ -1340,7 +1346,7 @@ impl ABA {
                         //In this cases, pi adopts the value s of the common coin
                         info!(
                             id = cloned_self.id,
-                            session_id = cloned_msg.session_id,
+                            session_id = cloned_msg.session_id.as_u64(),
                             "Entering round {} with coin",
                             msg.round_id + 1
                         );
@@ -1355,7 +1361,7 @@ impl ABA {
                             .map_err(|err| {
                                 error!(
                                     id = cloned_self.id,
-                                    session_id = cloned_msg.session_id,
+                                    session_id = cloned_msg.session_id.as_u64(),
                                     error = ?err,
                                     "Starting next round failed"
                                 );
@@ -1370,7 +1376,7 @@ impl ABA {
     //Function to wait and get notified when the coin is ready
     async fn wait_for_coin(
         &self,
-        session_id: usize,
+        session_id: SessionId,
         round_id: usize,
         timeout_ms: u64,
     ) -> Option<bool> {
@@ -1402,14 +1408,14 @@ impl ABA {
             _ = tokio::time::sleep(timeout) => {
                 warn!(
                     "Timed out waiting for coin for session {} round {}",
-                    session_id, round_id
+                    session_id.as_u64(), round_id
                 );
                 None
             }
         }
     }
 
-    async fn get_or_create_store(&self, session_id: usize) -> Arc<Mutex<AbaStore>> {
+    async fn get_or_create_store(&self, session_id: SessionId) -> Arc<Mutex<AbaStore>> {
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store
@@ -1418,7 +1424,7 @@ impl ABA {
             .clone()
     }
 
-    async fn get_or_create_coinstore(&self, session_id: usize) -> Arc<Mutex<CoinStore>> {
+    async fn get_or_create_coinstore(&self, session_id: SessionId) -> Arc<Mutex<CoinStore>> {
         let mut store = self.coin.lock().await;
         // Get or create the session state for the current session.
         store
@@ -1452,7 +1458,7 @@ impl ABA {
     fn key_handler(&self, msg: Msg) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling Key setup message"
@@ -1477,7 +1483,7 @@ impl ABA {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             round = msg.round_id,
@@ -1489,7 +1495,7 @@ impl ABA {
             None => {
                 error!(
                     id = self.id,
-                    session_id = msg.session_id,
+                    session_id = msg.session_id.as_u64(),
                     "Error while getting secret key share"
                 );
                 return Err(RbcError::Internal(
@@ -1515,7 +1521,7 @@ impl ABA {
             msg.msg_len,
         );
         info!(
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             id = self.id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
@@ -1528,7 +1534,7 @@ impl ABA {
     //Collect the signature share and generate the common coin
     async fn coin_handler(&self, msg: Msg) -> Result<(), RbcError> {
         info!(
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             id = self.id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
@@ -1573,7 +1579,7 @@ impl ABA {
                 None => {
                     error!(
                         id = self.id,
-                        session_id = msg.session_id,
+                        session_id = msg.session_id.as_u64(),
                         "Error while getting pk key set"
                     );
                     return Err(RbcError::Internal(
@@ -1633,7 +1639,7 @@ impl ABA {
 
                                 store.set_coin(msg.round_id, coin_bit);
                                 info!(
-                                    session_id = msg.session_id,
+                                    session_id = msg.session_id.as_u64(),
                                     id = self.id,
                                     "Successfully combined and verified signature for round {} with coin = {}",
                                     msg.round_id,
@@ -1749,7 +1755,7 @@ impl ACS {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id,
+            session_id = msg.session_id.as_u64(),
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Initiating common subset"
@@ -1757,9 +1763,9 @@ impl ACS {
 
         let mut store = self.store.lock().await;
 
-        if !store.has_aba_input(msg.session_id) {
-            store.set_aba_input(msg.session_id, true);
-            store.set_rbc_output(msg.session_id, msg.payload);
+        if !store.has_aba_input(msg.session_id.context_id()) {
+            store.set_aba_input(msg.session_id.context_id(), true);
+            store.set_rbc_output(msg.session_id.context_id(), msg.payload);
 
             //Initiate aba for session id
             let payload = set_value_round(true, 0);
@@ -1787,16 +1793,16 @@ impl ACS {
 
                 // Store ABA output
                 let mut store = store_clone.lock().await;
-                store.set_aba_output(msg.session_id, output);
+                store.set_aba_output(msg.session_id.context_id(), output);
 
                 // Check if enough parties agreed with output 1
                 let true_count = store.get_aba_output_one_count();
                 if true_count >= self_clone.n - self_clone.t {
-                    // For any party that hasn't provided input yet, provide input 0
-                    //We assume the session ID is of some form (broadcasterID||... ),
-                    //for now we can assume session ID is just the broadcasters ID
+                    //Todo :
+                    //for now we can assume session ID = [protocoltype||context-id]
+                    //we can assume context id is just the broadcasters ID for now
                     let uninitiated = (0..self_clone.n)
-                        .filter(|sid| !store.has_aba_input(*sid))
+                        .filter(|sid| !store.has_aba_input(*sid as u64))
                         .collect::<Vec<_>>();
                     if uninitiated.len() == 0 {
                         let store_clone2 = store_clone.clone();
@@ -1808,9 +1814,10 @@ impl ACS {
                     } else {
                         for sid in uninitiated {
                             let payload = set_value_round(false, 0);
+                            let sessionid = SessionId::new(msg.session_id.protocol().unwrap(), sid as u64);
                             let _ = self_clone
                                 .aba
-                                .init(payload, sid, net_clone.clone())
+                                .init(payload, sessionid, net_clone.clone())
                                 .await
                                 .map_err(|err| {
                                     error!(
@@ -1820,10 +1827,10 @@ impl ACS {
                                         "ABA init failed"
                                     );
                                 });
-                            store.set_aba_input(sid, false);
+                            store.set_aba_input(sid as u64, false);
 
                             // Spawn task for ABA completion of each uninitiated session
-                            let aba_store = self_clone.aba.get_or_create_store(sid).await;
+                            let aba_store = self_clone.aba.get_or_create_store(sessionid).await;
                             let aba_store_clone = aba_store.clone();
                             let self_clone2 = self_clone.clone();
                             let store_clone2 = store_clone.clone();
@@ -1843,7 +1850,7 @@ impl ACS {
 
                                 {
                                     let mut store = self_clone2.store.lock().await;
-                                    store.set_aba_output(sid, output);
+                                    store.set_aba_output(sid as u64, output);
                                 }
 
                                 self_clone2.check_and_finalize_output(store_clone2).await;
@@ -1852,9 +1859,9 @@ impl ACS {
                     }
                 }
             });
-        } else if store.get_rbc_output(msg.session_id).is_none() {
+        } else if store.get_rbc_output(msg.session_id.context_id()).is_none() {
             // RBC finished *after* ABA started
-            store.set_rbc_output(msg.session_id, msg.payload);
+            store.set_rbc_output(msg.session_id.context_id(), msg.payload);
 
             // Now try finalizing in case all ABA + RBC outputs are ready
             let store_clone = self.store.clone();
@@ -1875,7 +1882,7 @@ impl ACS {
         }
 
         // Gather indices where ABA output is 1
-        let mut consensus_indices: Vec<usize> = store
+        let mut consensus_indices: Vec<u64> = store
             .aba_output
             .iter()
             .filter(|(_, &v)| v)

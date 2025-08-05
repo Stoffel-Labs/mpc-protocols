@@ -7,10 +7,10 @@ pub mod rbc;
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
 
-use crate::common::{
+use crate::{common::{
     rbc::{rbc_store::Msg, RbcError},
     share::ShareError,
-};
+}, honeybadger::SessionId};
 
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
@@ -142,7 +142,7 @@ pub trait RBC: Send + Sync {
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: usize,
+        session_id: SessionId,
         parties: Arc<N>,
     ) -> Result<(), RbcError>;
     ///Processing messages sent by other nodes based on their type

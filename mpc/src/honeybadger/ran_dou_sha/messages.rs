@@ -1,9 +1,9 @@
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use serde::{Deserialize, Serialize};
-use stoffelmpc_network::{Message, PartyId, SessionId};
+use stoffelmpc_network::PartyId;
 
-use crate::common::share::shamir::NonRobustShare;
+use crate::{common::share::shamir::NonRobustShare, honeybadger::SessionId};
 
 /// Types for the all the possible messages sent during the Random Double Sharing protocol.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -46,16 +46,6 @@ impl RanDouShaMessage {
             session_id,
             payload,
         }
-    }
-}
-
-impl Message for RanDouShaMessage {
-    fn sender_id(&self) -> PartyId {
-        self.sender_id
-    }
-
-    fn session(&self) -> SessionId {
-        self.session_id
     }
 }
 
