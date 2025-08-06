@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::rbc::{rbc::Avid, rbc_store::Msg, RbcError},
-    honeybadger::{batch_recon::BatchReconMsg, ran_dou_sha::messages::RanDouShaMessage},
+    honeybadger::{
+        batch_recon::{batch_recon::BatchReconNode, BatchReconMsg},
+        ran_dou_sha::messages::RanDouShaMessage,
+    },
 };
 
 /// This module contains the implementation of the Robust interpolate protocol presented in
@@ -114,7 +117,7 @@ where
             preprocessing_opts.threshold,
             preprocessing_opts.n_triples,
         );
-        let triple_gen_node = TripleGenNode::new(id, triple_gen_params, triple_sender);
+        let triple_gen_node = TripleGenNode::new(id, triple_gen_params, triple_sender)?;
         Ok(Self {
             id,
             preprocessing_material: HoneyBadgerMPCNodePreprocMaterial::empty(),

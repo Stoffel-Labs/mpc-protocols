@@ -212,19 +212,28 @@ where
     /// Internal storage of the node.
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStorage<F>>>>>>,
     pub output_sender: Sender<SessionId>,
+    /// Batch reconstruction node used in the triple generation
+    // TODO - should we put batch_recon_node here or in honeybadger node
+    pub batch_recon_node: BatchReconNode<F>,
 }
 
 impl<F> TripleGenNode<F>
 where
     F: FftField,
 {
-    pub fn new(id: PartyId, params: TripleGenParams, output_sender: Sender<SessionId>) -> Self {
-        Self {
+    pub fn new(
+        id: PartyId,
+        params: TripleGenParams,
+        output_sender: Sender<SessionId>,
+    ) -> Result<Self, TripleGenError> {
+        let batch_recon_node = BatchReconNode::<F>::new(id, params.n_parties, params.threshold)?;
+        Ok(Self {
             id,
             params,
             storage: Arc::new(Mutex::new(HashMap::new())),
             output_sender,
-        }
+            batch_recon_node,
+        })
     }
 
     /// Accesses the storage of the node, and in case that the storage does not exists yet for the
@@ -280,9 +289,7 @@ where
         }
 
         // Call to Batch Reconstruction.
-        let batch_recon_node =
-            BatchReconNode::<F>::new(self.id, self.params.n_parties, self.params.threshold)?;
-        batch_recon_node
+        self.batch_recon_node
             .init_batch_reconstruct(
                 &sub_shares_deg_2t,
                 session_id,
@@ -328,10 +335,7 @@ where
         Ok(())
     }
 
-    pub async fn process<N: Network>(
-        &mut self,
-        message: &TripleGenMessage,
-    ) -> Result<(), TripleGenError> {
+    pub async fn process(&mut self, message: &TripleGenMessage) -> Result<(), TripleGenError> {
         let batch_recon_finished_msg =
             BatchReconFinishMessage::deserialize_compressed(message.payload.as_slice())?;
         self.batch_recon_finish_handler(batch_recon_finished_msg)

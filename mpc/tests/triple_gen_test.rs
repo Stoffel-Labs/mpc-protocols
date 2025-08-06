@@ -1,7 +1,7 @@
 mod utils;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
-use std::matches;
+use std::{matches, net};
 use stoffelmpc_mpc::{
     common::{share::shamir::NonRobustShamirShare, SecretSharingScheme},
     honeybadger::{
@@ -10,11 +10,17 @@ use stoffelmpc_mpc::{
     },
 };
 
-use crate::utils::triple_gen_utils::{create_nodes, get_triple_init_test_shares, test_setup};
+use crate::utils::{
+    test_utils::{construct_e2e_input, setup_tracing},
+    triple_gen_utils::{
+        create_nodes, get_triple_init_test_shares, spawn_receiver_tasks, test_setup,
+    },
+};
 use ark_bls12_381::Fr;
 
 #[tokio::test]
 async fn test_init() {
+    setup_tracing();
     let n_parties = 10;
     let threshold = 3;
     let n_shares = 5;
@@ -22,29 +28,29 @@ async fn test_init() {
     let (random_shares_a, random_shares_b, randousha_pairs, a_values, b_values, pairs_values) =
         get_triple_init_test_shares(n_shares, n_parties, threshold);
     let (params, network, receivers) = test_setup(n_parties, threshold, n_shares);
-    let (nodes, receivers) = create_nodes(n_parties, params.clone());
-    println!("{:?}", random_shares_a[0]);
-    println!("{:?}", random_shares_b[0]);
-    println!("{:?}", randousha_pairs[0][0].degree_2t);
-    nodes[0]
-        .lock()
-        .await
-        .init(
-            random_shares_a[0].clone(),
-            random_shares_b[0].clone(),
-            randousha_pairs[0].clone(),
-            session_id,
-            network.clone(),
-        )
-        .await
-        .unwrap();
-    let node0 = nodes[0].lock().await;
-    let s_map = node0.storage.lock().await;
-    let session_storage = s_map.get(&session_id).unwrap().lock().await;
-    assert!(matches!(
-        session_storage.protocol_state,
-        ProtocolState::Initialized
-    ))
+    let (nodes, tripe_finish_receivers) = create_nodes(n_parties, params.clone());
+
+    spawn_receiver_tasks(&nodes, receivers, network.clone());
+    for (i, node) in nodes.iter().enumerate() {
+        node.lock()
+            .await
+            .init(
+                random_shares_a[i].clone(),
+                random_shares_b[i].clone(),
+                randousha_pairs[i].clone(),
+                session_id,
+                network.clone(),
+            )
+            .await
+            .unwrap();
+        let node_binding = node.lock().await;
+        let s_map = node_binding.storage.lock().await;
+        let session_storage = s_map.get(&session_id).unwrap().lock().await;
+        assert!(matches!(
+            session_storage.protocol_state,
+            ProtocolState::Initialized
+        ))
+    }
 }
 
 #[tokio::test]
