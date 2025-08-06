@@ -36,7 +36,7 @@ pub fn create_nodes(
     params: TripleGenParams,
 ) -> (Vec<Arc<Mutex<TripleGenNode<Fr>>>>, Vec<Receiver<usize>>) {
     let mut receivers = vec![];
-    let triple_gen_nodes = (1..=n_parties)
+    let triple_gen_nodes = (0..n_parties)
         .map(|id| {
             let (triple_sender, triple_receiver) = mpsc::channel(128);
             let triple_gen_node = TripleGenNode::new(id, params, triple_sender).unwrap();
@@ -79,9 +79,6 @@ pub fn get_triple_init_test_shares(
         b_values.push(b);
         let mut shares_b =
             RobustShamirShare::compute_shares(b, n_parties, t, None, &mut rng).unwrap();
-
-        shares_a.iter_mut().for_each(|s| s.id += 1);
-        shares_b.iter_mut().for_each(|s| s.id += 1);
 
         let r = Fr::rand(&mut rng);
         pairs_values.push(r);

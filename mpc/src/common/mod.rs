@@ -39,6 +39,7 @@ pub enum ProtocolError {
 pub struct ShamirShare<F: FftField, const N: usize, P> {
     pub share: [F; N],
     pub id: usize,
+    pub n: usize,
     pub degree: usize,
     pub _sharetype: PhantomData<fn() -> P>,
 }
@@ -108,11 +109,16 @@ impl<F: FftField, const N: usize, P> Add for ShamirShare<F, N, P> {
             return Err(ShareError::IdMismatch);
         }
 
+        if self.n != other.n {
+            return Err(ShareError::NMismatch);
+        }
+
         let new_share: [F; N] = std::array::from_fn(|i| self.share[i] + other.share[i]);
 
         Ok(Self {
             share: new_share,
             id: self.id,
+            n: self.n,
             degree: self.degree,
             _sharetype: PhantomData,
         })
@@ -128,6 +134,7 @@ impl<F: FftField, const N: usize, P> Add<&F> for ShamirShare<F, N, P> {
         Ok(Self {
             share: new_share,
             id: self.id,
+            n: self.n,
             degree: self.degree,
             _sharetype: PhantomData,
         })
@@ -150,6 +157,7 @@ impl<F: FftField, const N: usize, P> Sub<&Self> for ShamirShare<F, N, P> {
         Ok(Self {
             share: new_share,
             id: self.id,
+            n: self.n,
             degree: self.degree,
             _sharetype: PhantomData,
         })
@@ -165,6 +173,7 @@ impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
         Ok(Self {
             share: new_share,
             id: self.id,
+            n: self.n,
             degree: self.degree,
             _sharetype: PhantomData,
         })
@@ -180,11 +189,16 @@ where
             return Err(ShareError::IdMismatch);
         }
 
+        if self.n != other.n {
+            return Err(ShareError::NMismatch);
+        }
+
         let new_share: [F; N] = std::array::from_fn(|i| self.share[i] * other.share[i]);
 
         Ok(Self {
             share: new_share,
             id: self.id,
+            n: self.n,
             degree: self.degree + other.degree,
             _sharetype: PhantomData,
         })

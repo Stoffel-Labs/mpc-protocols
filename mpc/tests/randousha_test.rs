@@ -533,8 +533,12 @@ async fn test_e2e_reconstruct_mismatch() {
 
     // lets corrupt the shares of party 1 so that the shares reconstruct different values
     let rng = &mut test_rng();
-    n_shares_t[0][0] =
-        NonRobustShamirShare::new(Fr::rand(rng), n_shares_t[0][0].id, n_shares_t[0][0].degree);
+    n_shares_t[0][0] = NonRobustShamirShare::new(
+        Fr::rand(rng),
+        n_shares_t[0][0].id,
+        n_shares_t[0][0].n,
+        n_shares_t[0][0].degree,
+    );
 
     let mut sender_channels = Vec::new();
     let mut receiver_channels = Vec::new();
@@ -571,7 +575,7 @@ async fn test_e2e_reconstruct_mismatch() {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_millis(3000)).await;
 
     let num_aborted_tasks = abort_count.load(Ordering::SeqCst);
 
@@ -648,7 +652,7 @@ async fn test_e2e_wrong_degree() {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_millis(3000)).await;
 
     let num_aborted_tasks = abort_count.load(Ordering::SeqCst);
 

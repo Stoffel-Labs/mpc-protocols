@@ -1,9 +1,10 @@
 mod utils;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
+use itertools::izip;
 use std::{matches, net};
 use stoffelmpc_mpc::{
-    common::{share::shamir::NonRobustShamirShare, SecretSharingScheme},
+    common::{share::shamir::NonRobustShamirShare, SecretSharingScheme, ShamirShare},
     honeybadger::{
         robust_interpolate::robust_interpolate::RobustShamirShare,
         triple_generation::ProtocolState, DoubleShamirShare,
@@ -21,8 +22,8 @@ use ark_bls12_381::Fr;
 #[tokio::test]
 async fn test_init() {
     setup_tracing();
-    let n_parties = 10;
-    let threshold = 3;
+    let n_parties = 15;
+    let threshold = 2;
     let n_shares = 5;
     let session_id = 1111;
     let (random_shares_a, random_shares_b, randousha_pairs, a_values, b_values, pairs_values) =
@@ -93,5 +94,35 @@ async fn test_triple_init_test_shares() {
                 .1,
             pairs_values[i]
         );
+    }
+
+    // test compute open(ab-r)
+    let mut sub_shares_deg_2t_all = Vec::new();
+
+    for p in 0..n_parties {
+        let random_shares_a_p = random_shares_a[p].clone();
+        let random_shares_b_p = random_shares_b[p].clone();
+        let randousha_pairs_p = randousha_pairs[p].clone();
+        let mut sub_shares_deg_2t = Vec::new();
+        for (share_a, share_b, ran_dou_sha) in
+            izip!(&random_shares_a_p, &random_shares_b_p, &randousha_pairs_p)
+        {
+            let mult_share_deg_2t = share_a.share_mul(share_b).unwrap();
+            let sub_share_deg_2t = (mult_share_deg_2t
+                - &RobustShamirShare::from(ran_dou_sha.degree_2t.clone()))
+                .unwrap();
+            sub_shares_deg_2t.push(sub_share_deg_2t);
+        }
+        sub_shares_deg_2t_all.push(sub_shares_deg_2t);
+    }
+    for i in 0..n_shares {
+        // shares for share i from every party
+        let mut shares_i = vec![];
+        for p in 0..n_parties {
+            let share_i_p = sub_shares_deg_2t_all[p][i].clone();
+            shares_i.push(share_i_p);
+        }
+        let r = RobustShamirShare::recover_secret(&shares_i).unwrap();
+        assert!(r.1 == (a_values[i] * b_values[i]) - pairs_values[i]);
     }
 }

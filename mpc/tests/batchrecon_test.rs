@@ -32,6 +32,7 @@ mod tests {
                 RobustShamirShare {
                     share: [F::zero()],
                     id: 0,
+                    n: n,
                     degree: t,
                     _sharetype: PhantomData
                 };
@@ -108,7 +109,7 @@ mod tests {
                         .expect("deserialization should not fail");
 
                     if seen.insert(i) {
-                        received.push(RobustShamirShare::new(val, i, t));
+                        received.push(RobustShamirShare::new(val, i, n, t));
                         if received.len() == 2 * t + 1 {
                             break;
                         }
@@ -130,7 +131,7 @@ mod tests {
             for (j, val_opt) in reveals.iter().enumerate() {
                 if let Some(y_j) = val_opt {
                     if seen.insert(j) {
-                        y_values.push(RobustShamirShare::new(*y_j, j, t));
+                        y_values.push(RobustShamirShare::new(*y_j, j, n, t));
                         if y_values.len() == 2 * t + 1 {
                             break;
                         }

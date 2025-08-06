@@ -226,7 +226,9 @@ where
         params: TripleGenParams,
         output_sender: Sender<SessionId>,
     ) -> Result<Self, TripleGenError> {
-        let batch_recon_node = BatchReconNode::<F>::new(id, params.n_parties, params.threshold)?;
+        // batch_recon_node is for opening degree 2t shares
+        let batch_recon_node =
+            BatchReconNode::<F>::new(id, params.n_parties, params.threshold * 2)?;
         Ok(Self {
             id,
             params,

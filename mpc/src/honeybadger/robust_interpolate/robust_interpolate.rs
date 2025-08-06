@@ -18,10 +18,11 @@ pub struct Robust;
 pub type RobustShamirShare<F> = ShamirShare<F, 1, Robust>;
 
 impl<F: FftField> RobustShamirShare<F> {
-    pub fn new(share: F, id: usize, degree: usize) -> Self {
+    pub fn new(share: F, id: usize, n: usize, degree: usize) -> Self {
         ShamirShare {
             share: [share],
             id,
+            n,
             degree,
             _sharetype: PhantomData,
         }
@@ -36,6 +37,7 @@ where
         Self {
             share: value.share,
             id: value.id,
+            n: value.n,
             degree: value.degree,
             _sharetype: PhantomData,
         }
@@ -78,7 +80,7 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShamirShare<F> {
         let shares = evals
             .iter()
             .enumerate()
-            .map(|(i, eval)| RobustShamirShare::new(*eval, i, degree))
+            .map(|(i, eval)| RobustShamirShare::new(*eval, i, n, degree))
             .collect();
 
         Ok(shares)
@@ -102,8 +104,13 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShamirShare<F> {
             return Err(InterpolateError::Inner(ShareError::DegreeMismatch));
         };
 
-        let n = shares.len();
-        if n < 2 * t + 1 {
+        let n = shares[0].n;
+        if !shares.iter().all(|share| share.n == n) {
+            return Err(InterpolateError::Inner(ShareError::NMismatch));
+        };
+
+        let share_len = shares.len();
+        if share_len < 2 * t + 1 {
             return Err(InterpolateError::InvalidInput(format!(
             "Not enough shares provided ({}) to attempt decoding for t={}. At least {} shares are required.",
             n,
@@ -429,7 +436,7 @@ mod tests {
             .map(|i| {
                 let x = domain.element(i);
                 let y = poly.evaluate(&x);
-                RobustShamirShare::new(y, i, t)
+                RobustShamirShare::new(y, i, n, t)
             })
             .collect();
 
@@ -512,6 +519,7 @@ mod tests {
             + RobustShamirShare {
                 share: [Fr::from(3u64)],
                 id: 2,
+                n: n,
                 degree: t,
                 _sharetype: PhantomData,
             };
@@ -519,6 +527,7 @@ mod tests {
             + RobustShamirShare {
                 share: [Fr::from(1u64)],
                 id: 5,
+                n: n,
                 degree: t,
                 _sharetype: PhantomData,
             };
@@ -559,6 +568,7 @@ mod tests {
                 + RobustShamirShare {
                     share: [Fr::from(7u64)],
                     id: i,
+                    n: n,
                     degree: t,
                     _sharetype: PhantomData,
                 };
