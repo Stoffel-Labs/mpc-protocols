@@ -338,10 +338,12 @@ where
     }
 
     pub async fn process(&mut self, message: &TripleGenMessage) -> Result<(), TripleGenError> {
+        tracing::warn!("process start");
         let batch_recon_finished_msg =
             BatchReconFinishMessage::deserialize_compressed(message.payload.as_slice())?;
         self.batch_recon_finish_handler(batch_recon_finished_msg)
             .await?;
+        tracing::warn!("process fin");
         Ok(())
     }
 }

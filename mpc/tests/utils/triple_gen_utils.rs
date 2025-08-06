@@ -6,14 +6,14 @@ use stoffelmpc_mpc::{
     common::{share::shamir::NonRobustShamirShare, SecretSharingScheme},
     honeybadger::{
         robust_interpolate::robust_interpolate::RobustShamirShare,
-        triple_generation::{TripleGenMessage, TripleGenNode, TripleGenParams, TripleGenStorage},
+        triple_generation::{TripleGenMessage, TripleGenNode, TripleGenParams},
         DoubleShamirShare,
     },
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub fn test_setup(
     n_parties: usize,
@@ -73,12 +73,10 @@ pub fn get_triple_init_test_shares(
         // gen share of a_i, b_i for n parties
         let a = Fr::rand(&mut rng);
         a_values.push(a);
-        let mut shares_a =
-            RobustShamirShare::compute_shares(a, n_parties, t, None, &mut rng).unwrap();
+        let shares_a = RobustShamirShare::compute_shares(a, n_parties, t, None, &mut rng).unwrap();
         let b = Fr::rand(&mut rng);
         b_values.push(b);
-        let mut shares_b =
-            RobustShamirShare::compute_shares(b, n_parties, t, None, &mut rng).unwrap();
+        let shares_b = RobustShamirShare::compute_shares(b, n_parties, t, None, &mut rng).unwrap();
 
         let r = Fr::rand(&mut rng);
         pairs_values.push(r);
@@ -131,10 +129,9 @@ pub fn spawn_receiver_tasks(
                     Some(msg) => msg,
                     None => break,
                 };
+                let mut node_bind = triple_gen_node.lock().await;
                 // received batch recon msg
-                if let Ok(_) = triple_gen_node
-                    .lock()
-                    .await
+                if let Ok(_) = node_bind
                     .batch_recon_node
                     .process(msg.clone(), net_clone.clone())
                     .await
@@ -142,14 +139,10 @@ pub fn spawn_receiver_tasks(
                     debug!("Received batch recon msg");
                     continue;
                 } else if let Ok(triple_gen_msg) = bincode::deserialize::<TripleGenMessage>(&msg) {
-                    triple_gen_node
-                        .lock()
-                        .await
-                        .process(&triple_gen_msg)
-                        .await
-                        .unwrap();
+                    debug!("Received triple_gen_msg");
+                    node_bind.process(&triple_gen_msg).await.unwrap();
                 } else {
-                    debug!("received invalid msg type");
+                    warn!("received invalid msg type");
                     break;
                 }
             }

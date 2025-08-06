@@ -8,6 +8,7 @@ use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShamirShare;
 use stoffelmpc_mpc::common::{SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::{DoubleShamirShare, WrappedMessage};
+use tracing::level_filters::LevelFilter;
 use tracing::{info, warn};
 
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{
