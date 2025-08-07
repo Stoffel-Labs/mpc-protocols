@@ -533,12 +533,8 @@ async fn test_e2e_reconstruct_mismatch() {
 
     // lets corrupt the shares of party 1 so that the shares reconstruct different values
     let rng = &mut test_rng();
-    n_shares_t[0][0] = NonRobustShamirShare::new(
-        Fr::rand(rng),
-        n_shares_t[0][0].id,
-        n_shares_t[0][0].n,
-        n_shares_t[0][0].degree,
-    );
+    n_shares_t[0][0] =
+        NonRobustShamirShare::new(Fr::rand(rng), n_shares_t[0][0].id, n_shares_t[0][0].degree);
 
     let mut sender_channels = Vec::new();
     let mut receiver_channels = Vec::new();

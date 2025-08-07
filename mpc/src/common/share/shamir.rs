@@ -17,11 +17,10 @@ pub struct NonRobust;
 pub type NonRobustShamirShare<T> = ShamirShare<T, 1, NonRobust>;
 
 impl<F: FftField> NonRobustShamirShare<F> {
-    pub fn new(share: F, id: usize, n: usize, degree: usize) -> Self {
+    pub fn new(share: F, id: usize, degree: usize) -> Self {
         ShamirShare {
             share: [share],
             id,
-            n,
             degree,
             _sharetype: PhantomData,
         }
@@ -33,7 +32,6 @@ impl<F: FftField> Default for NonRobustShamirShare<F> {
         Self {
             share: [F::ZERO],
             id: 0,
-            n: 0,
             degree: 0,
             _sharetype: PhantomData,
         }
@@ -74,7 +72,7 @@ impl<F: FftField> SecretSharingScheme<F> for NonRobustShamirShare<F> {
         let shares = evals[..n]
             .iter()
             .enumerate()
-            .map(|(i, eval)| NonRobustShamirShare::new(*eval, i, n, degree))
+            .map(|(i, eval)| NonRobustShamirShare::new(*eval, i, degree))
             .collect();
 
         Ok(shares)
@@ -83,14 +81,11 @@ impl<F: FftField> SecretSharingScheme<F> for NonRobustShamirShare<F> {
     // recover the secret of the input shares
     fn recover_secret(
         shares: &[Self],
+        n: usize,
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), ShareError> {
         let deg = shares[0].degree;
-        let n = shares[0].n;
         if !shares.iter().all(|share| share.degree == deg) {
             return Err(ShareError::DegreeMismatch);
-        };
-        if !shares.iter().all(|share| share.n == n) {
-            return Err(ShareError::NMismatch);
         };
         if shares.len() < deg + 1 {
             return Err(ShareError::InsufficientShares);
@@ -122,7 +117,7 @@ mod test {
         let mut rng = test_rng();
         let shares =
             NonRobustShamirShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
-        let (_, recovered_secret) = NonRobustShamirShare::recover_secret(&shares).unwrap();
+        let (_, recovered_secret) = NonRobustShamirShare::recover_secret(&shares, 6).unwrap();
         assert!(recovered_secret == secret);
     }
 
@@ -141,7 +136,7 @@ mod test {
             .map(|(a, b)| a + b)
             .collect::<Result<_, _>>() // Handles errors cleanly
             .unwrap();
-        let (_, recovered_secret) = NonRobustShamirShare::recover_secret(&added_shares).unwrap();
+        let (_, recovered_secret) = NonRobustShamirShare::recover_secret(&added_shares, 6).unwrap();
         assert!(recovered_secret == secret1 + secret2);
     }
 
@@ -157,7 +152,8 @@ mod test {
             .map(|share| share.clone() * Fr::from(3))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        let (_, recovered_secret) = NonRobustShamirShare::recover_secret(&tripled_shares).unwrap();
+        let (_, recovered_secret) =
+            NonRobustShamirShare::recover_secret(&tripled_shares, 8).unwrap();
         assert!(recovered_secret == secret * Fr::from(3));
     }
 
@@ -170,7 +166,7 @@ mod test {
             NonRobustShamirShare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
 
         shares[2].degree = 4;
-        let recovered_secret = NonRobustShamirShare::recover_secret(&shares).unwrap_err();
+        let recovered_secret = NonRobustShamirShare::recover_secret(&shares, 6).unwrap_err();
         match recovered_secret {
             ShareError::InsufficientShares => panic!("incorrect error type"),
             ShareError::DegreeMismatch => (),
@@ -178,7 +174,6 @@ mod test {
             ShareError::InvalidInput => panic!("incorrect error type"),
             ShareError::TypeMismatch => panic!("incorrect error type"),
             ShareError::NoSuitableDomain => panic!("incorrect error type"),
-            ShareError::NMismatch => panic!("incorrect number of shares"),
         }
     }
 
@@ -196,7 +191,6 @@ mod test {
             ShareError::InvalidInput => (),
             ShareError::TypeMismatch => panic!("incorrect error type"),
             ShareError::NoSuitableDomain => panic!("incorrect error type"),
-            ShareError::NMismatch => panic!("incorrect number of shares"),
         }
     }
 
@@ -220,7 +214,6 @@ mod test {
             ShareError::InvalidInput => panic!("incorrect error type"),
             ShareError::TypeMismatch => panic!("incorrect error type"),
             ShareError::NoSuitableDomain => panic!("incorrect error type"),
-            ShareError::NMismatch => panic!("incorrect number of shares"),
         }
     }
 }

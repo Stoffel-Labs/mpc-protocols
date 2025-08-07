@@ -10,8 +10,6 @@ pub enum ShareError {
     DegreeMismatch,
     #[error("mismatch index between shares")]
     IdMismatch,
-    #[error("mismatch num of nodes between shares")]
-    NMismatch,
     #[error("invalid input")]
     InvalidInput,
     #[error("types are different")]

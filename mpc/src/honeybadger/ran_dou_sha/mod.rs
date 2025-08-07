@@ -327,8 +327,10 @@ where
                 drop(store);
                 // (5) Perform reconstruction for both degrees.
                 // ShamirSecretSharing::reconstruct expects a vector of shares.
-                let reconstructed_r_t = NonRobustShamirShare::recover_secret(&shares_t_for_recon);
-                let reconstructed_r_2t = NonRobustShamirShare::recover_secret(&shares_2t_for_recon);
+                let reconstructed_r_t =
+                    NonRobustShamirShare::recover_secret(&shares_t_for_recon, params.n_parties);
+                let reconstructed_r_2t =
+                    NonRobustShamirShare::recover_secret(&shares_2t_for_recon, params.n_parties);
 
                 // if the reconstruction fails, broadcast false
                 let mut output_message = OutputMessage::new(params.session_id, self.id, true);

@@ -18,11 +18,10 @@ pub struct Robust;
 pub type RobustShamirShare<F> = ShamirShare<F, 1, Robust>;
 
 impl<F: FftField> RobustShamirShare<F> {
-    pub fn new(share: F, id: usize, n: usize, degree: usize) -> Self {
+    pub fn new(share: F, id: usize, degree: usize) -> Self {
         ShamirShare {
             share: [share],
             id,
-            n,
             degree,
             _sharetype: PhantomData,
         }
@@ -37,7 +36,6 @@ where
         Self {
             share: value.share,
             id: value.id,
-            n: value.n,
             degree: value.degree,
             _sharetype: PhantomData,
         }
@@ -80,7 +78,7 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShamirShare<F> {
         let shares = evals
             .iter()
             .enumerate()
-            .map(|(i, eval)| RobustShamirShare::new(*eval, i, n, degree))
+            .map(|(i, eval)| RobustShamirShare::new(*eval, i, degree))
             .collect();
 
         Ok(shares)
@@ -98,22 +96,18 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShamirShare<F> {
     /// * `Ok((poly, poly(0)))` if decoding succeeds, or `Err(InterpolateError)` otherwise
     fn recover_secret(
         shares: &[Self],
+        n: usize,
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), InterpolateError> {
         let t = shares[0].degree;
         if !shares.iter().all(|share| share.degree == t) {
             return Err(InterpolateError::Inner(ShareError::DegreeMismatch));
         };
 
-        let n = shares[0].n;
-        if !shares.iter().all(|share| share.n == n) {
-            return Err(InterpolateError::Inner(ShareError::NMismatch));
-        };
-
         let share_len = shares.len();
         if share_len < 2 * t + 1 {
             return Err(InterpolateError::InvalidInput(format!(
             "Not enough shares provided ({}) to attempt decoding for t={}. At least {} shares are required.",
-            n,
+            share_len,
             t,
             2 * t + 1
         )));
@@ -436,7 +430,7 @@ mod tests {
             .map(|i| {
                 let x = domain.element(i);
                 let y = poly.evaluate(&x);
-                RobustShamirShare::new(y, i, n, t)
+                RobustShamirShare::new(y, i, t)
             })
             .collect();
 
@@ -519,7 +513,6 @@ mod tests {
             + RobustShamirShare {
                 share: [Fr::from(3u64)],
                 id: 2,
-                n: n,
                 degree: t,
                 _sharetype: PhantomData,
             };
@@ -527,7 +520,6 @@ mod tests {
             + RobustShamirShare {
                 share: [Fr::from(1u64)],
                 id: 5,
-                n: n,
                 degree: t,
                 _sharetype: PhantomData,
             };
@@ -568,13 +560,12 @@ mod tests {
                 + RobustShamirShare {
                     share: [Fr::from(7u64)],
                     id: i,
-                    n: n,
                     degree: t,
                     _sharetype: PhantomData,
                 };
         }
         // Attempt robust interpolation
-        let result = RobustShamirShare::recover_secret(&shares.clone());
+        let result = RobustShamirShare::recover_secret(&shares.clone(), n);
         assert!(
             result.is_ok(),
             "robust_interpolate failed despite valid parameters"

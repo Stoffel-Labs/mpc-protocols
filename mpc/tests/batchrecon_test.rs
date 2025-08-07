@@ -32,7 +32,6 @@ mod tests {
                 RobustShamirShare {
                     share: [F::zero()],
                     id: 0,
-                    n: n,
                     degree: t,
                     _sharetype: PhantomData
                 };
@@ -109,7 +108,7 @@ mod tests {
                         .expect("deserialization should not fail");
 
                     if seen.insert(i) {
-                        received.push(RobustShamirShare::new(val, i, n, t));
+                        received.push(RobustShamirShare::new(val, i, t));
                         if received.len() == 2 * t + 1 {
                             break;
                         }
@@ -117,7 +116,7 @@ mod tests {
                 }
             }
 
-            if let Ok((_, value)) = RobustShamirShare::recover_secret(&received) {
+            if let Ok((_, value)) = RobustShamirShare::recover_secret(&received, n) {
                 reveals[j] = Some(value);
             }
         }
@@ -131,14 +130,14 @@ mod tests {
             for (j, val_opt) in reveals.iter().enumerate() {
                 if let Some(y_j) = val_opt {
                     if seen.insert(j) {
-                        y_values.push(RobustShamirShare::new(*y_j, j, n, t));
+                        y_values.push(RobustShamirShare::new(*y_j, j, t));
                         if y_values.len() == 2 * t + 1 {
                             break;
                         }
                     }
                 }
             }
-            if let Ok((mut poly, _)) = RobustShamirShare::recover_secret(&y_values) {
+            if let Ok((mut poly, _)) = RobustShamirShare::recover_secret(&y_values, n) {
                 //  Extract original secrets (coefficients) x_1 .. x_{t+1}
                 poly.resize(t + 1, Fr::zero());
                 recovered_all.push(poly);

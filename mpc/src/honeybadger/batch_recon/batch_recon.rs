@@ -143,7 +143,7 @@ impl<F: FftField> BatchReconNode<F> {
                 // Store the received evaluation share if it's from a new sender.
                 if !self.evals_received.iter().any(|s| s.id == sender_id) {
                     self.evals_received
-                        .push(RobustShamirShare::new(val, sender_id, self.n, self.t));
+                        .push(RobustShamirShare::new(val, sender_id, self.t));
                 }
                 // Check if we have enough evaluation shares and haven't already computed our `y_j`.
                 if self.evals_received.len() >= 2 * self.t + 1 && self.y_j.is_none() {
@@ -153,12 +153,11 @@ impl<F: FftField> BatchReconNode<F> {
                     );
 
                     // Attempt to interpolate the polynomial and get our specific `y_j` value.
-                    match RobustShamirShare::recover_secret(&self.evals_received.clone()) {
+                    match RobustShamirShare::recover_secret(&self.evals_received.clone(), self.n) {
                         Ok((_, value)) => {
                             self.y_j = Some(RobustShamirShare {
                                 share: [value],
                                 id: self.id,
-                                n: self.n,
                                 degree: self.t,
                                 _sharetype: PhantomData,
                             });
@@ -205,7 +204,7 @@ impl<F: FftField> BatchReconNode<F> {
                 // Store the received revealed `y_j` value if it's from a new sender.
                 if !self.reveals_received.iter().any(|s| s.id == sender_id) {
                     self.reveals_received
-                        .push(RobustShamirShare::new(y_j, sender_id, self.n, self.t));
+                        .push(RobustShamirShare::new(y_j, sender_id, self.t));
                 }
                 // Check if we have enough revealed `y_j` values and haven't already reconstructed the secrets.
                 if self.reveals_received.len() >= 2 * self.t + 1 && self.secrets.is_none() {
@@ -214,7 +213,8 @@ impl<F: FftField> BatchReconNode<F> {
                         "Enough Reveals collected, interpolating secrets"
                     );
                     // Attempt to interpolate the polynomial whose coefficients are the original secrets.
-                    match RobustShamirShare::recover_secret(&self.reveals_received.clone()) {
+                    match RobustShamirShare::recover_secret(&self.reveals_received.clone(), self.n)
+                    {
                         Ok((poly, _)) => {
                             let mut result = poly;
                             // Resize the coefficient vector to `t + 1` to get all secrets.
@@ -348,7 +348,6 @@ mod tests {
                 RobustShamirShare {
                     share: [F::zero()],
                     id: 0,
-                    n: 0,
                     degree: t,
                     _sharetype: PhantomData
                 };
@@ -427,9 +426,9 @@ mod tests {
         let vandermonde = make_vandermonde::<Fr>(n, t).expect("make_vandermonde failed");
         // Shares represent coefficients [c0, c1, c2] for a polynomial c0 + c1*x + c2*x^2
         let shares = vec![
-            RobustShamirShare::new(Fr::from(1u64), 0, 4, 2),
-            RobustShamirShare::new(Fr::from(2u64), 0, 4, 2),
-            RobustShamirShare::new(Fr::from(3u64), 0, 4, 2),
+            RobustShamirShare::new(Fr::from(1u64), 0, 2),
+            RobustShamirShare::new(Fr::from(2u64), 0, 2),
+            RobustShamirShare::new(Fr::from(3u64), 0, 2),
         ];
         let y_values = apply_vandermonde(&vandermonde, &shares).expect("apply_vandermonde failed");
         assert_eq!(
@@ -513,7 +512,7 @@ mod tests {
                         .expect("deserialization should not fail");
 
                     if seen.insert(i) {
-                        received.push(RobustShamirShare::new(val, i, n, t));
+                        received.push(RobustShamirShare::new(val, i, t));
                         if received.len() == 2 * t + 1 {
                             break;
                         }
@@ -521,7 +520,7 @@ mod tests {
                 }
             }
 
-            if let Ok((_, value)) = RobustShamirShare::recover_secret(&received) {
+            if let Ok((_, value)) = RobustShamirShare::recover_secret(&received, n) {
                 reveals[j] = Some(value);
             }
         }
@@ -535,14 +534,14 @@ mod tests {
             for (j, val_opt) in reveals.iter().enumerate() {
                 if let Some(y_j) = val_opt {
                     if seen.insert(j) {
-                        y_values.push(RobustShamirShare::new(*y_j, j, n, t));
+                        y_values.push(RobustShamirShare::new(*y_j, j, t));
                         if y_values.len() == 2 * t + 1 {
                             break;
                         }
                     }
                 }
             }
-            if let Ok((mut poly, _)) = RobustShamirShare::recover_secret(&y_values) {
+            if let Ok((mut poly, _)) = RobustShamirShare::recover_secret(&y_values, n) {
                 //  Extract original secrets (coefficients) x_1 .. x_{t+1}
                 poly.resize(t + 1, Fr::zero());
                 recovered_all.push(poly);
