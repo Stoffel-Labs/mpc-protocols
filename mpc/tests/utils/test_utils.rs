@@ -254,11 +254,10 @@ pub fn spawn_receiver_tasks(
 }
 
 static TRACING_INIT: Lazy<()> = Lazy::new(|| {
-    let subscriber = FmtSubscriber::builder()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("trace".parse().unwrap()))
+    let _subscriber = FmtSubscriber::builder()
+        .with_env_filter(EnvFilter::from_default_env())
         .pretty()
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+        .try_init();
 });
 
 pub fn setup_tracing() {
