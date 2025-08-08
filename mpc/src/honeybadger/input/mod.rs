@@ -1,8 +1,8 @@
+use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use stoffelmpc_network::NetworkError;
 use thiserror::Error;
-use ark_serialize::SerializationError;
 
 use crate::{common::rbc::RbcError, honeybadger::robust_interpolate::InterpolateError};
 
@@ -20,11 +20,11 @@ pub enum InputError {
     ArkDeserialization(SerializationError),
     #[error("error while serializing the object into bytes: {0:?}")]
     SerializationError(Box<ErrorKind>),
-    #[error("Incorrect input")]
+    #[error("Incorrect input: {0}")]
     InvalidInput(String),
-    #[error("Duplicate input")]
+    #[error("Duplicate input: {0}")]
     Duplicate(String),
-    #[error("Interpolate error")]
+    #[error("Interpolate error: {0:?}")]
     InterpolateError(InterpolateError),
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]

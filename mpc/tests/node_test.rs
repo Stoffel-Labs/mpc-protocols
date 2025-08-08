@@ -4,9 +4,7 @@ use std::{sync::Arc, time::Duration};
 use stoffelmpc_mpc::{
     common::{rbc::rbc::Avid, SecretSharingScheme, ShamirShare},
     honeybadger::{
-        input::
-            input::InputClient
-        ,
+        input::input::InputClient,
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShamirShare},
         share_gen::RanShaState,
@@ -17,9 +15,9 @@ use stoffelmpc_network::ClientId;
 use tokio::time::{sleep, timeout};
 
 use crate::utils::test_utils::{
-    construct_e2e_input, create_global_nodes, generate_independent_shares,
-    initialize_global_nodes_randousha, initialize_global_nodes_ransha, receive, setup_tracing,
-    test_setup,
+    construct_e2e_input, construct_e2e_input_ransha, create_global_nodes,
+    generate_independent_shares, initialize_global_nodes_randousha, initialize_global_nodes_ransha,
+    receive, setup_tracing, test_setup,
 };
 
 pub mod utils;
@@ -95,7 +93,7 @@ async fn ransha_e2e() {
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
-    let (_, n_shares_t, _) = construct_e2e_input(n_parties, t);
+    let (_, n_shares_t) = construct_e2e_input_ransha(n_parties, t);
     // create global nodes
     let mut nodes = create_global_nodes::<Fr, Avid>(n_parties, t, t + 1);
     // spawn tasks to process received messages
@@ -121,8 +119,9 @@ async fn ransha_e2e() {
                 }
                 store.computed_r_shares.iter().for_each(|s_t| {
                     assert_eq!(s_t.degree, t);
-                    assert_eq!(s_t.id, node.id + 1);
+                    assert_eq!(s_t.id, node.id);
                 });
+                assert_eq!(store.computed_r_shares.len(), n_parties);
                 sleep(Duration::from_millis(10)).await;
             }
         })),
@@ -162,13 +161,10 @@ async fn test_input_protocol_e2e() {
                 Err(_) => continue,
             };
             match wrapped {
-                WrappedMessage::Input(msg) => {
-                        match client.process(msg, net_clone2.clone()).await {
-                            Ok(_) => {}
-                            Err(e) => eprintln!("{}", e),
-                        }
-                    
-                }
+                WrappedMessage::Input(msg) => match client.process(msg, net_clone2.clone()).await {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Processing error : {}", e),
+                },
                 _ => continue,
             }
         }

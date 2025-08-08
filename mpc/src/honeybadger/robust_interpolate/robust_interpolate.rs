@@ -53,15 +53,16 @@ impl<F: FftField> SecretSharingScheme<F, 1> for RobustShamirShare<F> {
             .ok_or_else(|| InterpolateError::NoSuitableDomain(n))?;
 
         let mut poly = DensePolynomial::<F>::rand(degree, rng);
-        poly[0] = secret;
+        poly.coeffs[0] = secret;
         // Evaluate the polynomial over the domain
         let evals = domain.fft(&poly);
 
         // Create shares from evaluations
-        let shares = evals
+        let shares: Vec<RobustShamirShare<F>> = evals
             .iter()
+            .take(n)
             .enumerate()
-            .map(|(i, eval)| RobustShamirShare::new(*eval, i, degree))
+            .map(|(i, &eval)| RobustShamirShare::new(eval, i, degree))
             .collect();
 
         Ok(shares)
@@ -266,12 +267,9 @@ fn gao_rs_decode<F: FftField>(
     //To do: need to make this efficient
     let g1 = lagrange_interpolate(&x_vals, &y_vals)?;
 
-    // Step 2 : Define g0(x) = (x^n - 1) / s(x)
-    let mut xn_minus_1_coeffs = vec![F::zero(); n + 1];
-    xn_minus_1_coeffs[0] = -F::one();
-    xn_minus_1_coeffs[n] = F::one();
-    let xn_minus_1 = DensePolynomial::from_coefficients_vec(xn_minus_1_coeffs);
-    let g0 = &xn_minus_1 / &s_poly;
+    // Step 2 : Define g₀(x) = ∏ (x - aᵢ)
+    let x_a_prod = compute_g0_from_domain(n);
+    let g0 = &x_a_prod / &s_poly;
 
     // Step 3: Extended Euclidean algorithm: find g(x) and v(x) such that g = f * v
     let threshold = (n - s + k) / 2;
@@ -316,6 +314,24 @@ fn gao_rs_decode<F: FftField>(
     }
 }
 
+pub fn compute_g0_from_domain<F: FftField>(n: usize) -> DensePolynomial<F> {
+    // Create an FFT-compatible evaluation domain of size n
+    let domain =
+        GeneralEvaluationDomain::<F>::new(n).expect("Domain of size n must exist over the field");
+
+    // Extract evaluation points: ω^0, ω^1, ..., ω^{n-1}
+    let evaluation_points: Vec<F> = domain.elements().collect();
+
+    // Compute g₀(x) = ∏ (x - aᵢ) for aᵢ in evaluation_points
+    let mut g0 = DensePolynomial::from_coefficients_slice(&[F::one()]); // g0 = 1
+
+    for ai in evaluation_points.iter().take(n) {
+        let factor = DensePolynomial::from_coefficients_slice(&[-*ai, F::one()]); // (x - ai)
+        g0 = &g0 * &factor;
+    }
+
+    g0
+}
 /// Implements OEC decoding by incrementally increasing the number of shares until decoding succeeds.
 /// https://eprint.iacr.org/2012/517.pdf
 ///
@@ -338,7 +354,7 @@ fn oec_decode<F: FftField>(
         GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
 
     // Iterate, increasing the number of shares considered (r) to handle more erasures/errors
-    for r in 0..=t {
+    for r in 1..=t {
         let required = 2 * t + 1 + r;
         if shares.len() < required {
             continue;
@@ -457,10 +473,9 @@ mod tests {
     fn test_reed_solomon_error() {
         let mut rng = test_rng();
         let t = 2;
-        let n = 8;
+        let n = 10;
         let secret = Fr::from(42u32);
-        let ids: Vec<usize> = (0..n).collect();
-        let shares = RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
+        let shares = RobustShamirShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
 
         // === Case 2: Error-only decoding ===
         let mut corrupted: Vec<Fr> = shares.iter().map(|a| a.share[0]).collect();
@@ -477,34 +492,53 @@ mod tests {
         );
     }
     #[test]
+    fn test_reed_solomon_error_all_pairs() {
+        use itertools::Itertools;
+
+        let mut rng = test_rng();
+        let t = 3;
+        let n = 10;
+        let secret = Fr::from(42u32);
+        let shares = RobustShamirShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
+
+        // Go through all possible combinations of 2 distinct indices
+        for pair in (0..n).combinations(3) {
+            let mut corrupted: Vec<Fr> = shares.iter().map(|a| a.share[0]).collect();
+
+            // Apply different corruptions to the two indices
+            corrupted[pair[0]] += Fr::from(5u64);
+            corrupted[pair[1]] += Fr::from(3u64);
+            corrupted[pair[2]] += Fr::from(3u64);
+
+            // No erasure information provided
+            let decoded = gao_rs_decode(&corrupted, t + 1, n, &[]).unwrap();
+
+            let recovered_secret = decoded[0];
+            assert_eq!(
+                recovered_secret, secret,
+                "Failed to decode when corrupting indices {:?}",
+                pair
+            );
+        }
+    }
+    #[test]
     fn test_oec_protocol() {
         use ark_bls12_381::Fr;
         use ark_std::test_rng;
 
         let mut rng = test_rng();
         let t = 2;
-        let n = 8;
+        let n = 10;
 
         // Step 1: Create random message and encode it
         let secret = Fr::from(42u32);
         let ids: Vec<usize> = (0..n).collect();
-        let shares = RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
+        let mut shares =
+            RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
 
         // Step 3: Corrupt up to t shares
-        let _ = shares[2].clone()
-            + RobustShamirShare {
-                share: [Fr::from(3u64)],
-                id: 2,
-                degree: t,
-                _sharetype: PhantomData,
-            };
-        let _ = shares[5].clone()
-            + RobustShamirShare {
-                share: [Fr::from(1u64)],
-                id: 5,
-                degree: t,
-                _sharetype: PhantomData,
-            };
+        shares[0].share[0] += Fr::from(999u64);
+        shares[5].share[0] += Fr::from(999u64);
 
         // Step 4: Attempt OEC decode
         let result = oec_decode(n, t, shares.clone());
@@ -527,27 +561,29 @@ mod tests {
         use ark_std::test_rng;
 
         let mut rng = test_rng();
-        let t = 2;
-        let n = 8;
+        let t = 3;
+        let n = 10;
 
         // Generate random message and encode it
         let secret = Fr::from(42u32);
         let ids: Vec<usize> = (0..n).collect();
-        let shares = RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
+        let mut shares =
+            RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
 
         // Corrupt up to t shares
         let corruption_indices = [1, 4];
         for &i in &corruption_indices {
-            let _ = shares[i].clone()
+            shares[i] = (shares[i].clone()
                 + RobustShamirShare {
                     share: [Fr::from(7u64)],
                     id: i,
                     degree: t,
                     _sharetype: PhantomData,
-                };
+                })
+            .unwrap();
         }
         // Attempt robust interpolation
-        let result = RobustShamirShare::recover_secret(&shares.clone());
+        let result = RobustShamirShare::recover_secret(&shares);
         assert!(
             result.is_ok(),
             "robust_interpolate failed despite valid parameters"
@@ -556,5 +592,55 @@ mod tests {
         let (_, val_at_zero) = result.unwrap();
 
         assert_eq!(val_at_zero, secret, "Evaluation at zero incorrect");
+    }
+    #[test]
+    fn test_robust_interpolate_all_corruption_combinations() {
+        use ark_bls12_381::Fr;
+        use ark_std::test_rng;
+        use itertools::Itertools;
+
+        let mut rng = test_rng();
+        let t = 2;
+        let n = 7;
+
+        let secret = Fr::from(42u32);
+
+        let base_shares = RobustShamirShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
+
+        // Generate all corruption combinations of size 1..=t
+        for k in 1..=t {
+            for corruption_indices in (0..n).combinations(k) {
+                // Clone base shares to avoid compounding corruption
+                let mut shares = base_shares.clone();
+
+                // Apply corruption
+                for &i in &corruption_indices {
+                    shares[i].share[0] += Fr::from(999u64); // Ensure significant corruption
+                }
+
+                // Run recovery
+                let result = RobustShamirShare::recover_secret(&shares);
+
+                // Debug: show the corrupted indices
+                if result.is_err() {
+                    eprintln!("Failed for corrupted indices: {:?}", corruption_indices);
+                }
+
+                // Assert: should always succeed up to t corruptions
+                assert!(
+                    result.is_ok(),
+                    "Decoding failed for corrupted indices: {:?}",
+                    corruption_indices
+                );
+
+                // Check recovered secret
+                let (_, val_at_zero) = result.unwrap();
+                assert_eq!(
+                    val_at_zero, secret,
+                    "Incorrect recovery at zero for {:?}",
+                    corruption_indices
+                );
+            }
+        }
     }
 }

@@ -8,14 +8,11 @@ use tokio::sync::Mutex;
 
 use crate::{
     common::{
-        share::{
-            apply_vandermonde, make_vandermonde,
-            shamir::{NonRobust, NonRobustShare},
-            ShareError,
-        },
+        share::{apply_vandermonde, make_vandermonde, ShareError},
         SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
+        robust_interpolate::robust_interpolate::{Robust, RobustShamirShare},
         share_gen::{
             RanShaError, RanShaMessage, RanShaMessageType, RanShaPayload, RanShaState, RanShaStore,
         },
@@ -66,7 +63,7 @@ where
 
     pub async fn init<N>(
         &mut self,
-        shares_deg_t: Vec<NonRobustShare<F>>,
+        shares_deg_t: Vec<RobustShamirShare<F>>,
         session_id: SessionId,
         network: Arc<N>,
     ) -> Result<(), RanShaError>
@@ -116,7 +113,7 @@ where
             RanShaPayload::Output(_) => return Err(RanShaError::Abort),
         };
 
-        let share: ShamirShare<F, 1, NonRobust> =
+        let share: ShamirShare<F, 1, Robust> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())
                 .map_err(RanShaError::ArkDeserialization)?;
         if share.degree != self.threshold {
@@ -125,18 +122,22 @@ where
         let binding = self.get_or_create_store(msg.session_id).await;
         let mut store = binding.lock().await;
         store.state = RanShaState::Reconstruction;
-        store.received_r_shares.insert(msg.sender_id, share);
+        store.received_r_shares.insert(msg.sender_id, share.clone());
 
         if self.id < 2 * self.threshold && store.received_r_shares.len() == self.n_parties {
-            let shares: Vec<ShamirShare<F, 1, NonRobust>> =
+            let shares: Vec<ShamirShare<F, 1, Robust>> =
                 store.received_r_shares.values().cloned().collect();
 
             drop(store);
 
-            let recovered =
-                NonRobustShare::recover_secret(&shares).map_err(|e| RanShaError::ShareError(e))?;
-            let poly = DensePolynomial::from_coefficients_slice(&recovered.0);
-            let ok = poly.degree() == self.threshold;
+            let ok: bool;
+            match RobustShamirShare::recover_secret(&shares) {
+                Ok(r) => {
+                    let poly = DensePolynomial::from_coefficients_slice(&r.0);
+                    ok = poly.degree() == self.threshold;
+                }
+                Err(_) => ok = false,
+            }
 
             let result = WrappedMessage::RanSha(RanShaMessage::new(
                 self.id,
@@ -161,7 +162,7 @@ where
     pub async fn output_handler(
         &mut self,
         msg: RanShaMessage,
-    ) -> Result<Vec<NonRobustShare<F>>, RanShaError> {
+    ) -> Result<Vec<RobustShamirShare<F>>, RanShaError> {
         let ok = match msg.payload {
             RanShaPayload::Output(o) => o,
             RanShaPayload::Reconstruct(_) => return Err(RanShaError::Abort),
@@ -195,7 +196,7 @@ where
         &mut self,
         msg: RanShaMessage,
         network: Arc<N>,
-    ) -> Result<Option<Vec<NonRobustShare<F>>>, RanShaError>
+    ) -> Result<Option<Vec<RobustShamirShare<F>>>, RanShaError>
     where
         N: Network + Send + Sync,
     {

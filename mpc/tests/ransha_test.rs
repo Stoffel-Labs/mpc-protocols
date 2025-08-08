@@ -1,13 +1,14 @@
 use crate::utils::test_utils::{
-    construct_e2e_input, create_global_nodes, setup_tracing, test_setup,
+    construct_e2e_input_ransha, create_global_nodes, setup_tracing, test_setup,
 };
 use ark_bls12_381::Fr;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use std::sync::Arc;
 use stoffelmpc_mpc::{
-    common::{rbc::rbc::Avid, share::shamir::NonRobustShare, SecretSharingScheme, RBC},
+    common::{rbc::rbc::Avid, SecretSharingScheme, RBC},
     honeybadger::{
+        robust_interpolate::robust_interpolate::RobustShamirShare,
         share_gen::{
             share_gen::RanShaNode, RanShaError, RanShaMessage, RanShaMessageType, RanShaPayload,
             RanShaState,
@@ -31,23 +32,27 @@ async fn test_reconstruct_handler_incorrect_share() {
     let secret = Fr::from(1234);
     let degree_t = 3;
 
-    let ids: Vec<usize> = (1..=n_parties).collect();
     // receiver id receives recconstruct messages from other party
     let receiver_id = t + 2;
 
     let mut rng = test_rng();
     // ri_t created by each party i
     let mut shares_ri_t =
-        NonRobustShare::compute_shares(secret, n_parties, degree_t, Some(&ids), &mut rng).unwrap();
+        RobustShamirShare::compute_shares(secret, n_parties, degree_t, None, &mut rng).unwrap();
 
-    shares_ri_t[0].share[0] = Fr::from(111);
+    // Set the corruption indices
+    let corruption_indices = [0, 1, 3, 4]; // Corrupt 4 shares, which is > t=3
+
+    // Corrupt more than t shares
+    for &i in &corruption_indices {
+        shares_ri_t[i].share[0] += Fr::from(7u64);
+    }
     // create global nodes
     let nodes = create_global_nodes::<Fr, Avid>(n_parties, t, t + 1);
 
     // receiver randousha node
     let mut ransha_node = nodes.get(receiver_id).unwrap().clone();
 
-    // Send 2t+1 reconstruction messages to the receiver node
     for i in 0..n_parties {
         let mut bytes_rec_message = Vec::new();
         shares_ri_t[i]
@@ -135,7 +140,7 @@ async fn test_output_handler() {
     let degree_t = 3;
 
     let (network, _receivers, _) = test_setup(n_parties, vec![]);
-    let (_, shares_si_t, _) = construct_e2e_input(n_parties, degree_t);
+    let (_, shares_si_t) = construct_e2e_input_ransha(n_parties, degree_t);
     let receiver_id = 1;
 
     // create receiver randousha node

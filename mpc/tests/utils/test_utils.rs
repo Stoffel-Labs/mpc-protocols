@@ -420,10 +420,34 @@ pub async fn initialize_global_nodes_randousha<F, R, N>(
     }
 }
 
+// Return a vector that contains a vector of inputs for each node
+pub fn construct_e2e_input_ransha(
+    n: usize,
+    degree_t: usize,
+) -> (
+    Vec<Fr>,
+    Vec<Vec<RobustShamirShare<Fr>>>,
+) {
+    let mut n_shares_t = vec![vec![]; n];
+    let mut secrets = Vec::new();
+    let mut rng = test_rng();
+
+    for _ in 0..n {
+        let secret = Fr::rand(&mut rng);
+        secrets.push(secret);
+        let shares_si_t =
+            RobustShamirShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
+        for j in 0..n {
+            n_shares_t[j].push(shares_si_t[j].clone());
+        }
+    }
+
+    return (secrets, n_shares_t);
+}
 /// Initializes all global nodes with their respective shares for ransha.
 pub async fn initialize_global_nodes_ransha<F, R, N>(
     nodes: Vec<Node<F, R>>,
-    n_shares_t: &[Vec<NonRobustShare<F>>],
+    n_shares_t: &[Vec<RobustShamirShare<F>>],
     session_id: SessionId,
     network: Arc<N>,
 ) where

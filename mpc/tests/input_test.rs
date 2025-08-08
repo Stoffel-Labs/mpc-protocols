@@ -135,8 +135,8 @@ async fn test_input_recovery_with_missing_server() {
 #[tokio::test]
 async fn test_input_with_too_many_faulty_shares() {
     setup_tracing();
-    let n = 4;
-    let t = 1;
+    let n = 10;
+    let t = 3;
     let client_id = 103;
     let input_value = Fr::from(33);
     let mask_value = Fr::from(88);
@@ -163,8 +163,10 @@ async fn test_input_with_too_many_faulty_shares() {
     });
 
     // Corrupt more than t=1 shares
-    local_shares[0][0].share[0] = Fr::from(321);
-    local_shares[1][0].share[0] = Fr::from(123);
+    local_shares[0][0].share[0] += Fr::from(321);
+    local_shares[1][0].share[0] += Fr::from(123);
+    local_shares[2][0].share[0] += Fr::from(123);
+    local_shares[3][0].share[0] += Fr::from(123);
 
     for (i, node) in nodes.iter().enumerate() {
         node.preprocessing

@@ -10,9 +10,9 @@ use thiserror::Error;
 use crate::{
     common::{
         rbc::RbcError,
-        share::{shamir::NonRobustShare, ShareError},
+        share::ShareError,
     },
-    honeybadger::{robust_interpolate::InterpolateError, SessionId},
+    honeybadger::{robust_interpolate::{robust_interpolate::RobustShamirShare, InterpolateError}, SessionId},
 };
 
 pub mod share_gen;
@@ -28,11 +28,11 @@ pub enum RanShaError {
     ArkDeserialization(SerializationError),
     #[error("error while serializing the object into bytes: {0:?}")]
     SerializationError(Box<ErrorKind>),
-    #[error("inner error: {0}")]
+    #[error("inner error: {0:?}")]
     Inner(#[from] InterpolateError),
-    #[error("Rbc error: {0}")]
+    #[error("Rbc error: {0:?}")]
     RbcError(RbcError),
-    #[error("Share error: {0}")]
+    #[error("Share error: {0:?}")]
     ShareError(ShareError),
     #[error("received abort signal")]
     Abort,
@@ -42,8 +42,8 @@ pub enum RanShaError {
 
 #[derive(Clone)]
 pub struct RanShaStore<F: FftField> {
-    pub received_r_shares: HashMap<usize, NonRobustShare<F>>,
-    pub computed_r_shares: Vec<NonRobustShare<F>>,
+    pub received_r_shares: HashMap<usize, RobustShamirShare<F>>,
+    pub computed_r_shares: Vec<RobustShamirShare<F>>,
     pub received_ok_msg: Vec<usize>,
     pub state: RanShaState,
 }

@@ -23,6 +23,7 @@ rs_merkle.workspace = true
 reed-solomon-erasure.workspace = true
 rand.workspace = true
 futures.workspace =true
+itertools.workspace = true
 
 [dev-dependencies]
 once_cell = "1.21.3"
