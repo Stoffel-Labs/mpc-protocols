@@ -94,6 +94,7 @@ where
     pub inputs: (Vec<RobustShamirShare<F>>, Vec<RobustShamirShare<F>>),
     pub protocol_state: MultProtocolState,
     pub protocol_output: Vec<Vec<RobustShamirShare<F>>>,
+    pub share_mult_from_triple: Vec<RobustShamirShare<F>>,
 }
 
 impl<F> MultStorage<F>
@@ -106,6 +107,7 @@ where
             inputs: (Vec::new(), Vec::new()),
             protocol_state: MultProtocolState::NotInitialized,
             protocol_output: Vec::new(),
+            share_mult_from_triple: Vec::new(),
         }
     }
 }
@@ -274,17 +276,10 @@ where
                     // SAFETY: It's fine to do unwrap() on both components of the message because
                     // both are available in the database.
 
-                    // Gets a triple from the preprocessing.
-                    let mut triple_storage = self.preprocessing_material.lock().await;
-                    let triples = triple_storage.take_beaver_triples(storage.inputs.1.len());
-                    if triples.len() < storage.inputs.1.len() {
-                        return Err(HoneyBadgerError::NotEnoughPreprocessing);
-                    }
-
                     let mut shares_mult = Vec::new();
 
-                    for (triple, input_a, input_b, subtraction_a, subtraction_b) in izip!(
-                        &triples,
+                    for (triple_mult, input_a, input_b, subtraction_a, subtraction_b) in izip!(
+                        &storage.share_mult_from_triple,
                         &storage.inputs.0,
                         &storage.inputs.1,
                         storage.output_open_mult.0.as_ref().unwrap(),
@@ -293,8 +288,7 @@ where
                         let mult_subs = subtraction_a.mul(subtraction_b);
                         let mult_sub_a_y = input_b.clone().mul(subtraction_a.clone())?;
                         let mult_sub_b_x = input_a.clone().mul(subtraction_b.clone())?;
-                        let share = triple
-                            .mult
+                        let share = triple_mult
                             .clone()
                             .sub(&mult_subs)?
                             .sub(&mult_sub_a_y)?
@@ -473,12 +467,6 @@ where
         // Both lists must have the same length.
         assert_eq!(x.len(), y.len());
 
-        {
-            let storage_bind = self.get_or_create_mult_storage(session_id).await;
-            let mut storage = storage_bind.lock().await;
-            storage.inputs = (x.clone(), y.clone());
-        }
-
         // Extract the preprocessing triple.
         let beaver_triples = self
             .preprocessing_material
@@ -487,6 +475,16 @@ where
             .take_beaver_triples(x.len());
         if beaver_triples.len() < x.len() {
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+
+        {
+            let storage_bind = self.get_or_create_mult_storage(session_id).await;
+            let mut storage = storage_bind.lock().await;
+            storage.inputs = (x.clone(), y.clone());
+            storage.share_mult_from_triple = beaver_triples
+                .iter()
+                .map(|triple| triple.mult.clone())
+                .collect();
         }
 
         // Compute a - x and b - y.
