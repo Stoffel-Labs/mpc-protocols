@@ -220,10 +220,10 @@ where
         open_message: OpenMultMessage<F>,
         open_order: MultMessageType,
     ) -> Result<Option<Vec<RobustShamirShare<F>>>, HoneyBadgerError> {
-        let storage_bind = self.get_or_create_mult_storage(session_id).await;
-        let mut storage = storage_bind.lock().await;
         match open_order {
             MultMessageType::FirstOpen => {
+                let storage_bind = self.get_or_create_mult_storage(session_id).await;
+                let mut storage = storage_bind.lock().await;
                 storage.output_open_mult.0 = Some(open_message.values());
                 if storage.output_open_mult.1.is_none() {
                     // Both results are not ready yet, just return.
@@ -232,17 +232,9 @@ where
                     // SAFETY: It's fine to do unwrap() on both components of the message because
                     // both are available in the database.
 
-                    // Gets a triple from the preprocessing.
-                    let mut triple_storage = self.preprocessing_material.lock().await;
-                    let triples = triple_storage.take_beaver_triples(storage.inputs.1.len());
-                    if triples.len() < storage.inputs.1.len() {
-                        return Err(HoneyBadgerError::NotEnoughPreprocessing);
-                    }
-
                     let mut shares_mult = Vec::new();
-
-                    for (triple, input_a, input_b, subtraction_a, subtraction_b) in izip!(
-                        &triples,
+                    for (triple_mult, input_a, input_b, subtraction_a, subtraction_b) in izip!(
+                        &storage.share_mult_from_triple,
                         &storage.inputs.0,
                         &storage.inputs.1,
                         storage.output_open_mult.0.as_ref().unwrap(),
@@ -251,8 +243,7 @@ where
                         let mult_subs = subtraction_a.mul(subtraction_b);
                         let mult_sub_a_y = input_b.clone().mul(subtraction_a.clone())?;
                         let mult_sub_b_x = input_a.clone().mul(subtraction_b.clone())?;
-                        let share = triple
-                            .mult
+                        let share = triple_mult
                             .clone()
                             .sub(&mult_subs)?
                             .sub(&mult_sub_a_y)?
@@ -268,6 +259,9 @@ where
                 }
             }
             MultMessageType::SecondOpen => {
+                let session_id = session_id - 1;
+                let storage_bind = self.get_or_create_mult_storage(session_id).await;
+                let mut storage = storage_bind.lock().await;
                 storage.output_open_mult.1 = Some(open_message.values());
                 if storage.output_open_mult.0.is_none() {
                     // Both results are not ready yet, just return.
@@ -466,6 +460,7 @@ where
     {
         // Both lists must have the same length.
         assert_eq!(x.len(), y.len());
+        assert_eq!(x.len(), self.online_opts.threshold + 1);
 
         // Extract the preprocessing triple.
         let beaver_triples = self
@@ -508,6 +503,7 @@ where
         );
         let fut_b_sub_y = self.batch_recon.init_batch_reconstruct(
             &b_sub_y,
+            // TODO: This should be a different session ID from the previous one, but in such a we retrieve the original session ID from this one.
             session_id + 1,
             BatchReconContentType::MultMessageSecondOpen,
             Arc::clone(&network),
