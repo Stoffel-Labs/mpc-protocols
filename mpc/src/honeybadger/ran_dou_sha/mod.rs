@@ -450,7 +450,7 @@ where
                     OutputMessage::deserialize_compressed(message.payload.as_slice())
                         .map_err(RanDouShaError::ArkDeserialization)?;
                 self.output_handler(&output_message, params).await?;
-                return Ok(());
+                Ok(())
             }
             messages::RanDouShaMessageType::ReconstructMessage => {
                 let reconstr_message = ark_serialize::CanonicalDeserialize::deserialize_compressed(
@@ -459,7 +459,7 @@ where
                 .map_err(RanDouShaError::ArkDeserialization)?;
                 self.reconstruction_handler(&reconstr_message, params, Arc::clone(&network))
                     .await?;
-                return Ok(());
+                Ok(())
             }
         }
     }

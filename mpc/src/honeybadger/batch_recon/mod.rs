@@ -14,7 +14,8 @@ pub enum BatchReconContentType {
     /// The message is for the triple generation protocol.
     TripleGenMessage,
     /// The message is for the multiplication protocol.
-    MultiplicationMessage,
+    MultMessageFirstOpen,
+    MultMessageSecondOpen,
 }
 
 /// Represents message type exchanged between network nodes during the batch reconstruction protocol.

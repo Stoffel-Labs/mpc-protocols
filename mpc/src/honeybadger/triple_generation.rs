@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::Sub, result, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
@@ -15,7 +15,7 @@ use tokio::{
     task::JoinError,
 };
 
-use crate::common::share::{shamir::NonRobustShamirShare, ShareError};
+use crate::common::share::ShareError;
 
 use super::{
     batch_recon::{batch_recon::BatchReconNode, BatchReconContentType, BatchReconError},
@@ -67,7 +67,7 @@ pub struct ShamirBeaverTriple<F: FftField> {
     /// Second random value of the triple.
     pub b: RobustShamirShare<F>,
     /// Multiplication of both random values.
-    pub mult: NonRobustShamirShare<F>,
+    pub mult: RobustShamirShare<F>,
 }
 
 impl<F> ShamirBeaverTriple<F>
@@ -79,7 +79,7 @@ where
     pub fn new(
         a: RobustShamirShare<F>,
         b: RobustShamirShare<F>,
-        mult: NonRobustShamirShare<F>,
+        mult: RobustShamirShare<F>,
     ) -> Self {
         Self { a, b, mult }
     }
@@ -313,7 +313,7 @@ where
             result_triples.push(ShamirBeaverTriple::new(
                 share_a.clone(),
                 share_b.clone(),
-                result_share,
+                RobustShamirShare::from(result_share),
             ));
         }
 

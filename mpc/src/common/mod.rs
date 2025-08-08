@@ -24,16 +24,7 @@ use std::{
     sync::Arc,
     usize,
 };
-use stoffelmpc_network::Network;
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum ProtocolError {
-    #[error("there is no preprocessing available to perform the operation")]
-    NotEnoughPreprocessing,
-    #[error("there is an error with share computation")]
-    ShareError(#[from] ShareError),
-}
+use stoffelmpc_network::{Network, SessionId};
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
@@ -156,6 +147,20 @@ impl<F: FftField, const N: usize, P> Sub<&Self> for ShamirShare<F, N, P> {
     }
 }
 
+impl<F: FftField, const N: usize, P> Sub<&F> for ShamirShare<F, N, P> {
+    type Output = Result<Self, ShareError>;
+    fn sub(self, other: &F) -> Self::Output {
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] - other);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+            _sharetype: PhantomData,
+        })
+    }
+}
+
 impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
     type Output = Result<Self, ShareError>;
 
@@ -244,11 +249,19 @@ where
     /// Defines the information needed to run and define the MPC protocol.
     type MPCOpts;
 
+    type ProtocolError: std::error::Error;
+
     async fn init(&mut self, network: Arc<N>, opts: Self::MPCOpts)
     where
         N: 'async_trait;
 
-    async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<S, ProtocolError>
+    async fn mul(
+        &mut self,
+        a: Vec<S>,
+        b: Vec<S>,
+        session_id: SessionId,
+        network: Arc<N>,
+    ) -> Result<(), Self::ProtocolError>
     where
         N: 'async_trait;
 }
@@ -261,14 +274,14 @@ where
     F: FftField,
     S: SecretSharingScheme<F>,
 {
-    type ProtocolError: std::error::Error;
+    type PreprocessingError: std::error::Error;
 
     /// Runs the offline/preprocessing phase for an MPC protocol
     async fn run_preprocessing<R>(
         &mut self,
         network: Arc<N>,
         rng: &mut R,
-    ) -> Result<Vec<ShamirBeaverTriple<F>>, Self::ProtocolError>
+    ) -> Result<Vec<ShamirBeaverTriple<F>>, Self::PreprocessingError>
     where
         N: 'async_trait,
         R: Rng + Send;

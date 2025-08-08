@@ -1,11 +1,3 @@
-use robust_interpolate::robust_interpolate::RobustShamirShare;
-use serde::{Deserialize, Serialize};
-
-use crate::{
-    common::rbc::{rbc::Avid, rbc_store::Msg, RbcError},
-    honeybadger::{batch_recon::BatchReconMsg, ran_dou_sha::messages::RanDouShaMessage},
-};
-
 /// This module contains the implementation of the Robust interpolate protocol presented in
 /// Figure 1 in the paper "HoneyBadgerMPC and AsynchroMix: Practical AsynchronousMPC and its
 /// Application to Anonymous Communication".
@@ -27,46 +19,95 @@ pub mod double_share_generation;
 /// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
 pub mod triple_generation;
 
+/// Implements the multiplication handlers.
+mod multiplication;
+
+use std::collections::HashMap;
+use std::ops::{Deref, Mul, Sub};
 use std::sync::Arc;
 
-use ark_ff::FftField;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::Rng;
-use async_trait::async_trait;
 use double_share_generation::{DouShaError, DouShaParams, DoubleShareNode};
 use ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaParams};
-use sha2::digest::crypto_common::KeyInit;
+use robust_interpolate::robust_interpolate::RobustShamirShare;
 use stoffelmpc_network::{Network, NetworkError, PartyId, SessionId};
 use thiserror::Error;
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use triple_generation::{ShamirBeaverTriple, TripleGenError, TripleGenNode, TripleGenParams};
 
 use crate::common::{
-    share::shamir::NonRobustShamirShare, MPCProtocol, PreprocessingMPCProtocol, ProtocolError, RBC,
+    share::shamir::NonRobustShamirShare, MPCProtocol, PreprocessingMPCProtocol, RBC,
 };
+use serde::{Deserialize, Serialize};
+
+use crate::common::share::ShareError;
+use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
+use crate::honeybadger::batch_recon::{BatchReconContentType, BatchReconError};
+use crate::honeybadger::multiplication::{
+    MultMessage, MultMessageType, MultProtocolState, OpenMultMessage,
+};
+use crate::{
+    common::rbc::{rbc::Avid, rbc_store::Msg, RbcError},
+    honeybadger::{batch_recon::BatchReconMsg, ran_dou_sha::messages::RanDouShaMessage},
+};
+use ark_ff::FftField;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
+use ark_std::rand::Rng;
+use async_trait::async_trait;
+use itertools::izip;
+use tokio::sync::mpsc::error::SendError;
+use tokio::sync::Mutex;
+use tokio::try_join;
 
 /// Information pertaining a HoneyBadgerMPCNode protocol participant.
-pub struct HoneyBadgerMPCNode<F: FftField> {
+pub struct HoneyBadgerMpcNode<F: FftField> {
     /// ID of the current execution node.
     pub id: PartyId,
 
     /// Preprocessing material used in the protocol execution.
-    pub preprocessing_material: HoneyBadgerMPCNodePreprocMaterial<F>,
+    pub preprocessing_material: Arc<Mutex<HoneyBadgerMPCNodePreprocMaterial<F>>>,
 
     // Preprocessing parameters.
     pub online_opts: HoneyBadgerMPCNodeOpts,
     pub preprocessing_opts: HoneyBadgerMPCNodePreprocOpts,
 
+    pub mult_storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<MultStorage<F>>>>>>,
+    pub sender_finished_mults: Sender<SessionId>,
+
     // Nodes for subprotocols.
     pub dou_sha: DoubleShareNode<F>,
     pub ran_dou_sha: RanDouShaNode<F>,
     pub triple_gen: TripleGenNode<F>,
+    pub batch_recon: BatchReconNode<F>,
 
     // Channels for outputs from subprotocols. Those channels contain the session ids of protocols
     // that are already finished.
     pub dou_sha_channel: Receiver<SessionId>,
     pub ran_dou_sha_channel: Receiver<SessionId>,
     pub triple_channel: Receiver<SessionId>,
+}
+
+pub struct MultStorage<F>
+where
+    F: FftField,
+{
+    pub output_open_mult: (Option<Vec<F>>, Option<Vec<F>>),
+    pub inputs: (Vec<RobustShamirShare<F>>, Vec<RobustShamirShare<F>>),
+    pub protocol_state: MultProtocolState,
+    pub protocol_output: Vec<Vec<RobustShamirShare<F>>>,
+}
+
+impl<F> MultStorage<F>
+where
+    F: FftField,
+{
+    pub fn empty() -> Self {
+        Self {
+            output_open_mult: (None, None),
+            inputs: (Vec::new(), Vec::new()),
+            protocol_state: MultProtocolState::NotInitialized,
+            protocol_output: Vec::new(),
+        }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -83,9 +124,19 @@ pub enum HoneyBadgerError {
     TripleGenError(#[from] TripleGenError),
     #[error("error in the RBC: {0:?}")]
     RbcError(#[from] RbcError),
+    #[error("serialization error using arkworks: {0:?}")]
+    ArkSerializationError(#[from] SerializationError),
+    #[error("serialization error using bincode: {0:?}")]
+    BincodeError(#[from] bincode::Error),
+    #[error("error in batch reconstruction: {0:?}")]
+    BatchReconError(#[from] BatchReconError),
+    #[error("error manipulating shares: {0:?}")]
+    ShareError(#[from] ShareError),
+    #[error("error sending information to the MPSC channel: {0:?}")]
+    SendError(#[from] SendError<SessionId>),
 }
 
-impl<F> HoneyBadgerMPCNode<F>
+impl<F> HoneyBadgerMpcNode<F>
 where
     F: FftField,
 {
@@ -93,6 +144,7 @@ where
         id: PartyId,
         online_opts: HoneyBadgerMPCNodeOpts,
         preprocessing_opts: HoneyBadgerMPCNodePreprocOpts,
+        sender_finished_mults: Sender<SessionId>,
     ) -> Result<Self, HoneyBadgerError> {
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
@@ -115,9 +167,16 @@ where
             preprocessing_opts.n_triples,
         );
         let triple_gen_node = TripleGenNode::new(id, triple_gen_params, triple_sender);
+
+        // Create batch reconstruction node.
+        let batch_recon_node =
+            BatchReconNode::new(id, online_opts.n_parties, online_opts.threshold)?;
+
         Ok(Self {
             id,
-            preprocessing_material: HoneyBadgerMPCNodePreprocMaterial::empty(),
+            preprocessing_material: Arc::new(
+                Mutex::new(HoneyBadgerMPCNodePreprocMaterial::empty()),
+            ),
             online_opts,
             preprocessing_opts,
             dou_sha: dousha_node,
@@ -126,7 +185,131 @@ where
             dou_sha_channel: dou_sha_receiver,
             ran_dou_sha_channel: ran_dou_sha_receiver,
             triple_channel: triple_receiver,
+            batch_recon: batch_recon_node,
+            mult_storage: Arc::new(Mutex::new(HashMap::new())),
+            sender_finished_mults,
         })
+    }
+
+    pub async fn process(&mut self, message: MultMessage) -> Result<(), HoneyBadgerError> {
+        // Deserialize the message payload.
+        let open_mult_message =
+            OpenMultMessage::deserialize_compressed(message.payload.as_slice())?;
+        self.open_mult_handler(message.session_id, open_mult_message, message.message_type)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn get_or_create_mult_storage(
+        &self,
+        session_id: SessionId,
+    ) -> Arc<Mutex<MultStorage<F>>> {
+        let mut storage = self.mult_storage.lock().await;
+        storage
+            .entry(session_id)
+            .or_insert(Arc::new(Mutex::new(MultStorage::empty())))
+            .clone()
+    }
+
+    pub async fn open_mult_handler(
+        &self,
+        session_id: SessionId,
+        open_message: OpenMultMessage<F>,
+        open_order: MultMessageType,
+    ) -> Result<Option<Vec<RobustShamirShare<F>>>, HoneyBadgerError> {
+        let storage_bind = self.get_or_create_mult_storage(session_id).await;
+        let mut storage = storage_bind.lock().await;
+        match open_order {
+            MultMessageType::FirstOpen => {
+                storage.output_open_mult.0 = Some(open_message.values());
+                if storage.output_open_mult.1.is_none() {
+                    // Both results are not ready yet, just return.
+                    Ok(None)
+                } else {
+                    // SAFETY: It's fine to do unwrap() on both components of the message because
+                    // both are available in the database.
+
+                    // Gets a triple from the preprocessing.
+                    let mut triple_storage = self.preprocessing_material.lock().await;
+                    let triples = triple_storage.take_beaver_triples(storage.inputs.1.len());
+                    if triples.len() < storage.inputs.1.len() {
+                        return Err(HoneyBadgerError::NotEnoughPreprocessing);
+                    }
+
+                    let mut shares_mult = Vec::new();
+
+                    for (triple, input_a, input_b, subtraction_a, subtraction_b) in izip!(
+                        &triples,
+                        &storage.inputs.0,
+                        &storage.inputs.1,
+                        storage.output_open_mult.0.as_ref().unwrap(),
+                        storage.output_open_mult.1.as_ref().unwrap(),
+                    ) {
+                        let mult_subs = subtraction_a.mul(subtraction_b);
+                        let mult_sub_a_y = input_b.clone().mul(subtraction_a.clone())?;
+                        let mult_sub_b_x = input_a.clone().mul(subtraction_b.clone())?;
+                        let share = triple
+                            .mult
+                            .clone()
+                            .sub(&mult_subs)?
+                            .sub(&mult_sub_a_y)?
+                            .sub(&mult_sub_b_x)?;
+                        shares_mult.push(share);
+                    }
+
+                    storage.protocol_output.push(shares_mult.clone());
+                    storage.protocol_state = MultProtocolState::Finished;
+                    self.sender_finished_mults.send(session_id).await?;
+
+                    Ok(Some(shares_mult))
+                }
+            }
+            MultMessageType::SecondOpen => {
+                storage.output_open_mult.1 = Some(open_message.values());
+                if storage.output_open_mult.0.is_none() {
+                    // Both results are not ready yet, just return.
+                    Ok(None)
+                } else {
+                    // SAFETY: It's fine to do unwrap() on both components of the message because
+                    // both are available in the database.
+
+                    // Gets a triple from the preprocessing.
+                    let mut triple_storage = self.preprocessing_material.lock().await;
+                    let triples = triple_storage.take_beaver_triples(storage.inputs.1.len());
+                    if triples.len() < storage.inputs.1.len() {
+                        return Err(HoneyBadgerError::NotEnoughPreprocessing);
+                    }
+
+                    let mut shares_mult = Vec::new();
+
+                    for (triple, input_a, input_b, subtraction_a, subtraction_b) in izip!(
+                        &triples,
+                        &storage.inputs.0,
+                        &storage.inputs.1,
+                        storage.output_open_mult.0.as_ref().unwrap(),
+                        storage.output_open_mult.1.as_ref().unwrap(),
+                    ) {
+                        let mult_subs = subtraction_a.mul(subtraction_b);
+                        let mult_sub_a_y = input_b.clone().mul(subtraction_a.clone())?;
+                        let mult_sub_b_x = input_a.clone().mul(subtraction_b.clone())?;
+                        let share = triple
+                            .mult
+                            .clone()
+                            .sub(&mult_subs)?
+                            .sub(&mult_sub_a_y)?
+                            .sub(&mult_sub_b_x)?;
+                        shares_mult.push(share);
+                    }
+
+                    storage.protocol_output.push(shares_mult.clone());
+                    storage.protocol_state = MultProtocolState::Finished;
+                    self.sender_finished_mults.send(session_id).await?;
+
+                    Ok(Some(shares_mult))
+                }
+            }
+        }
     }
 }
 
@@ -140,7 +323,7 @@ pub struct DoubleShamirShare<F: FftField> {
 
 impl<F: FftField> DoubleShamirShare<F> {
     pub fn new(degree_t: NonRobustShamirShare<F>, degree_2t: NonRobustShamirShare<F>) -> Self {
-        assert!(degree_t.id == degree_2t.id);
+        assert_eq!(degree_t.id, degree_2t.id);
         Self {
             degree_2t,
             degree_t,
@@ -217,12 +400,12 @@ impl HoneyBadgerMPCNodeOpts {
     pub fn new(
         n_parties: usize,
         threshold: usize,
-        init_preproc_opts: HoneyBadgerMPCNodePreprocOpts,
+        init_preprocess_opts: HoneyBadgerMPCNodePreprocOpts,
     ) -> Self {
         Self {
             n_parties,
             threshold,
-            init_preproc_opts,
+            init_preproc_opts: init_preprocess_opts,
         }
     }
 }
@@ -261,25 +444,13 @@ impl HoneyBadgerMPCNodePreprocOpts {
 }
 
 #[async_trait]
-impl<F, N> MPCProtocol<F, NonRobustShamirShare<F>, N> for HoneyBadgerMPCNode<F>
+impl<F, N> MPCProtocol<F, RobustShamirShare<F>, N> for HoneyBadgerMpcNode<F>
 where
     N: Network,
     F: FftField,
 {
     type MPCOpts = HoneyBadgerMPCNodeOpts;
-
-    async fn mul(
-        &mut self,
-        a: Vec<NonRobustShamirShare<F>>,
-        b: Vec<NonRobustShamirShare<F>>,
-        network: Arc<N>,
-    ) -> Result<NonRobustShamirShare<F>, ProtocolError>
-    where
-        N: 'async_trait,
-    {
-        // TODO: Implement multiplication.
-        todo!("implement multiplication");
-    }
+    type ProtocolError = HoneyBadgerError;
 
     async fn init(&mut self, network: Arc<N>, opts: Self::MPCOpts)
     where
@@ -288,15 +459,74 @@ where
         let network = Arc::clone(&network);
         todo!();
     }
+
+    async fn mul(
+        &mut self,
+        x: Vec<RobustShamirShare<F>>,
+        y: Vec<RobustShamirShare<F>>,
+        session_id: SessionId,
+        network: Arc<N>,
+    ) -> Result<(), Self::ProtocolError>
+    where
+        N: 'async_trait,
+    {
+        // Both lists must have the same length.
+        assert_eq!(x.len(), y.len());
+
+        {
+            let storage_bind = self.get_or_create_mult_storage(session_id).await;
+            let mut storage = storage_bind.lock().await;
+            storage.inputs = (x.clone(), y.clone());
+        }
+
+        // Extract the preprocessing triple.
+        let beaver_triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(x.len());
+        if beaver_triples.len() < x.len() {
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+
+        // Compute a - x and b - y.
+        let a_sub_x = x
+            .iter()
+            .zip(beaver_triples.iter())
+            .map(|(x, triple)| triple.a.clone() - x)
+            .collect::<Result<Vec<RobustShamirShare<F>>, ShareError>>()?;
+        let b_sub_y = y
+            .iter()
+            .zip(beaver_triples.iter())
+            .map(|(y, triple)| triple.b.clone() - y)
+            .collect::<Result<Vec<RobustShamirShare<F>>, ShareError>>()?;
+
+        // Executes the batch reconstruction to reconstruct the messages.
+        let fut_a_sub_x = self.batch_recon.init_batch_reconstruct(
+            &a_sub_x,
+            session_id,
+            BatchReconContentType::MultMessageFirstOpen,
+            Arc::clone(&network),
+        );
+        let fut_b_sub_y = self.batch_recon.init_batch_reconstruct(
+            &b_sub_y,
+            session_id + 1,
+            BatchReconContentType::MultMessageSecondOpen,
+            Arc::clone(&network),
+        );
+
+        try_join!(fut_a_sub_x, fut_b_sub_y)?;
+        Ok(())
+    }
 }
 
 #[async_trait]
-impl<F, N> PreprocessingMPCProtocol<F, NonRobustShamirShare<F>, N> for HoneyBadgerMPCNode<F>
+impl<F, N> PreprocessingMPCProtocol<F, RobustShamirShare<F>, N> for HoneyBadgerMpcNode<F>
 where
     N: Network,
     F: FftField,
 {
-    type ProtocolError = HoneyBadgerError;
+    type PreprocessingError = HoneyBadgerError;
 
     async fn run_preprocessing<R>(
         &mut self,
@@ -310,9 +540,13 @@ where
         // First, the node takes faulty double shares to create triples.
         let random_shares_a = self
             .preprocessing_material
+            .lock()
+            .await
             .take_random_shares(self.preprocessing_opts.n_triples);
         let random_shares_b = self
             .preprocessing_material
+            .lock()
+            .await
             .take_random_shares(self.preprocessing_opts.n_triples);
 
         if random_shares_a.len() < self.preprocessing_opts.n_triples
@@ -324,7 +558,7 @@ where
 
         let mut ran_dou_sha_pair = self.ran_dou_sha.pop_finished_protocol_result().await;
         if ran_dou_sha_pair.is_none() {
-            // There are not enought random double shares. We need to construct them.
+            // There are not enough random double shares. We need to construct them.
             let mut out_dou_sha = self.dou_sha.pop_finished_protocol_result().await;
             if out_dou_sha.is_none() {
                 // There are not enough faulty double shares. We need to construct them.

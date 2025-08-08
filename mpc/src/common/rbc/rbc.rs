@@ -113,6 +113,7 @@ impl RBC for Bracha {
             .map_err(|e| RbcError::NetworkError(e))?;
         Ok(())
     }
+
     /// Send to another node
     async fn send<N: Network + Send + Sync>(
         &self,

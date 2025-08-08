@@ -8,6 +8,9 @@ use std::{
 use ark_serialize::CanonicalSerialize;
 
 use super::*;
+// use std::sync::Arc;
+use crate::honeybadger::batch_recon::BatchReconContentType::MultMessageFirstOpen;
+use crate::honeybadger::multiplication::{MultMessage, MultMessageType, OpenMultMessage};
 use crate::{
     common::{share::ShareError, SecretSharingScheme, ShamirShare},
     honeybadger::{
@@ -18,7 +21,6 @@ use crate::{
 use ark_ff::FftField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use stoffelmpc_network::{Network, SessionId};
-// use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 /// --------------------------BatchRecPub--------------------------
@@ -240,9 +242,31 @@ impl<F: FftField> BatchReconNode<F> {
                                         bincode::serialize(&triple_gen_generic_msg)?;
                                     net.send(self.id + 1, &bytes_generic_msg).await?;
                                 }
-                                BatchReconContentType::MultiplicationMessage => {
-                                    // TODO: Complete this section.
-                                    todo!()
+                                MultMessageFirstOpen => {
+                                    let mult_message = OpenMultMessage::new(result);
+                                    let mut bytes_message = Vec::new();
+                                    mult_message.serialize_compressed(&mut bytes_message)?;
+                                    let mult_generic_msg = MultMessage::new(
+                                        self.id,
+                                        msg.session_id,
+                                        MultMessageType::FirstOpen,
+                                        bytes_message,
+                                    );
+                                    let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
+                                    net.send(self.id + 1, &bytes_generic_msg).await?;
+                                }
+                                BatchReconContentType::MultMessageSecondOpen => {
+                                    let mult_message = OpenMultMessage::new(result);
+                                    let mut bytes_message = Vec::new();
+                                    mult_message.serialize_compressed(&mut bytes_message)?;
+                                    let mult_generic_msg = MultMessage::new(
+                                        self.id,
+                                        msg.session_id,
+                                        MultMessageType::SecondOpen,
+                                        bytes_message,
+                                    );
+                                    let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
+                                    net.send(self.id + 1, &bytes_generic_msg).await?;
                                 }
                             }
                         }

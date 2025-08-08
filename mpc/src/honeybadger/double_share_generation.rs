@@ -95,10 +95,14 @@ pub enum DouShaMessageType {
     Receive,
 }
 
+/// Represents the current state of the protocol.
 #[derive(PartialEq)]
 pub enum ProtocolState {
+    /// The protocol has been initialized.
     Initialized,
+    /// The protocol has been finished.
     Finished,
+    /// The protocol has not been initialized.
     NotInitialized,
 }
 
@@ -315,7 +319,7 @@ where
             network.send(recipient_id, &bytes_generic_msg).await?;
         }
 
-        // Update the state of the protocol to Initialized.
+        // Update the state of the protocol to "initialized".
         let storage_access = self
             .get_or_create_store(params.n_parties, params.session_id)
             .await;
