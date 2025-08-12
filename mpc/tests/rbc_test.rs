@@ -1,78 +1,35 @@
+pub mod utils;
 #[cfg(test)]
 mod tests {
     use rand::Rng;
-    use std::time::Duration;
-    use std::{collections::HashMap, sync::Arc};
-    use stoffelmpc_mpc::common::rbc::rbc_store::AbaStore;
-    use stoffelmpc_mpc::common::{
-        rbc::{
-            rbc::{Avid, Bracha, Dealer, ABA},
-            rbc_store::{GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAvid},
-            utils::set_value_round,
-            RbcError,
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use stoffelmpc_mpc::{
+        common::{
+            rbc::{
+                rbc::{Avid, Bracha, Dealer, ABA},
+                rbc_store::{AbaStore, GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAvid},
+                utils::set_value_round,
+            },
+            RBC,
         },
-        RBC,
+        honeybadger::{ProtocolType, SessionId},
     };
-    use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-    use stoffelmpc_network::Network;
+    use stoffelmpc_network::fake_network::FakeNetwork;
     use tokio::sync::Mutex;
-    use tokio::{sync::mpsc, time::timeout};
+    use tokio::time::timeout;
     use tracing::warn;
-    use tracing_subscriber;
 
-    /// Helper function to set up parties,Network,Receivers
-    async fn setup_network_and_parties<T: RBC, N: Network>(
-        n: u32,
-        t: u32,
-        k: u32,
-        buffer_size: usize,
-    ) -> Result<(Vec<T>, Arc<FakeNetwork>, Vec<mpsc::Receiver<Vec<u8>>>), RbcError> {
-        let config = FakeNetworkConfig::new(buffer_size);
-        let (network, receivers) = FakeNetwork::new(n as usize, config);
-        let net = Arc::new(network);
-
-        let mut parties = Vec::with_capacity(n as usize);
-        for i in 0..n {
-            let rbc = T::new(i, n, t, k)?; // Create a new RBC instance for each party
-            parties.push(rbc);
-        }
-        Ok((parties, net, receivers))
-    }
-
-    ///Spawn parties for rbc
-    pub async fn spawn_parties<T, N>(
-        parties: &[T],
-        receivers: Vec<mpsc::Receiver<Vec<u8>>>,
-        net: Arc<N>,
-    ) where
-        T: RBC + Clone + Send + Sync + 'static,
-        N: Network + Send + Sync + 'static,
-    {
-        for (rbc, mut rx) in parties.iter().cloned().zip(receivers.into_iter()) {
-            let net_clone = Arc::clone(&net);
-
-            tokio::spawn(async move {
-                while let Some(msg) = rx.recv().await {
-                    if let Err(e) = rbc.process(msg, Arc::clone(&net_clone)).await {
-                        warn!(error = %e, "Message processing failed");
-                    }
-                }
-            });
-        }
-    }
+    use crate::utils::test_utils::{setup_network_and_parties, setup_tracing, spawn_parties};
 
     #[tokio::test]
     async fn test_bracha_rbc_basic() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         // Set the parameters
         let n = 4;
         let t = 1;
         let payload = b"Hello, MPC!".to_vec();
-        let session_id = 12;
+        let session_id = SessionId::new(ProtocolType::Rbc, 12);
 
         let (parties, net, receivers) =
             setup_network_and_parties::<Bracha, FakeNetwork>(n, t, t + 1, 500)
@@ -111,14 +68,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_sessions() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         let n = 4;
         let t = 1;
-        let session_ids = vec![101, 202, 303];
+        let session_ids = vec![
+            SessionId::new(ProtocolType::Rbc, 101),
+            SessionId::new(ProtocolType::Rbc, 102),
+            SessionId::new(ProtocolType::Rbc, 103),
+        ];
         let payloads = vec![
             b"Payload A".to_vec(),
             b"Payload B".to_vec(),
@@ -148,26 +106,30 @@ mod tests {
                 assert!(
                     s.ended,
                     "Session {} not completed at party {}",
-                    sid, bracha.id
+                    sid.as_u64(),
+                    bracha.id
                 );
                 assert_eq!(
-                    &s.output, &payloads[i],
+                    &s.output,
+                    &payloads[i],
                     "Incorrect payload for session {}",
-                    sid
+                    sid.as_u64()
                 );
             }
         }
     }
     #[tokio::test]
     async fn test_multiple_sessions_different_party() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         let n = 4;
         let t = 1;
-        let session_ids = vec![10, 20, 30, 40];
+        let session_ids = vec![
+            SessionId::new(ProtocolType::Rbc, 10),
+            SessionId::new(ProtocolType::Rbc, 20),
+            SessionId::new(ProtocolType::Rbc, 30),
+            SessionId::new(ProtocolType::Rbc, 40),
+        ];
         let payloads = vec![
             b"From Party 0".to_vec(),
             b"From Party 1".to_vec(),
@@ -198,26 +160,26 @@ mod tests {
                 assert!(
                     s.ended,
                     "Session {} not completed at party {}",
-                    session_id, bracha.id
+                    session_id.as_u64(),
+                    bracha.id
                 );
                 assert_eq!(
-                    &s.output, &payloads[i],
+                    &s.output,
+                    &payloads[i],
                     "Incorrect output at party {} for session {}",
-                    bracha.id, session_id
+                    bracha.id,
+                    session_id.as_u64()
                 );
             }
         }
     }
     #[tokio::test]
     async fn test_out_of_order_delivery() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         let n = 4;
         let t = 1;
-        let session_id = 11;
+        let session_id = SessionId::new(ProtocolType::Rbc, 11);
         let payload = b"out-of-order".to_vec();
 
         let (parties, net, receivers) =
@@ -230,8 +192,8 @@ mod tests {
         let sender_id = 1;
         let ready_msg = Msg::new(
             sender_id,
-            0,
             session_id,
+            0,
             payload.clone(),
             vec![],
             GenericMsgType::Bracha(MsgType::Ready),
@@ -283,7 +245,13 @@ mod tests {
         }
     }
 
-    async fn run_avid_rbc_test(n: u32, t: u32, k: u32, session_id: u32, payload: Vec<u8>) {
+    async fn run_avid_rbc_test(
+        n: usize,
+        t: usize,
+        k: usize,
+        session_id: SessionId,
+        payload: Vec<u8>,
+    ) {
         println!("Running Avid RBC with n={}, t={}, k={}", n, t, k);
 
         let (parties, net, receivers) =
@@ -324,10 +292,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_avid_rbc_varied_parameters() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         let payload = b"Param test".to_vec();
 
@@ -342,21 +307,30 @@ mod tests {
         ];
 
         for (_, &(n, t, k)) in test_cases.iter().enumerate() {
-            run_avid_rbc_test(n, t, k, 100, payload.clone()).await;
+            run_avid_rbc_test(
+                n,
+                t,
+                k,
+                SessionId::new(ProtocolType::Rbc, 100),
+                payload.clone(),
+            )
+            .await;
         }
     }
 
     #[tokio::test]
     async fn test_multiple_sessions_different_party_avid() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         let n = 4;
         let t = 1;
 
-        let session_ids = vec![10, 20, 30, 40];
+        let session_ids = vec![
+            SessionId::new(ProtocolType::Rbc, 10),
+            SessionId::new(ProtocolType::Rbc, 20),
+            SessionId::new(ProtocolType::Rbc, 30),
+            SessionId::new(ProtocolType::Rbc, 40),
+        ];
         let payloads = vec![
             b"From Party 0".to_vec(),
             b"From Party 1".to_vec(),
@@ -387,27 +361,27 @@ mod tests {
                 assert!(
                     s.ended,
                     "Session {} not completed at party {}",
-                    session_id, avid.id
+                    session_id.as_u64(),
+                    avid.id
                 );
                 assert_eq!(
-                    &s.output, &payloads[i],
+                    &s.output,
+                    &payloads[i],
                     "Incorrect output at party {} for session {}",
-                    avid.id, session_id
+                    avid.id,
+                    session_id.as_u64()
                 );
             }
         }
     }
     #[tokio::test]
     async fn test_out_of_order_delivery_avid() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         let n = 4;
         let t = 1;
         let k = 2;
-        let session_id = 11;
+        let session_id = SessionId::new(ProtocolType::Rbc, 11);
         let payload = b"out-of-order".to_vec();
 
         let (parties, net, receivers) =
@@ -472,15 +446,12 @@ mod tests {
     }
     #[tokio::test]
     async fn test_bracha_rbc_faulty_nodes() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         let n = 7;
         let t = 2;
         let payload = b"crash fault test".to_vec();
-        let session_id = 2025;
+        let session_id = SessionId::new(ProtocolType::Rbc, 2025);
 
         let (parties, net, receivers) =
             setup_network_and_parties::<Bracha, FakeNetwork>(n, t, t + 1, 500)
@@ -520,10 +491,10 @@ mod tests {
         }
     }
     async fn test_avid_rbc_with_faulty_nodes(
-        n: u32,
-        t: u32,
-        k: u32,
-        session_id: u32,
+        n: usize,
+        t: usize,
+        k: usize,
+        session_id: SessionId,
         payload: Vec<u8>,
     ) {
         println!(
@@ -578,10 +549,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_avid_rbc_crash_faults_varied_parameters() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         let payload = b"AVID crash fault test".to_vec();
 
@@ -590,21 +558,26 @@ mod tests {
 
         for (i, &(n, t, k)) in test_cases.iter().enumerate() {
             println!("--- Test case {} ---", i + 1);
-            test_avid_rbc_with_faulty_nodes(n, t, k, 100 + i as u32, payload.clone()).await;
+            test_avid_rbc_with_faulty_nodes(
+                n,
+                t,
+                k,
+                SessionId::new(ProtocolType::Rbc, 100 + i as u64),
+                payload.clone(),
+            )
+            .await;
         }
     }
 
     #[tokio::test]
     async fn test_common_coin() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_id = 99;
+        let session_id = SessionId::new(ProtocolType::Rbc, 99);
+
         let round_id = 0;
 
         let (parties, net, receivers) = setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 500)
@@ -678,16 +651,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_aba_agreement() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         // === Parameters ===
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_id = 42;
+        let session_id = SessionId::new(ProtocolType::Rbc, 42);
         let round_id = 0;
 
         let (parties, net, receivers) =
@@ -719,7 +689,7 @@ mod tests {
         }
 
         let init_futures = parties.iter().zip(inputs).map(|(aba, input)| {
-            let payload = set_value_round(input, round_id);
+            let payload = set_value_round(input, round_id as u32);
             aba.init(payload, session_id, net.clone())
         });
 
@@ -786,17 +756,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_aba_sessions() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         // === Parameters ===
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_ids: Vec<u32> = vec![100, 101, 102, 103]; // One session per party
-
+        let session_ids = vec![
+            SessionId::new(ProtocolType::Rbc, 100),
+            SessionId::new(ProtocolType::Rbc, 101),
+            SessionId::new(ProtocolType::Rbc, 102),
+            SessionId::new(ProtocolType::Rbc, 103),
+        ];
         let (parties, net, receivers) =
             setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 1000)
                 .await
@@ -807,7 +778,7 @@ mod tests {
         let dealer = Dealer::new(n, t);
         let key_dist_msg = Msg::new(
             0,
-            0,
+            SessionId::new(ProtocolType::Rbc, 0),
             0,
             vec![],
             vec![],
@@ -836,7 +807,8 @@ mod tests {
         use std::collections::HashMap;
         let timeout_duration = Duration::from_secs(50);
         let poll_interval = Duration::from_millis(50);
-        let mut all_results: HashMap<u32, HashMap<usize, Arc<Mutex<AbaStore>>>> = HashMap::new();
+        let mut all_results: HashMap<SessionId, HashMap<usize, Arc<Mutex<AbaStore>>>> =
+            HashMap::new();
 
         let result = timeout(timeout_duration, async {
             loop {
@@ -897,16 +869,18 @@ mod tests {
                 match agreed_value {
                     None => agreed_value = Some(output),
                     Some(expected) => assert_eq!(
-                        output, expected,
+                        output,
+                        expected,
                         "Mismatch in ABA output at party {} for session {}",
-                        aba.id, session_id
+                        aba.id,
+                        session_id.as_u64()
                     ),
                 }
             }
 
             println!(
                 "✅ Session {}: All parties agreed on value: {}",
-                session_id,
+                session_id.as_u64(),
                 agreed_value.unwrap()
             );
         }

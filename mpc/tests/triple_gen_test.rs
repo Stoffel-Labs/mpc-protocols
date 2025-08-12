@@ -1,14 +1,16 @@
 mod utils;
-use crate::utils::triple_gen_utils::{
-    create_nodes, get_triple_init_test_shares, spawn_receiver_tasks, test_setup,
+use crate::utils::{
+    test_utils::test_setup,
+    triple_gen_utils::{create_nodes, get_triple_init_test_shares, spawn_receiver_tasks},
 };
 use ark_bls12_381::Fr;
 use itertools::izip;
 use std::matches;
 use stoffelmpc_mpc::{
-    common::{share::shamir::NonRobustShamirShare, SecretSharingScheme},
+    common::SecretSharingScheme,
     honeybadger::{
-        robust_interpolate::robust_interpolate::RobustShamirShare, triple_generation::ProtocolState,
+        robust_interpolate::robust_interpolate::RobustShamirShare,
+        triple_gen::triple_generation::ProtocolState, ProtocolType, SessionId,
     },
 };
 
@@ -18,11 +20,11 @@ async fn test_triple_gen_e2e() {
     let n_parties = 13;
     let threshold = 2;
     let n_shares = 5;
-    let session_id = 1111;
+    let session_id = SessionId::new(ProtocolType::Triple, 111);
     let (random_shares_a, random_shares_b, randousha_pairs, a_values, b_values, _) =
         get_triple_init_test_shares(n_shares, n_parties, threshold);
-    let (params, network, receivers) = test_setup(n_parties, threshold, n_shares);
-    let (nodes, mut triple_finish_receivers) = create_nodes(n_parties, params.clone());
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    let (nodes, mut triple_finish_receivers) = create_nodes(n_parties, threshold, n_shares);
 
     for (i, node) in nodes.iter().enumerate() {
         node.lock()
@@ -42,8 +44,7 @@ async fn test_triple_gen_e2e() {
     // vec[[a_1_1, a_1_2,..., a_1_nparties],..., [a_nshares_1, ... , a_nshares_nparties]]
     let mut a_shares = vec![vec![RobustShamirShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
     let mut b_shares = vec![vec![RobustShamirShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
-    let mut ab_shares =
-        vec![vec![NonRobustShamirShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
+    let mut ab_shares = vec![vec![RobustShamirShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
     for p in 0..n_parties {
         let session = triple_finish_receivers[p].recv().await.unwrap();
         let node = nodes[p].lock().await;
@@ -64,7 +65,7 @@ async fn test_triple_gen_e2e() {
     for i in 0..n_shares {
         let (_, a) = RobustShamirShare::recover_secret(&a_shares[i], n_parties).unwrap();
         let (_, b) = RobustShamirShare::recover_secret(&b_shares[i], n_parties).unwrap();
-        let (_, ab) = NonRobustShamirShare::recover_secret(&ab_shares[i], n_parties).unwrap();
+        let (_, ab) = RobustShamirShare::recover_secret(&ab_shares[i], n_parties).unwrap();
         assert!(a * b == ab);
         assert!(a == a_values[i]);
         assert!(b == b_values[i]);
@@ -104,13 +105,13 @@ async fn test_triple_init_test_shares() {
             b_values[i]
         );
         assert_eq!(
-            NonRobustShamirShare::recover_secret(&randousha_pairs_t_i, n_parties)
+            RobustShamirShare::recover_secret(&randousha_pairs_t_i, n_parties)
                 .unwrap()
                 .1,
             pairs_values[i]
         );
         assert_eq!(
-            NonRobustShamirShare::recover_secret(&randousha_pairs_2t_i, n_parties)
+            RobustShamirShare::recover_secret(&randousha_pairs_2t_i, n_parties)
                 .unwrap()
                 .1,
             pairs_values[i]

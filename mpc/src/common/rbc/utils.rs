@@ -1,5 +1,4 @@
 use super::*;
-use crate::common::rbc::ShardError;
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use rs_merkle::*;
 use sha2::{Digest, Sha256};
@@ -52,7 +51,7 @@ pub fn encode_rs(
 }
 /// Decodes and reconstructs original shards using Reed-Solomon
 pub fn decode_rs(
-    shards_map: HashMap<u32, Vec<u8>>,
+    shards_map: HashMap<usize, Vec<u8>>,
     data_shards: usize,
     parity_shards: usize,
 ) -> Result<Vec<Vec<u8>>, ShardError> {
@@ -65,8 +64,8 @@ pub fn decode_rs(
     let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
     // Fill known shard positions
     for (&idx, shard) in &shards_map {
-        if (idx as usize) < total_shards {
-            shards[idx as usize] = Some(shard.clone());
+        if idx < total_shards {
+            shards[idx] = Some(shard.clone());
         } else {
             return Err(ShardError::OutOfBounds(idx, total_shards - 1));
         }
@@ -141,7 +140,12 @@ pub fn get_merkle_proof(proof: Vec<u8>) -> Result<MerkleProof<Sha256Algorithm>, 
         .map_err(|e| ShardError::Merkle(e.to_string()))
 }
 /// Verify a Merkle proof for a given shard and index.
-pub fn verify_merkle(id: u32, n: u32, proof: Vec<u8>, shard: Vec<u8>) -> Result<bool, ShardError> {
+pub fn verify_merkle(
+    id: usize,
+    n: usize,
+    proof: Vec<u8>,
+    shard: Vec<u8>,
+) -> Result<bool, ShardError> {
     if proof.len() < 32 {
         return Err(ShardError::Merkle("Invalid fingerprint length".to_string()));
     }
@@ -151,7 +155,7 @@ pub fn verify_merkle(id: u32, n: u32, proof: Vec<u8>, shard: Vec<u8>) -> Result<
     let proof = get_merkle_proof(proof)?;
     let leaf_hash = hash(shard.clone());
 
-    Ok(proof.verify(root, &vec![id as usize], &[leaf_hash], n as usize))
+    Ok(proof.verify(root, &vec![id], &[leaf_hash], n))
 }
 
 /// Generate Merkle proofs for all leaves and return them as a map.
@@ -226,7 +230,7 @@ mod tests {
         for (i, shard) in shards.iter().enumerate() {
             if i != 1 {
                 // Drop shard 1
-                shards_map.insert(i as u32, shard.clone());
+                shards_map.insert(i, shard.clone());
             }
         }
 
@@ -261,13 +265,8 @@ mod tests {
             proof_with_root.extend_from_slice(&tree.root().unwrap()); // prepend root
             proof_with_root.extend_from_slice(&proofs_map[&i]);
 
-            let verified = verify_merkle(
-                i as u32,
-                shards.len() as u32,
-                proof_with_root,
-                shard.clone(),
-            )
-            .expect("Verification should succeed");
+            let verified = verify_merkle(i, shards.len(), proof_with_root, shard.clone())
+                .expect("Verification should succeed");
 
             assert!(verified, "Merkle proof for shard {} failed", i);
         }

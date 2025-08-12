@@ -1,14 +1,17 @@
 use std::{collections::HashMap, sync::Arc, thread, time::Duration};
 
-use ark_bls12_381::Fr;
+use crate::utils::test_utils::test_setup;
 use ark_std::test_rng;
-use stoffelmpc_mpc::common::SecretSharingScheme;
-use stoffelmpc_mpc::common::{share::shamir::NonRobustShamirShare, ShamirShare};
+use stoffelmpc_mpc::{
+    common::SecretSharingScheme,
+    honeybadger::{
+        robust_interpolate::robust_interpolate::RobustShamirShare, ProtocolType, SessionId,
+    },
+};
 use tokio::sync::mpsc;
-use tracing::info;
 use utils::{
-    double_share_utils::{create_nodes, spawn_receiver_tasks, test_setup},
-    test_utils::{construct_e2e_input, setup_tracing},
+    double_share_utils::{create_nodes, spawn_receiver_tasks},
+    test_utils::setup_tracing,
 };
 
 pub mod utils;
@@ -18,9 +21,9 @@ async fn generate_faulty_double_shares_e2e() {
     setup_tracing();
     let n_parties = 5;
     let threshold = 2;
-    let session_id = 1111;
+    let session_id = SessionId::new(ProtocolType::Dousha, 0);
 
-    let (params, network, receivers) = test_setup(n_parties, threshold, session_id);
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
 
     let mut sender_channels = Vec::new();
     let mut receiver_channels = Vec::new();
@@ -30,19 +33,13 @@ async fn generate_faulty_double_shares_e2e() {
         receiver_channels.push(receiver);
     }
 
-    let dou_sha_nodes = create_nodes(n_parties, sender_channels);
+    let dou_sha_nodes = create_nodes(n_parties, threshold, sender_channels);
     let mut rng = test_rng();
 
     let (final_result_sender, mut final_result_receiver) = mpsc::channel(1024);
 
     // Setup the receivers and spawn receivers tasks.
-    spawn_receiver_tasks(
-        &dou_sha_nodes,
-        receivers,
-        &params,
-        Arc::clone(&network),
-        final_result_sender,
-    );
+    spawn_receiver_tasks(&dou_sha_nodes, receivers, final_result_sender);
 
     // Wait a bit until all the receivers are ready.
     thread::sleep(Duration::from_millis(300));
@@ -51,7 +48,7 @@ async fn generate_faulty_double_shares_e2e() {
     for node in &dou_sha_nodes {
         let mut node_locked = node.lock().await;
         node_locked
-            .init(session_id, &params, &mut rng, Arc::clone(&network))
+            .init(session_id, &mut rng, Arc::clone(&network))
             .await
             .unwrap();
     }
@@ -70,8 +67,8 @@ async fn generate_faulty_double_shares_e2e() {
                     // party id starts from 1 while share id starts from 0
                     assert_eq!(*id - 1, double_share.degree_t.id);
                     assert_eq!(*id - 1, double_share.degree_2t.id);
-                    assert_eq!(double_share.degree_t.degree, params.threshold);
-                    assert_eq!(double_share.degree_2t.degree, 2 * params.threshold);
+                    assert_eq!(double_share.degree_t.degree, threshold);
+                    assert_eq!(double_share.degree_2t.degree, 2 * threshold);
                 }
             }
             break;
@@ -92,8 +89,8 @@ async fn generate_faulty_double_shares_e2e() {
             .map(|shares| shares[i].degree_2t.clone())
             .collect();
 
-        let secret_t = NonRobustShamirShare::recover_secret(&shares_t, n_parties);
-        let secret_2t = NonRobustShamirShare::recover_secret(&shares_2t, n_parties);
+        let secret_t = RobustShamirShare::recover_secret(&shares_t, n_parties);
+        let secret_2t = RobustShamirShare::recover_secret(&shares_2t, n_parties);
 
         assert_eq!(
             secret_t.unwrap().1,

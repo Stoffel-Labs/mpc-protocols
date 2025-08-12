@@ -3,43 +3,31 @@ use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::sync::Arc;
 use stoffelmpc_mpc::{
-    common::{share::shamir::NonRobustShamirShare, SecretSharingScheme},
+    common::SecretSharingScheme,
     honeybadger::{
+        batch_recon::BatchReconMsg,
+        double_share::DoubleShamirShare,
         robust_interpolate::robust_interpolate::RobustShamirShare,
-        triple_generation::{TripleGenMessage, TripleGenNode, TripleGenParams},
-        DoubleShamirShare,
+        triple_gen::{triple_generation::TripleGenNode, TripleGenMessage},
+        SessionId,
     },
 };
-use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+use stoffelmpc_network::fake_network::FakeNetwork;
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-pub fn test_setup(
-    n_parties: usize,
-    threshold: usize,
-    n_triples: usize,
-) -> (TripleGenParams, Arc<FakeNetwork>, Vec<Receiver<Vec<u8>>>) {
-    let config = FakeNetworkConfig::new(500);
-    let (network, receivers) = FakeNetwork::new(n_parties, config);
-    let network = Arc::new(network);
-    let params = TripleGenParams {
-        n_parties,
-        threshold,
-        n_triples,
-    };
-    (params, network, receivers)
-}
-
 pub fn create_nodes(
     n_parties: usize,
-    params: TripleGenParams,
-) -> (Vec<Arc<Mutex<TripleGenNode<Fr>>>>, Vec<Receiver<usize>>) {
+    threshold: usize,
+    n_triple: usize,
+) -> (Vec<Arc<Mutex<TripleGenNode<Fr>>>>, Vec<Receiver<SessionId>>) {
     let mut receivers = vec![];
     let triple_gen_nodes = (0..n_parties)
         .map(|id| {
             let (triple_sender, triple_receiver) = mpsc::channel(128);
-            let triple_gen_node = TripleGenNode::new(id, params, triple_sender).unwrap();
+            let triple_gen_node =
+                TripleGenNode::new(id, n_parties, threshold, n_triple, triple_sender).unwrap();
             receivers.push(triple_receiver);
             Arc::new(Mutex::new(triple_gen_node))
         })
@@ -83,10 +71,9 @@ pub fn get_triple_init_test_shares(
 
         let ids: Vec<usize> = (1..=n_parties).collect();
         let shares_r_t =
-            NonRobustShamirShare::compute_shares(r, n_parties, t, Some(&ids), &mut rng).unwrap();
+            RobustShamirShare::compute_shares(r, n_parties, t, Some(&ids), &mut rng).unwrap();
         let shares_r_2t =
-            NonRobustShamirShare::compute_shares(r, n_parties, 2 * t, Some(&ids), &mut rng)
-                .unwrap();
+            RobustShamirShare::compute_shares(r, n_parties, 2 * t, Some(&ids), &mut rng).unwrap();
 
         for p in 0..n_parties {
             random_shares_a[p].push(shares_a[p].clone());
@@ -131,16 +118,15 @@ pub fn spawn_receiver_tasks(
                 };
                 let mut node_bind = triple_gen_node.lock().await;
                 // received batch recon msg
-                if let Ok(_) = node_bind
-                    .batch_recon_node
-                    .process(msg.clone(), net_clone.clone())
-                    .await
-                {
-                    debug!("Received batch recon msg");
-                    continue;
+                if let Ok(batch_msg) = bincode::deserialize::<BatchReconMsg>(&msg) {
+                    node_bind
+                        .batch_recon_node
+                        .process(batch_msg, net_clone.clone())
+                        .await
+                        .unwrap();
                 } else if let Ok(triple_gen_msg) = bincode::deserialize::<TripleGenMessage>(&msg) {
                     debug!("Received triple_gen_msg");
-                    node_bind.process(&triple_gen_msg).await.unwrap();
+                    node_bind.process(triple_gen_msg).await.unwrap();
                 } else {
                     warn!("received invalid msg type");
                     break;

@@ -8,8 +8,11 @@ pub mod rbc;
 pub mod share;
 
 use crate::{
-    common::{rbc::rbc_store::Msg, share::ShareError},
-    honeybadger::triple_generation::ShamirBeaverTriple,
+    common::{
+        rbc::{rbc_store::Msg, RbcError},
+        share::ShareError,
+    },
+    honeybadger::{triple_gen::ShamirBeaverTriple, SessionId},
 };
 
 use ark_ff::{FftField, Zero};
@@ -17,7 +20,6 @@ use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use async_trait::async_trait;
-use rbc::RbcError;
 use std::{
     marker::PhantomData,
     ops::{Add, Mul, Sub},
@@ -25,19 +27,11 @@ use std::{
     usize,
 };
 use stoffelmpc_network::Network;
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum ProtocolError {
-    #[error("there is no preprocessing available to perform the operation")]
-    NotEnoughPreprocessing,
-    #[error("there is an error with share computation")]
-    ShareError(#[from] ShareError),
-}
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
     pub share: [F; N],
+    ///index of the share(x-values),can be different from the reciever ID
     pub id: usize,
     pub degree: usize,
     pub _sharetype: PhantomData<fn() -> P>,
@@ -199,22 +193,22 @@ where
 #[async_trait]
 pub trait RBC: Send + Sync {
     /// Creates a new instance
-    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, RbcError>
+    fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError>
     where
         Self: Sized;
     /// Returns the unique identifier of the current party.
-    fn id(&self) -> u32;
+    fn id(&self) -> usize;
     /// Required for initiating the broadcast
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: u32,
+        session_id: SessionId,
         parties: Arc<N>,
     ) -> Result<(), RbcError>;
     ///Processing messages sent by other nodes based on their type
     async fn process<N: Network + Send + Sync + 'static>(
         &self,
-        msg: Vec<u8>,
+        msg: Msg,
         parties: Arc<N>,
     ) -> Result<(), RbcError>;
     /// Broadcast messages to other nodes.
@@ -228,7 +222,7 @@ pub trait RBC: Send + Sync {
         &self,
         msg: Msg,
         net: Arc<N>,
-        recv: u32,
+        recv: usize,
     ) -> Result<(), RbcError>;
 }
 
@@ -242,19 +236,25 @@ where
     S: SecretSharingScheme<F>,
     N: Network,
 {
-    /// Defines the information needed to run and define the MPC protocol.
     type MPCOpts;
+    type Error : std::fmt::Debug;
+
+    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error>;
 
     async fn init(&mut self, network: Arc<N>, opts: Self::MPCOpts)
     where
         N: 'async_trait;
 
-    async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<S, ProtocolError>
+    async fn mul(
+        &mut self,
+        a: Vec<S>,
+        b: Vec<S>,
+        network: Arc<N>,
+    ) -> Result<S, Self::Error>
     where
         N: 'async_trait;
 }
 
-/// Some MPC protocols require preprocessing before they can be used
 #[async_trait]
 pub trait PreprocessingMPCProtocol<F, S, N>: MPCProtocol<F, S, N>
 where
@@ -262,14 +262,11 @@ where
     F: FftField,
     S: SecretSharingScheme<F>,
 {
-    type ProtocolError: std::error::Error;
-
-    /// Runs the offline/preprocessing phase for an MPC protocol
     async fn run_preprocessing<R>(
         &mut self,
         network: Arc<N>,
         rng: &mut R,
-    ) -> Result<Vec<ShamirBeaverTriple<F>>, Self::ProtocolError>
+    ) -> Result<Vec<ShamirBeaverTriple<F>>, Self::Error>
     where
         N: 'async_trait,
         R: Rng + Send;

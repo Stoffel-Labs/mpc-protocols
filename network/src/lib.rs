@@ -1,8 +1,6 @@
 pub mod fake_network;
 
 use ark_ff::Field;
-use serde::{Deserialize, Serialize};
-// use std::sync::mpsc::Receiver;
 use async_trait::async_trait;
 use thiserror::Error;
 
@@ -17,31 +15,23 @@ pub enum NetworkError {
     /// The party is not found in the network.
     #[error("the party with ID {0:?} is not in the network")]
     PartyNotFound(PartyId),
+    #[error("the client with ID {0:?} is not connected")]
+    ClientNotFound(ClientId),
 }
 
 /// Type to identify a party in a protocol.
 pub type PartyId = usize;
-
-/// Type to identify a session.
-pub type SessionId = usize;
+pub type ClientId = usize;
 
 /// Time that the network needs to wait until the operation returns a timeout.
 pub type Timeout = usize;
 
-/// Trait for messages sent in a protocol.
-pub trait Message: Serialize + for<'a> Deserialize<'a> + Sized {
-    /// Returns the ID of the sender of the message.
-    fn sender_id(&self) -> PartyId;
-    /// Returns the message as little endiand bytes.
-    fn bytes(&self) -> &[u8];
-}
-
 /// Trait that represents a network used to communicate messages during the execution of a
 /// protocol.
 #[async_trait]
-pub trait Network: Send + Sync {
+pub trait Network {
     /// Type of the node in the network.
-    type NodeType: Node + Send + Sync;
+    type NodeType: Node;
     /// Configuration of the network.
     type NetworkConfig;
     /// Send a message through the network to the given party. The function returns the number of
@@ -60,10 +50,20 @@ pub trait Network: Send + Sync {
     fn node(&self, id: PartyId) -> Option<&Self::NodeType>;
     /// Returns a mutable reference of the node with the given ID.
     fn node_mut(&mut self, id: PartyId) -> Option<&mut Self::NodeType>;
+    // --- server-to-client communication ---
+    /// Send a message to a client.
+    async fn send_to_client(&self, client: ClientId, message: &[u8])
+        -> Result<usize, NetworkError>;
+    
+    /// Returns the connected clients.
+    fn clients(&self) -> Vec<ClientId>;
+
+    /// Checks whether a client is connected.
+    fn is_client_connected(&self, client: ClientId) -> bool;
 }
 
 /// Participant of an MPC protocol.
-pub trait Node {
+pub trait Node: Send + Sync {
     /// Returns the ID of this node.
     fn id(&self) -> PartyId;
     /// Returns the ID of this node as a field element for protocol specific usage.

@@ -1,46 +1,27 @@
-use std::{
-    collections::HashMap,
-    sync::{atomic::AtomicUsize, mpsc, Arc},
-};
-
 use ark_bls12_381::Fr;
-use ark_std::test_rng;
-use stoffelmpc_mpc::honeybadger::{
-    double_share_generation::{DouShaMessage, DouShaParams, DoubleShareNode, ProtocolState},
-    DoubleShamirShare,
+use std::sync::Arc;
+use stoffelmpc_mpc::honeybadger::double_share::{
+    double_share_generation::{DoubleShareNode, ProtocolState},
+    DouShaMessage, DoubleShamirShare,
 };
-use stoffelmpc_network::{
-    fake_network::{FakeNetwork, FakeNetworkConfig},
-    SessionId,
-};
+use stoffelmpc_mpc::honeybadger::SessionId;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc::Sender, Mutex};
-use tokio::{sync::mpsc::Receiver, task::JoinSet};
 use tracing::error;
-
-pub fn test_setup(
-    n_parties: usize,
-    threshold: usize,
-    session_id: usize,
-) -> (DouShaParams, Arc<FakeNetwork>, Vec<Receiver<Vec<u8>>>) {
-    let config = FakeNetworkConfig::new(500);
-    let (network, receivers) = FakeNetwork::new(n_parties, config);
-    let network = Arc::new(network);
-    let params = DouShaParams {
-        session_id,
-        n_parties,
-        threshold,
-    };
-    (params, network, receivers)
-}
 
 /// Initializes all RanDouSha nodes and returns them wrapped in `Arc<Mutex<_>>`.
 pub fn create_nodes(
     n_parties: usize,
+    threshold: usize,
     senders: Vec<Sender<SessionId>>,
 ) -> Vec<Arc<Mutex<DoubleShareNode<Fr>>>> {
-    (1..=n_parties)
+    (0..n_parties)
         .zip(senders.into_iter())
-        .map(|(id, sender)| Arc::new(Mutex::new(DoubleShareNode::new(id, sender))))
+        .map(|(id, sender)| {
+            Arc::new(Mutex::new(DoubleShareNode::new(
+                id, n_parties, threshold, sender,
+            )))
+        })
         .collect()
 }
 
@@ -52,20 +33,13 @@ pub fn create_nodes(
 pub fn spawn_receiver_tasks(
     nodes: &[Arc<Mutex<DoubleShareNode<Fr>>>],
     mut receivers: Vec<Receiver<Vec<u8>>>,
-    params: &DouShaParams,
-    network: Arc<FakeNetwork>,
     final_result_data_chan: Sender<(usize, Vec<DoubleShamirShare<Fr>>)>,
 ) {
     for node in nodes {
         let dousha_node = Arc::clone(&node);
         let mut receiver = receivers.remove(0);
 
-        let params = params.clone();
-        let _network = Arc::clone(&network);
         let final_result_data_chan = final_result_data_chan.clone();
-
-        // Keep track of aborts
-        let mut _rng = test_rng();
 
         // spawn tasks to process received messages
         tokio::spawn(async move {
@@ -78,15 +52,18 @@ pub fn spawn_receiver_tasks(
                 let result = dousha_node
                     .lock()
                     .await
-                    .proccess(&params, &deserialized_msg)
+                    .proccess(deserialized_msg.clone())
                     .await;
 
                 match result {
                     Ok(_) => {
                         let dousha_node_lock = dousha_node.lock().await;
                         let storage_lock = dousha_node_lock.storage.lock().await;
-                        let node_storage =
-                            storage_lock.get(&params.session_id).unwrap().lock().await;
+                        let node_storage = storage_lock
+                            .get(&deserialized_msg.session_id)
+                            .unwrap()
+                            .lock()
+                            .await;
                         if node_storage.state == ProtocolState::Finished {
                             let resulting_double_shares = node_storage.protocol_output.clone();
                             final_result_data_chan

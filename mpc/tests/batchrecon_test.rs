@@ -1,68 +1,33 @@
+pub mod utils;
 #[cfg(test)]
 mod tests {
+    use crate::utils::test_utils::{generate_independent_shares, setup_tracing};
     use ark_bls12_381::Fr;
-    use ark_ff::{FftField, Field, One, Zero};
-    use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+    use ark_ff::Zero;
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-    use ark_std::test_rng;
-    use std::{marker::PhantomData, time::Duration};
+    use std::time::Duration;
     use stoffelmpc_mpc::{
-        common::SecretSharingScheme,
+        common::{
+            share::{apply_vandermonde, make_vandermonde},
+            SecretSharingScheme,
+        },
         honeybadger::{
-            batch_recon::{
-                apply_vandermonde, batch_recon::BatchReconNode, make_vandermonde,
-                BatchReconContentType, BatchReconMsg, BatchReconMsgType,
-            },
+            batch_recon::{batch_recon::BatchReconNode, BatchReconMsg, BatchReconMsgType},
             robust_interpolate::robust_interpolate::RobustShamirShare,
+            ProtocolType, SessionId, WrappedMessage,
         },
     };
     use tokio::time::timeout;
     use tracing::warn;
 
-    /// Generate secret shares where each secret is shared independently using a random polynomial
-    /// with that secret as the constant term (f(0) = secret), and evaluated using FFT-based domain.
-    pub fn generate_independent_shares<F: FftField>(
-        secrets: &[F],
-        t: usize,
-        n: usize,
-    ) -> Vec<Vec<RobustShamirShare<F>>> {
-        let mut rng = test_rng();
-        let mut shares = vec![
-            vec![
-                RobustShamirShare {
-                    share: [F::zero()],
-                    id: 0,
-                    degree: t,
-                    _sharetype: PhantomData
-                };
-                secrets.len()
-            ];
-            n
-        ];
-        for (j, secret) in secrets.iter().enumerate() {
-            // Call gen_shares to create 'n' shares for the current 'secret'
-            let ids: Vec<usize> = (0..n).collect();
-            let secret_shares =
-                RobustShamirShare::compute_shares(*secret, n, t, Some(&ids), &mut rng).unwrap();
-            for i in 0..n {
-                shares[i][j] = secret_shares[i].clone(); // Party i receives evaluation of f_j at α_i
-            }
-        }
-
-        shares
-    }
-
     #[test]
     fn test_batch_reconstruct_sequential() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
 
         let t = 1;
         let n = 4;
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(4u64)];
-        let session_id = 111;
+        let session_id = SessionId::new(ProtocolType::BatchRecon, 0);
         assert_eq!(secrets.len(), t + 1);
 
         // Step 0: Generate shares
@@ -83,13 +48,7 @@ mod tests {
                     .share
                     .serialize_compressed(&mut payload)
                     .expect("serialization should not fail");
-                let msg = BatchReconMsg::new(
-                    i,
-                    session_id,
-                    BatchReconMsgType::Eval,
-                    BatchReconContentType::TripleGenMessage,
-                    payload,
-                );
+                let msg = BatchReconMsg::new(i, session_id, BatchReconMsgType::Eval, payload);
 
                 inboxes[j].push(msg);
             }
@@ -150,21 +109,17 @@ mod tests {
             assert_eq!(recovered[..secrets.len()], secrets[..]);
         }
     }
-
     #[tokio::test]
     async fn test_batch_reconstruction() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+        setup_tracing();
         use std::sync::Arc;
         use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
 
         let n = 4;
         let t = 1;
-        let session_id = 111;
+        let session_id = SessionId::new(ProtocolType::BatchRecon, 0);
         let config = FakeNetworkConfig::new(100);
-        let (network, mut receivers) = FakeNetwork::new(n, config);
+        let (network, mut receivers, _) = FakeNetwork::new(n, None, config);
         let net = Arc::new(network);
 
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(6u64)];
@@ -179,12 +134,7 @@ mod tests {
 
             handles.push(tokio::spawn(async move {
                 match node
-                    .init_batch_reconstruct(
-                        &shares,
-                        session_id,
-                        BatchReconContentType::TripleGenMessage,
-                        Arc::clone(&net_clone),
-                    )
+                    .init_batch_reconstruct(&shares, session_id, net_clone.clone())
                     .await
                 {
                     Ok(()) => {}
@@ -193,15 +143,26 @@ mod tests {
 
                 while node.secrets.is_none() {
                     let msg = timeout(Duration::from_secs(2), recv.recv()).await;
-                    match msg {
-                        Ok(Some(msg)) => match node.process(msg, net_clone.clone()).await {
-                            Ok(()) => {}
-                            Err(e) => warn!(id =i,error = ?e ,"Broadcasting failure"),
-                        },
-                        Ok(None) => break, // Channel closed
+                    // Attempt to deserialize into WrappedMessage
+                    let brmsg = match msg {
+                        Ok(m) => m.unwrap(),
+                        Err(_) => todo!(),
+                    };
+                    let wrapped: WrappedMessage = match bincode::deserialize(&brmsg) {
+                        Ok(m) => m,
                         Err(_) => {
-                            panic!("Node {} timed out waiting for a message", i);
+                            warn!("Malformed or unrecognized message format.");
+                            continue;
                         }
+                    };
+                    match wrapped {
+                        WrappedMessage::BatchRecon(m) => {
+                            match node.process(m, net_clone.clone()).await {
+                                Ok(()) => {}
+                                Err(e) => warn!(id =i,error = ?e ,"Broadcasting failure"),
+                            }
+                        }
+                        _ => todo!(),
                     }
                 }
 

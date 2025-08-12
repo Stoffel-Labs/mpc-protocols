@@ -1,21 +1,11 @@
 pub mod batch_recon;
-pub use batch_recon::{apply_vandermonde, make_vandermonde};
 
-use crate::honeybadger::robust_interpolate::InterpolateError;
+use crate::honeybadger::{robust_interpolate::InterpolateError, SessionId};
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelmpc_network::{NetworkError, PartyId, SessionId};
+use stoffelmpc_network::NetworkError;
 use thiserror::Error;
-
-/// Content type of the batch reconstruction message.
-#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
-pub enum BatchReconContentType {
-    /// The message is for the triple generation protocol.
-    TripleGenMessage,
-    /// The message is for the multiplication protocol.
-    MultiplicationMessage,
-}
 
 /// Represents message type exchanged between network nodes during the batch reconstruction protocol.
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -28,18 +18,15 @@ pub enum BatchReconMsgType {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct BatchReconMsg {
     pub session_id: SessionId,
-    pub sender_id: PartyId,                  // Sender id
-    pub msg_type: BatchReconMsgType,         // Message type
-    pub content_type: BatchReconContentType, // Content type
-    pub payload: Vec<u8>,                    // Field element
+    pub sender_id: usize,            //Sender id
+    pub msg_type: BatchReconMsgType, //Message type
+    pub payload: Vec<u8>,            //field element
 }
-
 impl BatchReconMsg {
     pub fn new(
-        sender_id: PartyId,
+        sender_id: usize,
         session_id: SessionId,
         msg_type: BatchReconMsgType,
-        content_type: BatchReconContentType,
         payload: Vec<u8>,
     ) -> Self {
         BatchReconMsg {
@@ -47,7 +34,6 @@ impl BatchReconMsg {
             session_id,
             msg_type,
             payload,
-            content_type,
         }
     }
 }
