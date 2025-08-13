@@ -12,7 +12,7 @@ use crate::{
         rbc::RbcError,
         share::ShareError,
     },
-    honeybadger::{robust_interpolate::{robust_interpolate::RobustShamirShare, InterpolateError}, SessionId},
+    honeybadger::{robust_interpolate::{robust_interpolate::RobustShare, InterpolateError}, SessionId},
 };
 
 pub mod share_gen;
@@ -42,8 +42,8 @@ pub enum RanShaError {
 
 #[derive(Clone,Debug)]
 pub struct RanShaStore<F: FftField> {
-    pub received_r_shares: HashMap<usize, RobustShamirShare<F>>,
-    pub computed_r_shares: Vec<RobustShamirShare<F>>,
+    pub received_r_shares: HashMap<usize, RobustShare<F>>,
+    pub computed_r_shares: Vec<RobustShare<F>>,
     pub received_ok_msg: Vec<usize>,
     pub state: RanShaState,
 }

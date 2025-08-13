@@ -6,7 +6,7 @@ use stoffelmpc_mpc::{
     honeybadger::{
         input::input::InputClient,
         ran_dou_sha::RanDouShaState,
-        robust_interpolate::robust_interpolate::{Robust, RobustShamirShare},
+        robust_interpolate::robust_interpolate::{Robust, RobustShare},
         share_gen::RanShaState,
         ProtocolType, SessionId, WrappedMessage,
     },
@@ -36,7 +36,7 @@ async fn randousha_e2e() {
     // create global nodes
     let mut nodes = create_global_nodes::<Fr, Avid>(n_parties, t, 0, 0, session_id);
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShamirShare<Fr>, FakeNetwork>(
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         receivers,
         nodes.clone(),
         network.clone(),
@@ -73,8 +73,8 @@ async fn randousha_e2e() {
                     .for_each(|(s_t, s_2t)| {
                         assert_eq!(s_t.degree, t);
                         assert_eq!(s_2t.degree, 2 * t);
-                        assert_eq!(s_t.id, node.id + 1);
-                        assert_eq!(s_2t.id, node.id + 1);
+                        assert_eq!(s_t.id, node.id);
+                        assert_eq!(s_2t.id, node.id);
                     });
                 sleep(Duration::from_millis(10)).await;
             }
@@ -101,7 +101,7 @@ async fn ransha_e2e() {
     // create global nodes
     let mut nodes = create_global_nodes::<Fr, Avid>(n_parties, t, 0, 0, session_id);
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShamirShare<Fr>, FakeNetwork>(
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         receivers,
         nodes.clone(),
         network.clone(),
@@ -158,7 +158,7 @@ async fn test_input_protocol_e2e() {
     let nodes = create_global_nodes::<Fr, Avid>(n, t, 0, 0, SessionId::new(ProtocolType::Input, 0));
 
     //Receive at server
-    receive::<Fr, Avid, RobustShamirShare<Fr>, FakeNetwork>(
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         server_recv,
         nodes.clone(),
         net.clone(),
@@ -208,7 +208,7 @@ async fn test_input_protocol_e2e() {
     }
     for (i, secret) in input_values.iter().enumerate() {
         let shares: Vec<ShamirShare<Fr, 1, Robust>> = recovered_shares[i].iter().cloned().collect();
-        let (_, r) = RobustShamirShare::recover_secret(&shares, n).unwrap();
+        let (_, r) = RobustShare::recover_secret(&shares, n).unwrap();
         assert_eq!(r, *secret);
     }
 }

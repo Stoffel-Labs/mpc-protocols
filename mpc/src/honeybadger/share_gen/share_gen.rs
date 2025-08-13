@@ -12,7 +12,7 @@ use crate::{
         SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
-        robust_interpolate::robust_interpolate::{Robust, RobustShamirShare},
+        robust_interpolate::robust_interpolate::{Robust, RobustShare},
         share_gen::{
             RanShaError, RanShaMessage, RanShaMessageType, RanShaPayload, RanShaState, RanShaStore,
         },
@@ -63,7 +63,7 @@ where
 
     pub async fn init<N>(
         &mut self,
-        shares_deg_t: Vec<RobustShamirShare<F>>,
+        shares_deg_t: Vec<RobustShare<F>>,
         session_id: SessionId,
         network: Arc<N>,
     ) -> Result<(), RanShaError>
@@ -124,14 +124,14 @@ where
         store.state = RanShaState::Reconstruction;
         store.received_r_shares.insert(msg.sender_id, share.clone());
 
-        if self.id < 2 * self.threshold && store.received_r_shares.len() == self.n_parties {
+        if self.id < 2 * self.threshold && store.received_r_shares.len() >= 2 * self.threshold + 1 {
             let shares: Vec<ShamirShare<F, 1, Robust>> =
                 store.received_r_shares.values().cloned().collect();
 
             drop(store);
 
             let ok: bool;
-            match RobustShamirShare::recover_secret(&shares, self.n_parties) {
+            match RobustShare::recover_secret(&shares, self.n_parties) {
                 Ok(r) => {
                     let poly = DensePolynomial::from_coefficients_slice(&r.0);
                     ok = poly.degree() == self.threshold;
@@ -162,7 +162,7 @@ where
     pub async fn output_handler(
         &mut self,
         msg: RanShaMessage,
-    ) -> Result<Vec<RobustShamirShare<F>>, RanShaError> {
+    ) -> Result<Vec<RobustShare<F>>, RanShaError> {
         let ok = match msg.payload {
             RanShaPayload::Output(o) => o,
             RanShaPayload::Reconstruct(_) => return Err(RanShaError::Abort),
@@ -196,7 +196,7 @@ where
         &mut self,
         msg: RanShaMessage,
         network: Arc<N>,
-    ) -> Result<Option<Vec<RobustShamirShare<F>>>, RanShaError>
+    ) -> Result<Option<Vec<RobustShare<F>>>, RanShaError>
     where
         N: Network + Send + Sync,
     {

@@ -1,22 +1,22 @@
 mod utils;
 use crate::utils::{
-    test_utils::test_setup,
+    test_utils::{setup_tracing, test_setup},
     triple_gen_utils::{create_nodes, get_triple_init_test_shares, spawn_receiver_tasks},
 };
 use ark_bls12_381::Fr;
 use itertools::izip;
 use std::matches;
 use stoffelmpc_mpc::{
-    common::SecretSharingScheme,
+    common::{share::shamir::NonRobustShare, SecretSharingScheme},
     honeybadger::{
-        robust_interpolate::robust_interpolate::RobustShamirShare,
+        robust_interpolate::robust_interpolate::RobustShare,
         triple_gen::triple_generation::ProtocolState, ProtocolType, SessionId,
     },
 };
 
 #[tokio::test]
 async fn test_triple_gen_e2e() {
-    // setup_tracing();
+    setup_tracing();
     let n_parties = 13;
     let threshold = 2;
     let n_shares = 5;
@@ -42,9 +42,9 @@ async fn test_triple_gen_e2e() {
     spawn_receiver_tasks(&nodes, receivers, network.clone());
 
     // vec[[a_1_1, a_1_2,..., a_1_nparties],..., [a_nshares_1, ... , a_nshares_nparties]]
-    let mut a_shares = vec![vec![RobustShamirShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
-    let mut b_shares = vec![vec![RobustShamirShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
-    let mut ab_shares = vec![vec![RobustShamirShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
+    let mut a_shares = vec![vec![RobustShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
+    let mut b_shares = vec![vec![RobustShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
+    let mut ab_shares = vec![vec![RobustShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
     for p in 0..n_parties {
         let session = triple_finish_receivers[p].recv().await.unwrap();
         let node = nodes[p].lock().await;
@@ -63,9 +63,9 @@ async fn test_triple_gen_e2e() {
     }
 
     for i in 0..n_shares {
-        let (_, a) = RobustShamirShare::recover_secret(&a_shares[i], n_parties).unwrap();
-        let (_, b) = RobustShamirShare::recover_secret(&b_shares[i], n_parties).unwrap();
-        let (_, ab) = RobustShamirShare::recover_secret(&ab_shares[i], n_parties).unwrap();
+        let (_, a) = RobustShare::recover_secret(&a_shares[i], n_parties).unwrap();
+        let (_, b) = RobustShare::recover_secret(&b_shares[i], n_parties).unwrap();
+        let (_, ab) = RobustShare::recover_secret(&ab_shares[i], n_parties).unwrap();
         assert!(a * b == ab);
         assert!(a == a_values[i]);
         assert!(b == b_values[i]);
@@ -93,25 +93,25 @@ async fn test_triple_init_test_shares() {
             randousha_pairs_2t_i.push(randousha_pairs[p][i].degree_2t.clone());
         }
         assert_eq!(
-            RobustShamirShare::recover_secret(&a_i, n_parties)
+            RobustShare::recover_secret(&a_i, n_parties)
                 .unwrap()
                 .1,
             a_values[i]
         );
         assert_eq!(
-            RobustShamirShare::recover_secret(&b_i, n_parties)
+            RobustShare::recover_secret(&b_i, n_parties)
                 .unwrap()
                 .1,
             b_values[i]
         );
         assert_eq!(
-            RobustShamirShare::recover_secret(&randousha_pairs_t_i, n_parties)
+            NonRobustShare::recover_secret(&randousha_pairs_t_i, n_parties)
                 .unwrap()
                 .1,
             pairs_values[i]
         );
         assert_eq!(
-            RobustShamirShare::recover_secret(&randousha_pairs_2t_i, n_parties)
+            NonRobustShare::recover_secret(&randousha_pairs_2t_i, n_parties)
                 .unwrap()
                 .1,
             pairs_values[i]
@@ -131,7 +131,7 @@ async fn test_triple_init_test_shares() {
         {
             let mult_share_deg_2t = share_a.share_mul(share_b).unwrap();
             let sub_share_deg_2t = (mult_share_deg_2t
-                - &RobustShamirShare::from(ran_dou_sha.degree_2t.clone()))
+                - &RobustShare::from(ran_dou_sha.degree_2t.clone()))
                 .unwrap();
             sub_shares_deg_2t.push(sub_share_deg_2t);
         }
@@ -144,7 +144,7 @@ async fn test_triple_init_test_shares() {
             let share_i_p = sub_shares_deg_2t_all[p][i].clone();
             shares_i.push(share_i_p);
         }
-        let r = RobustShamirShare::recover_secret(&shares_i, n_parties).unwrap();
+        let r = RobustShare::recover_secret(&shares_i, n_parties).unwrap();
         assert!(r.1 == (a_values[i] * b_values[i]) - pairs_values[i]);
     }
 }

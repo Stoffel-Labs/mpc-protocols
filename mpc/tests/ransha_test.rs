@@ -8,7 +8,7 @@ use std::sync::Arc;
 use stoffelmpc_mpc::{
     common::{rbc::rbc::Avid, SecretSharingScheme, RBC},
     honeybadger::{
-        robust_interpolate::robust_interpolate::RobustShamirShare,
+        robust_interpolate::robust_interpolate::RobustShare,
         share_gen::{
             share_gen::RanShaNode, RanShaError, RanShaMessage, RanShaMessageType, RanShaPayload,
             RanShaState,
@@ -38,7 +38,7 @@ async fn test_reconstruct_handler_incorrect_share() {
     let mut rng = test_rng();
     // ri_t created by each party i
     let mut shares_ri_t =
-        RobustShamirShare::compute_shares(secret, n_parties, degree_t, None, &mut rng).unwrap();
+        RobustShare::compute_shares(secret, n_parties, degree_t, None, &mut rng).unwrap();
 
     // Set the corruption indices
     let corruption_indices = [0, 1, 3, 4]; // Corrupt 4 shares, which is > t=3

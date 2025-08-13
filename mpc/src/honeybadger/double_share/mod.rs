@@ -1,7 +1,9 @@
-use crate::honeybadger::{
-    double_share::double_share_generation::ProtocolState,
-    robust_interpolate::{robust_interpolate::RobustShamirShare, InterpolateError},
-    SessionId,
+use crate::{
+    common::share::{shamir::NonRobustShare, ShareError},
+    honeybadger::{
+        double_share::double_share_generation::ProtocolState, robust_interpolate::InterpolateError,
+        SessionId,
+    },
 };
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -38,18 +40,20 @@ pub enum DouShaError {
     NetworkError(#[from] NetworkError),
     #[error("error sending the output of the protocol execution: {0:?}")]
     SendError(#[from] SendError<SessionId>),
+    #[error("ShareError: {0}")]
+    ShareError(#[from] ShareError),
 }
 
-#[derive(Clone,Debug, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct DoubleShamirShare<F: FftField> {
     /// Share of degree 2t.
-    pub degree_2t: RobustShamirShare<F>,
+    pub degree_2t: NonRobustShare<F>,
     // Share of degree t.
-    pub degree_t: RobustShamirShare<F>,
+    pub degree_t: NonRobustShare<F>,
 }
 
 impl<F: FftField> DoubleShamirShare<F> {
-    pub fn new(degree_t: RobustShamirShare<F>, degree_2t: RobustShamirShare<F>) -> Self {
+    pub fn new(degree_t: NonRobustShare<F>, degree_2t: NonRobustShare<F>) -> Self {
         assert!(degree_t.id == degree_2t.id);
         Self {
             degree_2t,
@@ -59,7 +63,7 @@ impl<F: FftField> DoubleShamirShare<F> {
 }
 
 /// Generic message for the faulty double share distribution protocol.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DouShaMessage {
     /// ID of the sender.
     sender_id: PartyId,
@@ -81,7 +85,7 @@ impl DouShaMessage {
 }
 
 /// Storage for the faulty double share protocol.
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 
 pub struct DouShaStorage<F>
 where

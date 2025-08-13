@@ -22,6 +22,9 @@ pub enum ShareError {
     InvalidInput,
     #[error("types are different")]
     TypeMismatch,
+    /// No suitable FFT evaluation domain could be found.
+    #[error("No suitable FFT evaluation domain found for n={0}")]
+    NoSuitableDomain(usize),
 }
 
 /// Creates a Vandermonde matrix `V` of size `n x (t+1)`.
@@ -79,7 +82,7 @@ where
 mod tests {
 
     use super::*;
-    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShamirShare;
+    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use ark_bls12_381::Fr;
     use ark_ff::{Field, One};
     use ark_poly::GeneralEvaluationDomain;
@@ -142,9 +145,9 @@ mod tests {
         let vandermonde = make_vandermonde::<Fr>(n, t).expect("make_vandermonde failed");
         // Shares represent coefficients [c0, c1, c2] for a polynomial c0 + c1*x + c2*x^2
         let shares = vec![
-            RobustShamirShare::new(Fr::from(1u64), 0, 2),
-            RobustShamirShare::new(Fr::from(2u64), 0, 2),
-            RobustShamirShare::new(Fr::from(3u64), 0, 2),
+            RobustShare::new(Fr::from(1u64), 0, 2),
+            RobustShare::new(Fr::from(2u64), 0, 2),
+            RobustShare::new(Fr::from(3u64), 0, 2),
         ];
         let y_values = apply_vandermonde(&vandermonde, &shares).expect("apply_vandermonde failed");
         assert_eq!(

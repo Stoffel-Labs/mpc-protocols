@@ -1,13 +1,16 @@
 use ark_bls12_381::Fr;
 use std::sync::Arc;
-use stoffelmpc_mpc::honeybadger::double_share::{
-    double_share_generation::{DoubleShareNode, ProtocolState},
-    DouShaMessage, DoubleShamirShare,
-};
 use stoffelmpc_mpc::honeybadger::SessionId;
+use stoffelmpc_mpc::honeybadger::{
+    double_share::{
+        double_share_generation::{DoubleShareNode, ProtocolState},
+        DoubleShamirShare,
+    },
+    WrappedMessage,
+};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc::Sender, Mutex};
-use tracing::error;
+use tracing::{error, warn};
 
 /// Initializes all RanDouSha nodes and returns them wrapped in `Arc<Mutex<_>>`.
 pub fn create_nodes(
@@ -48,19 +51,25 @@ pub fn spawn_receiver_tasks(
                     Some(msg) => msg,
                     None => break,
                 };
-                let deserialized_msg: DouShaMessage = bincode::deserialize(&msg).unwrap();
-                let result = dousha_node
-                    .lock()
-                    .await
-                    .proccess(deserialized_msg.clone())
-                    .await;
+                let wrapped: WrappedMessage = match bincode::deserialize(&msg) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        warn!("Malformed or unrecognized message format.");
+                        continue;
+                    }
+                };
+                let dousha_msg = match wrapped {
+                    WrappedMessage::Dousha(dou_sha_message) => dou_sha_message,
+                    _ => todo!(),
+                };
+                let result = dousha_node.lock().await.process(dousha_msg.clone()).await;
 
                 match result {
                     Ok(_) => {
                         let dousha_node_lock = dousha_node.lock().await;
                         let storage_lock = dousha_node_lock.storage.lock().await;
                         let node_storage = storage_lock
-                            .get(&deserialized_msg.session_id)
+                            .get(&dousha_msg.session_id)
                             .unwrap()
                             .lock()
                             .await;

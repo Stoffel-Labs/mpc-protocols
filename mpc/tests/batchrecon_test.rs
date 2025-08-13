@@ -13,7 +13,7 @@ mod tests {
         },
         honeybadger::{
             batch_recon::{batch_recon::BatchReconNode, BatchReconMsg, BatchReconMsgType},
-            robust_interpolate::robust_interpolate::RobustShamirShare,
+            robust_interpolate::robust_interpolate::RobustShare,
             ProtocolType, SessionId, WrappedMessage,
         },
     };
@@ -67,7 +67,7 @@ mod tests {
                         .expect("deserialization should not fail");
 
                     if seen.insert(i) {
-                        received.push(RobustShamirShare::new(val, i, t));
+                        received.push(RobustShare::new(val, i, t));
                         if received.len() == 2 * t + 1 {
                             break;
                         }
@@ -75,7 +75,7 @@ mod tests {
                 }
             }
 
-            if let Ok((_, value)) = RobustShamirShare::recover_secret(&received, n) {
+            if let Ok((_, value)) = RobustShare::recover_secret(&received, n) {
                 reveals[j] = Some(value);
             }
         }
@@ -89,14 +89,14 @@ mod tests {
             for (j, val_opt) in reveals.iter().enumerate() {
                 if let Some(y_j) = val_opt {
                     if seen.insert(j) {
-                        y_values.push(RobustShamirShare::new(*y_j, j, t));
+                        y_values.push(RobustShare::new(*y_j, j, t));
                         if y_values.len() == 2 * t + 1 {
                             break;
                         }
                     }
                 }
             }
-            if let Ok((mut poly, _)) = RobustShamirShare::recover_secret(&y_values, n) {
+            if let Ok((mut poly, _)) = RobustShare::recover_secret(&y_values, n) {
                 //  Extract original secrets (coefficients) x_1 .. x_{t+1}
                 poly.resize(t + 1, Fr::zero());
                 recovered_all.push(poly);

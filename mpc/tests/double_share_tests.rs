@@ -3,10 +3,8 @@ use std::{collections::HashMap, sync::Arc, thread, time::Duration};
 use crate::utils::test_utils::test_setup;
 use ark_std::test_rng;
 use stoffelmpc_mpc::{
-    common::SecretSharingScheme,
-    honeybadger::{
-        robust_interpolate::robust_interpolate::RobustShamirShare, ProtocolType, SessionId,
-    },
+    common::{share::shamir::NonRobustShare, SecretSharingScheme},
+    honeybadger::{ProtocolType, SessionId},
 };
 use tokio::sync::mpsc;
 use utils::{
@@ -64,9 +62,8 @@ async fn generate_faulty_double_shares_e2e() {
             for (id, final_double_shares) in &resulting_shares {
                 assert_eq!(final_double_shares.len(), n_parties);
                 for double_share in final_double_shares {
-                    // party id starts from 1 while share id starts from 0
-                    assert_eq!(*id - 1, double_share.degree_t.id);
-                    assert_eq!(*id - 1, double_share.degree_2t.id);
+                    assert_eq!(*id, double_share.degree_t.id);
+                    assert_eq!(*id, double_share.degree_2t.id);
                     assert_eq!(double_share.degree_t.degree, threshold);
                     assert_eq!(double_share.degree_2t.degree, 2 * threshold);
                 }
@@ -89,8 +86,8 @@ async fn generate_faulty_double_shares_e2e() {
             .map(|shares| shares[i].degree_2t.clone())
             .collect();
 
-        let secret_t = RobustShamirShare::recover_secret(&shares_t, n_parties);
-        let secret_2t = RobustShamirShare::recover_secret(&shares_2t, n_parties);
+        let secret_t = NonRobustShare::recover_secret(&shares_t, n_parties);
+        let secret_2t = NonRobustShare::recover_secret(&shares_2t, n_parties);
 
         assert_eq!(
             secret_t.unwrap().1,

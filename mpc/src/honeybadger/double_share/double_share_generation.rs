@@ -9,17 +9,16 @@ use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;
 
 use crate::{
-    common::SecretSharingScheme,
+    common::{share::shamir::NonRobustShare, SecretSharingScheme},
     honeybadger::{
         double_share::{DouShaError, DouShaMessage, DouShaStorage},
-        robust_interpolate::robust_interpolate::RobustShamirShare,
-        SessionId,
+        SessionId, WrappedMessage,
     },
 };
 
 use super::DoubleShamirShare;
 
-#[derive(Clone,PartialEq,Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum ProtocolState {
     Initialized,
     Finished,
@@ -69,7 +68,7 @@ where
         }
     }
 
-    pub async fn proccess(&mut self, message: DouShaMessage) -> Result<(), DouShaError> {
+    pub async fn process(&mut self, message: DouShaMessage) -> Result<(), DouShaError> {
         self.receive_double_shares_handler(message).await?;
         Ok(())
     }
@@ -118,14 +117,9 @@ where
         let secret = F::rand(rng);
 
         let shares_deg_t =
-            RobustShamirShare::compute_shares(secret, self.n_parties, self.threshold, None, rng)?;
-        let shares_deg_2t = RobustShamirShare::compute_shares(
-            secret,
-            self.n_parties,
-            2 * self.threshold,
-            None,
-            rng,
-        )?;
+            NonRobustShare::compute_shares(secret, self.n_parties, self.threshold, None, rng)?;
+        let shares_deg_2t =
+            NonRobustShare::compute_shares(secret, self.n_parties, 2 * self.threshold, None, rng)?;
 
         for (recipient_id, (share_t, share_2t)) in izip!(shares_deg_t, shares_deg_2t).enumerate() {
             // Create and serialize the payload.
@@ -134,7 +128,8 @@ where
             double_share.serialize_compressed(&mut payload)?;
 
             // Create and serialize the generic message.
-            let generic_message = DouShaMessage::new(self.id, session_id, payload);
+            let generic_message =
+                WrappedMessage::Dousha(DouShaMessage::new(self.id, session_id, payload));
             let bytes_generic_msg = bincode::serialize(&generic_message)?;
 
             info!("sending shares from {:?} to {:?}", self.id, recipient_id);
@@ -164,7 +159,7 @@ where
             self.id,
             recv_message.sender_id,
         );
-        dousha_storage.reception_tracker[recv_message.sender_id - 1] = true;
+        dousha_storage.reception_tracker[recv_message.sender_id] = true;
 
         // Check if the protocol has reached an end
         if dousha_storage

@@ -10,7 +10,7 @@ use crate::{
     common::share::ShareError,
     honeybadger::{
         batch_recon::BatchReconError, double_share::DoubleShamirShare,
-        robust_interpolate::robust_interpolate::RobustShamirShare,
+        robust_interpolate::robust_interpolate::RobustShare,
         triple_gen::triple_generation::ProtocolState, SessionId,
     },
 };
@@ -57,11 +57,11 @@ pub enum TripleGenError {
 #[derive(Clone,Debug)]
 pub struct ShamirBeaverTriple<F: FftField> {
     /// First random value of the triple.
-    pub a: RobustShamirShare<F>,
+    pub a: RobustShare<F>,
     /// Second random value of the triple.
-    pub b: RobustShamirShare<F>,
+    pub b: RobustShare<F>,
     /// Multiplication of both random values.
-    pub mult: RobustShamirShare<F>,
+    pub mult: RobustShare<F>,
 }
 
 impl<F> ShamirBeaverTriple<F>
@@ -71,9 +71,9 @@ where
     /// Creates a new Shamir Beaver triple with `a` and `b` being the random values of the triple
     /// and `mult` is the multiplication of `a` and `b`.
     pub fn new(
-        a: RobustShamirShare<F>,
-        b: RobustShamirShare<F>,
-        mult: RobustShamirShare<F>,
+        a: RobustShare<F>,
+        b: RobustShare<F>,
+        mult: RobustShare<F>,
     ) -> Self {
         Self { a, b, mult }
     }
@@ -88,8 +88,8 @@ where
     /// Current state of the protocol execution.
     pub protocol_state: ProtocolState,
     pub randousha_pairs: Vec<DoubleShamirShare<F>>,
-    pub random_shares_a_input: Vec<RobustShamirShare<F>>,
-    pub random_shares_b_input: Vec<RobustShamirShare<F>>,
+    pub random_shares_a_input: Vec<RobustShare<F>>,
+    pub random_shares_b_input: Vec<RobustShare<F>>,
     pub protocol_output: Vec<ShamirBeaverTriple<F>>,
 }
 
@@ -115,7 +115,7 @@ where
 /// execution. Any message that is sent in the protocol is converted into bytes that are placed in
 /// the `payload`. Once a party receives a message, it takes the payload and deserialize it to the
 /// specific message sent during the protocol execution.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone,Debug, Serialize, Deserialize)]
 pub struct TripleGenMessage {
     /// The ID of the party.
     pub sender_id: PartyId,

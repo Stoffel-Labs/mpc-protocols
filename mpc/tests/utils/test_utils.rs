@@ -2,21 +2,20 @@ use ark_bls12_381::Fr;
 use ark_ff::{FftField, UniformRand};
 use ark_std::test_rng;
 use once_cell::sync::Lazy;
+use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::rbc::RbcError;
-use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme, ShamirShare, RBC};
+use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::double_share::DoubleShamirShare;
-use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::{
-    Robust, RobustShamirShare,
-};
+use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::share_gen::RanShaError;
 use stoffelmpc_mpc::honeybadger::{
     HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
-use tracing::{info, warn};
+use tracing::warn;
 
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
@@ -102,13 +101,13 @@ pub fn test_setup(
 pub fn get_reconstruct_input(
     n: usize,
     degree_t: usize,
-) -> (Fr, Vec<RobustShamirShare<Fr>>, Vec<RobustShamirShare<Fr>>) {
+) -> (Fr, Vec<NonRobustShare<Fr>>, Vec<NonRobustShare<Fr>>) {
     let mut rng = test_rng();
     let secret = Fr::rand(&mut rng);
     let shares_si_t =
-        RobustShamirShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
+        NonRobustShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
     let shares_si_2t =
-        RobustShamirShare::compute_shares(secret, n, degree_t * 2, None, &mut rng).unwrap();
+        NonRobustShare::compute_shares(secret, n, degree_t * 2, None, &mut rng).unwrap();
     (secret, shares_si_t, shares_si_2t)
 }
 
@@ -118,8 +117,8 @@ pub fn construct_e2e_input(
     degree_t: usize,
 ) -> (
     Vec<Fr>,
-    Vec<Vec<RobustShamirShare<Fr>>>,
-    Vec<Vec<RobustShamirShare<Fr>>>,
+    Vec<Vec<NonRobustShare<Fr>>>,
+    Vec<Vec<NonRobustShare<Fr>>>,
 ) {
     let mut n_shares_t = vec![vec![]; n];
     let mut n_shares_2t = vec![vec![]; n];
@@ -130,9 +129,9 @@ pub fn construct_e2e_input(
         let secret = Fr::rand(&mut rng);
         secrets.push(secret);
         let shares_si_t =
-            RobustShamirShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
+            NonRobustShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
         let shares_si_2t =
-            RobustShamirShare::compute_shares(secret, n, degree_t * 2, None, &mut rng).unwrap();
+            NonRobustShare::compute_shares(secret, n, degree_t * 2, None, &mut rng).unwrap();
         for j in 0..n {
             n_shares_t[j].push(shares_si_t[j].clone());
             n_shares_2t[j].push(shares_si_2t[j].clone());
@@ -168,8 +167,8 @@ pub fn create_nodes(
 /// Initializes all nodes with their respective shares.
 pub async fn initialize_all_nodes(
     nodes: &[Arc<Mutex<RanDouShaNode<Fr, Avid>>>],
-    n_shares_t: &[Vec<RobustShamirShare<Fr>>],
-    n_shares_2t: &[Vec<RobustShamirShare<Fr>>],
+    n_shares_t: &[Vec<NonRobustShare<Fr>>],
+    n_shares_2t: &[Vec<NonRobustShare<Fr>>],
     session_id: SessionId,
     network: Arc<FakeNetwork>,
 ) {
@@ -302,15 +301,15 @@ pub fn spawn_receiver_tasks(
 //--------------------------TRACING--------------------------
 
 static TRACING_INIT: Lazy<()> = Lazy::new(|| {
-    let _subscriber = FmtSubscriber::builder()
-        .with_env_filter(EnvFilter::from_default_env())
+    let subscriber = FmtSubscriber::builder()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("trace".parse().unwrap()))
         .pretty()
-        .try_init();
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 });
 
 pub fn setup_tracing() {
     Lazy::force(&TRACING_INIT);
-    info!("tracing set up")
 }
 //--------------------------BATCH RECON--------------------------
 
@@ -320,11 +319,11 @@ pub fn generate_independent_shares<F: FftField>(
     secrets: &[F],
     t: usize,
     n: usize,
-) -> Vec<Vec<RobustShamirShare<F>>> {
+) -> Vec<Vec<RobustShare<F>>> {
     let mut rng = test_rng();
     let mut shares = vec![
         vec![
-            RobustShamirShare {
+            RobustShare {
                 share: [F::zero()],
                 id: 0,
                 degree: t,
@@ -337,7 +336,7 @@ pub fn generate_independent_shares<F: FftField>(
     for (j, secret) in secrets.iter().enumerate() {
         // Call gen_shares to create 'n' shares for the current 'secret'
         let secret_shares =
-            RobustShamirShare::compute_shares(*secret, n, t, None, &mut rng).unwrap();
+            RobustShare::compute_shares(*secret, n, t, None, &mut rng).unwrap();
         for i in 0..n {
             shares[i][j] = secret_shares[i].clone(); // Party i receives evaluation of f_j at α_i
         }
@@ -398,8 +397,8 @@ pub fn create_global_nodes<F: FftField, R: RBC + 'static>(
 /// Initializes all global nodes with their respective shares for randousha.
 pub async fn initialize_global_nodes_randousha<F, R, N>(
     nodes: Vec<HoneyBadgerMPCNode<F, R>>,
-    n_shares_t: &[Vec<RobustShamirShare<F>>],
-    n_shares_2t: &[Vec<RobustShamirShare<F>>],
+    n_shares_t: &[Vec<NonRobustShare<F>>],
+    n_shares_2t: &[Vec<NonRobustShare<F>>],
     session_id: SessionId,
     network: Arc<N>,
 ) where
@@ -445,7 +444,7 @@ pub async fn initialize_global_nodes_randousha<F, R, N>(
 pub fn construct_e2e_input_ransha(
     n: usize,
     degree_t: usize,
-) -> (Vec<Fr>, Vec<Vec<RobustShamirShare<Fr>>>) {
+) -> (Vec<Fr>, Vec<Vec<RobustShare<Fr>>>) {
     let mut n_shares_t = vec![vec![]; n];
     let mut secrets = Vec::new();
     let mut rng = test_rng();
@@ -454,7 +453,7 @@ pub fn construct_e2e_input_ransha(
         let secret = Fr::rand(&mut rng);
         secrets.push(secret);
         let shares_si_t =
-            RobustShamirShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
+            RobustShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
         for j in 0..n {
             n_shares_t[j].push(shares_si_t[j].clone());
         }
@@ -465,7 +464,7 @@ pub fn construct_e2e_input_ransha(
 /// Initializes all global nodes with their respective shares for ransha.
 pub async fn initialize_global_nodes_ransha<F, R, N>(
     nodes: Vec<HoneyBadgerMPCNode<F, R>>,
-    n_shares_t: &[Vec<RobustShamirShare<F>>],
+    n_shares_t: &[Vec<RobustShare<F>>],
     session_id: SessionId,
     network: Arc<N>,
 ) where

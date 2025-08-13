@@ -7,7 +7,7 @@ use crate::{
         SecretSharingScheme,
     },
     honeybadger::{
-        robust_interpolate::robust_interpolate::RobustShamirShare, triple_gen::TripleGenMessage,
+        robust_interpolate::robust_interpolate::RobustShare, triple_gen::TripleGenMessage,
         ProtocolType, WrappedMessage,
     },
 };
@@ -32,28 +32,20 @@ use tracing::{debug, error, info, warn};
 /// 4. Using the reconstructed y-values, parties robustly
 ///    interpolate to recover the original secrets [x₁, ..., x_{t+1}].
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct BatchReconNode<F: FftField> {
     pub id: usize,                                   // This node's unique identifier
     pub n: usize,                                    // Total number of nodes/shares
     pub t: usize,                                    // Number of malicious parties
-    pub evals_received: Vec<RobustShamirShare<F>>,   // Stores (sender_id, eval_share) messages
-    pub reveals_received: Vec<RobustShamirShare<F>>, // Stores (sender_id, y_j_value) messages
-    pub y_j: Option<RobustShamirShare<F>>, // The interpolated y_j value for this node's index
+    pub evals_received: Vec<RobustShare<F>>,   // Stores (sender_id, eval_share) messages
+    pub reveals_received: Vec<RobustShare<F>>, // Stores (sender_id, y_j_value) messages
+    pub y_j: Option<RobustShare<F>>, // The interpolated y_j value for this node's index
     pub secrets: Option<Vec<F>>, // The finally reconstructed original secrets (polynomial coefficients)
 }
 
 impl<F: FftField> BatchReconNode<F> {
     /// Creates a new `Node` instance.
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, BatchReconError> {
-        // TODO - we might need to relax this check in preprocessing, since we will be opening deg 2t shares
-        if !(t < (n + 2) / 3) {
-            // ceil(n / 3)
-            return Err(BatchReconError::InvalidInput(format!(
-                "Invalid t: must satisfy 0 <= t < n / 3 (t={}, n={})",
-                t, n
-            )));
-        }
         Ok(Self {
             id,
             n,
@@ -70,7 +62,7 @@ impl<F: FftField> BatchReconNode<F> {
     /// Each party computes its `y_j_share` for all `j` and sends it to party `P_j`.
     pub async fn init_batch_reconstruct<N: Network>(
         &self,
-        shares: &[RobustShamirShare<F>], // this party's shares of x_0 to x_t
+        shares: &[RobustShare<F>], // this party's shares of x_0 to x_t
         session_id: SessionId,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
@@ -127,7 +119,7 @@ impl<F: FftField> BatchReconNode<F> {
                 // Store the received evaluation share if it's from a new sender.
                 if !self.evals_received.iter().any(|s| s.id == sender_id) {
                     self.evals_received
-                        .push(RobustShamirShare::new(val, sender_id, self.t));
+                        .push(RobustShare::new(val, sender_id, self.t));
                 }
                 // Check if we have enough evaluation shares and haven't already computed our `y_j`.
                 if self.evals_received.len() >= 2 * self.t + 1 && self.y_j.is_none() {
@@ -137,9 +129,9 @@ impl<F: FftField> BatchReconNode<F> {
                     );
 
                     // Attempt to interpolate the polynomial and get our specific `y_j` value.
-                    match RobustShamirShare::recover_secret(&self.evals_received.clone(), self.n) {
+                    match RobustShare::recover_secret(&self.evals_received.clone(), self.n) {
                         Ok((_, value)) => {
-                            self.y_j = Some(RobustShamirShare {
+                            self.y_j = Some(RobustShare {
                                 share: [value],
                                 id: self.id,
                                 degree: self.t,
@@ -189,7 +181,7 @@ impl<F: FftField> BatchReconNode<F> {
                 // Store the received revealed `y_j` value if it's from a new sender.
                 if !self.reveals_received.iter().any(|s| s.id == sender_id) {
                     self.reveals_received
-                        .push(RobustShamirShare::new(y_j, sender_id, self.t));
+                        .push(RobustShare::new(y_j, sender_id, self.t));
                 }
                 // Check if we have enough revealed `y_j` values and haven't already reconstructed the secrets.
                 if self.reveals_received.len() >= 2 * self.t + 1 && self.secrets.is_none() {
@@ -198,7 +190,7 @@ impl<F: FftField> BatchReconNode<F> {
                         "Enough Reveals collected, interpolating secrets"
                     );
                     // Attempt to interpolate the polynomial whose coefficients are the original secrets.
-                    match RobustShamirShare::recover_secret(&self.reveals_received.clone(), self.n)
+                    match RobustShare::recover_secret(&self.reveals_received.clone(), self.n)
                     {
                         Ok((poly, _)) => {
                             let mut result = poly;
@@ -213,11 +205,12 @@ impl<F: FftField> BatchReconNode<F> {
                                 ProtocolType::Triple => {
                                     let mut bytes_message = Vec::new();
                                     result.serialize_compressed(&mut bytes_message)?;
-                                    let triple_gen_generic_msg = TripleGenMessage::new(
-                                        self.id,
-                                        msg.session_id,
-                                        bytes_message,
-                                    );
+                                    let triple_gen_generic_msg =
+                                        WrappedMessage::Triple(TripleGenMessage::new(
+                                            self.id,
+                                            msg.session_id,
+                                            bytes_message,
+                                        ));
                                     let bytes_generic_msg =
                                         bincode::serialize(&triple_gen_generic_msg)?;
                                     net.send(self.id, &bytes_generic_msg).await?;

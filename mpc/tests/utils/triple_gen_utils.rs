@@ -3,13 +3,12 @@ use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::sync::Arc;
 use stoffelmpc_mpc::{
-    common::SecretSharingScheme,
+    common::{share::shamir::NonRobustShare, SecretSharingScheme},
     honeybadger::{
-        batch_recon::BatchReconMsg,
         double_share::DoubleShamirShare,
-        robust_interpolate::robust_interpolate::RobustShamirShare,
-        triple_gen::{triple_generation::TripleGenNode, TripleGenMessage},
-        SessionId,
+        robust_interpolate::robust_interpolate::RobustShare,
+        triple_gen::{triple_generation::TripleGenNode},
+        SessionId, WrappedMessage,
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
@@ -41,8 +40,8 @@ pub fn get_triple_init_test_shares(
     n_parties: usize,
     t: usize,
 ) -> (
-    Vec<Vec<RobustShamirShare<Fr>>>,
-    Vec<Vec<RobustShamirShare<Fr>>>,
+    Vec<Vec<RobustShare<Fr>>>,
+    Vec<Vec<RobustShare<Fr>>>,
     Vec<Vec<DoubleShamirShare<Fr>>>,
     Vec<Fr>,
     Vec<Fr>,
@@ -61,19 +60,19 @@ pub fn get_triple_init_test_shares(
         // gen share of a_i, b_i for n parties
         let a = Fr::rand(&mut rng);
         a_values.push(a);
-        let shares_a = RobustShamirShare::compute_shares(a, n_parties, t, None, &mut rng).unwrap();
+        let shares_a = RobustShare::compute_shares(a, n_parties, t, None, &mut rng).unwrap();
         let b = Fr::rand(&mut rng);
         b_values.push(b);
-        let shares_b = RobustShamirShare::compute_shares(b, n_parties, t, None, &mut rng).unwrap();
+        let shares_b = RobustShare::compute_shares(b, n_parties, t, None, &mut rng).unwrap();
 
         let r = Fr::rand(&mut rng);
         pairs_values.push(r);
 
         let ids: Vec<usize> = (1..=n_parties).collect();
         let shares_r_t =
-            RobustShamirShare::compute_shares(r, n_parties, t, Some(&ids), &mut rng).unwrap();
+            NonRobustShare::compute_shares(r, n_parties, t, Some(&ids), &mut rng).unwrap();
         let shares_r_2t =
-            RobustShamirShare::compute_shares(r, n_parties, 2 * t, Some(&ids), &mut rng).unwrap();
+            NonRobustShare::compute_shares(r, n_parties, 2 * t, Some(&ids), &mut rng).unwrap();
 
         for p in 0..n_parties {
             random_shares_a[p].push(shares_a[p].clone());
@@ -116,20 +115,31 @@ pub fn spawn_receiver_tasks(
                     Some(msg) => msg,
                     None => break,
                 };
+                let wrapped: WrappedMessage = match bincode::deserialize(&msg) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        warn!("Malformed or unrecognized message format.");
+                        continue;
+                    }
+                };
                 let mut node_bind = triple_gen_node.lock().await;
-                // received batch recon msg
-                if let Ok(batch_msg) = bincode::deserialize::<BatchReconMsg>(&msg) {
-                    node_bind
-                        .batch_recon_node
-                        .process(batch_msg, net_clone.clone())
-                        .await
-                        .unwrap();
-                } else if let Ok(triple_gen_msg) = bincode::deserialize::<TripleGenMessage>(&msg) {
-                    debug!("Received triple_gen_msg");
-                    node_bind.process(triple_gen_msg).await.unwrap();
-                } else {
-                    warn!("received invalid msg type");
-                    break;
+
+                match wrapped {
+                    WrappedMessage::BatchRecon(batch_msg) => {
+                        node_bind
+                            .batch_recon_node
+                            .process(batch_msg, net_clone.clone())
+                            .await
+                            .unwrap();
+                    }
+                    WrappedMessage::Triple(triple_gen_msg) => {
+                        debug!("Received triple_gen_msg");
+                        node_bind.process(triple_gen_msg).await.unwrap();
+                    }
+                    _ => {
+                        warn!("received invalid msg type");
+                        break;
+                    }
                 }
             }
         });

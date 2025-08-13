@@ -1,7 +1,7 @@
 use crate::common::{SecretSharingScheme, RBC};
 use crate::honeybadger::input::InputMessage;
 use crate::honeybadger::input::{InputError, InputMessageType};
-use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShamirShare;
+use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
@@ -11,15 +11,15 @@ use stoffelmpc_network::{ClientId, Network};
 use tokio::sync::Mutex;
 use tracing::info;
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct InputServer<F: FftField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub rbc: R,
     /// For each input index, the local share of r_i
-    pub local_mask_shares: Arc<Mutex<HashMap<ClientId, Vec<RobustShamirShare<F>>>>>,
+    pub local_mask_shares: Arc<Mutex<HashMap<ClientId, Vec<RobustShare<F>>>>>,
     /// For each input index, the result: share of m_i
-    pub input_shares: Arc<Mutex<HashMap<ClientId, Vec<RobustShamirShare<F>>>>>,
+    pub input_shares: Arc<Mutex<HashMap<ClientId, Vec<RobustShare<F>>>>>,
 }
 
 impl<F: FftField, R: RBC> InputServer<F, R> {
@@ -38,7 +38,7 @@ impl<F: FftField, R: RBC> InputServer<F, R> {
     pub async fn init<N: Network>(
         &self,
         client_id: usize,
-        shares: Vec<RobustShamirShare<F>>,
+        shares: Vec<RobustShare<F>>,
         input_len: usize,
         net: Arc<N>,
     ) -> Result<(), InputError> {
@@ -89,10 +89,10 @@ impl<F: FftField, R: RBC> InputServer<F, R> {
                 )))
             }
         };
-        let input_shares: Vec<RobustShamirShare<F>> = masked_input
+        let input_shares: Vec<RobustShare<F>> = masked_input
             .iter()
             .zip(local_shares)
-            .map(|(a, b)| RobustShamirShare::new(*a - b.share[0], b.id, b.degree))
+            .map(|(a, b)| RobustShare::new(*a - b.share[0], b.id, b.degree))
             .collect();
         drop(local_share_store); // release lock early
         let mut input_store = self.input_shares.lock().await;
@@ -123,7 +123,7 @@ pub struct InputClient<F: FftField, R: RBC> {
     pub t: usize,
     pub rbc: R,
     pub inputs: Arc<Mutex<Vec<F>>>,
-    pub received_shares: Arc<Mutex<HashMap<usize, Vec<RobustShamirShare<F>>>>>,
+    pub received_shares: Arc<Mutex<HashMap<usize, Vec<RobustShare<F>>>>>,
 }
 
 impl<F: FftField, R: RBC> InputClient<F, R> {
@@ -144,7 +144,7 @@ impl<F: FftField, R: RBC> InputClient<F, R> {
         msg: InputMessage,
         net: Arc<N>,
     ) -> Result<(), InputError> {
-        let shares: Vec<RobustShamirShare<F>> =
+        let shares: Vec<RobustShare<F>> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())
                 .map_err(InputError::ArkDeserialization)?;
         let inputs = self.inputs.lock().await;
@@ -177,7 +177,7 @@ impl<F: FftField, R: RBC> InputClient<F, R> {
             }
 
             for recon in r_shares {
-                let secret = RobustShamirShare::recover_secret(&recon, self.n)
+                let secret = RobustShare::recover_secret(&recon, self.n)
                     .map_err(|e| InputError::InterpolateError(e))?;
                 masks.push(secret.1);
             }

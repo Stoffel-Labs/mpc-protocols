@@ -1,5 +1,5 @@
 use bincode::ErrorKind;
-use robust_interpolate::robust_interpolate::RobustShamirShare;
+use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -10,11 +10,11 @@ use crate::{
     },
     honeybadger::{
         batch_recon::BatchReconMsg,
-        double_share::{double_share_generation, DouShaError},
+        double_share::{double_share_generation, DouShaError, DouShaMessage},
         input::{input::InputServer, InputError, InputMessage},
         ran_dou_sha::messages::RanDouShaMessage,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
-        triple_gen::{ShamirBeaverTriple, TripleGenError},
+        triple_gen::{ShamirBeaverTriple, TripleGenError, TripleGenMessage},
     },
 };
 
@@ -170,7 +170,7 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     /// A pool of random double shares used for secure multiplication.
     beaver_triples: Vec<ShamirBeaverTriple<F>>,
     /// A pool of random shares used for inputing private data for the protocol.
-    random_shares: Vec<RobustShamirShare<F>>,
+    random_shares: Vec<RobustShare<F>>,
 }
 
 impl<F> HoneyBadgerMPCNodePreprocMaterial<F>
@@ -189,7 +189,7 @@ where
     pub fn add(
         &mut self,
         mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
-        mut random_shares: Option<Vec<RobustShamirShare<F>>>,
+        mut random_shares: Option<Vec<RobustShare<F>>>,
     ) {
         if let Some(pairs) = &mut triples {
             self.beaver_triples.append(pairs);
@@ -213,7 +213,7 @@ where
     }
 
     /// Take up to n random shares from the preprocessing material.
-    pub fn take_random_shares(&mut self, n_shares: usize) -> Vec<RobustShamirShare<F>> {
+    pub fn take_random_shares(&mut self, n_shares: usize) -> Vec<RobustShare<F>> {
         let pairs = n_shares.min(self.random_shares.len());
         self.random_shares.drain(0..pairs).collect()
     }
@@ -310,6 +310,9 @@ where
             WrappedMessage::BatchRecon(_) => {
                 todo!()
             }
+            WrappedMessage::Dousha(_) => {
+                todo!()
+            }
             WrappedMessage::Input(input) => {
                 self.preprocess.input.process(input).await?;
             }
@@ -318,6 +321,9 @@ where
             }
             WrappedMessage::RanDouSha(rds_msg) => {
                 self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
+            }
+            WrappedMessage::Triple(_) => {
+                todo!()
             }
         }
 
@@ -440,6 +446,8 @@ pub enum WrappedMessage {
     BatchRecon(BatchReconMsg),
     Input(InputMessage),
     RanSha(RanShaMessage),
+    Triple(TripleGenMessage),
+    Dousha(DouShaMessage)
 }
 
 ///-----------------Session-ID-----------------

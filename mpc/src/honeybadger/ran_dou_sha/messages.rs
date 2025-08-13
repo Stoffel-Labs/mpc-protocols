@@ -3,7 +3,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use serde::{Deserialize, Serialize};
 use stoffelmpc_network::PartyId;
 
-use crate::honeybadger::{robust_interpolate::robust_interpolate::RobustShamirShare, SessionId};
+use crate::{common::share::shamir::NonRobustShare, honeybadger::SessionId};
 
 /// Types for the all the possible messages sent during the Random Double Sharing protocol.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -55,9 +55,9 @@ impl RanDouShaMessage {
 #[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct ReconstructionMessage<F: FftField> {
     /// Share of r of degree t.
-    pub r_share_deg_t: RobustShamirShare<F>,
+    pub r_share_deg_t: NonRobustShare<F>,
     /// Share of r of degree 2t.
-    pub r_share_deg_2t: RobustShamirShare<F>,
+    pub r_share_deg_2t: NonRobustShare<F>,
 }
 
 impl<F> ReconstructionMessage<F>
@@ -65,7 +65,7 @@ where
     F: FftField,
 {
     /// Creates a message for the reconstruction phase.
-    pub fn new(r_deg_t: RobustShamirShare<F>, r_deg_2t: RobustShamirShare<F>) -> Self {
+    pub fn new(r_deg_t: NonRobustShare<F>, r_deg_2t: NonRobustShare<F>) -> Self {
         Self {
             r_share_deg_t: r_deg_t,
             r_share_deg_2t: r_deg_2t,

@@ -4,7 +4,7 @@ use stoffelmpc_mpc::{
     common::{rbc::rbc::Avid, SecretSharingScheme, ShamirShare},
     honeybadger::{
         input::{input::InputClient, InputMessageType},
-        robust_interpolate::robust_interpolate::{Robust, RobustShamirShare},
+        robust_interpolate::robust_interpolate::{Robust, RobustShare},
         HoneyBadgerMPCNode, ProtocolType, SessionId, WrappedMessage,
     },
 };
@@ -38,7 +38,7 @@ async fn test_multiple_clients_parallel_input() {
 
     let nodes: Vec<HoneyBadgerMPCNode<Fr, Avid>> =
         create_global_nodes::<Fr, Avid>(n, t, 0, 0, SessionId::new(ProtocolType::Input, 0));
-    receive::<Fr, Avid, RobustShamirShare<Fr>, FakeNetwork>(
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         server_recv,
         nodes.clone(),
         net.clone(),
@@ -82,7 +82,7 @@ async fn test_multiple_clients_parallel_input() {
         for (j, secret) in inputs[i].iter().enumerate() {
             let shares: Vec<ShamirShare<Fr, 1, Robust>> =
                 recovered_shares[j].iter().cloned().collect();
-            let (_, r) = RobustShamirShare::recover_secret(&shares, n).unwrap();
+            let (_, r) = RobustShare::recover_secret(&shares, n).unwrap();
             assert_eq!(r, *secret);
         }
     }
@@ -102,7 +102,7 @@ async fn test_input_recovery_with_missing_server() {
     let mut client = InputClient::<Fr, Avid>::new(clientid, n, t, input_values.clone()).unwrap();
     let nodes = create_global_nodes::<Fr, Avid>(n, t, 0, 0, SessionId::new(ProtocolType::Input, 0));
 
-    receive::<Fr, Avid, RobustShamirShare<Fr>, FakeNetwork>(
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         server_recv,
         nodes.clone(),
         net.clone(),
@@ -138,7 +138,7 @@ async fn test_input_recovery_with_missing_server() {
     }
 
     let shares: Vec<ShamirShare<Fr, 1, Robust>> = recovered_shares;
-    let (_, r) = RobustShamirShare::recover_secret(&shares, n).unwrap();
+    let (_, r) = RobustShare::recover_secret(&shares, n).unwrap();
     assert_eq!(r, input_values[0]);
 }
 
@@ -158,7 +158,7 @@ async fn test_input_with_too_many_faulty_shares() {
     let nodes = create_global_nodes::<Fr, Avid>(n, t, 0, 0, SessionId::new(ProtocolType::Input, 0));
 
     // Start server receiver loop
-    receive::<Fr, Avid, RobustShamirShare<Fr>, FakeNetwork>(
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         server_recv,
         nodes.clone(),
         net.clone(),

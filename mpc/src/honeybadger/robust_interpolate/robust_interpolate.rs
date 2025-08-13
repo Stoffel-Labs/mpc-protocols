@@ -1,4 +1,8 @@
-use crate::common::{lagrange_interpolate, share::ShareError, SecretSharingScheme, ShamirShare};
+use crate::common::{
+    lagrange_interpolate,
+    share::{shamir::NonRobustShare, ShareError},
+    SecretSharingScheme, ShamirShare,
+};
 use ark_ff::{FftField, Zero};
 use ark_poly::{
     univariate::{DenseOrSparsePolynomial, DensePolynomial},
@@ -11,9 +15,9 @@ use std::marker::PhantomData;
 use super::*;
 #[derive(Clone, Debug)]
 pub struct Robust;
-pub type RobustShamirShare<T> = ShamirShare<T, 1, Robust>;
+pub type RobustShare<T> = ShamirShare<T, 1, Robust>;
 
-impl<F: FftField> RobustShamirShare<F> {
+impl<F: FftField> RobustShare<F> {
     pub fn new(share: F, id: usize, degree: usize) -> Self {
         ShamirShare {
             share: [share],
@@ -23,8 +27,18 @@ impl<F: FftField> RobustShamirShare<F> {
         }
     }
 }
+impl<F: FftField> From<NonRobustShare<F>> for RobustShare<F> {
+    fn from(non_robust: NonRobustShare<F>) -> Self {
+        RobustShare {
+            share: non_robust.share,
+            id: non_robust.id,
+            degree: non_robust.degree,
+            _sharetype: PhantomData,
+        }
+    }
+}
 
-impl<F: FftField> SecretSharingScheme<F> for RobustShamirShare<F> {
+impl<F: FftField> SecretSharingScheme<F> for RobustShare<F> {
     type SecretType = F;
     type Error = InterpolateError;
     /// Generates `n` secret shares for a `value` using a degree `t` polynomial,
@@ -41,7 +55,7 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShamirShare<F> {
         degree: usize,
         _ids: Option<&[usize]>,
         rng: &mut impl Rng,
-    ) -> Result<Vec<RobustShamirShare<F>>, InterpolateError> {
+    ) -> Result<Vec<RobustShare<F>>, InterpolateError> {
         if n <= degree {
             return Err(InterpolateError::InvalidInput(format!(
                 "Number of shares ({}) must be greater than threshold ({})",
@@ -57,11 +71,11 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShamirShare<F> {
         let evals = domain.fft(&poly);
 
         // Create shares from evaluations
-        let shares: Vec<RobustShamirShare<F>> = evals
+        let shares: Vec<RobustShare<F>> = evals
             .iter()
             .take(n)
             .enumerate()
-            .map(|(i, &eval)| RobustShamirShare::new(eval, i, degree))
+            .map(|(i, &eval)| RobustShare::new(eval, i, degree))
             .collect();
 
         Ok(shares)
@@ -161,7 +175,7 @@ fn div_with_remainder<F: FftField>(
 fn robust_interpolate_fnt<F: FftField>(
     t: usize,
     n: usize,
-    shares: &[RobustShamirShare<F>],
+    shares: &[RobustShare<F>],
 ) -> Result<DensePolynomial<F>, InterpolateError> {
     let domain =
         GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
@@ -348,7 +362,7 @@ pub fn compute_g0_from_domain<F: FftField>(n: usize) -> DensePolynomial<F> {
 fn oec_decode<F: FftField>(
     n: usize,
     t: usize,
-    shares: Vec<RobustShamirShare<F>>,
+    shares: Vec<RobustShare<F>>,
 ) -> Result<(DensePolynomial<F>, F), InterpolateError> {
     let domain =
         GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
@@ -424,11 +438,11 @@ mod tests {
         let poly = DensePolynomial::from_coefficients_vec(coeffs);
 
         // Evaluate over domain
-        let shares: Vec<RobustShamirShare<Fr>> = (0..n)
+        let shares: Vec<RobustShare<Fr>> = (0..n)
             .map(|i| {
                 let x = domain.element(i);
                 let y = poly.evaluate(&x);
-                RobustShamirShare::new(y, i, t)
+                RobustShare::new(y, i, t)
             })
             .collect();
 
@@ -454,7 +468,7 @@ mod tests {
 
         let secret = Fr::from(42u32);
         let ids: Vec<usize> = (0..n).collect();
-        let shares = RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
+        let shares = RobustShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
 
         // === Case 1: Erasure-only decoding ===
         let mut erased: Vec<Fr> = shares.iter().map(|a| a.share[0]).collect();
@@ -475,7 +489,7 @@ mod tests {
         let t = 2;
         let n = 10;
         let secret = Fr::from(42u32);
-        let shares = RobustShamirShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
+        let shares = RobustShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
 
         // === Case 2: Error-only decoding ===
         let mut corrupted: Vec<Fr> = shares.iter().map(|a| a.share[0]).collect();
@@ -499,7 +513,7 @@ mod tests {
         let t = 3;
         let n = 10;
         let secret = Fr::from(42u32);
-        let shares = RobustShamirShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
+        let shares = RobustShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
 
         // Go through all possible combinations of 2 distinct indices
         for triple in (0..n).combinations(3) {
@@ -533,8 +547,7 @@ mod tests {
         // Step 1: Create random message and encode it
         let secret = Fr::from(42u32);
         let ids: Vec<usize> = (0..n).collect();
-        let mut shares =
-            RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
+        let mut shares = RobustShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
 
         // Step 3: Corrupt up to t shares
         shares[0].share[0] += Fr::from(999u64);
@@ -567,14 +580,13 @@ mod tests {
         // Generate random message and encode it
         let secret = Fr::from(42u32);
         let ids: Vec<usize> = (0..n).collect();
-        let mut shares =
-            RobustShamirShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
+        let mut shares = RobustShare::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
 
         // Corrupt up to t shares
         let corruption_indices = [1, 4];
         for &i in &corruption_indices {
             shares[i] = (shares[i].clone()
-                + RobustShamirShare {
+                + RobustShare {
                     share: [Fr::from(7u64)],
                     id: i,
                     degree: t,
@@ -583,7 +595,7 @@ mod tests {
             .unwrap();
         }
         // Attempt robust interpolation
-        let result = RobustShamirShare::recover_secret(&shares, n);
+        let result = RobustShare::recover_secret(&shares, n);
         assert!(
             result.is_ok(),
             "robust_interpolate failed despite valid parameters"
@@ -605,7 +617,7 @@ mod tests {
 
         let secret = Fr::from(42u32);
 
-        let base_shares = RobustShamirShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
+        let base_shares = RobustShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
 
         // Generate all corruption combinations of size 1..=t
         for k in 1..=t {
@@ -619,7 +631,7 @@ mod tests {
                 }
 
                 // Run recovery
-                let result = RobustShamirShare::recover_secret(&shares, n);
+                let result = RobustShare::recover_secret(&shares, n);
 
                 // Debug: show the corrupted indices
                 if result.is_err() {

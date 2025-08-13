@@ -3,14 +3,12 @@ pub mod messages;
 use crate::{
     common::{
         rbc::RbcError,
-        share::{apply_vandermonde, make_vandermonde},
+        share::{apply_vandermonde, make_vandermonde, shamir::NonRobustShare, ShareError},
         SecretSharingScheme, RBC,
     },
     honeybadger::{
-        double_share::DoubleShamirShare,
-        ran_dou_sha::messages::RanDouShaPayload,
-        robust_interpolate::{robust_interpolate::RobustShamirShare, InterpolateError},
-        ProtocolType, SessionId, WrappedMessage,
+        double_share::DoubleShamirShare, ran_dou_sha::messages::RanDouShaPayload,
+        robust_interpolate::InterpolateError, ProtocolType, SessionId, WrappedMessage,
     },
 };
 use ark_ff::FftField;
@@ -57,21 +55,23 @@ pub enum RanDouShaError {
     WaitForOk,
     #[error("error sending information to other async tasks: {0:?}")]
     SendError(#[from] SendError<SessionId>),
+    #[error("ShareError: {0}")]
+    ShareError(ShareError),
 }
 
 /// Storage for the Random Double Sharing protocol.
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct RanDouShaStore<F: FftField> {
     /// Vector that stores the received degree t shares of r.
-    pub received_r_shares_degree_t: HashMap<PartyId, RobustShamirShare<F>>,
+    pub received_r_shares_degree_t: HashMap<PartyId, NonRobustShare<F>>,
     /// Vector that stores the received degree 2t shares of r.
-    pub received_r_shares_degree_2t: HashMap<PartyId, RobustShamirShare<F>>,
+    pub received_r_shares_degree_2t: HashMap<PartyId, NonRobustShare<F>>,
     /// Vector of r shares of degree t computed as a result of multiplying the Vandermonde matrix
     /// with the shares of s.
-    pub computed_r_shares_degree_t: Vec<RobustShamirShare<F>>,
+    pub computed_r_shares_degree_t: Vec<NonRobustShare<F>>,
     /// Vector of r shares of degree 2t computed as a result of multiplying the Vandermonde matrix
     /// with the shares of s.
-    pub computed_r_shares_degree_2t: Vec<RobustShamirShare<F>>,
+    pub computed_r_shares_degree_2t: Vec<NonRobustShare<F>>,
     /// Vector that stores the nodes who have sent the output ok msg.
     pub received_ok_msg: Vec<usize>,
     /// Current state of the protocol.
@@ -111,7 +111,7 @@ where
 }
 
 /// Node representation for the Random Double Share protocol.
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct RanDouShaNode<F: FftField, R: RBC> {
     /// ID of the node.
     pub id: PartyId,
@@ -199,8 +199,8 @@ where
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
     pub async fn init<N>(
         &mut self,
-        shares_deg_t: Vec<RobustShamirShare<F>>,
-        shares_deg_2t: Vec<RobustShamirShare<F>>,
+        shares_deg_t: Vec<NonRobustShare<F>>,
+        shares_deg_2t: Vec<NonRobustShare<F>>,
         session_id: SessionId,
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
@@ -318,8 +318,8 @@ where
             if store.received_r_shares_degree_t.len() >= 2 * self.threshold + 1
                 && store.received_r_shares_degree_2t.len() >= 2 * self.threshold + 1
             {
-                let mut shares_t_for_recon: Vec<RobustShamirShare<F>> = Vec::new();
-                let mut shares_2t_for_recon: Vec<RobustShamirShare<F>> = Vec::new();
+                let mut shares_t_for_recon: Vec<NonRobustShare<F>> = Vec::new();
+                let mut shares_2t_for_recon: Vec<NonRobustShare<F>> = Vec::new();
 
                 for (_, share) in store.received_r_shares_degree_t.iter() {
                     shares_t_for_recon.push(share.clone());
@@ -331,11 +331,11 @@ where
                 // (5) Perform reconstruction for both degrees.
                 // ShamirSecretSharing::reconstruct expects a vector of shares.
                 let reconstructed_r_t =
-                    RobustShamirShare::recover_secret(&shares_t_for_recon, self.n_parties)
-                        .map_err(|e| RanDouShaError::InterpolateError(e))?;
+                    NonRobustShare::recover_secret(&shares_t_for_recon, self.n_parties)
+                        .map_err(|e| RanDouShaError::ShareError(e))?;
                 let reconstructed_r_2t =
-                    RobustShamirShare::recover_secret(&shares_2t_for_recon, self.n_parties)
-                        .map_err(|e| RanDouShaError::InterpolateError(e))?;
+                    NonRobustShare::recover_secret(&shares_2t_for_recon, self.n_parties)
+                        .map_err(|e| RanDouShaError::ShareError(e))?;
                 let poly1 = DensePolynomial::from_coefficients_slice(&reconstructed_r_t.0);
                 let poly2 = DensePolynomial::from_coefficients_slice(&reconstructed_r_2t.0);
 

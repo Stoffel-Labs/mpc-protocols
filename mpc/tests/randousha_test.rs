@@ -8,6 +8,7 @@ use ark_bls12_381::Fr;
 use ark_ff::{Field, UniformRand};
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
+use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
 use std::{
     collections::HashMap, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc,
     time::Duration, vec,
@@ -19,7 +20,6 @@ use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
     RanDouShaMessage, RanDouShaMessageType, RanDouShaPayload, ReconstructionMessage,
 };
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
-use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShamirShare;
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use tokio::sync::mpsc::{self};
 use tokio::task::JoinSet;
@@ -244,10 +244,10 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let mut rng = test_rng();
     // ri_t created by each party i
     let shares_ri_t =
-        RobustShamirShare::compute_shares(secret, n_parties, degree_t, None, &mut rng).unwrap();
+        NonRobustShare::compute_shares(secret, n_parties, degree_t, None, &mut rng).unwrap();
     // ri_2t created by each party i
     let shares_ri_2t =
-        RobustShamirShare::compute_shares(secret_2t, n_parties, degree_2t, None, &mut rng).unwrap();
+        NonRobustShare::compute_shares(secret_2t, n_parties, degree_2t, None, &mut rng).unwrap();
     // initialize RanDouShaNode
     let mut randousha_nodes = vec![];
     for i in 0..n_parties {
@@ -526,7 +526,7 @@ async fn test_e2e_reconstruct_mismatch() {
     // lets corrupt the shares of party 1 so that the shares reconstruct different values
     let rng = &mut test_rng();
     n_shares_t[0][0] =
-        RobustShamirShare::new(Fr::rand(rng), n_shares_t[0][0].id, n_shares_t[0][0].degree);
+        NonRobustShare::new(Fr::rand(rng), n_shares_t[0][0].id, n_shares_t[0][0].degree);
 
     let mut sender_channels = Vec::new();
     let mut receiver_channels = Vec::new();
