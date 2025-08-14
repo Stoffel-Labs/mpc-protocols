@@ -97,7 +97,7 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShare<F> {
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), InterpolateError> {
         let t = shares[0].degree;
         if !shares.iter().all(|share| share.degree == t) {
-            return Err(InterpolateError::Inner(ShareError::DegreeMismatch));
+            return Err(InterpolateError::ShareError(ShareError::DegreeMismatch));
         };
 
         let share_len = shares.len();

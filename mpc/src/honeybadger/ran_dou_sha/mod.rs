@@ -34,19 +34,17 @@ use tracing::info;
 pub enum RanDouShaError {
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
-    NetworkError(NetworkError),
+    NetworkError(#[from] NetworkError),
     #[error("error while serializing an arkworks object: {0:?}")]
-    ArkSerialization(SerializationError),
+    ArkSerialization(#[from] SerializationError),
     #[error("error while serializing an arkworks object: {0:?}")]
     ArkDeserialization(SerializationError),
     #[error("error while serializing the object into bytes: {0:?}")]
-    SerializationError(Box<ErrorKind>),
-    #[error("inner error: {0}")]
-    Inner(#[from] InterpolateError),
+    SerializationError(#[from] Box<ErrorKind>),
     #[error("Rbc error: {0}")]
-    RbcError(RbcError),
+    RbcError(#[from] RbcError),
     #[error("Interpolate error: {0}")]
-    InterpolateError(InterpolateError),
+    InterpolateError(#[from] InterpolateError),
     /// The protocol received an abort signal.
     #[error("received abort singal")]
     Abort,
@@ -56,7 +54,7 @@ pub enum RanDouShaError {
     #[error("error sending information to other async tasks: {0:?}")]
     SendError(#[from] SendError<SessionId>),
     #[error("ShareError: {0}")]
-    ShareError(ShareError),
+    ShareError(#[from] ShareError),
 }
 
 /// Storage for the Random Double Sharing protocol.
@@ -138,7 +136,7 @@ where
         threshold: usize,
         k: usize, // for RBC init
     ) -> Result<Self, RanDouShaError> {
-        let rbc = R::new(id, n_parties, threshold, k).map_err(|e| RanDouShaError::RbcError(e))?;
+        let rbc = R::new(id, n_parties, threshold, k)?;
         Ok(Self {
             id,
             n_parties,
@@ -236,9 +234,7 @@ where
 
                 // Serializing the reconstruction message and wrapping it into a generic message.
                 let mut bytes_rec_message = Vec::new();
-                reconst_message
-                    .serialize_compressed(&mut bytes_rec_message)
-                    .map_err(RanDouShaError::ArkSerialization)?;
+                reconst_message.serialize_compressed(&mut bytes_rec_message)?;
                 let rds_message = RanDouShaMessage::new(
                     self.id,
                     RanDouShaMessageType::ReconstructMessage,
@@ -247,13 +243,9 @@ where
                 );
                 let wrapped = WrappedMessage::RanDouSha(rds_message);
 
-                let bytes_wrapped =
-                    bincode::serialize(&wrapped).map_err(RanDouShaError::SerializationError)?;
+                let bytes_wrapped = bincode::serialize(&wrapped)?;
                 // Sending the generic message to the network.
-                network
-                    .send(i, &bytes_wrapped)
-                    .await
-                    .map_err(RanDouShaError::NetworkError)?;
+                network.send(i, &bytes_wrapped).await?;
             }
         }
         Ok(())
@@ -287,8 +279,7 @@ where
             RanDouShaPayload::Output(_) => return Err(RanDouShaError::Abort),
         };
         let rec_msg: ReconstructionMessage<F> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())
-                .map_err(RanDouShaError::ArkDeserialization)?;
+            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
         // --- Step (3) Implementation ---
         // (1) Store the received shares.
         // Each party receives a ReconstructionMessage. This message contains two ShamirSecretSharing objects:
@@ -331,11 +322,9 @@ where
                 // (5) Perform reconstruction for both degrees.
                 // ShamirSecretSharing::reconstruct expects a vector of shares.
                 let reconstructed_r_t =
-                    NonRobustShare::recover_secret(&shares_t_for_recon, self.n_parties)
-                        .map_err(|e| RanDouShaError::ShareError(e))?;
+                    NonRobustShare::recover_secret(&shares_t_for_recon, self.n_parties)?;
                 let reconstructed_r_2t =
-                    NonRobustShare::recover_secret(&shares_2t_for_recon, self.n_parties)
-                        .map_err(|e| RanDouShaError::ShareError(e))?;
+                    NonRobustShare::recover_secret(&shares_2t_for_recon, self.n_parties)?;
                 let poly1 = DensePolynomial::from_coefficients_slice(&reconstructed_r_t.0);
                 let poly2 = DensePolynomial::from_coefficients_slice(&reconstructed_r_2t.0);
 
@@ -350,8 +339,7 @@ where
                     RanDouShaPayload::Output(ok),
                 ));
 
-                let bytes_wrapped =
-                    bincode::serialize(&wrapped).map_err(RanDouShaError::SerializationError)?;
+                let bytes_wrapped = bincode::serialize(&wrapped)?;
 
                 // if the verification succeeds, broadcast true (aka. OK)
                 let sessionid = SessionId::new(
@@ -364,8 +352,7 @@ where
                         sessionid, // A unique session id per node
                         Arc::clone(&network),
                     )
-                    .await
-                    .map_err(|e| RanDouShaError::RbcError(e))?;
+                    .await?;
             }
         }
 

@@ -8,11 +8,11 @@ use stoffelmpc_network::NetworkError;
 use thiserror::Error;
 
 use crate::{
-    common::{
-        rbc::RbcError,
-        share::ShareError,
+    common::{rbc::RbcError, share::ShareError},
+    honeybadger::{
+        robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
+        SessionId,
     },
-    honeybadger::{robust_interpolate::{robust_interpolate::RobustShare, InterpolateError}, SessionId},
 };
 
 pub mod share_gen;
@@ -21,31 +21,32 @@ pub mod share_gen;
 #[derive(Debug, Error)]
 pub enum RanShaError {
     #[error("there was an error in the network: {0:?}")]
-    NetworkError(NetworkError),
+    NetworkError(#[from] NetworkError),
     #[error("error while serializing an arkworks object: {0:?}")]
-    ArkSerialization(SerializationError),
+    ArkSerialization(#[from] SerializationError),
     #[error("error while serializing an arkworks object: {0:?}")]
     ArkDeserialization(SerializationError),
     #[error("error while serializing the object into bytes: {0:?}")]
-    SerializationError(Box<ErrorKind>),
+    SerializationError(#[from] Box<ErrorKind>),
     #[error("inner error: {0:?}")]
-    Inner(#[from] InterpolateError),
+    InterpolateError(#[from] InterpolateError),
     #[error("Rbc error: {0:?}")]
-    RbcError(RbcError),
+    RbcError(#[from] RbcError),
     #[error("Share error: {0:?}")]
-    ShareError(ShareError),
+    ShareError(#[from] ShareError),
     #[error("received abort signal")]
     Abort,
     #[error("waiting for more confirmations")]
     WaitForOk,
 }
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct RanShaStore<F: FftField> {
     pub received_r_shares: HashMap<usize, RobustShare<F>>,
     pub computed_r_shares: Vec<RobustShare<F>>,
     pub received_ok_msg: Vec<usize>,
     pub state: RanShaState,
+    pub protocol_output: Vec<RobustShare<F>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +64,7 @@ impl<F: FftField> RanShaStore<F> {
             computed_r_shares: Vec::new(),
             received_ok_msg: Vec::new(),
             state: RanShaState::Initialized,
+            protocol_output: Vec::new(),
         }
     }
 }

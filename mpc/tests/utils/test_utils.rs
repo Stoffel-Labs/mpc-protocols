@@ -2,12 +2,12 @@ use ark_bls12_381::Fr;
 use ark_ff::{FftField, UniformRand};
 use ark_std::test_rng;
 use once_cell::sync::Lazy;
-use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::rbc::RbcError;
+use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
 use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::double_share::DoubleShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -104,8 +104,7 @@ pub fn get_reconstruct_input(
 ) -> (Fr, Vec<NonRobustShare<Fr>>, Vec<NonRobustShare<Fr>>) {
     let mut rng = test_rng();
     let secret = Fr::rand(&mut rng);
-    let shares_si_t =
-        NonRobustShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
+    let shares_si_t = NonRobustShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
     let shares_si_2t =
         NonRobustShare::compute_shares(secret, n, degree_t * 2, None, &mut rng).unwrap();
     (secret, shares_si_t, shares_si_2t)
@@ -335,8 +334,7 @@ pub fn generate_independent_shares<F: FftField>(
     ];
     for (j, secret) in secrets.iter().enumerate() {
         // Call gen_shares to create 'n' shares for the current 'secret'
-        let secret_shares =
-            RobustShare::compute_shares(*secret, n, t, None, &mut rng).unwrap();
+        let secret_shares = RobustShare::compute_shares(*secret, n, t, None, &mut rng).unwrap();
         for i in 0..n {
             shares[i][j] = secret_shares[i].clone(); // Party i receives evaluation of f_j at α_i
         }
@@ -452,8 +450,7 @@ pub fn construct_e2e_input_ransha(
     for _ in 0..n {
         let secret = Fr::rand(&mut rng);
         secrets.push(secret);
-        let shares_si_t =
-            RobustShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
+        let shares_si_t = RobustShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
         for j in 0..n {
             n_shares_t[j].push(shares_si_t[j].clone());
         }

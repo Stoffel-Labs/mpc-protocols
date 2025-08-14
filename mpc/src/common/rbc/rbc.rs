@@ -109,10 +109,8 @@ impl RBC for Bracha {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         let wrap_msg = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrap_msg).map_err(RbcError::SerializationError)?;
-        net.broadcast(&encoded)
-            .await
-            .map_err(|e| RbcError::NetworkError(e))?;
+        let encoded = bincode::serialize(&wrap_msg)?;
+        net.broadcast(&encoded).await?;
         Ok(())
     }
     /// Send to another node
@@ -123,10 +121,8 @@ impl RBC for Bracha {
         recv: usize,
     ) -> Result<(), RbcError> {
         let wrap_msg = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrap_msg).map_err(RbcError::SerializationError)?;
-        net.send(recv, &encoded)
-            .await
-            .map_err(|e| RbcError::NetworkError(e))?;
+        let encoded = bincode::serialize(&wrap_msg)?;
+        net.send(recv, &encoded).await?;
         Ok(())
     }
 }
@@ -340,9 +336,7 @@ impl Bracha {
                     output = ?msg.payload,
                     "Consensus achieved; RBC instance ended"
                 );
-                net.send(self.id, &msg.payload)
-                    .await
-                    .map_err(|e| RbcError::NetworkError(e))?;
+                net.send(self.id, &msg.payload).await?;
             }
         }
         Ok(())
@@ -538,10 +532,8 @@ impl RBC for Avid {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         let wrapped = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrapped).map_err(RbcError::SerializationError)?;
-        net.broadcast(&encoded)
-            .await
-            .map_err(|e| RbcError::NetworkError(e))?;
+        let encoded = bincode::serialize(&wrapped)?;
+        net.broadcast(&encoded).await?;
         Ok(())
     }
     /// Send to another node
@@ -552,10 +544,8 @@ impl RBC for Avid {
         recv: usize,
     ) -> Result<(), RbcError> {
         let wrapped = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrapped).map_err(RbcError::SerializationError)?;
-        net.send(recv, &encoded)
-            .await
-            .map_err(|e| RbcError::NetworkError(e))?;
+        let encoded = bincode::serialize(&wrapped)?;
+        net.send(recv, &encoded).await?;
         Ok(())
     }
 }
@@ -627,7 +617,7 @@ impl Avid {
                         error = %e,
                         "Error during Merkle proof verification"
                     );
-                    return Err(RbcError::Inner(e));
+                    return Err(RbcError::ShardError(e));
                 }
             };
         }
@@ -715,7 +705,7 @@ impl Avid {
                         error = %e,
                         "Merkle verification threw error"
                     );
-                    return Err(RbcError::Inner(e));
+                    return Err(RbcError::ShardError(e));
                 }
             }
         }
@@ -807,9 +797,7 @@ impl Avid {
                             output = ?output,
                             "Consensus achieved; AVID instance ended"
                         );
-                        net.send(self.id, &output)
-                            .await
-                            .map_err(|e| RbcError::NetworkError(e))?;
+                        net.send(self.id, &output).await?;
                     }
                 }
                 Ok(false) => {
@@ -831,7 +819,7 @@ impl Avid {
                         error = %e,
                         "Error during Merkle verification in READY handler"
                     );
-                    return Err(RbcError::Inner(e));
+                    return Err(RbcError::ShardError(e));
                 }
             }
         }
@@ -888,7 +876,7 @@ impl Avid {
                                 error = %e,
                                 "Error during Merkle verification in {handler_type} handler"
                             );
-                            return Err(RbcError::Inner(e));
+                            return Err(RbcError::ShardError(e));
                         }
                     }
                 }
@@ -900,7 +888,7 @@ impl Avid {
                     error = %e,
                     "Failed to generate Merkle proof map in {handler_type} handler"
                 );
-                return Err(RbcError::Inner(e));
+                return Err(RbcError::ShardError(e));
             }
         }
 
@@ -1073,10 +1061,8 @@ impl RBC for ABA {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         let wrapped = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrapped).map_err(RbcError::SerializationError)?;
-        net.broadcast(&encoded)
-            .await
-            .map_err(|e| RbcError::NetworkError(e))?;
+        let encoded = bincode::serialize(&wrapped)?;
+        net.broadcast(&encoded).await?;
         Ok(())
     }
     /// Send to another node
@@ -1087,10 +1073,8 @@ impl RBC for ABA {
         recv: usize,
     ) -> Result<(), RbcError> {
         let wrapped = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrapped).map_err(RbcError::SerializationError)?;
-        net.send(recv, &encoded)
-            .await
-            .map_err(|e| RbcError::NetworkError(e))?;
+        let encoded = bincode::serialize(&wrapped)?;
+        net.send(recv, &encoded).await?;
         Ok(())
     }
 }
@@ -1706,10 +1690,8 @@ impl Dealer {
             );
 
             let wrap = WrappedMessage::Rbc(key_msg);
-            let encoded = bincode::serialize(&wrap).map_err(RbcError::SerializationError)?;
-            net.send(i, &encoded)
-                .await
-                .map_err(|e| RbcError::NetworkError(e))?;
+            let encoded = bincode::serialize(&wrap)?;
+            net.send(i, &encoded).await?;
         }
         Ok(())
     }

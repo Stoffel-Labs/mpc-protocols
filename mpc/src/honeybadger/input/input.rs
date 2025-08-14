@@ -54,17 +54,13 @@ impl<F: FftField, R: RBC> InputServer<F, R> {
             info!("Stored local mask shares for client {}", client_id);
         }
         let mut payload = Vec::new();
-        shares
-            .serialize_compressed(&mut payload)
-            .map_err(InputError::ArkSerialization)?;
+        shares.serialize_compressed(&mut payload)?;
         let msg = InputMessage::new(self.id, InputMessageType::MaskShare, payload);
         //wrap it in protocol wide enum
         let wrapped = WrappedMessage::Input(msg);
-        let bytes = bincode::serialize(&wrapped).map_err(InputError::SerializationError)?;
+        let bytes = bincode::serialize(&wrapped)?;
         //Send to the client
-        net.send_to_client(client_id, &bytes)
-            .await
-            .map_err(InputError::NetworkError)?;
+        net.send_to_client(client_id, &bytes).await?;
         info!("Server {} sent MaskShare to client {}", self.id, client_id);
 
         Ok(())
@@ -77,8 +73,7 @@ impl<F: FftField, R: RBC> InputServer<F, R> {
         // and stores it
         info!("Received MaskedInput from client {}", msg.sender_id);
         let masked_input: Vec<F> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())
-                .map_err(InputError::ArkDeserialization)?;
+            ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
         let local_share_store = self.local_mask_shares.lock().await;
         let local_shares = match local_share_store.get(&msg.sender_id) {
             Some(s) => s,
@@ -145,8 +140,7 @@ impl<F: FftField, R: RBC> InputClient<F, R> {
         net: Arc<N>,
     ) -> Result<(), InputError> {
         let shares: Vec<RobustShare<F>> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())
-                .map_err(InputError::ArkDeserialization)?;
+            ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
         let inputs = self.inputs.lock().await;
         let input_len = inputs.len();
         drop(inputs);
@@ -177,8 +171,7 @@ impl<F: FftField, R: RBC> InputClient<F, R> {
             }
 
             for recon in r_shares {
-                let secret = RobustShare::recover_secret(&recon, self.n)
-                    .map_err(|e| InputError::InterpolateError(e))?;
+                let secret = RobustShare::recover_secret(&recon, self.n)?;
                 masks.push(secret.1);
             }
             let inputs = self.inputs.lock().await;
@@ -187,13 +180,11 @@ impl<F: FftField, R: RBC> InputClient<F, R> {
             }
 
             let mut payload = Vec::new();
-            output
-                .serialize_compressed(&mut payload)
-                .map_err(InputError::ArkSerialization)?;
+            output.serialize_compressed(&mut payload)?;
             let msg = InputMessage::new(self.client_id, InputMessageType::MaskedInput, payload);
             //wrap it in protocol wide enum
             let wrapped = WrappedMessage::Input(msg);
-            let bytes = bincode::serialize(&wrapped).map_err(InputError::SerializationError)?;
+            let bytes = bincode::serialize(&wrapped)?;
             //Broadcast to servers
             let sessionid = SessionId::new(ProtocolType::Input, self.client_id as u64);
             self.rbc.init(bytes, sessionid, net).await?;

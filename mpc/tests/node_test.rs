@@ -13,6 +13,7 @@ use stoffelmpc_mpc::{
 };
 use stoffelmpc_network::{fake_network::FakeNetwork, ClientId};
 use tokio::time::{sleep, timeout};
+use tracing::info;
 
 use crate::utils::test_utils::{
     construct_e2e_input, construct_e2e_input_ransha, create_global_nodes,
@@ -36,11 +37,7 @@ async fn randousha_e2e() {
     // create global nodes
     let mut nodes = create_global_nodes::<Fr, Avid>(n_parties, t, 0, 0, session_id);
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        receivers,
-        nodes.clone(),
-        network.clone(),
-    );
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     // init all randousha nodes
     initialize_global_nodes_randousha(
@@ -101,13 +98,9 @@ async fn ransha_e2e() {
     // create global nodes
     let mut nodes = create_global_nodes::<Fr, Avid>(n_parties, t, 0, 0, session_id);
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        receivers,
-        nodes.clone(),
-        network.clone(),
-    );
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
-    // init all randousha nodes
+    // init all ransha nodes
     initialize_global_nodes_ransha(nodes.clone(), &n_shares_t, session_id, Arc::clone(&network))
         .await;
 
@@ -158,11 +151,7 @@ async fn test_input_protocol_e2e() {
     let nodes = create_global_nodes::<Fr, Avid>(n, t, 0, 0, SessionId::new(ProtocolType::Input, 0));
 
     //Receive at server
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        server_recv,
-        nodes.clone(),
-        net.clone(),
-    );
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
     //Receive at client
     let net_clone2 = net.clone();
     let mut recv = client_recv.remove(&clientid[0]).unwrap();
@@ -209,6 +198,114 @@ async fn test_input_protocol_e2e() {
     for (i, secret) in input_values.iter().enumerate() {
         let shares: Vec<ShamirShare<Fr, 1, Robust>> = recovered_shares[i].iter().cloned().collect();
         let (_, r) = RobustShare::recover_secret(&shares, n).unwrap();
+        assert_eq!(r, *secret);
+    }
+}
+
+#[tokio::test]
+async fn gen_masks_for_input_e2e() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 4;
+    let t = 1;
+    let session_id = SessionId::new(ProtocolType::Ransha, 1111);
+    let clientid: Vec<ClientId> = vec![100];
+    let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
+    //Setup the network for servers and client
+    let (network, receivers, mut client_recv) = test_setup(n_parties, clientid.clone());
+    //Generate the masking input
+    let (_, n_shares_t) = construct_e2e_input_ransha(n_parties, t);
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    //Create global nodes for InputServers
+    let mut nodes = create_global_nodes::<Fr, Avid>(n_parties, t, 0, 0, session_id);
+    //Create nodes for InputClient
+    let mut client =
+        InputClient::<Fr, Avid>::new(clientid[0], n_parties, t, input_values.clone()).unwrap();
+
+    //----------------------------------------RECIEVE----------------------------------------
+    //At servers
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
+    //At client
+    let net_clone2 = network.clone();
+    let mut recv = client_recv.remove(&clientid[0]).unwrap();
+    tokio::spawn(async move {
+        while let Some(received) = recv.recv().await {
+            let wrapped: WrappedMessage = match bincode::deserialize(&received) {
+                Ok(w) => w,
+                Err(_) => continue,
+            };
+            match wrapped {
+                WrappedMessage::Input(msg) => match client.process(msg, net_clone2.clone()).await {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Processing error : {}", e),
+                },
+                _ => continue,
+            }
+        }
+    });
+
+    //----------------------------------------RUN PROTOCOL----------------------------------------
+    //Run nodes for Share generation
+    initialize_global_nodes_ransha(nodes.clone(), &n_shares_t, session_id, Arc::clone(&network))
+        .await;
+    let result = timeout(
+        Duration::from_secs(5),
+        join_all(nodes.iter_mut().map(|node| async move {
+            let store = node
+                .preprocess
+                .share_gen
+                .get_or_create_store(session_id)
+                .await;
+
+            loop {
+                let store = store.lock().await;
+                if store.state == RanShaState::Finished {
+                    info!("Ransha ended");
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })),
+    )
+    .await;
+    assert!(result.is_ok(), "RanSha did not complete within the timeout");
+
+    //Run nodes for inputting
+    for (_, node) in nodes.iter_mut().enumerate() {
+        let local_store = node
+            .preprocess
+            .share_gen
+            .get_or_create_store(session_id)
+            .await;
+        let local_shares = local_store.lock().await.protocol_output.clone();
+        match node
+            .preprocess
+            .input
+            .init(clientid[0], local_shares, 2, network.clone())
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                eprint!("{e}");
+            }
+        }
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+    //Check final result: each server should have m_i = input_i
+    let mut recovered_shares = vec![vec![]; input_values.len()];
+    for server in &nodes {
+        let shares = server.preprocess.input.input_shares.lock().await;
+        let server_shares = shares.get(&clientid[0]).unwrap();
+        for (i, s) in server_shares.iter().enumerate() {
+            recovered_shares[i].push(s.clone());
+        }
+    }
+    for (i, secret) in input_values.iter().enumerate() {
+        let shares: Vec<ShamirShare<Fr, 1, Robust>> = recovered_shares[i].iter().cloned().collect();
+        let (_, r) = RobustShare::recover_secret(&shares, n_parties).unwrap();
         assert_eq!(r, *secret);
     }
 }

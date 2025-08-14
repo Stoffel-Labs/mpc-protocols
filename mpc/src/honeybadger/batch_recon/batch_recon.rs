@@ -162,7 +162,7 @@ impl<F: FftField> BatchReconNode<F> {
                         }
                         Err(e) => {
                             warn!(self_id = self.id, "Interpolation of y_j failed: {:?}", e);
-                            return Err(BatchReconError::Inner(e));
+                            return Err(BatchReconError::InterpolateError(e));
                         }
                     }
                 }
@@ -223,7 +223,7 @@ impl<F: FftField> BatchReconNode<F> {
                                 self_id = self.id, error = ?e,
                                 "Final secrets interpolation failed "
                             );
-                            return Err(BatchReconError::Inner(e));
+                            return Err(BatchReconError::InterpolateError(e));
                         }
                     }
                 }

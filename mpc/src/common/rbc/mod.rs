@@ -41,11 +41,11 @@ pub enum RbcError {
     Internal(String),
 
     #[error("there was an error in the network: {0:?}")]
-    NetworkError(NetworkError),
+    NetworkError(#[from] NetworkError),
 
     #[error("error while serializing the object into bytes: {0:?}")]
-    SerializationError(Box<ErrorKind>),
+    SerializationError(#[from] Box<ErrorKind>),
 
     #[error("inner error: {0}")]
-    Inner(#[from] ShardError),
+    ShardError(#[from] ShardError),
 }

@@ -54,5 +54,5 @@ pub enum BatchReconError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
     #[error("inner error: {0}")]
-    Inner(#[from] InterpolateError),
+    InterpolateError(#[from] InterpolateError),
 }

@@ -207,11 +207,12 @@ async fn test_output_handler() {
         session_id,
         RanShaPayload::Output(true),
     );
-    let v = ransha_node
+    ransha_node
         .output_handler(output_message)
         .await
         .expect("should return vec");
 
+    let v = node_store.lock().await.protocol_output.clone();
     assert!(v.len() == threshold + 1);
     for share_t1 in v {
         assert!(share_t1.degree == threshold);

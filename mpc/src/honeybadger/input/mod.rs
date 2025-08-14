@@ -11,21 +11,21 @@ pub mod input;
 #[derive(Debug, Error)]
 pub enum InputError {
     #[error("inner error: {0}")]
-    Inner(#[from] RbcError),
+    RbcError(#[from] RbcError),
     #[error("there was an error in the network: {0:?}")]
-    NetworkError(NetworkError),
+    NetworkError(#[from] NetworkError),
     #[error("error while serializing an arkworks object: {0:?}")]
-    ArkSerialization(SerializationError),
+    ArkSerialization(#[from] SerializationError),
     #[error("error while serializing an arkworks object: {0:?}")]
     ArkDeserialization(SerializationError),
     #[error("error while serializing the object into bytes: {0:?}")]
-    SerializationError(Box<ErrorKind>),
+    SerializationError(#[from] Box<ErrorKind>),
     #[error("Incorrect input: {0}")]
     InvalidInput(String),
     #[error("Duplicate input: {0}")]
     Duplicate(String),
     #[error("Interpolate error: {0:?}")]
-    InterpolateError(InterpolateError),
+    InterpolateError(#[from] InterpolateError),
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub enum InputMessageType {

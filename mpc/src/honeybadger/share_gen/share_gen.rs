@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct RanShaNode<F: FftField, R: RBC> {
     pub id: usize,
     pub n_parties: usize,
@@ -40,7 +40,7 @@ where
         threshold: usize,
         k: usize,
     ) -> Result<Self, RanShaError> {
-        let rbc = R::new(id, n_parties, threshold, k).map_err(RanShaError::RbcError)?;
+        let rbc = R::new(id, n_parties, threshold, k)?;
         Ok(Self {
             id,
             n_parties,
@@ -82,20 +82,15 @@ where
             let share_deg_t = r_deg_t[i].clone();
 
             let mut bytes_rec_message = Vec::new();
-            share_deg_t
-                .serialize_compressed(&mut bytes_rec_message)
-                .map_err(RanShaError::ArkSerialization)?;
+            share_deg_t.serialize_compressed(&mut bytes_rec_message)?;
             let message = WrappedMessage::RanSha(RanShaMessage::new(
                 self.id,
                 RanShaMessageType::ReconstructMessage,
                 session_id,
                 RanShaPayload::Reconstruct(bytes_rec_message),
             ));
-            let bytes = bincode::serialize(&message).map_err(RanShaError::SerializationError)?;
-            network
-                .send(i, &bytes)
-                .await
-                .map_err(RanShaError::NetworkError)?;
+            let bytes = bincode::serialize(&message)?;
+            network.send(i, &bytes).await?;
         }
         Ok(())
     }
@@ -114,8 +109,7 @@ where
         };
 
         let share: ShamirShare<F, 1, Robust> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())
-                .map_err(RanShaError::ArkDeserialization)?;
+            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
         if share.degree != self.threshold {
             return Err(RanShaError::ShareError(ShareError::DegreeMismatch));
         }
@@ -145,24 +139,20 @@ where
                 msg.session_id,
                 RanShaPayload::Output(ok),
             ));
-            let bytes = bincode::serialize(&result).map_err(RanShaError::SerializationError)?;
+            let bytes = bincode::serialize(&result)?;
             let sessionid = SessionId::new(
                 ProtocolType::Ransha,
                 msg.session_id.as_u64() + self.id as u64,
             );
             self.rbc
                 .init(bytes, sessionid, Arc::clone(&network))
-                .await
-                .map_err(RanShaError::RbcError)?;
+                .await?;
         }
 
         Ok(())
     }
 
-    pub async fn output_handler(
-        &mut self,
-        msg: RanShaMessage,
-    ) -> Result<Vec<RobustShare<F>>, RanShaError> {
+    pub async fn output_handler(&mut self, msg: RanShaMessage) -> Result<(), RanShaError> {
         let ok = match msg.payload {
             RanShaPayload::Output(o) => o,
             RanShaPayload::Reconstruct(_) => return Err(RanShaError::Abort),
@@ -189,22 +179,23 @@ where
 
         let output = store.computed_r_shares[2 * self.threshold..].to_vec();
         store.state = RanShaState::Finished;
-        Ok(output)
+        store.protocol_output = output;
+        Ok(())
     }
 
     pub async fn process<N>(
         &mut self,
         msg: RanShaMessage,
         network: Arc<N>,
-    ) -> Result<Option<Vec<RobustShare<F>>>, RanShaError>
+    ) -> Result<(), RanShaError>
     where
         N: Network + Send + Sync,
     {
         match msg.msg_type {
-            RanShaMessageType::OutputMessage => Ok(Some(self.output_handler(msg).await?)),
+            RanShaMessageType::OutputMessage => Ok(self.output_handler(msg).await?),
             RanShaMessageType::ReconstructMessage => {
                 self.reconstruction_handler(msg, network).await?;
-                Ok(None)
+                Ok(())
             }
         }
     }
