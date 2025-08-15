@@ -129,9 +129,9 @@ impl<F: FftField, const N: usize, P> Add<&F> for ShamirShare<F, N, P> {
     }
 }
 
-impl<F: FftField, const N: usize, P> Sub<&Self> for ShamirShare<F, N, P> {
+impl<F: FftField, const N: usize, P> Sub<Self> for ShamirShare<F, N, P> {
     type Output = Result<Self, ShareError>;
-    fn sub(self, other: &Self) -> Self::Output {
+    fn sub(self, other: Self) -> Self::Output {
         if self.degree != other.degree {
             return Err(ShareError::DegreeMismatch);
         }
@@ -141,6 +141,19 @@ impl<F: FftField, const N: usize, P> Sub<&Self> for ShamirShare<F, N, P> {
         }
 
         let new_share: [F; N] = std::array::from_fn(|i| self.share[i] - other.share[i]);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+            _sharetype: PhantomData,
+        })
+    }
+}
+impl<F: FftField, const N: usize, P> Sub<F> for ShamirShare<F, N, P> {
+    type Output = Result<Self, ShareError>;
+    fn sub(self, other: F) -> Self::Output {
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] - other);
 
         Ok(Self {
             share: new_share,
@@ -237,7 +250,7 @@ where
     N: Network,
 {
     type MPCOpts;
-    type Error : std::fmt::Debug;
+    type Error: std::fmt::Debug;
 
     async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error>;
 
@@ -245,12 +258,7 @@ where
     where
         N: 'async_trait;
 
-    async fn mul(
-        &mut self,
-        a: Vec<S>,
-        b: Vec<S>,
-        network: Arc<N>,
-    ) -> Result<S, Self::Error>
+    async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
     where
         N: 'async_trait;
 }

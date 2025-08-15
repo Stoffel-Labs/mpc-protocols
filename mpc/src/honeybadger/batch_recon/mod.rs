@@ -1,6 +1,10 @@
 pub mod batch_recon;
 
-use crate::honeybadger::{robust_interpolate::InterpolateError, SessionId};
+use crate::honeybadger::{
+    robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
+    SessionId,
+};
+use ark_ff::FftField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
@@ -34,6 +38,24 @@ impl BatchReconMsg {
             session_id,
             msg_type,
             payload,
+        }
+    }
+}
+
+pub struct BatchReconStore<F: FftField> {
+    pub evals_received: Vec<RobustShare<F>>, // Stores (sender_id, eval_share) messages
+    pub reveals_received: Vec<RobustShare<F>>, // Stores (sender_id, y_j_value) messages
+    pub y_j: Option<RobustShare<F>>,         // The interpolated y_j value for this node's index
+    pub secrets: Option<Vec<F>>, // The finally reconstructed original secrets (polynomial coefficients)
+}
+
+impl<F: FftField> BatchReconStore<F> {
+    pub fn empty() -> Self {
+        Self {
+            evals_received: vec![],
+            reveals_received: vec![],
+            y_j: None,
+            secrets: None,
         }
     }
 }

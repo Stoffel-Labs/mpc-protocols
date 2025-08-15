@@ -1,23 +1,3 @@
-use bincode::ErrorKind;
-use robust_interpolate::robust_interpolate::RobustShare;
-use serde::{Deserialize, Serialize};
-use tracing::warn;
-
-use crate::{
-    common::{
-        rbc::{rbc_store::Msg, RbcError},
-        SecretSharingScheme,
-    },
-    honeybadger::{
-        batch_recon::BatchReconMsg,
-        double_share::{double_share_generation, DouShaError, DouShaMessage},
-        input::{input::InputServer, InputError, InputMessage},
-        ran_dou_sha::messages::RanDouShaMessage,
-        share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
-        triple_gen::{ShamirBeaverTriple, TripleGenError, TripleGenMessage},
-    },
-};
-
 /// This module contains the implementation of the Robust interpolate protocol presented in
 /// Figure 1 in the paper "HoneyBadgerMPC and AsynchroMix: Practical AsynchronousMPC and its
 /// Application to Anonymous Communication".
@@ -40,24 +20,41 @@ pub mod double_share;
 pub mod triple_gen;
 
 pub mod input;
+pub mod mul;
 pub mod share_gen;
 
-use std::sync::Arc;
-
+use crate::{
+    common::{
+        rbc::{rbc_store::Msg, RbcError},
+        MPCProtocol, PreprocessingMPCProtocol, RBC,
+    },
+    honeybadger::{
+        batch_recon::{BatchReconError, BatchReconMsg},
+        double_share::{double_share_generation, DouShaError, DouShaMessage},
+        input::{input::InputServer, InputError, InputMessage},
+        mul::{multiplication::Multiply, MulError, MultMessage},
+        ran_dou_sha::messages::RanDouShaMessage,
+        share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
+        triple_gen::{ShamirBeaverTriple, TripleGenError, TripleGenMessage},
+    },
+};
 use ark_ff::FftField;
 use ark_std::rand::Rng;
 use async_trait::async_trait;
+use bincode::ErrorKind;
 use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
+use robust_interpolate::robust_interpolate::RobustShare;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use stoffelmpc_network::{Network, NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::{
     mpsc::{self, Receiver},
     Mutex,
 };
+use tracing::warn;
 use triple_gen::triple_generation::TripleGenNode;
-
-use crate::common::{MPCProtocol, PreprocessingMPCProtocol, RBC};
 
 #[derive(Error, Debug)]
 pub enum HoneyBadgerError {
@@ -77,9 +74,17 @@ pub enum HoneyBadgerError {
     TripleGenError(#[from] TripleGenError),
     #[error("error in the RBC: {0:?}")]
     RbcError(#[from] RbcError),
+    #[error("error in the Mul: {0:?}")]
+    MulError(#[from] MulError),
+    #[error("error in the Batch Reconstruction: {0:?}")]
+    BatchReconError(#[from] BatchReconError),
     /// Error during the serialization using [`bincode`].
     #[error("error during the serialization using bincode: {0:?}")]
     BincodeSerializationError(#[from] Box<ErrorKind>),
+    #[error("failed to join spawned task")]
+    JoinError,
+    #[error("output channel closed before result was received")]
+    ChannelClosed,
 }
 
 /// Information pertaining a HoneyBadgerMPCNode protocol participant.
@@ -88,12 +93,17 @@ pub struct HoneyBadgerMPCNode<F: FftField, R: RBC> {
     /// ID of the current execution node.
     pub id: PartyId,
     /// Preprocessing material used in the protocol execution.
-    pub preprocessing_material: HoneyBadgerMPCNodePreprocMaterial<F>,
+    pub preprocessing_material: Arc<Mutex<HoneyBadgerMPCNodePreprocMaterial<F>>>,
     // Preprocessing parameters.
     pub params: HoneyBadgerMPCNodeOpts,
     pub preprocess: PreprocessNodes<F, R>,
-    // pub operations : Operation<F>,
+    pub operations: Operation<F>,
     pub output: OutputChannels,
+}
+
+#[derive(Clone, Debug)]
+pub struct Operation<F: FftField> {
+    pub mul: Multiply<F>,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +121,7 @@ pub struct OutputChannels {
     pub dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub triple_channel: Arc<Mutex<Receiver<SessionId>>>,
+    pub mul_channel: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 impl<F: FftField, R: RBC> HoneyBadgerMPCNode<F, R>
@@ -122,6 +133,7 @@ where
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
         let (triple_sender, triple_receiver) = mpsc::channel(128);
+        let (mul_sender, mul_receiver) = mpsc::channel(128);
 
         // Create nodes for preprocessing.
         let dousha_node =
@@ -141,12 +153,15 @@ where
             params.n_triples,
             triple_sender,
         )?;
+        let mul_node = Multiply::new(id, params.n_parties, params.threshold, mul_sender)?;
         let share_gen =
             RanShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
         let input = InputServer::new(id, params.n_parties, params.threshold)?;
         Ok(Self {
             id,
-            preprocessing_material: HoneyBadgerMPCNodePreprocMaterial::empty(),
+            preprocessing_material: Arc::new(
+                Mutex::new(HoneyBadgerMPCNodePreprocMaterial::empty()),
+            ),
             params,
             preprocess: PreprocessNodes {
                 input,
@@ -155,10 +170,12 @@ where
                 ran_dou_sha: ran_dou_sha_node,
                 triple_gen: triple_gen_node,
             },
+            operations: Operation { mul: mul_node },
             output: OutputChannels {
                 dou_sha_channel: Arc::new(Mutex::new(dou_sha_receiver)),
                 ran_dou_sha_channel: Arc::new(Mutex::new(ran_dou_sha_receiver)),
                 triple_channel: Arc::new(Mutex::new(triple_receiver)),
+                mul_channel: Arc::new(Mutex::new(mul_receiver)),
             },
         })
     }
@@ -254,19 +271,66 @@ impl HoneyBadgerMPCNodeOpts {
 }
 
 #[async_trait]
-impl<F, R, S, N> MPCProtocol<F, S, N> for HoneyBadgerMPCNode<F, R>
+impl<F, R, N> MPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
 where
     N: Network + Send + Sync + 'static,
     F: FftField,
     R: RBC,
-    S: SecretSharingScheme<F> + Send + Sync + 'static,
 {
     type MPCOpts = HoneyBadgerMPCNodeOpts;
     type Error = HoneyBadgerError;
 
-    async fn mul(&mut self, _a: Vec<S>, _b: Vec<S>, _network: Arc<N>) -> Result<S, Self::Error> {
-        // TODO: implement multiplication protocol
-        todo!("implement multiplication for HoneyBadgerMPCNode")
+    async fn mul(
+        &mut self,
+        x: Vec<RobustShare<F>>,
+        y: Vec<RobustShare<F>>,
+        network: Arc<N>,
+    ) -> Result<Vec<RobustShare<F>>, Self::Error> {
+        // Both lists must have the same length.
+        assert_eq!(x.len(), y.len());
+        assert_eq!(x.len(), self.params.threshold + 1);
+
+        // Extract the preprocessing triple.
+        let beaver_triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(x.len());
+
+        if beaver_triples.len() < x.len() {
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+
+        let session_id = self.params.session_id;
+
+        // Clone required fields for the async task before we drop &mut self
+        let rx_clone = self.output.mul_channel.clone();
+        let mul_clone = self.operations.mul.clone();
+        let params_session_id = self.params.session_id;
+
+        // Call the mul function
+        self.operations
+            .mul
+            .init(session_id, x, y, beaver_triples, network)
+            .await?;
+
+        // Spawn receiver task
+        let handle = tokio::spawn(async move {
+            let mut rx = rx_clone.lock().await;
+            while let Some(id) = rx.recv().await {
+                if id == params_session_id {
+                    let mul_store = mul_clone.mult_storage.lock().await;
+                    if let Some(mul_lock) = mul_store.get(&params_session_id) {
+                        let store = mul_lock.lock().await;
+                        return Ok::<_, Self::Error>(store.protocol_output.clone());
+                    }
+                }
+            }
+            Err(HoneyBadgerError::ChannelClosed)
+        });
+
+        // Await and return the result from the spawned task
+        handle.await.map_err(|_| HoneyBadgerError::JoinError)? // join handle error
     }
 
     async fn init(&mut self, _network: Arc<N>, _opts: Self::MPCOpts)
@@ -293,38 +357,61 @@ where
                 Some(ProtocolType::Input) => {
                     self.preprocess.input.rbc.process(rbc_msg, net).await?
                 }
-                Some(ProtocolType::Rbc) => {
-                    todo!()
-                }
-                Some(ProtocolType::Triple) => {}
-                Some(ProtocolType::BatchRecon) => {}
-                Some(ProtocolType::Dousha) => {}
-                None => {
+                _ => {
                     warn!(
-                        "Unknown protocol ID in session ID: {:?}",
+                        "Unknown protocol ID in session ID: {:?} in RBC",
                         rbc_msg.session_id
                     );
                 }
             },
 
-            WrappedMessage::BatchRecon(_) => {
-                todo!()
-            }
-            WrappedMessage::Dousha(_) => {
-                todo!()
-            }
             WrappedMessage::Input(input) => {
                 self.preprocess.input.process(input).await?;
             }
             WrappedMessage::RanSha(rs_msg) => {
                 self.preprocess.share_gen.process(rs_msg, net).await?;
             }
+            WrappedMessage::Dousha(ds_msg) => {
+                self.preprocess.dou_sha.process(ds_msg).await?;
+            }
             WrappedMessage::RanDouSha(rds_msg) => {
                 self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
             }
-            WrappedMessage::Triple(_) => {
-                todo!()
+            WrappedMessage::Mul(mul_msg) => {
+                self.operations.mul.process(mul_msg).await?;
             }
+            WrappedMessage::Triple(triple_msg) => {
+                self.preprocess.triple_gen.process(triple_msg).await?;
+            }
+            WrappedMessage::BatchRecon(batch_msg) => match batch_msg.session_id.protocol() {
+                Some(ProtocolType::MulOne) => {
+                    self.operations
+                        .mul
+                        .batch_recon
+                        .process(batch_msg, net)
+                        .await?
+                }
+                Some(ProtocolType::MulTwo) => {
+                    self.operations
+                        .mul
+                        .batch_recon
+                        .process(batch_msg, net)
+                        .await?
+                }
+                Some(ProtocolType::Triple) => {
+                    self.preprocess
+                        .triple_gen
+                        .batch_recon_node
+                        .process(batch_msg, net)
+                        .await?
+                }
+                _ => {
+                    warn!(
+                        "Unknown protocol ID in session ID: {:?} at Batch reconstruction",
+                        batch_msg.session_id
+                    );
+                }
+            },
         }
 
         Ok(())
@@ -332,12 +419,11 @@ where
 }
 
 #[async_trait]
-impl<F, R, S, N> PreprocessingMPCProtocol<F, S, N> for HoneyBadgerMPCNode<F, R>
+impl<F, R, N> PreprocessingMPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
 where
     N: Network + Send + Sync + 'static,
     F: FftField,
     R: RBC,
-    S: SecretSharingScheme<F> + Send + Sync + 'static,
 {
     async fn run_preprocessing<G>(
         &mut self,
@@ -351,9 +437,13 @@ where
         // First, the node takes faulty double shares to create triples.
         let random_shares_a = self
             .preprocessing_material
+            .lock()
+            .await
             .take_random_shares(self.params.n_triples);
         let random_shares_b = self
             .preprocessing_material
+            .lock()
+            .await
             .take_random_shares(self.params.n_triples);
 
         if random_shares_a.len() < self.params.n_triples
@@ -439,6 +529,7 @@ where
     }
 }
 
+///Used for routing messages to respective sub-protocols
 #[derive(Serialize, Deserialize, Debug)]
 pub enum WrappedMessage {
     RanDouSha(RanDouShaMessage),
@@ -447,10 +538,12 @@ pub enum WrappedMessage {
     Input(InputMessage),
     RanSha(RanShaMessage),
     Triple(TripleGenMessage),
-    Dousha(DouShaMessage)
+    Dousha(DouShaMessage),
+    Mul(MultMessage),
 }
 
-///-----------------Session-ID-----------------
+//-----------------Session-ID-----------------
+//Used for re-routing inter-protocol messages
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProtocolType {
@@ -461,6 +554,9 @@ pub enum ProtocolType {
     Triple = 5,
     BatchRecon = 6,
     Dousha = 7,
+    MulOne = 8,
+    MulTwo = 9,
+    Mul = 10,
 }
 
 impl TryFrom<u16> for ProtocolType {
@@ -475,6 +571,9 @@ impl TryFrom<u16> for ProtocolType {
             5 => Ok(ProtocolType::Triple),
             6 => Ok(ProtocolType::BatchRecon),
             7 => Ok(ProtocolType::Dousha),
+            8 => Ok(ProtocolType::MulOne),
+            9 => Ok(ProtocolType::MulTwo),
+            10 => Ok(ProtocolType::Mul),
             _ => Err(()),
         }
     }

@@ -120,7 +120,7 @@ where
         {
             let mult_share_deg_2t = share_a.share_mul(share_b)?;
             let sub_share_deg_2t =
-                (mult_share_deg_2t - &RobustShare::from(ran_dou_sha.degree_2t.clone()))?;
+                (mult_share_deg_2t - RobustShare::from(ran_dou_sha.degree_2t.clone()))?;
             sub_shares_deg_2t.push(sub_share_deg_2t);
         }
 

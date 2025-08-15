@@ -140,8 +140,13 @@ mod tests {
                     Ok(()) => {}
                     Err(e) => warn!(id =i,error = ?e,"Sending failure"),
                 }
+                // Lock the session store to update the session state.
+                let session_store = node.get_or_create_store(session_id).await;
 
-                while node.secrets.is_none() {
+                while {
+                    let s = session_store.lock().await;
+                    s.secrets.is_none()
+                } {
                     let msg = timeout(Duration::from_secs(2), recv.recv()).await;
                     // Attempt to deserialize into WrappedMessage
                     let brmsg = match msg {
@@ -167,7 +172,8 @@ mod tests {
                 }
 
                 // Return recovered secrets
-                node.secrets.clone().unwrap()
+                let recovered = session_store.lock().await.secrets.clone().unwrap();
+                recovered
             }));
         }
         for handle in handles {
