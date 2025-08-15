@@ -12,6 +12,7 @@ use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::double_share::DoubleShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::share_gen::RanShaError;
+use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{
     HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
@@ -499,4 +500,49 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
             }
         }
     }
+}
+
+//--------------------------MUL--------------------------
+
+pub async fn construct_e2e_input_mul(
+    n_parties: usize,
+    n_triples: usize,
+    threshold: usize,
+) -> Vec<Vec<ShamirBeaverTriple<Fr>>> {
+    let mut rng = test_rng();
+    let mut secrets_a = Vec::new();
+    let mut secrets_b = Vec::new();
+    let mut secrets_c = Vec::new();
+    let mut per_party_triples: Vec<Vec<ShamirBeaverTriple<Fr>>> = vec![Vec::new(); n_parties];
+
+    for _i in 0..n_triples {
+        // sample secrets a,b
+        let a_secret = Fr::rand(&mut rng);
+        let b_secret = Fr::rand(&mut rng);
+        let c_secret = a_secret * b_secret;
+
+        // make robust shares for each secret (length == n_parties)
+        let shares_a = RobustShare::compute_shares(a_secret, n_parties, threshold, None, &mut rng)
+            .expect("share a creation failed");
+        let shares_b = RobustShare::compute_shares(b_secret, n_parties, threshold, None, &mut rng)
+            .expect("share b creation failed");
+        let shares_c = RobustShare::compute_shares(c_secret, n_parties, threshold, None, &mut rng)
+            .expect("share c creation failed");
+
+        // push the secrets to the vectors
+        secrets_a.push(a_secret);
+        secrets_b.push(b_secret);
+        secrets_c.push(c_secret);
+
+        // For each party, create their per-party ShamirBeaverTriple and push it
+        for pid in 0..n_parties {
+            let triple = ShamirBeaverTriple {
+                a: shares_a[pid].clone(),
+                b: shares_b[pid].clone(),
+                mult: shares_c[pid].clone(),
+            };
+            per_party_triples[pid].push(triple);
+        }
+    }
+    per_party_triples
 }

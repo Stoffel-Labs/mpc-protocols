@@ -1,8 +1,10 @@
 use ark_bls12_381::Fr;
+use ark_ff::UniformRand;
+use ark_std::test_rng;
 use futures::future::join_all;
 use std::{sync::Arc, time::Duration};
 use stoffelmpc_mpc::{
-    common::{rbc::rbc::Avid, SecretSharingScheme, ShamirShare},
+    common::{rbc::rbc::Avid, MPCProtocol, SecretSharingScheme, ShamirShare},
     honeybadger::{
         input::input::InputClient,
         ran_dou_sha::RanDouShaState,
@@ -16,7 +18,7 @@ use tokio::time::{sleep, timeout};
 use tracing::info;
 
 use crate::utils::test_utils::{
-    construct_e2e_input, construct_e2e_input_ransha, create_global_nodes,
+    construct_e2e_input, construct_e2e_input_mul, construct_e2e_input_ransha, create_global_nodes,
     generate_independent_shares, initialize_global_nodes_randousha, initialize_global_nodes_ransha,
     receive, setup_tracing, test_setup,
 };
@@ -307,5 +309,120 @@ async fn gen_masks_for_input_e2e() {
         let shares: Vec<ShamirShare<Fr, 1, Robust>> = recovered_shares[i].iter().cloned().collect();
         let (_, r) = RobustShare::recover_secret(&shares, n_parties).unwrap();
         assert_eq!(r, *secret);
+    }
+}
+
+//----------------------------------------MUL----------------------------------------
+
+#[tokio::test]
+async fn mul_e2e() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 4;
+    let t = 1;
+    let session_id = SessionId::new(ProtocolType::Mul, 1111);
+    let mut rng = test_rng();
+
+    //Setup
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    //Generate triples
+    let triple = construct_e2e_input_mul(n_parties, t + 1, t).await;
+
+    // Prepare inputs for multiplication
+    let mut x_values = Vec::new();
+    let mut y_values = Vec::new();
+
+    let mut x_inputs_per_node = vec![Vec::new(); n_parties];
+    let mut y_inputs_per_node = vec![Vec::new(); n_parties];
+
+    for _i in 0..(t + 1) {
+        let x_value = Fr::rand(&mut rng);
+        x_values.push(x_value);
+        let y_value = Fr::rand(&mut rng);
+        y_values.push(y_value);
+
+        let shares_x = RobustShare::compute_shares(x_value, n_parties, t, None, &mut rng).unwrap();
+        let shares_y = RobustShare::compute_shares(y_value, n_parties, t, None, &mut rng).unwrap();
+
+        for p in 0..n_parties {
+            x_inputs_per_node[p].push(shares_x[p].clone());
+            y_inputs_per_node[p].push(shares_y[p].clone());
+        }
+    }
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    // create global nodes
+    let nodes = create_global_nodes::<Fr, Avid>(n_parties, t, 0, 0, session_id);
+
+    //----------------------------------------RECIEVE----------------------------------------
+    // spawn tasks to process received messages
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
+
+    //----------------------------------------RUN PROTOCOL----------------------------------------
+    //Load the triples
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        node.preprocessing_material
+            .lock()
+            .await
+            .add(Some(triple[pid].clone()), None);
+    }
+
+    // init all nodes
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let x_shares = x_inputs_per_node[pid].clone();
+        let y_shares = y_inputs_per_node[pid].clone();
+
+        let handle = tokio::spawn(async move {
+            {
+                node.mul(x_shares.clone(), y_shares.clone(), net.clone())
+                    .await
+                    .expect("mul failed");
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all mul tasks to finish
+    futures::future::join_all(handles).await;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+
+    let mut per_multiplication_shares: Vec<Vec<RobustShare<Fr>>> = vec![Vec::new(); t + 1];
+
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        let storage_map = node.operations.mul.mult_storage.lock().await;
+        if let Some(storage_mutex) = storage_map.get(&session_id) {
+            let storage = storage_mutex.lock().await;
+
+            if storage.protocol_output.is_empty() {
+                panic!("protocol_output empty for node {}", pid);
+            }
+            let shares_mult_for_node: Vec<RobustShare<Fr>> = storage.protocol_output.clone();
+            assert_eq!(shares_mult_for_node.len(), t + 1);
+
+            for i in 0..(t + 1) {
+                per_multiplication_shares[i].push(shares_mult_for_node[i].clone());
+            }
+        } else {
+            panic!(
+                "no mult_storage entry for session {:?} on node {}",
+                session_id, pid
+            );
+        }
+    }
+
+    for i in 0..(t + 1) {
+        let shares_for_i = per_multiplication_shares[i][0..=(t + 1)].to_vec();
+        let (_, z_rec) =
+            RobustShare::recover_secret(&shares_for_i, n_parties).expect("interpolate failed");
+        let expected = x_values[i] * y_values[i];
+
+        assert_eq!(z_rec, expected, "multiplication mismatch at index {}", i);
     }
 }

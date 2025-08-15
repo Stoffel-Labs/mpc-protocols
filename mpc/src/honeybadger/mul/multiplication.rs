@@ -18,6 +18,7 @@ use std::{
 };
 use stoffelmpc_network::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
+use tracing::info;
 
 #[derive(Clone, Debug)]
 pub struct Multiply<F: FftField> {
@@ -107,9 +108,17 @@ impl<F: FftField> Multiply<F> {
         // Store the values in the appropriate slot
         match msg.session_id.protocol().unwrap() {
             ProtocolType::MulOne => {
+                info!(
+                    self_id = self.id,
+                    "Received first open message for session_id: {:?}", session_id
+                );
                 storage.output_open_mult.0 = Some(open_message);
             }
             ProtocolType::MulTwo => {
+                info!(
+                    self_id = self.id,
+                    "Received second open message for session_id: {:?}", session_id
+                );
                 storage.output_open_mult.1 = Some(open_message);
             }
             _ => return Ok(None),
