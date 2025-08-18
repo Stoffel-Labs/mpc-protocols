@@ -379,17 +379,22 @@ pub fn receive<F, R, S, N>(
     }
 }
 
-pub fn create_global_nodes<F: FftField, R: RBC + 'static>(
+pub fn create_global_nodes<F: FftField, R: RBC + 'static, S, N>(
     n_parties: usize,
     t: usize,
     n_triples: usize,
     n_random_shares: usize,
     session_id: SessionId,
-) -> Vec<HoneyBadgerMPCNode<F, R>> {
+) -> Vec<HoneyBadgerMPCNode<F, R>>
+where
+    N: Network + Send + Sync + 'static,
+    S: SecretSharingScheme<F>,
+    HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts>,
+{
     let parameters =
         HoneyBadgerMPCNodeOpts::new(n_parties, t, n_triples, n_random_shares, session_id);
     (0..n_parties)
-        .map(|id| HoneyBadgerMPCNode::new(id, parameters.clone()).unwrap())
+        .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone()).unwrap())
         .collect()
 }
 

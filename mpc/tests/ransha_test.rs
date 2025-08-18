@@ -16,6 +16,7 @@ use stoffelmpc_mpc::{
         ProtocolType, SessionId, WrappedMessage,
     },
 };
+use stoffelmpc_network::fake_network::FakeNetwork;
 use tokio::task::JoinSet;
 use tracing::warn;
 
@@ -48,7 +49,9 @@ async fn test_reconstruct_handler_incorrect_share() {
         shares_ri_t[i].share[0] += Fr::from(7u64);
     }
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid>(n_parties, t, 0, 0, session_id);
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties, t, 0, 0, session_id,
+    );
 
     // receiver randousha node
     let mut ransha_node = nodes.get(receiver_id).unwrap().clone();

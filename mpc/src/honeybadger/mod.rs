@@ -124,11 +124,116 @@ pub struct OutputChannels {
     pub mul_channel: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-impl<F: FftField, R: RBC> HoneyBadgerMPCNode<F, R>
+/// Preprocessing material for the HoneyBadgerMPCNode protocol.
+#[derive(Clone, Debug)]
+pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
+    /// A pool of random double shares used for secure multiplication.
+    beaver_triples: Vec<ShamirBeaverTriple<F>>,
+    /// A pool of random shares used for inputing private data for the protocol.
+    random_shares: Vec<RobustShare<F>>,
+}
+
+impl<F> HoneyBadgerMPCNodePreprocMaterial<F>
 where
     F: FftField,
 {
-    pub fn new(id: PartyId, params: HoneyBadgerMPCNodeOpts) -> Result<Self, HoneyBadgerError> {
+    /// Generates empty preprocessing material storage.
+    pub fn empty() -> Self {
+        Self {
+            random_shares: Vec::new(),
+            beaver_triples: Vec::new(),
+        }
+    }
+
+    /// Adds the provided new preprocessing material to the current pool.
+    pub fn add(
+        &mut self,
+        mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
+        mut random_shares: Option<Vec<RobustShare<F>>>,
+    ) {
+        if let Some(pairs) = &mut triples {
+            self.beaver_triples.append(pairs);
+        }
+
+        if let Some(shares) = &mut random_shares {
+            self.random_shares.append(shares);
+        }
+    }
+
+    /// Returns the number of random double share pairs, and the number of random shares
+    /// respectively.
+    pub fn len(&self) -> (usize, usize) {
+        (self.beaver_triples.len(), self.random_shares.len())
+    }
+
+    /// Take up to n pairs of random double sharings from the preprocessing material.
+    pub fn take_beaver_triples(
+        &mut self,
+        n_pairs: usize,
+    ) -> Result<Vec<ShamirBeaverTriple<F>>, HoneyBadgerError> {
+        if n_pairs > self.random_shares.len() {
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self.beaver_triples.drain(0..n_pairs).collect())
+    }
+
+    /// Take up to n random shares from the preprocessing material.
+    pub fn take_random_shares(
+        &mut self,
+        n_shares: usize,
+    ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
+        if n_shares > self.random_shares.len() {
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self.random_shares.drain(0..n_shares).collect())
+    }
+}
+
+#[derive(Clone, Debug)]
+/// Configuration options for the HoneyBadgerMPCNode protocol.
+pub struct HoneyBadgerMPCNodeOpts {
+    /// Number of parties in the protocol.
+    pub n_parties: usize,
+    /// Upper bound of corrupt parties.
+    pub threshold: usize,
+    /// Number of random double sharing pairs that need to be generated.
+    pub n_triples: usize,
+    /// Number of random shares needed.
+    pub n_random_shares: usize,
+    /// Session ID
+    pub session_id: SessionId,
+}
+
+impl HoneyBadgerMPCNodeOpts {
+    /// Creates a new struct of initialization options for the HoneyBadgerMPCNode protocol.
+    pub fn new(
+        n_parties: usize,
+        threshold: usize,
+        n_triples: usize,
+        n_random_shares: usize,
+        session_id: SessionId,
+    ) -> Self {
+        Self {
+            n_parties,
+            threshold,
+            n_triples,
+            n_random_shares,
+            session_id,
+        }
+    }
+}
+
+#[async_trait]
+impl<F, R, N> MPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
+where
+    N: Network + Send + Sync + 'static,
+    F: FftField,
+    R: RBC,
+{
+    type MPCOpts = HoneyBadgerMPCNodeOpts;
+    type Error = HoneyBadgerError;
+
+    fn setup(id: PartyId, params: Self::MPCOpts) -> Result<Self, HoneyBadgerError> {
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
@@ -179,106 +284,6 @@ where
             },
         })
     }
-}
-
-/// Preprocessing material for the HoneyBadgerMPCNode protocol.
-#[derive(Clone, Debug)]
-pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
-    /// A pool of random double shares used for secure multiplication.
-    beaver_triples: Vec<ShamirBeaverTriple<F>>,
-    /// A pool of random shares used for inputing private data for the protocol.
-    random_shares: Vec<RobustShare<F>>,
-}
-
-impl<F> HoneyBadgerMPCNodePreprocMaterial<F>
-where
-    F: FftField,
-{
-    /// Generates empty preprocessing material storage.
-    pub fn empty() -> Self {
-        Self {
-            random_shares: Vec::new(),
-            beaver_triples: Vec::new(),
-        }
-    }
-
-    /// Adds the provided new preprocessing material to the current pool.
-    pub fn add(
-        &mut self,
-        mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
-        mut random_shares: Option<Vec<RobustShare<F>>>,
-    ) {
-        if let Some(pairs) = &mut triples {
-            self.beaver_triples.append(pairs);
-        }
-
-        if let Some(shares) = &mut random_shares {
-            self.random_shares.append(shares);
-        }
-    }
-
-    /// Returns the number of random double share pairs, and the number of random shares
-    /// respectively.
-    pub fn len(&self) -> (usize, usize) {
-        (self.beaver_triples.len(), self.random_shares.len())
-    }
-
-    /// Take up to n pairs of random double sharings from the preprocessing material.
-    pub fn take_beaver_triples(&mut self, n_pairs: usize) -> Vec<ShamirBeaverTriple<F>> {
-        let pairs = n_pairs.min(self.beaver_triples.len());
-        self.beaver_triples.drain(0..pairs).collect()
-    }
-
-    /// Take up to n random shares from the preprocessing material.
-    pub fn take_random_shares(&mut self, n_shares: usize) -> Vec<RobustShare<F>> {
-        let pairs = n_shares.min(self.random_shares.len());
-        self.random_shares.drain(0..pairs).collect()
-    }
-}
-
-#[derive(Clone, Debug)]
-/// Configuration options for the HoneyBadgerMPCNode protocol.
-pub struct HoneyBadgerMPCNodeOpts {
-    /// Number of parties in the protocol.
-    pub n_parties: usize,
-    /// Upper bound of corrupt parties.
-    pub threshold: usize,
-    /// Number of random double sharing pairs that need to be generated.
-    pub n_triples: usize,
-    /// Number of random shares needed.
-    pub n_random_shares: usize,
-    /// Session ID
-    pub session_id: SessionId,
-}
-
-impl HoneyBadgerMPCNodeOpts {
-    /// Creates a new struct of initialization options for the HoneyBadgerMPCNode protocol.
-    pub fn new(
-        n_parties: usize,
-        threshold: usize,
-        n_triples: usize,
-        n_random_shares: usize,
-        session_id: SessionId,
-    ) -> Self {
-        Self {
-            n_parties,
-            threshold,
-            n_triples,
-            n_random_shares,
-            session_id,
-        }
-    }
-}
-
-#[async_trait]
-impl<F, R, N> MPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
-where
-    N: Network + Send + Sync + 'static,
-    F: FftField,
-    R: RBC,
-{
-    type MPCOpts = HoneyBadgerMPCNodeOpts;
-    type Error = HoneyBadgerError;
 
     async fn mul(
         &mut self,
@@ -297,9 +302,13 @@ where
             .await
             .take_beaver_triples(x.len());
 
-        if beaver_triples.len() < x.len() {
-            return Err(HoneyBadgerError::NotEnoughPreprocessing);
-        }
+        let triples = match beaver_triples {
+            Ok(r) => r,
+            Err(e) => return Err(e), // match self.run_preprocessing(network, rng).await {
+                                     //     Ok(t) => t,
+                                     //     Err(e) => return Err(e),
+                                     // },
+        };
 
         let session_id = self.params.session_id;
 
@@ -311,34 +320,22 @@ where
         // Call the mul function
         self.operations
             .mul
-            .init(session_id, x, y, beaver_triples, network)
+            .init(session_id, x, y, triples, network)
             .await?;
 
-        // Spawn receiver task
-        let handle = tokio::spawn(async move {
-            let mut rx = rx_clone.lock().await;
-            while let Some(id) = rx.recv().await {
-                if id == params_session_id {
-                    let mul_store = mul_clone.mult_storage.lock().await;
-                    if let Some(mul_lock) = mul_store.get(&params_session_id) {
-                        let store = mul_lock.lock().await;
-                        return Ok::<_, Self::Error>(store.protocol_output.clone());
-                    }
+        let mut rx = rx_clone.lock().await;
+        while let Some(id) = rx.recv().await {
+            if id == params_session_id {
+                let mul_store = mul_clone.mult_storage.lock().await;
+                if let Some(mul_lock) = mul_store.get(&params_session_id) {
+                    let store = mul_lock.lock().await;
+                    return Ok(store.protocol_output.clone());
                 }
             }
-            Err(HoneyBadgerError::ChannelClosed)
-        });
-
-        // Await and return the result from the spawned task
-        handle.await.map_err(|_| HoneyBadgerError::JoinError)? // join handle error
+        }
+        Err(HoneyBadgerError::ChannelClosed)
     }
 
-    async fn init(&mut self, _network: Arc<N>, _opts: Self::MPCOpts)
-    where
-        N: 'async_trait,
-    {
-        todo!();
-    }
     async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
         let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
 
@@ -434,6 +431,13 @@ where
         N: 'async_trait,
         G: Rng + Send,
     {
+        let (no_of_triples, no_of_shares) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        if self.params.n_triples < no_of_triples {}
+        if self.params.n_random_shares < no_of_shares {}
+
         // First, the node takes faulty double shares to create triples.
         let random_shares_a = self
             .preprocessing_material
@@ -446,19 +450,19 @@ where
             .await
             .take_random_shares(self.params.n_triples);
 
-        if random_shares_a.len() < self.params.n_triples
-            || random_shares_b.len() < self.params.n_triples
-        {
+        if random_shares_a.is_err() || random_shares_b.is_err() {
             // TODO: Run the random share generation protocol.
             todo!()
         }
 
+        //TODO: How do we make sure nodes are using the same preprocessed data
         let mut ran_dou_sha_pair = self
             .preprocess
             .ran_dou_sha
             .pop_finished_protocol_result()
             .await;
         if ran_dou_sha_pair.is_none() {
+            //TODO: How do we make sure nodes are using the same preprocessed data
             // There are not enought random double shares. We need to construct them.
             let mut out_dou_sha = self.preprocess.dou_sha.pop_finished_protocol_result().await;
             if out_dou_sha.is_none() {
@@ -506,8 +510,8 @@ where
         self.preprocess
             .triple_gen
             .init(
-                random_shares_a,
-                random_shares_b,
+                random_shares_a.unwrap(),
+                random_shares_b.unwrap(),
                 // SAFETY: The given that the RanDouSha was generated. This sould be Some(_).
                 ran_dou_sha_pair.unwrap(),
                 self.params.session_id,
