@@ -614,7 +614,6 @@ async fn test_e2e_wrong_degree() {
         receiver_channels.push(receiver);
     }
     let randousha_nodes = create_nodes(n_parties, sender_channels, threshold, threshold + 1);
-
     let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<DoubleShamirShare<Fr>>)>(100);
 
     // Keep track of aborts

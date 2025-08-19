@@ -255,7 +255,6 @@ impl<F: FftField> BatchReconNode<F> {
             }
         }
     }
-
     pub async fn process<N: Network>(
         &mut self,
         msg: BatchReconMsg,

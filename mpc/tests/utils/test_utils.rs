@@ -224,6 +224,7 @@ pub fn spawn_receiver_tasks(
         let net_clone = Arc::clone(&network);
         let fin_send = fin_send.clone();
         let abort_count = abort_counter.clone();
+        let params = params.clone();
 
         set.spawn(async move {
             while let Some(msg_bytes) = receiver.recv().await {

@@ -346,6 +346,7 @@ pub fn compute_g0_from_domain<F: FftField>(n: usize) -> DensePolynomial<F> {
 
     g0
 }
+
 /// Implements OEC decoding by incrementally increasing the number of shares until decoding succeeds.
 /// https://eprint.iacr.org/2012/517.pdf
 ///
