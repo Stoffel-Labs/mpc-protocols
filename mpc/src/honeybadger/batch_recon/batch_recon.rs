@@ -14,7 +14,7 @@ use ark_serialize::CanonicalSerialize;
 use futures::lock::Mutex;
 use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
-use stoffelmpc_network::Network;
+use stoffelnet::network_utils::Network;
 use tracing::{debug, error, info, warn};
 /// --------------------------BatchRecPub--------------------------
 ///
@@ -45,6 +45,11 @@ impl<F: FftField> BatchReconNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, BatchReconError> {
         let store = Arc::new(Mutex::new(HashMap::new()));
         Ok(Self { id, n, t, store })
+    }
+
+    pub async fn clear_store(&self) {
+        let mut store = self.store.lock().await;
+        store.clear();
     }
 
     /// Initiates the batch reconstruction protocol for a given node.

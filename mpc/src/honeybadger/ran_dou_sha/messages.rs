@@ -1,7 +1,7 @@
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use serde::{Deserialize, Serialize};
-use stoffelmpc_network::PartyId;
+use stoffelnet::network_utils::PartyId;
 
 use crate::{common::share::shamir::NonRobustShare, honeybadger::SessionId};
 

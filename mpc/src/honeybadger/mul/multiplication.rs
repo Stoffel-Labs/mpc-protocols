@@ -16,7 +16,7 @@ use std::{
     ops::{Mul, Sub},
     sync::Arc,
 };
-use stoffelmpc_network::{Network, PartyId};
+use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;
 

@@ -16,11 +16,11 @@ use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{
     HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
+use stoffelnet::network_utils::{ClientId, Network, NetworkError};
 use tracing::warn;
 
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-use stoffelmpc_network::{ClientId, Network, NetworkError};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -467,7 +467,6 @@ pub fn construct_e2e_input_ransha(
 /// Initializes all global nodes with their respective shares for ransha.
 pub async fn initialize_global_nodes_ransha<F, R, N>(
     nodes: Vec<HoneyBadgerMPCNode<F, R>>,
-    n_shares_t: &[Vec<RobustShare<F>>],
     session_id: SessionId,
     network: Arc<N>,
 ) where
@@ -475,17 +474,13 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
     R: RBC + 'static,
     N: Network + Send + Sync + 'static,
 {
-    assert!(nodes.len() == n_shares_t.len());
+    let mut rng = test_rng();
 
     for node in nodes {
         let mut node_rds = node.preprocess.share_gen;
         let node_id = node_rds.id;
         match node_rds
-            .init(
-                n_shares_t[node_id].clone(),
-                session_id,
-                Arc::clone(&network),
-            )
+            .init(session_id, &mut rng, Arc::clone(&network))
             .await
         {
             Ok(()) => (),

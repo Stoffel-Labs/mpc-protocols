@@ -8,7 +8,7 @@ use ark_ff::FftField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelmpc_network::NetworkError;
+use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 
 /// Represents message type exchanged between network nodes during the batch reconstruction protocol.

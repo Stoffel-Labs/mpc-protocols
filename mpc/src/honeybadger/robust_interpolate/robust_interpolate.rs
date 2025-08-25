@@ -371,7 +371,7 @@ fn oec_decode<F: FftField>(
     for r in 1..=t {
         let required = 2 * t + 1 + r;
         if shares.len() < required {
-            continue;
+            break;
         }
 
         let subset = &shares[..required];

@@ -3,7 +3,7 @@ use futures::future::join_all;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
-use crate::{ClientId, Network, NetworkError, Node, PartyId};
+use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
 
 /// Simulates a network for testing purposes. The channels for the network are simulated as `tokio`
 /// channels.
@@ -191,7 +191,6 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::*;
-    use crate::Network;
 
     #[tokio::test]
     async fn test_fake_network_new() {
