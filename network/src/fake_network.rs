@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use futures::future::join_all;
+use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
-use crate::{Network, NetworkError, Node, PartyId};
+use crate::{ClientId, Network, NetworkError, Node, PartyId};
 
 /// Simulates a network for testing purposes. The channels for the network are simulated as `tokio`
 /// channels.
@@ -13,27 +14,50 @@ pub struct FakeNetwork {
     config: FakeNetworkConfig,
     /// Fake nodes connected to the network
     nodes: Vec<FakeNode>,
+    /// Channels to send messages to clients.
+    client_channels: HashMap<ClientId, Sender<Vec<u8>>>,
 }
 
 impl FakeNetwork {
     /// Creates a new fake network for testing using the given number of nodes and configuration.
-    pub fn new(n_nodes: usize, config: FakeNetworkConfig) -> (Self, Vec<Receiver<Vec<u8>>>) {
+    pub fn new(
+        n_nodes: usize,
+        n_clients: Option<Vec<ClientId>>,
+        config: FakeNetworkConfig,
+    ) -> (
+        Self,
+        Vec<Receiver<Vec<u8>>>,
+        HashMap<ClientId, Receiver<Vec<u8>>>,
+    ) {
         let mut node_channels = Vec::new();
         let mut nodes = Vec::new();
         let mut receivers = Vec::new();
-        for id in 1..=n_nodes {
+        for id in 0..n_nodes {
             let (sender, receiver) = mpsc::channel(config.channel_buff_size);
             node_channels.push(sender);
             nodes.push(FakeNode::new(id));
             receivers.push(receiver);
         }
+        let mut client_channels = HashMap::new();
+        let mut client_receivers = HashMap::new();
+
+        if let Some(clients) = n_clients {
+            for id in clients {
+                let (client_tx, client_rx) = mpsc::channel(config.channel_buff_size);
+                client_channels.insert(id, client_tx);
+                client_receivers.insert(id, client_rx);
+            }
+        }
+
         (
             Self {
                 node_channels,
                 config,
                 nodes,
+                client_channels: client_channels.clone(),
             },
             receivers,
+            client_receivers,
         )
     }
 }
@@ -44,7 +68,7 @@ impl Network for FakeNetwork {
     type NetworkConfig = FakeNetworkConfig;
 
     async fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
-        if let Some(sender) = self.node_channels.get(recipient - 1) {
+        if let Some(sender) = self.node_channels.get(recipient) {
             sender
                 .send(message.to_vec())
                 .await
@@ -90,6 +114,32 @@ impl Network for FakeNetwork {
 
     fn config(&self) -> &Self::NetworkConfig {
         &self.config
+    }
+
+    // --- New client communication methods ---
+
+    async fn send_to_client(
+        &self,
+        client: ClientId,
+        message: &[u8],
+    ) -> Result<usize, NetworkError> {
+        if let Some(sender) = self.client_channels.get(&client) {
+            sender
+                .send(message.to_vec())
+                .await
+                .map_err(|_| NetworkError::SendError)?;
+            Ok(message.len())
+        } else {
+            Err(NetworkError::ClientNotFound(client))
+        }
+    }
+
+    fn clients(&self) -> Vec<ClientId> {
+        self.client_channels.keys().copied().collect()
+    }
+
+    fn is_client_connected(&self, client: ClientId) -> bool {
+        self.client_channels.contains_key(&client)
     }
 }
 
@@ -147,15 +197,15 @@ mod tests {
     async fn test_fake_network_new() {
         let n_nodes = 5;
         let config = FakeNetworkConfig::new(100);
-        let (network, _) = FakeNetwork::new(n_nodes, config);
+        let (network, _, _) = FakeNetwork::new(n_nodes, None, config);
 
         let channels = network.node_channels.clone();
 
         assert_eq!(network.nodes.len(), n_nodes);
         assert_eq!(channels.len(), n_nodes);
 
-        for i in 1..=n_nodes {
-            assert!(channels.get(i - 1).is_some());
+        for i in 0..n_nodes {
+            assert!(channels.get(i).is_some());
             assert!(network.node(i).is_some());
             assert_eq!(network.node(i).unwrap().id(), i);
         }
@@ -165,7 +215,7 @@ mod tests {
     async fn test_fake_network_send_and_receive() {
         let n_nodes = 3;
         let config = FakeNetworkConfig::new(100);
-        let (network, mut receivers) = FakeNetwork::new(n_nodes, config);
+        let (network, mut receivers, _) = FakeNetwork::new(n_nodes, None, config);
 
         let sender_id = 1;
         let recipient_id = 2;
@@ -177,14 +227,14 @@ mod tests {
         assert_eq!(send_result.unwrap(), message.len());
 
         // Get the recipient node and try to receive the message
-        let recipient_node = &mut receivers[recipient_id - 1];
+        let recipient_node = &mut receivers[recipient_id];
         let received_message_result = recipient_node.try_recv();
 
         assert!(received_message_result.is_ok());
         assert_eq!(received_message_result.unwrap(), message.to_vec());
 
         // Ensure the other node didn't receive the message
-        let other_node1 = &mut receivers[sender_id - 1];
+        let other_node1 = &mut receivers[sender_id];
         let other_received_message_result = other_node1.try_recv();
         assert!(other_received_message_result.is_err()); // Should be empty
 
@@ -197,7 +247,7 @@ mod tests {
     async fn test_fake_network_broadcast() {
         let n_nodes = 3;
         let config = FakeNetworkConfig::new(100);
-        let (network, mut receivers) = FakeNetwork::new(n_nodes, config);
+        let (network, mut receivers, _) = FakeNetwork::new(n_nodes, None, config);
         let network = Arc::new(Mutex::new(network));
 
         let message = b"broadcast";
@@ -230,38 +280,36 @@ mod tests {
         //drop(sender);
     }
 
-    // #[tokio::test]
-    // async fn test_network_error_on_send_failure() {
-    //     let n_nodes = 2;
-    //     let config = FakeNetworkConfig::new(100);
-    //     let (network, _) = FakeNetwork::new(n_nodes, config);
-    //     // The network needs to be mutable to modify its `node_channels` HashMap
-    //     let network = Arc::new(Mutex::new(network));
+    #[tokio::test]
+    async fn test_network_error_on_send_failure() {
+        let n_nodes = 2;
+        let config = FakeNetworkConfig::new(100);
+        let (mut network, _, _) = FakeNetwork::new(n_nodes, None, config);
 
-    //     let recipient_id = 1;
-    //     let message = b"test";
+        let recipient_id = 1;
+        let message = b"test";
 
-    //     // To simulate a send failure with an unbounded mpsc channel:
-    //     // The most direct way is to remove the recipient from the network's map.
-    //     let network = network.lock().await;
+        // Simulate send failure by removing the recipient's sender
+        assert!(
+            recipient_id < network.node_channels.len(),
+            "Recipient must exist"
+        );
 
-    //     // This scope is necessary so that the variable channels is dropped and network is accessed again later
-    //     // without blocking the thread.
-    //     {
-    //         let mut channels = network.node_channels.clone();
-    //         let removed_recipient = channels.remove(&recipient_id);
-    //         assert!(removed_recipient.is_some(), "should exist for recipient_id");
-    //     }
+        network.node_channels[recipient_id] = {
+            // Drop the sender by replacing it with a closed channel
+            let (closed_sender, _): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(1);
+            drop(closed_sender); // explicitly drop so that send fails
+            mpsc::channel(1).0 // use a channel with no receiver
+        };
 
-    //     // Now that the recipient is removed, the send should fail
-    //     let send_result = network.send(recipient_id, message).await;
-    //     assert!(
-    //         send_result.is_err(),
-    //         "Send should fail after sender is removed."
-    //     );
-    //     assert_eq!(
-    //         send_result.unwrap_err(),
-    //         NetworkError::PartyNotFound(recipient_id)
-    //     );
-    // }
+        // Now, sending should fail
+        let send_result = network.send(recipient_id, message).await;
+        assert!(
+            send_result.is_err(),
+            "Send should fail after sender is closed."
+        );
+
+        // Since the channel exists but is closed, expect a SendError (not PartyNotFound)
+        assert_eq!(send_result.unwrap_err(), NetworkError::SendError);
+    }
 }

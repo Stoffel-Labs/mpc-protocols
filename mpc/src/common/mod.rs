@@ -7,9 +7,13 @@ pub mod rbc;
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
 
-use crate::common::{
-    rbc::{rbc_store::Msg, RbcError},
-    share::ShareError,
+use crate::{
+    common::{
+        rbc::{rbc_store::Msg, RbcError},
+        share::ShareError,
+    },
+    honeybadger::{triple_gen::ShamirBeaverTriple, SessionId},
+
 };
 
 use ark_ff::{FftField, Zero};
@@ -19,7 +23,7 @@ use ark_std::rand::Rng;
 use async_trait::async_trait;
 use std::{
     marker::PhantomData,
-    ops::{Add, Mul},
+    ops::{Add, Mul, Sub},
     sync::Arc,
     usize,
 };
@@ -28,17 +32,15 @@ use stoffelmpc_network::Network;
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
     pub share: [F; N],
+    ///index of the share(x-values),can be different from the reciever ID
     pub id: usize,
     pub degree: usize,
     pub _sharetype: PhantomData<fn() -> P>,
 }
 
-pub trait SecretSharingScheme<F: FftField, const N: usize>: Sized {
+pub trait SecretSharingScheme<F: FftField>: Sized {
     /// Secret type used in the Share
     type SecretType;
-
-    /// Protocol marker type (used for Share<F, N, P>)
-    type Sharetype;
 
     type Error;
 
@@ -48,13 +50,15 @@ pub trait SecretSharingScheme<F: FftField, const N: usize>: Sized {
         degree: usize,
         ids: Option<&[usize]>,
         rng: &mut impl Rng,
-    ) -> Result<Vec<ShamirShare<F, N, Self::Sharetype>>, Self::Error>;
+    ) -> Result<Vec<Self>, Self::Error>;
 
     /// Recover the secret of the input shares.
     fn recover_secret(
-        shares: &[ShamirShare<F, N, Self::Sharetype>],
+        shares: &[Self],
+        n: usize,
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), Self::Error>;
 }
+
 /// Interpolates a polynomial from `(x, y)` pairs using Lagrange interpolation.
 ///
 /// # Errors
@@ -110,6 +114,57 @@ impl<F: FftField, const N: usize, P> Add for ShamirShare<F, N, P> {
         })
     }
 }
+
+impl<F: FftField, const N: usize, P> Add<&F> for ShamirShare<F, N, P> {
+    type Output = Result<Self, ShareError>;
+
+    fn add(self, other: &F) -> Self::Output {
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] + other);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+            _sharetype: PhantomData,
+        })
+    }
+}
+
+impl<F: FftField, const N: usize, P> Sub<Self> for ShamirShare<F, N, P> {
+    type Output = Result<Self, ShareError>;
+    fn sub(self, other: Self) -> Self::Output {
+        if self.degree != other.degree {
+            return Err(ShareError::DegreeMismatch);
+        }
+
+        if self.id != other.id {
+            return Err(ShareError::IdMismatch);
+        }
+
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] - other.share[i]);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+            _sharetype: PhantomData,
+        })
+    }
+}
+impl<F: FftField, const N: usize, P> Sub<F> for ShamirShare<F, N, P> {
+    type Output = Result<Self, ShareError>;
+    fn sub(self, other: F) -> Self::Output {
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] - other);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+            _sharetype: PhantomData,
+        })
+    }
+}
+
 impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
     type Output = Result<Self, ShareError>;
 
@@ -125,6 +180,26 @@ impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
     }
 }
 
+impl<F, const N: usize, P> ShamirShare<F, N, P>
+where
+    F: FftField,
+{
+    pub fn share_mul(&self, other: &Self) -> Result<Self, ShareError> {
+        if self.id != other.id {
+            return Err(ShareError::IdMismatch);
+        }
+
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] * other.share[i]);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree + other.degree,
+            _sharetype: PhantomData,
+        })
+    }
+}
+
 /// In MPC, there needs to be a way for a dealer and the nodes to broadcast messages
 /// to each other. And the receivers need to agree on the senders' messages.
 /// The primitive that does this is called Reliable Broadcast (RBC).
@@ -132,22 +207,22 @@ impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
 #[async_trait]
 pub trait RBC: Send + Sync {
     /// Creates a new instance
-    fn new(id: u32, n: u32, t: u32, k: u32) -> Result<Self, RbcError>
+    fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError>
     where
         Self: Sized;
     /// Returns the unique identifier of the current party.
-    fn id(&self) -> u32;
+    fn id(&self) -> usize;
     /// Required for initiating the broadcast
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: u32,
+        session_id: SessionId,
         parties: Arc<N>,
     ) -> Result<(), RbcError>;
     ///Processing messages sent by other nodes based on their type
     async fn process<N: Network + Send + Sync + 'static>(
         &self,
-        msg: Vec<u8>,
+        msg: Msg,
         parties: Arc<N>,
     ) -> Result<(), RbcError>;
     /// Broadcast messages to other nodes.
@@ -161,38 +236,47 @@ pub trait RBC: Send + Sync {
         &self,
         msg: Msg,
         net: Arc<N>,
-        recv: u32,
+        recv: usize,
     ) -> Result<(), RbcError>;
 }
 
 /// Now, it's time to define the MPC Protocol trait.
 /// Given an underlying secret sharing protocol and a reliable broadcast protocol,
 /// you can define an MPC protocol.
-trait MPCProtocol<F: FftField, const N: usize, S: SecretSharingScheme<F, N>, R: RBC>
+#[async_trait]
+pub trait MPCProtocol<F, S, N>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
+    N: Network,
 {
-    /// Defines the information needed to run and define the MPC protocol.
     type MPCOpts;
+    type Error: std::fmt::Debug;
 
-    type ShareType;
+    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error>;
 
-    fn init(opts: Self::MPCOpts);
+    async fn init(&mut self, network: Arc<N>, opts: Self::MPCOpts)
+    where
+        N: 'async_trait;
 
-    fn input();
-
-    fn mul();
-
-    fn output();
+    async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
+    where
+        N: 'async_trait;
 }
 
-/// Some MPC protocols require preprocessing before they can be used
-trait PreprocessingMPCProtocol<F: FftField, const N: usize, S: SecretSharingScheme<F, N>, R: RBC>:
-    MPCProtocol<F, N, S, R>
+#[async_trait]
+pub trait PreprocessingMPCProtocol<F, S, N>: MPCProtocol<F, S, N>
+where
+    N: Network,
+    F: FftField,
+    S: SecretSharingScheme<F>,
 {
-    /// Defines the information needed to run the preprocessing phase of an MPC protocol
-    type PreprocessingOpts;
-
-    /// Runs the offline/preprocessing phase for an MPC protocol
-    fn run_preprocessing(opts: Self::PreprocessingOpts);
+    async fn run_preprocessing<R>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut R,
+    ) -> Result<Vec<ShamirBeaverTriple<F>>, Self::Error>
+    where
+        N: 'async_trait,
+        R: Rng + Send;
 }

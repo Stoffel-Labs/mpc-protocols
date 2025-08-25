@@ -1,17 +1,21 @@
-use std::marker::PhantomData;
-
 use super::*;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde},
         SecretSharingScheme,
     },
-    honeybadger::robust_interpolate::robust_interpolate::RobustShamirShare,
+    honeybadger::{
+        mul::MultMessage, robust_interpolate::robust_interpolate::RobustShare,
+        triple_gen::TripleGenMessage, ProtocolType, WrappedMessage,
+    },
 };
 use ark_ff::FftField;
+use ark_serialize::CanonicalSerialize;
+use futures::lock::Mutex;
 use std::sync::Arc;
+use std::{collections::HashMap, marker::PhantomData};
 use stoffelmpc_network::Network;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 /// --------------------------BatchRecPub--------------------------
 ///
 /// Goal: Publicly reconstruct t+1 secret-shared values [x₁, ..., x_{t+1}]
@@ -28,36 +32,19 @@ use tracing::{debug, info, warn};
 /// 4. Using the reconstructed y-values, parties robustly
 ///    interpolate to recover the original secrets [x₁, ..., x_{t+1}].
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BatchReconNode<F: FftField> {
-    pub id: usize,                                   // This node's unique identifier
-    pub n: usize,                                    // Total number of nodes/shares
-    pub t: usize,                                    // Number of malicious parties
-    pub evals_received: Vec<RobustShamirShare<F>>,   // Stores (sender_id, eval_share) messages
-    pub reveals_received: Vec<RobustShamirShare<F>>, // Stores (sender_id, y_j_value) messages
-    pub y_j: Option<RobustShamirShare<F>>, // The interpolated y_j value for this node's index
-    pub secrets: Option<Vec<F>>, // The finally reconstructed original secrets (polynomial coefficients)
+    pub id: usize, // This node's unique identifier
+    pub n: usize,  // Total number of nodes/shares
+    pub t: usize,
+    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BatchReconStore<F>>>>>>, // Number of malicious parties
 }
 
 impl<F: FftField> BatchReconNode<F> {
     /// Creates a new `Node` instance.
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, BatchReconError> {
-        if !(t < (n + 2) / 3) {
-            // ceil(n / 3)
-            return Err(BatchReconError::InvalidInput(format!(
-                "Invalid t: must satisfy 0 <= t < n / 3 (t={}, n={})",
-                t, n
-            )));
-        }
-        Ok(Self {
-            id,
-            n,
-            t,
-            evals_received: vec![],
-            reveals_received: vec![],
-            y_j: None,
-            secrets: None,
-        })
+        let store = Arc::new(Mutex::new(HashMap::new()));
+        Ok(Self { id, n, t, store })
     }
 
     /// Initiates the batch reconstruction protocol for a given node.
@@ -65,12 +52,13 @@ impl<F: FftField> BatchReconNode<F> {
     /// Each party computes its `y_j_share` for all `j` and sends it to party `P_j`.
     pub async fn init_batch_reconstruct<N: Network>(
         &self,
-        shares: &[RobustShamirShare<F>], // this party's shares of x_0 to x_t
+        shares: &[RobustShare<F>], // this party's shares of x_0 to x_t
+        session_id: SessionId,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
         if shares.len() < self.t + 1 {
             return Err(BatchReconError::InvalidInput(
-                "Too little shares to start batch reconstruct".to_string(),
+                "too little shares to start batch reconstruct".to_string(),
             ));
         }
         let vandermonde = make_vandermonde::<F>(self.n, self.t)?;
@@ -78,26 +66,22 @@ impl<F: FftField> BatchReconNode<F> {
 
         info!(
             id = self.id,
-            "Initialized batch reconstruction with Vandermonde transform"
+            "initialized batch reconstruction with Vandermonde transform"
         );
 
         for (j, y_j_share) in y_shares.into_iter().enumerate() {
             info!(from = self.id, to = j, "Sending y_j shares ");
 
             let mut payload = Vec::new();
-            y_j_share.share[0]
-                .serialize_compressed(&mut payload)
-                .map_err(|e| BatchReconError::ArkSerialization(e))?;
-            let msg = BatchReconMsg::new(self.id, BatchReconMsgType::Eval, payload);
-
+            y_j_share.share[0].serialize_compressed(&mut payload)?;
+            let msg = BatchReconMsg::new(self.id, session_id, BatchReconMsgType::Eval, payload);
+            //Wrap the msg in global enum
+            let wrapped = WrappedMessage::BatchRecon(msg);
             //Send share y_j to each Party j
             let encoded_msg =
-                bincode::serialize(&msg).map_err(BatchReconError::SerializationError)?;
+                bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
 
-            let _ = net
-                .send(j + 1, &encoded_msg)
-                .await
-                .map_err(|e| BatchReconError::NetworkError(e))?;
+            let _ = net.send(j, &encoded_msg).await?;
         }
         Ok(())
     }
@@ -122,38 +106,51 @@ impl<F: FftField> BatchReconNode<F> {
                 let val = F::deserialize_compressed(msg.payload.as_slice())
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
+                // Lock the session store to update the session state.
+                let session_store = self.get_or_create_store(msg.session_id).await;
+                // Lock the session-specific store to access or update the session state.
+                let mut store = session_store.lock().await;
+
                 // Store the received evaluation share if it's from a new sender.
-                if !self.evals_received.iter().any(|s| s.id == sender_id) {
-                    self.evals_received
-                        .push(RobustShamirShare::new(val, sender_id, self.t));
+                if !store.evals_received.iter().any(|s| s.id == sender_id) {
+                    store
+                        .evals_received
+                        .push(RobustShare::new(val, sender_id, self.t));
                 }
                 // Check if we have enough evaluation shares and haven't already computed our `y_j`.
-                if self.evals_received.len() >= 2 * self.t + 1 && self.y_j.is_none() {
+                if store.evals_received.len() >= 2 * self.t + 1 && store.y_j.is_none() {
                     info!(
                         self_id = self.id,
                         "Enough Evals collected, interpolating y_j"
                     );
 
                     // Attempt to interpolate the polynomial and get our specific `y_j` value.
-                    match RobustShamirShare::recover_secret(&self.evals_received.clone()) {
+                    match RobustShare::recover_secret(&store.evals_received.clone(), self.n) {
                         Ok((_, value)) => {
-                            self.y_j = Some(RobustShamirShare {
+                            store.y_j = Some(RobustShare {
                                 share: [value],
                                 id: self.id,
                                 degree: self.t,
                                 _sharetype: PhantomData,
                             });
+                            drop(store);
                             info!(node = self.id, "Broadcasting y_j value: {:?}", value);
 
                             let mut payload = Vec::new();
                             value
                                 .serialize_compressed(&mut payload)
                                 .map_err(|e| BatchReconError::ArkSerialization(e))?;
-                            let new_msg =
-                                BatchReconMsg::new(self.id, BatchReconMsgType::Reveal, payload);
+                            let new_msg = BatchReconMsg::new(
+                                self.id,
+                                msg.session_id,
+                                BatchReconMsgType::Reveal,
+                                payload,
+                            );
 
+                            //Wrap the msg in global enum
+                            let wrapped = WrappedMessage::BatchRecon(new_msg);
                             // Broadcast our computed `y_j` to all other parties.
-                            let encoded = bincode::serialize(&new_msg)
+                            let encoded = bincode::serialize(&wrapped)
                                 .map_err(BatchReconError::SerializationError)?;
                             let _ = net
                                 .broadcast(&encoded)
@@ -162,7 +159,7 @@ impl<F: FftField> BatchReconNode<F> {
                         }
                         Err(e) => {
                             warn!(self_id = self.id, "Interpolation of y_j failed: {:?}", e);
-                            return Err(BatchReconError::Inner(e));
+                            return Err(BatchReconError::InterpolateError(e));
                         }
                     }
                 }
@@ -178,32 +175,79 @@ impl<F: FftField> BatchReconNode<F> {
                 let y_j = F::deserialize_compressed(msg.payload.as_slice())
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
+                // Lock the session store to update the session state.
+                let session_store = self.get_or_create_store(msg.session_id).await;
+                // Lock the session-specific store to access or update the session state.
+                let mut store = session_store.lock().await;
+
                 // Store the received revealed `y_j` value if it's from a new sender.
-                if !self.reveals_received.iter().any(|s| s.id == sender_id) {
-                    self.reveals_received
-                        .push(RobustShamirShare::new(y_j, sender_id, self.t));
+                if !store.reveals_received.iter().any(|s| s.id == sender_id) {
+                    store
+                        .reveals_received
+                        .push(RobustShare::new(y_j, sender_id, self.t));
                 }
                 // Check if we have enough revealed `y_j` values and haven't already reconstructed the secrets.
-                if self.reveals_received.len() >= 2 * self.t + 1 && self.secrets.is_none() {
+                if store.reveals_received.len() >= 2 * self.t + 1 && store.secrets.is_none() {
                     info!(
                         self_id = self.id,
                         "Enough Reveals collected, interpolating secrets"
                     );
                     // Attempt to interpolate the polynomial whose coefficients are the original secrets.
-                    match RobustShamirShare::recover_secret(&self.reveals_received.clone()) {
+                    match RobustShare::recover_secret(&store.reveals_received.clone(), self.n) {
                         Ok((poly, _)) => {
                             let mut result = poly;
                             // Resize the coefficient vector to `t + 1` to get all secrets.
                             result.resize(self.t + 1, F::zero());
-                            self.secrets = Some(result);
+                            store.secrets = Some(result.clone());
                             info!(self_id = self.id, "Secrets successfully reconstructed");
+
+                            // Send the finalization message back to the triple generation or the
+                            // multiplication protocol.
+                            match msg.session_id.protocol().unwrap() {
+                                ProtocolType::Triple => {
+                                    let mut bytes_message = Vec::new();
+                                    result.serialize_compressed(&mut bytes_message)?;
+                                    let triple_gen_generic_msg =
+                                        WrappedMessage::Triple(TripleGenMessage::new(
+                                            self.id,
+                                            msg.session_id,
+                                            bytes_message,
+                                        ));
+                                    let bytes_generic_msg =
+                                        bincode::serialize(&triple_gen_generic_msg)?;
+                                    net.send(self.id, &bytes_generic_msg).await?;
+                                }
+                                ProtocolType::MulOne => {
+                                    let mut bytes_message = Vec::new();
+                                    result.serialize_compressed(&mut bytes_message)?;
+                                    let mult_generic_msg = WrappedMessage::Mul(MultMessage::new(
+                                        self.id,
+                                        msg.session_id,
+                                        bytes_message,
+                                    ));
+                                    let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
+                                    net.send(self.id, &bytes_generic_msg).await?;
+                                }
+                                ProtocolType::MulTwo => {
+                                    let mut bytes_message = Vec::new();
+                                    result.serialize_compressed(&mut bytes_message)?;
+                                    let mult_generic_msg = WrappedMessage::Mul(MultMessage::new(
+                                        self.id,
+                                        msg.session_id,
+                                        bytes_message,
+                                    ));
+                                    let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
+                                    net.send(self.id, &bytes_generic_msg).await?;
+                                }
+                                _ => return Ok(()),
+                            }
                         }
                         Err(e) => {
-                            warn!(
+                            error!(
                                 self_id = self.id, error = ?e,
                                 "Final secrets interpolation failed "
                             );
-                            return Err(BatchReconError::Inner(e));
+                            return Err(BatchReconError::InterpolateError(e));
                         }
                     }
                 }
@@ -213,13 +257,21 @@ impl<F: FftField> BatchReconNode<F> {
     }
     pub async fn process<N: Network>(
         &mut self,
-        raw_msg: Vec<u8>,
+        msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
-        let msg: BatchReconMsg =
-            bincode::deserialize(&raw_msg).map_err(|e| BatchReconError::SerializationError(e))?;
-
         self.batch_recon_handler(msg, net).await?;
         Ok(())
+    }
+
+    pub async fn get_or_create_store(
+        &self,
+        session_id: SessionId,
+    ) -> Arc<Mutex<BatchReconStore<F>>> {
+        let mut storage = self.store.lock().await;
+        storage
+            .entry(session_id)
+            .or_insert(Arc::new(Mutex::new(BatchReconStore::empty())))
+            .clone()
     }
 }

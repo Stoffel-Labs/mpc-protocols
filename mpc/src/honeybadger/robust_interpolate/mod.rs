@@ -23,5 +23,5 @@ pub enum InterpolateError {
     NoSuitableDomain(usize),
 
     #[error("inner error: {0}")]
-    Inner(#[from] ShareError),
+    ShareError(#[from] ShareError),
 }
