@@ -335,8 +335,8 @@ async fn gen_masks_for_input_e2e() {
 async fn mul_e2e() {
     setup_tracing();
     //----------------------------------------SETUP PARAMETERS----------------------------------------
-    let n_parties = 4;
-    let t = 1;
+    let n_parties = 16;
+    let t = 3;
     let session_id = SessionId::new(ProtocolType::Mul, 1111);
     let mut rng = test_rng();
 
@@ -407,7 +407,7 @@ async fn mul_e2e() {
 
     // Wait for all mul tasks to finish
     futures::future::join_all(handles).await;
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(std::time::Duration::from_millis(1000));
 
     //----------------------------------------VALIDATE VALUES----------------------------------------
 
@@ -437,7 +437,7 @@ async fn mul_e2e() {
     }
 
     for i in 0..(t + 1) {
-        let shares_for_i = per_multiplication_shares[i][0..=(t + 1)].to_vec();
+        let shares_for_i = per_multiplication_shares[i][0..=(2 * t)].to_vec();
         let (_, z_rec) =
             RobustShare::recover_secret(&shares_for_i, n_parties).expect("interpolate failed");
         let expected = x_values[i] * y_values[i];

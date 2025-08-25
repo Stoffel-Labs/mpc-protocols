@@ -532,7 +532,6 @@ impl RBC for Avid {
         }
         Ok(())
     }
-
     /// Broadcast messages to other nodes.
     async fn broadcast<N: Network + Send + Sync>(
         &self,
