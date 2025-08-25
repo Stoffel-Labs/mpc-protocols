@@ -454,49 +454,50 @@ async fn mul_e2e_with_preprocessing() {
     let t = 1;
     let no_of_triples = 2 * t + 1;
     let session_id = SessionId::new(ProtocolType::Mul, 1111);
-    let mut rng = test_rng();
+    let clientid: Vec<ClientId> = vec![100];
+    let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)]; // t+1 multiplications
 
     //Setup
-    let (network, receivers, _) = test_setup(n_parties, vec![]);
-
-    // Prepare inputs for multiplication
-    let mut x_values = Vec::new();
-    let mut y_values = Vec::new();
-
-    let mut x_inputs_per_node = vec![Vec::new(); n_parties];
-    let mut y_inputs_per_node = vec![Vec::new(); n_parties];
-
-    for _i in 0..(t + 1) {
-        let x_value = Fr::rand(&mut rng);
-        x_values.push(x_value);
-        let y_value = Fr::rand(&mut rng);
-        y_values.push(y_value);
-
-        let shares_x = RobustShare::compute_shares(x_value, n_parties, t, None, &mut rng).unwrap();
-        let shares_y = RobustShare::compute_shares(y_value, n_parties, t, None, &mut rng).unwrap();
-
-        for p in 0..n_parties {
-            x_inputs_per_node[p].push(shares_x[p].clone());
-            y_inputs_per_node[p].push(shares_y[p].clone());
-        }
-    }
+    let (network, receivers, mut client_recv) = test_setup(n_parties, clientid.clone());
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         no_of_triples,
-        2 * no_of_triples,
+        2 + 2 * no_of_triples,
         session_id,
     );
 
+    //Create nodes for InputClient
+    let mut client =
+        InputClient::<Fr, Avid>::new(clientid[0], n_parties, t, input_values.clone()).unwrap();
+
     //----------------------------------------RECIEVE----------------------------------------
-    // spawn tasks to process received messages
+    //At servers
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
+    //At client
+    let net_clone2 = network.clone();
+    let mut recv = client_recv.remove(&clientid[0]).unwrap();
+    tokio::spawn(async move {
+        while let Some(received) = recv.recv().await {
+            let wrapped: WrappedMessage = match bincode::deserialize(&received) {
+                Ok(w) => w,
+                Err(_) => continue,
+            };
+            match wrapped {
+                WrappedMessage::Input(msg) => match client.process(msg, net_clone2.clone()).await {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Processing error : {}", e),
+                },
+                _ => continue,
+            }
+        }
+    });
+
     //----------------------------------------RUN PREPROCESSING----------------------------------------
-    //Run preprocessing
     let mut handles = Vec::new();
     for pid in 0..n_parties {
         let mut node = nodes[pid].clone();
@@ -517,13 +518,43 @@ async fn mul_e2e_with_preprocessing() {
     futures::future::join_all(handles).await;
     std::thread::sleep(std::time::Duration::from_millis(300));
 
+    //----------------------------------------RUN INPUT----------------------------------------
+    for (_, node) in nodes.iter_mut().enumerate() {
+        let local_shares = node
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(2)
+            .unwrap();
+        match node
+            .preprocess
+            .input
+            .init(clientid[0], local_shares, 2, network.clone())
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                eprint!("{e}");
+            }
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     //----------------------------------------RUN MULTIPLICATION----------------------------------------
+
     let mut handles = Vec::new();
     for pid in 0..n_parties {
         let mut node = nodes[pid].clone();
         let net = network.clone();
-        let x_shares = x_inputs_per_node[pid].clone();
-        let y_shares = y_inputs_per_node[pid].clone();
+
+        let (x_shares, y_shares) = {
+            let input_store = node.preprocess.input.input_shares.lock().await;
+            let inputs = input_store.get(&clientid[0]).unwrap();
+            (
+                vec![inputs[0].clone(), inputs[1].clone()],
+                vec![inputs[0].clone(), inputs[1].clone()],
+            )
+        };
 
         let handle = tokio::spawn(async move {
             {
@@ -567,10 +598,10 @@ async fn mul_e2e_with_preprocessing() {
     }
 
     for i in 0..(t + 1) {
-        let shares_for_i = per_multiplication_shares[i][0..=(t + 1)].to_vec();
+        let shares_for_i = per_multiplication_shares[i][0..=2 * t].to_vec();
         let (_, z_rec) =
             RobustShare::recover_secret(&shares_for_i, n_parties).expect("interpolate failed");
-        let expected = x_values[i] * y_values[i];
+        let expected = input_values[i] * input_values[i];
 
         assert_eq!(z_rec, expected, "multiplication mismatch at index {}", i);
     }
