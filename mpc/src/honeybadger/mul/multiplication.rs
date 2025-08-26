@@ -85,11 +85,9 @@ impl<F: FftField> Multiply<F> {
         self.batch_recon
             .init_batch_reconstruct(&a_sub_x, session_id1, Arc::clone(&network))
             .await?;
-
         self.batch_recon
             .init_batch_reconstruct(&b_sub_y, session_id2, Arc::clone(&network))
             .await?;
-
         Ok(())
     }
 
@@ -97,7 +95,7 @@ impl<F: FftField> Multiply<F> {
         &self,
         msg: MultMessage,
     ) -> Result<Option<Vec<RobustShare<F>>>, MulError> {
-        //Get back original session id,Im assuming the protocol type is Mul here, it could be different
+        //Get back original session id, I'm assuming the protocol type is Mul here, it could be different
         let session_id = SessionId::new(ProtocolType::Mul, msg.session_id.context_id());
         let open_message: Vec<F> =
             CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;

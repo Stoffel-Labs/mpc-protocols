@@ -6,6 +6,7 @@ pub mod rbc;
 /// When wanting to implement your own custom MPC protocols that can plug
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
+pub mod types;
 
 use crate::{
     common::{
@@ -13,7 +14,6 @@ use crate::{
         share::ShareError,
     },
     honeybadger::{triple_gen::ShamirBeaverTriple, SessionId},
-
 };
 
 use ark_ff::{FftField, Zero};
@@ -105,6 +105,21 @@ impl<F: FftField, const N: usize, P> Add for ShamirShare<F, N, P> {
         }
 
         let new_share: [F; N] = std::array::from_fn(|i| self.share[i] + other.share[i]);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+            _sharetype: PhantomData,
+        })
+    }
+}
+
+impl<F: FftField, const N: usize, P> Sub<&F> for ShamirShare<F, N, P> {
+    type Output = Result<Self, ShareError>;
+
+    fn sub(self, other: &F) -> Self::Output {
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] - other);
 
         Ok(Self {
             share: new_share,
