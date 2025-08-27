@@ -1,5 +1,5 @@
 use crate::common::types::Error;
-use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use crate::common::ShamirShare;
 use ark_ff::FftField;
 use std::marker::PhantomData;
 use std::ops::{Add, Mul, Sub};
@@ -14,23 +14,23 @@ pub struct FixedPointPrecision {
 }
 
 /// Represents a fixed-point number shared among the parties.
-pub struct SecretFixedPoint<F>
+pub struct SecretFixedPoint<F, const N: usize, P>
 where
     F: FftField,
 {
     /// The secret share used to represent the fixed point number.
-    pub value: RobustShare<F>,
+    pub value: ShamirShare<F, N, P>,
     /// Precision of this fixed point number.
     pub precision: FixedPointPrecision,
     _field_type: PhantomData<F>,
 }
 
-impl<F> SecretFixedPoint<F>
+impl<F, const N: usize, P> SecretFixedPoint<F, N, P>
 where
     F: FftField,
 {
     /// Creates a new secret fixed point number.
-    pub fn new(value: RobustShare<F>, precision: FixedPointPrecision) -> Self {
+    pub fn new(value: ShamirShare<F, N, P>, precision: FixedPointPrecision) -> Self {
         Self {
             value,
             precision,
@@ -39,7 +39,7 @@ where
     }
 }
 
-impl<F> Mul<ClearFixedPoint<F>> for SecretFixedPoint<F>
+impl<F, const N: usize, P> Mul<ClearFixedPoint<F>> for SecretFixedPoint<F, N, P>
 where
     F: FftField,
 {
@@ -60,7 +60,7 @@ where
     }
 }
 
-impl<F> Add<ClearFixedPoint<F>> for SecretFixedPoint<F>
+impl<F, const N: usize, P> Add<ClearFixedPoint<F>> for SecretFixedPoint<F, N, P>
 where
     F: FftField,
 {
@@ -81,7 +81,7 @@ where
     }
 }
 
-impl<F> Sub<ClearFixedPoint<F>> for SecretFixedPoint<F>
+impl<F, const N: usize, P> Sub<ClearFixedPoint<F>> for SecretFixedPoint<F, N, P>
 where
     F: FftField,
 {
@@ -102,7 +102,7 @@ where
     }
 }
 
-impl<F> Add for SecretFixedPoint<F>
+impl<F, const N: usize, P> Add for SecretFixedPoint<F, N, P>
 where
     F: FftField,
 {
@@ -123,7 +123,7 @@ where
     }
 }
 
-impl<F> Sub for SecretFixedPoint<F>
+impl<F, const N: usize, P> Sub for SecretFixedPoint<F, N, P>
 where
     F: FftField,
 {

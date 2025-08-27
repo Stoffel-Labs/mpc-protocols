@@ -1,21 +1,20 @@
 use crate::common::types::Error;
-use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use crate::common::ShamirShare;
 use ark_ff::{FftField, PrimeField};
 use std::ops::{Add, Mul, Sub};
-
 // TODO: Include an arbitrary Share type.
 // TODO: Make it an API-friendly code.
 
 /// Represents a secret signed integer shared among the parties.
-pub struct SecretInt<F>
+pub struct SecretInt<F, const N: usize, P>
 where
     F: FftField,
 {
-    share: RobustShare<F>,
-    bit_length: usize,
+    pub share: ShamirShare<F, N, P>,
+    pub bit_length: usize,
 }
 
-impl<F> Mul<ClearInt<F>> for SecretInt<F>
+impl<F, const N: usize, P> Mul<ClearInt<F>> for SecretInt<F, N, P>
 where
     F: FftField,
 {
@@ -35,7 +34,7 @@ where
     }
 }
 
-impl<F> Sub<ClearInt<F>> for SecretInt<F>
+impl<F, const N: usize, P> Sub<ClearInt<F>> for SecretInt<F, N, P>
 where
     F: FftField,
 {
@@ -55,13 +54,13 @@ where
     }
 }
 
-impl<F> Sub for SecretInt<F>
+impl<F, const N: usize, P> Sub for SecretInt<F, N, P>
 where
     F: FftField,
 {
     type Output = Result<Self, Error>;
 
-    fn sub(self, rhs: SecretInt<F>) -> Self::Output {
+    fn sub(self, rhs: Self) -> Self::Output {
         if self.bit_length != rhs.bit_length {
             return Err(Error::IncompatibleIntegerPrecision {
                 current: self.bit_length,
@@ -75,7 +74,7 @@ where
     }
 }
 
-impl<F> Add<ClearInt<F>> for SecretInt<F>
+impl<F, const N: usize, P> Add<ClearInt<F>> for SecretInt<F, N, P>
 where
     F: FftField,
 {
@@ -95,13 +94,13 @@ where
     }
 }
 
-impl<F> Add for SecretInt<F>
+impl<F, const N: usize, P> Add for SecretInt<F, N, P>
 where
     F: FftField,
 {
     type Output = Result<Self, Error>;
 
-    fn add(self, rhs: SecretInt<F>) -> Self::Output {
+    fn add(self, rhs: Self) -> Self::Output {
         if self.bit_length != rhs.bit_length {
             return Err(Error::IncompatibleIntegerPrecision {
                 current: self.bit_length,
