@@ -158,3 +158,43 @@ where
         Self { value, precision }
     }
 }
+
+impl<F> Add for ClearFixedPoint<F>
+where
+    F: FftField,
+{
+    type Output = Result<Self, Error>;
+    fn add(self, rhs: Self) -> Self::Output {
+        if self.precision != rhs.precision {
+            Err(Error::IncompatibleFixedPointPrecision {
+                current: self.precision,
+                other: rhs.precision,
+            })
+        } else {
+            Ok(Self {
+                value: self.value + rhs.value,
+                precision: self.precision,
+            })
+        }
+    }
+}
+
+impl<F> Sub for ClearFixedPoint<F>
+where
+    F: FftField,
+{
+    type Output = Result<Self, Error>;
+    fn sub(self, rhs: Self) -> Self::Output {
+        if self.precision != rhs.precision {
+            Err(Error::IncompatibleFixedPointPrecision {
+                current: self.precision,
+                other: rhs.precision,
+            })
+        } else {
+            Ok(Self {
+                value: self.value - rhs.value,
+                precision: self.precision,
+            })
+        }
+    }
+}
