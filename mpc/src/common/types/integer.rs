@@ -2,16 +2,40 @@ use crate::common::types::Error;
 use crate::common::ShamirShare;
 use ark_ff::{FftField, PrimeField};
 use std::ops::{Add, Mul, Sub};
-// TODO: Include an arbitrary Share type.
-// TODO: Make it an API-friendly code.
 
 /// Represents a secret signed integer shared among the parties.
+///
+/// The fields of this struct are private to prevent erroneous mutation of the precision and the
+/// share. The share and the bit size must be consistent in that the integer representation must
+/// fit into the field to guarantee correctness.
 pub struct SecretInt<F, const N: usize, P>
 where
     F: FftField,
 {
-    pub share: ShamirShare<F, N, P>,
-    pub bit_length: usize,
+    share: ShamirShare<F, N, P>,
+    bit_length: usize,
+}
+
+impl<F, const N: usize, P> SecretInt<F, N, P>
+where
+    F: FftField,
+{
+    pub fn new(share: ShamirShare<F, N, P>, bit_length: usize) -> Self {
+        assert!(
+            ((bit_length) as u32) < F::BasePrimeField::MODULUS_BIT_SIZE,
+            "the bit length of the resulting multiplication does not fit into the field"
+        );
+
+        Self { share, bit_length }
+    }
+
+    pub fn share(&self) -> &ShamirShare<F, N, P> {
+        &self.share
+    }
+
+    pub fn bit_length(&self) -> usize {
+        self.bit_length
+    }
 }
 
 impl<F, const N: usize, P> Mul<ClearInt<F>> for SecretInt<F, N, P>
@@ -27,6 +51,12 @@ where
                 other: rhs.bit_length,
             });
         }
+        // Multiplying two signed integers with bit length k can result in an integer of 2k bits,
+        // hence, we need to check that the multiplication fits into the current bit length.
+        assert!(
+            ((2 * self.bit_length) as u32) < F::BasePrimeField::MODULUS_BIT_SIZE,
+            "the bit length of the resulting multiplication does not fit into the field"
+        );
         Ok(Self {
             share: (self.share * rhs.value)?,
             bit_length: self.bit_length,
@@ -115,6 +145,10 @@ where
 }
 
 /// Represents a public signed integer shared among the parties.
+///
+/// The fields of this struct are private to prevent erroneous mutation of the precision and the
+/// share. The share and the bit size must be consistent in that the integer representation must
+/// fit into the field to guarantee correctness.
 pub struct ClearInt<F: FftField> {
     /// Clear value encoding the clear integer.
     value: F,
@@ -130,7 +164,10 @@ where
     ///
     /// The `bit_length` must satisfy that `2 ^ bit_length < q` to avoid overflow.
     fn new(value: F, bit_length: usize) -> Self {
-        assert!((1 << bit_length) < F::BasePrimeField::MODULUS_BIT_SIZE);
+        assert!(
+            (bit_length as u32) < F::BasePrimeField::MODULUS_BIT_SIZE,
+            "the bit length in the representation does not fit into the field"
+        );
         Self { value, bit_length }
     }
 }

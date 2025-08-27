@@ -1,6 +1,6 @@
 use crate::common::types::Error;
 use crate::common::ShamirShare;
-use ark_ff::FftField;
+use ark_ff::{FftField, PrimeField};
 use std::marker::PhantomData;
 use std::ops::{Add, Mul, Sub};
 
@@ -8,20 +8,39 @@ use std::ops::{Add, Mul, Sub};
 #[derive(Copy, Debug, Clone, PartialEq)]
 pub struct FixedPointPrecision {
     /// Total number of bits in the fixed point representation.
-    pub k: usize,
+    k: usize,
     /// Number of bits spent in the fractional fragment.
-    pub f: usize,
+    f: usize,
+}
+
+impl FixedPointPrecision {
+    pub fn new(k: usize, f: usize) -> Self {
+        assert!(f < k, "the number of bits in the fractional fragment must be less than the total number of bits for the representation");
+        Self { k, f }
+    }
+
+    pub fn k(&self) -> usize {
+        self.k
+    }
+
+    pub fn f(&self) -> usize {
+        self.f
+    }
 }
 
 /// Represents a fixed-point number shared among the parties.
+///
+/// The fields of this struct are private to prevent erroneous mutation of the precision and the
+/// share. The share and the bit size must be consistent in that the integer representation must
+/// fit into the field to guarantee correctness.
 pub struct SecretFixedPoint<F, const N: usize, P>
 where
     F: FftField,
 {
     /// The secret share used to represent the fixed point number.
-    pub value: ShamirShare<F, N, P>,
+    value: ShamirShare<F, N, P>,
     /// Precision of this fixed point number.
-    pub precision: FixedPointPrecision,
+    precision: FixedPointPrecision,
     _field_type: PhantomData<F>,
 }
 
@@ -30,12 +49,27 @@ where
     F: FftField,
 {
     /// Creates a new secret fixed point number.
+    ///
+    /// When we crate a new fixed point value, we must check that the created element fits into the
+    /// field.
     pub fn new(value: ShamirShare<F, N, P>, precision: FixedPointPrecision) -> Self {
+        assert!(
+            (precision.k as u32) < F::BasePrimeField::MODULUS_BIT_SIZE,
+            "the precision does not fit into the field"
+        );
         Self {
             value,
             precision,
             _field_type: PhantomData,
         }
+    }
+
+    pub fn value(&self) -> &ShamirShare<F, N, P> {
+        &self.value
+    }
+
+    pub fn precision(&self) -> &FixedPointPrecision {
+        &self.precision
     }
 }
 
@@ -52,6 +86,12 @@ where
                 other: rhs.precision,
             });
         }
+        // Multiplying two fixed point with bit length k can result in an integer of 2k bits,
+        // hence, we need to check that the multiplication fits into the current field.
+        assert!(
+            ((self.precision.k * 2) as u32) < F::BasePrimeField::MODULUS_BIT_SIZE,
+            "the resulting precision of the operation does not fit into the field"
+        );
         Ok(Self {
             value: (self.value * rhs.value)?,
             precision: self.precision,
@@ -145,6 +185,10 @@ where
 }
 
 /// Represents a public fixed-point number.
+///
+/// The fields of this struct are private to prevent erroneous mutation of the precision and the
+/// share. The share and the bit size must be consistent in that the integer representation must
+/// fit into the field to guarantee correctness.
 pub struct ClearFixedPoint<F: FftField> {
     value: F,
     precision: FixedPointPrecision,
@@ -154,8 +198,24 @@ impl<F> ClearFixedPoint<F>
 where
     F: FftField,
 {
+    /// Creates a new secret fixed point number.
+    ///
+    /// When we crate a new fixed point value, we must check that the created element fits into the
+    /// field.
     pub fn new(value: F, precision: FixedPointPrecision) -> Self {
+        assert!(
+            (precision.k as u32) < F::BasePrimeField::MODULUS_BIT_SIZE,
+            "the precision does not fit into the field"
+        );
         Self { value, precision }
+    }
+
+    pub fn value(&self) -> &F {
+        &self.value
+    }
+
+    pub fn precision(&self) -> &FixedPointPrecision {
+        &self.precision
     }
 }
 
