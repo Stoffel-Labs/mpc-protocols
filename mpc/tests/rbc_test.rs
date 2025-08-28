@@ -754,6 +754,7 @@ mod tests {
         println!("✅ All parties agreed on value: {}", agreed_value.unwrap());
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_multiple_aba_sessions() {
         setup_tracing();

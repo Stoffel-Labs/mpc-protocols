@@ -12,8 +12,7 @@ use crate::{
         rbc::{rbc_store::Msg, RbcError},
         share::ShareError,
     },
-    honeybadger::{triple_gen::ShamirBeaverTriple, SessionId},
-
+    honeybadger::SessionId,
 };
 
 use ark_ff::{FftField, Zero};
@@ -27,7 +26,7 @@ use std::{
     sync::Arc,
     usize,
 };
-use stoffelmpc_network::Network;
+use stoffelnet::network_utils::{Network, PartyId};
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
@@ -212,6 +211,7 @@ pub trait RBC: Send + Sync {
         Self: Sized;
     /// Returns the unique identifier of the current party.
     fn id(&self) -> usize;
+    async fn clear_store(&self);
     /// Required for initiating the broadcast
     async fn init<N: Network + Send + Sync>(
         &self,
@@ -253,11 +253,11 @@ where
     type MPCOpts;
     type Error: std::fmt::Debug;
 
-    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error>;
-
-    async fn init(&mut self, network: Arc<N>, opts: Self::MPCOpts)
+    fn setup(id: PartyId, params: Self::MPCOpts) -> Result<Self, Self::Error>
     where
-        N: 'async_trait;
+        Self: Sized;
+
+    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error>;
 
     async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
     where
@@ -275,7 +275,7 @@ where
         &mut self,
         network: Arc<N>,
         rng: &mut R,
-    ) -> Result<Vec<ShamirBeaverTriple<F>>, Self::Error>
+    ) -> Result<(), Self::Error>
     where
         N: 'async_trait,
         R: Rng + Send;

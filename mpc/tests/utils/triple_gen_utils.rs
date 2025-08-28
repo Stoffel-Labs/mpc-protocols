@@ -19,14 +19,13 @@ use tracing::{debug, warn};
 pub fn create_nodes(
     n_parties: usize,
     threshold: usize,
-    n_triple: usize,
 ) -> (Vec<Arc<Mutex<TripleGenNode<Fr>>>>, Vec<Receiver<SessionId>>) {
     let mut receivers = vec![];
     let triple_gen_nodes = (0..n_parties)
         .map(|id| {
             let (triple_sender, triple_receiver) = mpsc::channel(128);
             let triple_gen_node =
-                TripleGenNode::new(id, n_parties, threshold, n_triple, triple_sender).unwrap();
+                TripleGenNode::new(id, n_parties, threshold, triple_sender).unwrap();
             receivers.push(triple_receiver);
             Arc::new(Mutex::new(triple_gen_node))
         })

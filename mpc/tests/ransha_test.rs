@@ -16,7 +16,8 @@ use stoffelmpc_mpc::{
         ProtocolType, SessionId, WrappedMessage,
     },
 };
-use tokio::task::JoinSet;
+use stoffelmpc_network::fake_network::FakeNetwork;
+use tokio::{sync::mpsc, task::JoinSet};
 use tracing::warn;
 
 pub mod utils;
@@ -48,7 +49,9 @@ async fn test_reconstruct_handler_incorrect_share() {
         shares_ri_t[i].share[0] += Fr::from(7u64);
     }
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid>(n_parties, t, 0, 0, session_id);
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties, t, 0, 0, session_id,
+    );
 
     // receiver randousha node
     let mut ransha_node = nodes.get(receiver_id).unwrap().clone();
@@ -142,13 +145,14 @@ async fn test_output_handler() {
     let (network, _receivers, _) = test_setup(n_parties, vec![]);
     let (_, shares_si_t) = construct_e2e_input_ransha(n_parties, degree_t);
     let receiver_id = 1;
+    let (sender, _receiver_ch) = mpsc::channel(128);
 
     // create receiver randousha node
     let mut ransha_node: RanShaNode<Fr, Avid> =
-        RanShaNode::new(receiver_id, n_parties, threshold, threshold + 1).unwrap();
+        RanShaNode::new(receiver_id, n_parties, threshold, threshold + 1, sender).unwrap();
     // call init_handler to create random share
     ransha_node
-        .init(
+        .init_ransha(
             shares_si_t[receiver_id].clone(),
             session_id,
             Arc::clone(&network),
@@ -158,8 +162,8 @@ async fn test_output_handler() {
 
     let node_store = ransha_node.get_or_create_store(session_id).await;
 
-    // first n-(t+1)-1 message should return error
-    for i in 0..(n_parties - 2 * threshold - 1) {
+    // first 2t-1 message should return error
+    for i in 0..(2 * threshold - 1) {
         let output_message = RanShaMessage::new(
             i,
             RanShaMessageType::OutputMessage,
@@ -170,8 +174,8 @@ async fn test_output_handler() {
         let e = result.expect_err("should return waitForOk");
         assert_eq!(e.to_string(), RanShaError::WaitForOk.to_string());
     }
-    // check the store (n-(t+1)-1 shares)
-    assert!(node_store.lock().await.received_ok_msg.len() == (n_parties - 2 * threshold - 1));
+    // check the store 2t-1 shares)
+    assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold - 1));
 
     // existed id should not be counted
     let output_message = RanShaMessage::new(
@@ -185,7 +189,7 @@ async fn test_output_handler() {
         .await
         .expect_err("should return waitForOk");
     assert_eq!(e.to_string(), RanShaError::WaitForOk.to_string());
-    assert!(node_store.lock().await.received_ok_msg.len() == (n_parties - 2 * threshold - 1));
+    assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold - 1));
 
     // should return abort once received false outputMessage
     let output_message = RanShaMessage::new(
@@ -199,7 +203,7 @@ async fn test_output_handler() {
         .await
         .expect_err("should return abort");
     assert_eq!(e.to_string(), RanShaError::Abort.to_string());
-    assert!(node_store.lock().await.received_ok_msg.len() == (n_parties - 2 * threshold - 1));
+    assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold - 1));
 
     let output_message = RanShaMessage::new(
         n_parties,
@@ -210,13 +214,13 @@ async fn test_output_handler() {
     ransha_node
         .output_handler(output_message)
         .await
-        .expect("should return vec");
+        .expect("output handler should not fail");
 
     let v = node_store.lock().await.protocol_output.clone();
-    assert!(v.len() == threshold + 1);
+    assert!(v.len() == n_parties - 2 * threshold);
     for share_t1 in v {
         assert!(share_t1.degree == threshold);
     }
-    assert!(node_store.lock().await.received_ok_msg.len() == (n_parties - 2 * threshold));
+    assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold));
     assert!(node_store.lock().await.state == RanShaState::Finished);
 }

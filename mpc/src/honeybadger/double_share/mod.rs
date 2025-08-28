@@ -9,7 +9,7 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelmpc_network::{NetworkError, PartyId};
+use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 

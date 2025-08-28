@@ -1,5 +1,5 @@
 use bincode::ErrorKind;
-use stoffelmpc_network::NetworkError;
+use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 pub mod rbc;
 pub mod rbc_store;
