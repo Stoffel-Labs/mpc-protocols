@@ -21,6 +21,7 @@ pub mod triple_gen;
 
 pub mod input;
 pub mod mul;
+pub mod output;
 pub mod share_gen;
 
 use crate::{
@@ -98,13 +99,13 @@ pub struct HoneyBadgerMPCNode<F: FftField, R: RBC> {
     // Preprocessing parameters.
     pub params: HoneyBadgerMPCNodeOpts,
     pub preprocess: PreprocessNodes<F, R>,
-    pub operations: Operation<F>,
+    pub operations: Operation<F, R>,
     pub output: OutputChannels,
 }
 
 #[derive(Clone, Debug)]
-pub struct Operation<F: FftField> {
-    pub mul: Multiply<F>,
+pub struct Operation<F: FftField, R: RBC> {
+    pub mul: Multiply<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -195,15 +196,17 @@ where
 /// Configuration options for the HoneyBadgerMPCNode protocol.
 pub struct HoneyBadgerMPCNodeOpts {
     /// Number of parties in the protocol.
+    /// Minimum 5 for hbmpc
     pub n_parties: usize,
     /// Upper bound of corrupt parties.
     pub threshold: usize,
     /// Number of random double sharing pairs that need to be generated.
     pub n_triples: usize,
     /// Number of random shares needed.
+    /// This is usually = No of inputs + 2 * no of triples
     pub n_random_shares: usize,
-    /// Session ID
-    pub session_id: SessionId,
+    /// Instance ID
+    pub instance_id: u64,
 }
 
 impl HoneyBadgerMPCNodeOpts {
@@ -213,14 +216,14 @@ impl HoneyBadgerMPCNodeOpts {
         threshold: usize,
         n_triples: usize,
         n_random_shares: usize,
-        session_id: SessionId,
+        instance_id: u64,
     ) -> Self {
         Self {
             n_parties,
             threshold,
             n_triples,
             n_random_shares,
-            session_id,
+            instance_id,
         }
     }
 }
@@ -297,7 +300,6 @@ where
     ) -> Result<Vec<RobustShare<F>>, Self::Error> {
         // Both lists must have the same length.
         assert_eq!(x.len(), y.len());
-        assert_eq!(x.len(), self.params.threshold + 1);
 
         let (no_triples, _) = {
             let store = self.preprocessing_material.lock().await;
@@ -315,7 +317,7 @@ where
             .await
             .take_beaver_triples(x.len())?;
 
-        let session_id = self.params.session_id;
+        let session_id = SessionId::new(ProtocolType::Mul, 0, 0, self.params.instance_id);
 
         // Call the mul function
         self.operations
@@ -325,7 +327,7 @@ where
 
         let mut rx = self.output.mul_channel.lock().await;
         while let Some(id) = rx.recv().await {
-            if id == self.params.session_id {
+            if id == session_id {
                 let mul_store = self.operations.mul.mult_storage.lock().await;
                 if let Some(mul_lock) = mul_store.get(&id) {
                     let store = mul_lock.lock().await;
@@ -340,7 +342,7 @@ where
         let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
 
         match wrapped {
-            WrappedMessage::Rbc(rbc_msg) => match rbc_msg.session_id.protocol() {
+            WrappedMessage::Rbc(rbc_msg) => match rbc_msg.session_id.calling_protocol() {
                 Some(ProtocolType::Randousha) => {
                     self.preprocess
                         .ran_dou_sha
@@ -354,6 +356,7 @@ where
                 Some(ProtocolType::Input) => {
                     self.preprocess.input.rbc.process(rbc_msg, net).await?
                 }
+                Some(ProtocolType::Mul) => self.operations.mul.rbc.process(rbc_msg, net).await?,
                 _ => {
                     warn!(
                         "Unknown protocol ID in session ID: {:?} in RBC",
@@ -380,35 +383,30 @@ where
             WrappedMessage::Triple(triple_msg) => {
                 self.preprocess.triple_gen.process(triple_msg).await?;
             }
-            WrappedMessage::BatchRecon(batch_msg) => match batch_msg.session_id.protocol() {
-                Some(ProtocolType::MulOne) => {
-                    self.operations
-                        .mul
-                        .batch_recon
-                        .process(batch_msg, net)
-                        .await?
+            WrappedMessage::BatchRecon(batch_msg) => {
+                match batch_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::Mul) => {
+                        self.operations
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?
+                    }
+                    Some(ProtocolType::Triple) => {
+                        self.preprocess
+                            .triple_gen
+                            .batch_recon_node
+                            .process(batch_msg, net)
+                            .await?
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} at Batch reconstruction",
+                            batch_msg.session_id
+                        );
+                    }
                 }
-                Some(ProtocolType::MulTwo) => {
-                    self.operations
-                        .mul
-                        .batch_recon
-                        .process(batch_msg, net)
-                        .await?
-                }
-                Some(ProtocolType::Triple) => {
-                    self.preprocess
-                        .triple_gen
-                        .batch_recon_node
-                        .process(batch_msg, net)
-                        .await?
-                }
-                _ => {
-                    warn!(
-                        "Unknown protocol ID in session ID: {:?} at Batch reconstruction",
-                        batch_msg.session_id
-                    );
-                }
-            },
+            }
         }
 
         Ok(())
@@ -475,6 +473,7 @@ where
             .await
             .take_random_shares(no_of_triples)?;
 
+        //Outputs 2t+1 triples at a time
         let group_size = 2 * self.params.threshold + 1;
         assert!(no_of_triples % group_size == 0);
 
@@ -483,10 +482,8 @@ where
         let r_chunks = ran_dou_sha_pair[0..no_of_triples].chunks_exact(group_size);
 
         for (i, ((a, b), r)) in a_chunks.zip(b_chunks).zip(r_chunks).enumerate() {
-            let sessionid = SessionId::new(
-                ProtocolType::Triple,
-                self.params.session_id.context_id() + i as u64,
-            );
+            let sessionid =
+                SessionId::new(ProtocolType::Triple, 0, i as u8, self.params.instance_id);
             self.preprocess
                 .triple_gen
                 .init(
@@ -502,20 +499,22 @@ where
             // Step 4. Collect triples
             // ------------------------
             if let Some(sid) = self.output.triple_channel.lock().await.recv().await {
-                let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
-                let triple_storage_mutex = triple_gen_db.remove(&sid).unwrap();
-                let triple_storage = triple_storage_mutex.lock().await;
-                let triples = triple_storage.protocol_output.clone();
+                if sid == sessionid {
+                    let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
+                    let triple_storage_mutex = triple_gen_db.remove(&sid).unwrap();
+                    let triple_storage = triple_storage_mutex.lock().await;
+                    let triples = triple_storage.protocol_output.clone();
 
-                self.preprocessing_material
-                    .lock()
-                    .await
-                    .add(Some(triples), None);
-                self.preprocess
-                    .triple_gen
-                    .batch_recon_node
-                    .clear_store()
-                    .await;
+                    self.preprocessing_material
+                        .lock()
+                        .await
+                        .add(Some(triples), None);
+                    self.preprocess
+                        .triple_gen
+                        .batch_recon_node
+                        .clear_store()
+                        .await;
+                }
             }
         }
         Ok(())
@@ -545,7 +544,7 @@ where
         // How many more do we need?
         let missing = self.params.n_random_shares.saturating_sub(no_shares);
 
-        // Run in batches of (n-2t)
+        // Outputs in batches of (n-2t)
         let batch = self.params.n_parties - 2 * self.params.threshold;
         let run = (missing + batch - 1) / batch; // ceil(missing / batch)
 
@@ -557,10 +556,8 @@ where
         for i in 0..run {
             info!("Random share generation run {}", i);
 
-            let sessionid = SessionId::new(
-                ProtocolType::Ransha,
-                self.params.session_id.context_id() + 2 * i as u64,
-            );
+            let sessionid =
+                SessionId::new(ProtocolType::Ransha, 0, i as u8, self.params.instance_id);
 
             // Run ShareGen protocol
             self.preprocess
@@ -614,12 +611,9 @@ where
         let run = (missing + batch - 1) / batch; // ceil(missing / batch)
 
         for i in 0..run {
-            let sessionid = SessionId::new(
-                ProtocolType::Randousha,
-                self.params.session_id.context_id() + 2 * i as u64,
-            );
+            let sessionid =
+                SessionId::new(ProtocolType::Randousha, 0, i as u8, self.params.instance_id);
 
-            // Ensure we have double shares
             let double_shares = self
                 .ensure_double_shares(sessionid, network.clone(), rng)
                 .await?;
@@ -636,11 +630,13 @@ where
                 .await?;
 
             if let Some(sid) = self.output.ran_dou_sha_channel.lock().await.recv().await {
-                let mut ran_dou_sha_db = self.preprocess.ran_dou_sha.store.lock().await;
-                let ran_dou_sha_storage_mutex = ran_dou_sha_db.remove(&sid).unwrap();
-                let storage = ran_dou_sha_storage_mutex.lock().await;
-                pair.extend(storage.protocol_output.clone());
-                self.preprocess.ran_dou_sha.rbc.clear_store().await;
+                if sid == sessionid {
+                    let mut ran_dou_sha_db = self.preprocess.ran_dou_sha.store.lock().await;
+                    let ran_dou_sha_storage_mutex = ran_dou_sha_db.remove(&sid).unwrap();
+                    let storage = ran_dou_sha_storage_mutex.lock().await;
+                    pair.extend(storage.protocol_output.clone());
+                    self.preprocess.ran_dou_sha.rbc.clear_store().await;
+                }
             }
         }
 
@@ -665,10 +661,12 @@ where
 
         let mut dou_sha = Vec::new();
         if let Some(sid) = self.output.dou_sha_channel.lock().await.recv().await {
-            let mut dou_sha_db = self.preprocess.dou_sha.storage.lock().await;
-            let dou_sha_storage_mutex = dou_sha_db.remove(&sid).unwrap();
-            let dou_sha_storage = dou_sha_storage_mutex.lock().await;
-            dou_sha = dou_sha_storage.protocol_output.clone();
+            if sid == sessionid {
+                let mut dou_sha_db = self.preprocess.dou_sha.storage.lock().await;
+                let dou_sha_storage_mutex = dou_sha_db.remove(&sid).unwrap();
+                let dou_sha_storage = dou_sha_storage_mutex.lock().await;
+                dou_sha = dou_sha_storage.protocol_output.clone();
+            }
         }
 
         Ok(dou_sha)
@@ -693,6 +691,7 @@ pub enum WrappedMessage {
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProtocolType {
+    None = 0,
     Randousha = 1,
     Ransha = 2,
     Input = 3,
@@ -700,9 +699,7 @@ pub enum ProtocolType {
     Triple = 5,
     BatchRecon = 6,
     Dousha = 7,
-    MulOne = 8,
-    MulTwo = 9,
-    Mul = 10,
+    Mul = 8,
 }
 
 impl TryFrom<u16> for ProtocolType {
@@ -710,6 +707,7 @@ impl TryFrom<u16> for ProtocolType {
 
     fn try_from(value: u16) -> Result<Self, Self::Error> {
         match value {
+            0 => Ok(ProtocolType::None),
             1 => Ok(ProtocolType::Randousha),
             2 => Ok(ProtocolType::Ransha),
             3 => Ok(ProtocolType::Input),
@@ -717,9 +715,7 @@ impl TryFrom<u16> for ProtocolType {
             5 => Ok(ProtocolType::Triple),
             6 => Ok(ProtocolType::BatchRecon),
             7 => Ok(ProtocolType::Dousha),
-            8 => Ok(ProtocolType::MulOne),
-            9 => Ok(ProtocolType::MulTwo),
-            10 => Ok(ProtocolType::Mul),
+            8 => Ok(ProtocolType::Mul),
             _ => Err(()),
         }
     }
@@ -729,19 +725,35 @@ impl TryFrom<u16> for ProtocolType {
 pub struct SessionId(u64);
 
 impl SessionId {
-    pub fn new(protocol: ProtocolType, context_id: u64) -> Self {
-        // upper 16 bits = protocol, lower 48 bits = context id
-        let value = ((protocol as u64) << 48) | (context_id & 0x0000_FFFF_FFFF_FFFF);
+    pub fn new(caller: ProtocolType, sub_id: u8, round_id: u8, instance_id: u64) -> Self {
+        // Ensure instance_id fits in 44 bits
+        let instance_id = instance_id & 0x0000_0FFF_FFFF_FFFF;
+        let value = ((caller as u64 & 0xF) << 60)
+            | ((sub_id as u64 & 0xFF) << 52)
+            | ((round_id as u64 & 0xFF) << 44)
+            | instance_id;
         SessionId(value)
     }
 
-    pub fn protocol(self) -> Option<ProtocolType> {
-        let proto = ((self.0 >> 48) & 0xFFFF) as u16;
-        ProtocolType::try_from(proto).ok()
+    //First 4 bits
+    pub fn calling_protocol(self) -> Option<ProtocolType> {
+        let val = ((self.0 >> 60) & 0xF) as u16;
+        ProtocolType::try_from(val).ok()
     }
 
-    pub fn context_id(self) -> u64 {
-        self.0 & 0x0000_FFFF_FFFF_FFFF
+    //Second 8 bits
+    pub fn sub_id(self) -> u8 {
+        ((self.0 >> 52) & 0xFF) as u8
+    }
+
+    //Third 8 bits
+    pub fn round_id(self) -> u8 {
+        ((self.0 >> 44) & 0xFF) as u8
+    }
+
+    //Last 44 bits
+    pub fn instance_id(self) -> u64 {
+        self.0 & 0x0000_0FFF_FFFF_FFFF
     }
 
     pub fn as_u64(self) -> u64 {

@@ -344,7 +344,9 @@ where
                 // if the verification succeeds, broadcast true (aka. OK)
                 let sessionid = SessionId::new(
                     ProtocolType::Randousha,
-                    msg.session_id.as_u64() + self.id as u64,
+                    self.id as u8,
+                    msg.session_id.round_id(),
+                    msg.session_id.instance_id(),
                 );
                 self.rbc
                     .init(

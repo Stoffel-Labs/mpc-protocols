@@ -1,13 +1,16 @@
 use crate::{
-    common::share::ShareError,
+    common::{rbc::RbcError, share::ShareError},
     honeybadger::{
-        batch_recon::BatchReconError, robust_interpolate::robust_interpolate::RobustShare,
+        batch_recon::BatchReconError,
+        robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId,
     },
 };
 use ark_ff::FftField;
-use ark_serialize::SerializationError;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
+use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
@@ -26,11 +29,14 @@ pub struct MultStorage<F>
 where
     F: FftField,
 {
-    pub output_open_mult: (Option<Vec<F>>, Option<Vec<F>>),
+    pub no_of_mul: Option<usize>,
+    pub output_open_mult1: HashMap<u8, Vec<F>>,
+    pub output_open_mult2: HashMap<u8, Vec<F>>,
     pub inputs: (Vec<RobustShare<F>>, Vec<RobustShare<F>>),
     pub protocol_state: MultProtocolState,
     pub protocol_output: Vec<RobustShare<F>>,
     pub share_mult_from_triple: Vec<RobustShare<F>>,
+    pub received_shares: HashMap<PartyId, (Vec<RobustShare<F>>, Vec<RobustShare<F>>)>,
 }
 
 impl<F> MultStorage<F>
@@ -39,11 +45,14 @@ where
 {
     pub fn empty() -> Self {
         Self {
-            output_open_mult: (None, None),
+            no_of_mul: None,
+            output_open_mult1: HashMap::new(),
+            output_open_mult2: HashMap::new(),
             inputs: (Vec::new(), Vec::new()),
             protocol_state: MultProtocolState::NotInitialized,
             protocol_output: Vec::new(),
             share_mult_from_triple: Vec::new(),
+            received_shares: HashMap::new(),
         }
     }
 }
@@ -56,6 +65,8 @@ pub enum MulError {
     NetworkError(#[from] NetworkError),
     #[error("Shard Error: {0:?}")]
     ShareError(#[from] ShareError),
+    #[error("error in the RBC: {0:?}")]
+    RbcError(#[from] RbcError),
     #[error("error while serializing an arkworks object: {0:?}")]
     ArkSerialization(#[from] SerializationError),
     #[error("error while serializing an arkworks object: {0:?}")]
@@ -64,6 +75,16 @@ pub enum MulError {
     SendError(#[from] SendError<SessionId>),
     #[error("Batch reconstruction error : {0:?}")]
     BatchReconError(#[from] BatchReconError),
+    #[error("Duplicate input: {0}")]
+    Duplicate(String),
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+    #[error("error during the serialization using bincode: {0:?}")]
+    BincodeSerializationError(#[from] Box<ErrorKind>),
+    #[error("Interpolate error: {0:?}")]
+    InterpolateError(#[from] InterpolateError),
+    #[error("waiting for more openings")]
+    WaitForOk,
 }
 
 /// Generic message for the multiplication protocol.
@@ -88,5 +109,21 @@ impl MultMessage {
             session_id,
             payload,
         }
+    }
+}
+
+#[derive(CanonicalDeserialize, CanonicalSerialize)]
+pub struct ReconstructionMessage<F: FftField> {
+    pub a_sub_x: Vec<RobustShare<F>>,
+    pub b_sub_x: Vec<RobustShare<F>>,
+}
+
+impl<F> ReconstructionMessage<F>
+where
+    F: FftField,
+{
+    /// Creates a message for the reconstruction phase.
+    pub fn new(a_sub_x: Vec<RobustShare<F>>, b_sub_x: Vec<RobustShare<F>>) -> Self {
+        Self { a_sub_x, b_sub_x }
     }
 }

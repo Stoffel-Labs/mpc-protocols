@@ -29,7 +29,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let payload = b"Hello, MPC!".to_vec();
-        let session_id = SessionId::new(ProtocolType::Rbc, 12);
+        let session_id = SessionId::new(ProtocolType::Rbc, 0, 0, 12);
 
         let (parties, net, receivers) =
             setup_network_and_parties::<Bracha, FakeNetwork>(n, t, t + 1, 500)
@@ -73,9 +73,9 @@ mod tests {
         let n = 4;
         let t = 1;
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, 101),
-            SessionId::new(ProtocolType::Rbc, 102),
-            SessionId::new(ProtocolType::Rbc, 103),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 101),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 102),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 103),
         ];
         let payloads = vec![
             b"Payload A".to_vec(),
@@ -125,10 +125,10 @@ mod tests {
         let n = 4;
         let t = 1;
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, 10),
-            SessionId::new(ProtocolType::Rbc, 20),
-            SessionId::new(ProtocolType::Rbc, 30),
-            SessionId::new(ProtocolType::Rbc, 40),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 10),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 20),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 30),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 40),
         ];
         let payloads = vec![
             b"From Party 0".to_vec(),
@@ -179,7 +179,7 @@ mod tests {
 
         let n = 4;
         let t = 1;
-        let session_id = SessionId::new(ProtocolType::Rbc, 11);
+        let session_id = SessionId::new(ProtocolType::Rbc, 0, 0, 11);
         let payload = b"out-of-order".to_vec();
 
         let (parties, net, receivers) =
@@ -311,7 +311,7 @@ mod tests {
                 n,
                 t,
                 k,
-                SessionId::new(ProtocolType::Rbc, 100),
+                SessionId::new(ProtocolType::Rbc, 0, 0, 100),
                 payload.clone(),
             )
             .await;
@@ -326,10 +326,10 @@ mod tests {
         let t = 1;
 
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, 10),
-            SessionId::new(ProtocolType::Rbc, 20),
-            SessionId::new(ProtocolType::Rbc, 30),
-            SessionId::new(ProtocolType::Rbc, 40),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 10),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 20),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 30),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 40),
         ];
         let payloads = vec![
             b"From Party 0".to_vec(),
@@ -381,7 +381,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = 2;
-        let session_id = SessionId::new(ProtocolType::Rbc, 11);
+        let session_id = SessionId::new(ProtocolType::Rbc, 0, 0, 11);
         let payload = b"out-of-order".to_vec();
 
         let (parties, net, receivers) =
@@ -451,7 +451,7 @@ mod tests {
         let n = 7;
         let t = 2;
         let payload = b"crash fault test".to_vec();
-        let session_id = SessionId::new(ProtocolType::Rbc, 2025);
+        let session_id = SessionId::new(ProtocolType::Rbc, 0, 0, 2025);
 
         let (parties, net, receivers) =
             setup_network_and_parties::<Bracha, FakeNetwork>(n, t, t + 1, 500)
@@ -562,7 +562,7 @@ mod tests {
                 n,
                 t,
                 k,
-                SessionId::new(ProtocolType::Rbc, 100 + i as u64),
+                SessionId::new(ProtocolType::Rbc, 0, 0, 100 + i as u64),
                 payload.clone(),
             )
             .await;
@@ -576,7 +576,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_id = SessionId::new(ProtocolType::Rbc, 99);
+        let session_id = SessionId::new(ProtocolType::Rbc, 0, 0, 99);
 
         let round_id = 0;
 
@@ -657,7 +657,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_id = SessionId::new(ProtocolType::Rbc, 42);
+        let session_id = SessionId::new(ProtocolType::Rbc, 0, 0, 42);
         let round_id = 0;
 
         let (parties, net, receivers) =
@@ -764,10 +764,10 @@ mod tests {
         let t = 1;
         let k = t + 1;
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, 100),
-            SessionId::new(ProtocolType::Rbc, 101),
-            SessionId::new(ProtocolType::Rbc, 102),
-            SessionId::new(ProtocolType::Rbc, 103),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 100),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 101),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 102),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 103),
         ];
         let (parties, net, receivers) =
             setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 1000)
@@ -779,7 +779,7 @@ mod tests {
         let dealer = Dealer::new(n, t);
         let key_dist_msg = Msg::new(
             0,
-            SessionId::new(ProtocolType::Rbc, 0),
+            SessionId::new(ProtocolType::Rbc, 0, 0, 0),
             0,
             vec![],
             vec![],
