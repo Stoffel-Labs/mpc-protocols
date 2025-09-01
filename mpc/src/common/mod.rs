@@ -38,7 +38,12 @@ pub struct ShamirShare<F: FftField, const N: usize, P> {
     pub _sharetype: PhantomData<fn() -> P>,
 }
 
-pub trait SecretSharingScheme<F: FftField>: Sized {
+pub trait SecretSharingScheme<F: FftField>:
+    Sized
+    + Add<Output = Result<Self, ShareError>>
+    + Mul<F, Output = Result<Self, ShareError>>
+    + Sub<Output = Result<Self, ShareError>>
+{
     /// Secret type used in the Share
     type SecretType;
 
