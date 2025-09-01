@@ -1,10 +1,9 @@
+use crate::{common::rbc::RbcError, honeybadger::robust_interpolate::InterpolateError};
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
-
-use crate::{common::rbc::RbcError, honeybadger::robust_interpolate::InterpolateError};
 
 pub mod input;
 
