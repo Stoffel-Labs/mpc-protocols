@@ -7,6 +7,8 @@ pub mod rbc;
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
 
+pub mod types;
+
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
@@ -37,7 +39,14 @@ pub struct ShamirShare<F: FftField, const N: usize, P> {
     pub _sharetype: PhantomData<fn() -> P>,
 }
 
-pub trait SecretSharingScheme<F: FftField>: Sized {
+pub trait SecretSharingScheme<F: FftField>:
+    Sized
+    + Add<Output = Result<Self, ShareError>>
+    + Sub<Output = Result<Self, ShareError>>
+    + Add<F, Output = Result<Self, ShareError>>
+    + Sub<F, Output = Result<Self, ShareError>>
+    + Mul<F, Output = Result<Self, ShareError>>
+{
     /// Secret type used in the Share
     type SecretType;
 
@@ -129,7 +138,22 @@ impl<F: FftField, const N: usize, P> Add<&F> for ShamirShare<F, N, P> {
     }
 }
 
-impl<F: FftField, const N: usize, P> Sub<Self> for ShamirShare<F, N, P> {
+impl<F: FftField, const N: usize, P> Add<F> for ShamirShare<F, N, P> {
+    type Output = Result<Self, ShareError>;
+
+    fn add(self, other: F) -> Self::Output {
+        let new_share: [F; N] = std::array::from_fn(|i| self.share[i] + other);
+
+        Ok(Self {
+            share: new_share,
+            id: self.id,
+            degree: self.degree,
+            _sharetype: PhantomData,
+        })
+    }
+}
+
+impl<F: FftField, const N: usize, P> Sub for ShamirShare<F, N, P> {
     type Output = Result<Self, ShareError>;
     fn sub(self, other: Self) -> Self::Output {
         if self.degree != other.degree {
@@ -150,6 +174,7 @@ impl<F: FftField, const N: usize, P> Sub<Self> for ShamirShare<F, N, P> {
         })
     }
 }
+
 impl<F: FftField, const N: usize, P> Sub<F> for ShamirShare<F, N, P> {
     type Output = Result<Self, ShareError>;
     fn sub(self, other: F) -> Self::Output {

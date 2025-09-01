@@ -1,5 +1,3 @@
-use std::{collections::HashSet, marker::PhantomData};
-
 /// This file contains the more common secret sharing protocols used in MPC.
 /// You can reuse them for the MPC protocols that you aim to implement.
 ///
@@ -10,10 +8,12 @@ use ark_poly::{
     Polynomial,
 };
 use ark_std::rand::Rng;
+use std::{collections::HashSet, marker::PhantomData};
+
 
 #[derive(Clone, Debug)]
 pub struct Shamir;
-pub type Shamirshare<T> = ShamirShare<T, 1, Shamir>;
+pub type Shamirshare<T: FftField> = ShamirShare<T, 1, Shamir>;
 
 impl<F: FftField> Shamirshare<F> {
     pub fn new(share: F, id: usize, degree: usize) -> Self {
@@ -131,7 +131,6 @@ impl<F: FftField> NonRobustShare<F> {
             _sharetype: PhantomData,
         }
     }
-    
 }
 
 impl<F: FftField> Default for NonRobustShare<F> {
@@ -213,7 +212,6 @@ impl<F: FftField> SecretSharingScheme<F> for NonRobustShare<F> {
 
 #[cfg(test)]
 mod test {
-
     use super::*;
     use ark_bls12_381::Fr;
     use ark_std::test_rng;

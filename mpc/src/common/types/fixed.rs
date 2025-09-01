@@ -1,5 +1,5 @@
 use crate::common::types::Error;
-use crate::common::ShamirShare;
+use crate::common::SecretSharingScheme;
 use ark_ff::{FftField, PrimeField};
 use std::marker::PhantomData;
 use std::ops::{Add, Mul, Sub};
@@ -51,26 +51,28 @@ impl FixedPointPrecision {
 /// The fields of this struct are private to prevent erroneous mutation of the precision and the
 /// share. The share and the bit size must be consistent in that the integer representation must
 /// fit into the field to guarantee correctness.
-pub struct SecretFixedPoint<F, const N: usize, P>
+pub struct SecretFixedPoint<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     /// The secret share used to represent the fixed point number.
-    value: ShamirShare<F, N, P>,
+    value: S,
     /// Precision of this fixed point number.
     precision: FixedPointPrecision,
     _field_type: PhantomData<F>,
 }
 
-impl<F, const N: usize, P> SecretFixedPoint<F, N, P>
+impl<F, S> SecretFixedPoint<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     /// Creates a new secret fixed point number.
     ///
     /// When we crate a new fixed point value, we must check that the created element fits into the
     /// field.
-    pub fn new(value: ShamirShare<F, N, P>, precision: FixedPointPrecision) -> Self {
+    pub fn new(value: S, precision: FixedPointPrecision) -> Self {
         assert!(
             (precision.k as u32) < F::BasePrimeField::MODULUS_BIT_SIZE,
             "the precision does not fit into the field"
@@ -82,7 +84,7 @@ where
         }
     }
 
-    pub fn value(&self) -> &ShamirShare<F, N, P> {
+    pub fn value(&self) -> &S {
         &self.value
     }
 
@@ -91,9 +93,10 @@ where
     }
 }
 
-impl<F, const N: usize, P> Mul<ClearFixedPoint<F>> for SecretFixedPoint<F, N, P>
+impl<F, S> Mul<ClearFixedPoint<F>> for SecretFixedPoint<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     type Output = Result<Self, Error>;
 
@@ -118,9 +121,10 @@ where
     }
 }
 
-impl<F, const N: usize, P> Add<ClearFixedPoint<F>> for SecretFixedPoint<F, N, P>
+impl<F, S> Add<ClearFixedPoint<F>> for SecretFixedPoint<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     type Output = Result<Self, Error>;
 
@@ -132,16 +136,17 @@ where
             });
         }
         Ok(Self {
-            value: (self.value + &rhs.value)?,
+            value: (self.value + rhs.value)?,
             precision: self.precision,
             _field_type: PhantomData,
         })
     }
 }
 
-impl<F, const N: usize, P> Sub<ClearFixedPoint<F>> for SecretFixedPoint<F, N, P>
+impl<F, S> Sub<ClearFixedPoint<F>> for SecretFixedPoint<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     type Output = Result<Self, Error>;
 
@@ -153,16 +158,17 @@ where
             });
         }
         Ok(Self {
-            value: (self.value - &rhs.value)?,
+            value: (self.value - rhs.value)?,
             precision: self.precision,
             _field_type: PhantomData,
         })
     }
 }
 
-impl<F, const N: usize, P> Add for SecretFixedPoint<F, N, P>
+impl<F, S> Add for SecretFixedPoint<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     type Output = Result<Self, Error>;
 
@@ -181,9 +187,10 @@ where
     }
 }
 
-impl<F, const N: usize, P> Sub for SecretFixedPoint<F, N, P>
+impl<F, S> Sub for SecretFixedPoint<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     type Output = Result<Self, Error>;
 

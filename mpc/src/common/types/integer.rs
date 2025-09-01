@@ -1,6 +1,7 @@
 use crate::common::types::Error;
-use crate::common::ShamirShare;
+use crate::common::SecretSharingScheme;
 use ark_ff::{FftField, PrimeField};
+use std::marker::PhantomData;
 use std::ops::{Add, Mul, Sub};
 
 /// Represents a secret signed integer shared among the parties.
@@ -8,28 +9,35 @@ use std::ops::{Add, Mul, Sub};
 /// The fields of this struct are private to prevent erroneous mutation of the precision and the
 /// share. The share and the bit size must be consistent in that the integer representation must
 /// fit into the field to guarantee correctness.
-pub struct SecretInt<F, const N: usize, P>
+pub struct SecretInt<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
-    share: ShamirShare<F, N, P>,
+    share: S,
     bit_length: usize,
+    _field: PhantomData<F>,
 }
 
-impl<F, const N: usize, P> SecretInt<F, N, P>
+impl<F, S> SecretInt<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
-    pub fn new(share: ShamirShare<F, N, P>, bit_length: usize) -> Self {
+    pub fn new(share: S, bit_length: usize) -> Self {
         assert!(
             ((bit_length) as u32) < F::BasePrimeField::MODULUS_BIT_SIZE,
             "the bit length of the resulting multiplication does not fit into the field"
         );
 
-        Self { share, bit_length }
+        Self {
+            share,
+            bit_length,
+            _field: PhantomData,
+        }
     }
 
-    pub fn share(&self) -> &ShamirShare<F, N, P> {
+    pub fn share(&self) -> &S {
         &self.share
     }
 
@@ -50,9 +58,10 @@ where
     }
 }
 
-impl<F, const N: usize, P> Mul<ClearInt<F>> for SecretInt<F, N, P>
+impl<F, S> Mul<ClearInt<F>> for SecretInt<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     type Output = Result<Self, Error>;
 
@@ -72,13 +81,15 @@ where
         Ok(Self {
             share: (self.share * rhs.value)?,
             bit_length: self.bit_length,
+            _field: PhantomData,
         })
     }
 }
 
-impl<F, const N: usize, P> Sub<ClearInt<F>> for SecretInt<F, N, P>
+impl<F, S> Sub<ClearInt<F>> for SecretInt<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     type Output = Result<Self, Error>;
 
@@ -90,15 +101,17 @@ where
             });
         }
         Ok(Self {
-            share: (self.share - &rhs.value)?,
+            share: (self.share - rhs.value)?,
             bit_length: self.bit_length,
+            _field: PhantomData,
         })
     }
 }
 
-impl<F, const N: usize, P> Sub for SecretInt<F, N, P>
+impl<F, S> Sub for SecretInt<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     type Output = Result<Self, Error>;
 
@@ -112,13 +125,15 @@ where
         Ok(Self {
             share: (self.share - rhs.share)?,
             bit_length: self.bit_length,
+            _field: PhantomData,
         })
     }
 }
 
-impl<F, const N: usize, P> Add<ClearInt<F>> for SecretInt<F, N, P>
+impl<F, S> Add<ClearInt<F>> for SecretInt<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     type Output = Result<Self, Error>;
 
@@ -130,15 +145,17 @@ where
             });
         }
         Ok(Self {
-            share: (self.share + &rhs.value)?,
+            share: (self.share + rhs.value)?,
             bit_length: self.bit_length,
+            _field: PhantomData,
         })
     }
 }
 
-impl<F, const N: usize, P> Add for SecretInt<F, N, P>
+impl<F, S> Add for SecretInt<F, S>
 where
     F: FftField,
+    S: SecretSharingScheme<F>,
 {
     type Output = Result<Self, Error>;
 
@@ -152,6 +169,7 @@ where
         Ok(Self {
             share: (self.share + rhs.share)?,
             bit_length: self.bit_length,
+            _field: PhantomData,
         })
     }
 }
