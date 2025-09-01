@@ -19,12 +19,12 @@ async fn test_triple_gen_e2e() {
     setup_tracing();
     let n_parties = 13;
     let threshold = 2;
-    let n_shares = 5;
+    let n_shares = 2 * threshold + 1;
     let session_id = SessionId::new(ProtocolType::Triple, 111);
     let (random_shares_a, random_shares_b, randousha_pairs, a_values, b_values, _) =
         get_triple_init_test_shares(n_shares, n_parties, threshold);
     let (network, receivers, _) = test_setup(n_parties, vec![]);
-    let (nodes, mut triple_finish_receivers) = create_nodes(n_parties, threshold, n_shares);
+    let (nodes, mut triple_finish_receivers) = create_nodes(n_parties, threshold);
 
     for (i, node) in nodes.iter().enumerate() {
         node.lock()
@@ -93,15 +93,11 @@ async fn test_triple_init_test_shares() {
             randousha_pairs_2t_i.push(randousha_pairs[p][i].degree_2t.clone());
         }
         assert_eq!(
-            RobustShare::recover_secret(&a_i, n_parties)
-                .unwrap()
-                .1,
+            RobustShare::recover_secret(&a_i, n_parties).unwrap().1,
             a_values[i]
         );
         assert_eq!(
-            RobustShare::recover_secret(&b_i, n_parties)
-                .unwrap()
-                .1,
+            RobustShare::recover_secret(&b_i, n_parties).unwrap().1,
             b_values[i]
         );
         assert_eq!(
@@ -130,9 +126,8 @@ async fn test_triple_init_test_shares() {
             izip!(&random_shares_a_p, &random_shares_b_p, &randousha_pairs_p)
         {
             let mult_share_deg_2t = share_a.share_mul(share_b).unwrap();
-            let sub_share_deg_2t = (mult_share_deg_2t
-                - RobustShare::from(ran_dou_sha.degree_2t.clone()))
-                .unwrap();
+            let sub_share_deg_2t =
+                (mult_share_deg_2t - RobustShare::from(ran_dou_sha.degree_2t.clone())).unwrap();
             sub_shares_deg_2t.push(sub_share_deg_2t);
         }
         sub_shares_deg_2t_all.push(sub_shares_deg_2t);

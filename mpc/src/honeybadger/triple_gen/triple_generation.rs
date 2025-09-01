@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use ark_ff::FftField;
 use ark_serialize::CanonicalDeserialize;
 use itertools::izip;
-use stoffelmpc_network::{Network, PartyId};
+use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;
 
@@ -13,8 +13,7 @@ use crate::honeybadger::{
 };
 
 use crate::honeybadger::{
-    batch_recon::batch_recon::BatchReconNode,
-    robust_interpolate::robust_interpolate::RobustShare,
+    batch_recon::batch_recon::BatchReconNode, robust_interpolate::robust_interpolate::RobustShare,
 };
 
 /// Current state of the Shamir Beaver triple generation protocol.
@@ -40,8 +39,6 @@ where
     pub n_parties: usize,
     /// The upper bound of corrupt parties participating in the triple generation protocol.
     pub threshold: usize,
-    /// The number of triples that will be generated.
-    pub n_triples: usize,
     /// Internal storage of the node.
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStorage<F>>>>>>,
     pub output_sender: Sender<SessionId>,
@@ -58,7 +55,6 @@ where
         id: PartyId,
         n_parties: usize,
         threshold: usize,
-        n_triples: usize,
         output_sender: Sender<SessionId>,
     ) -> Result<Self, TripleGenError> {
         // batch_recon_node is for opening degree 2t shares
@@ -67,7 +63,6 @@ where
             id,
             n_parties,
             threshold,
-            n_triples,
             storage: Arc::new(Mutex::new(HashMap::new())),
             output_sender,
             batch_recon_node,
@@ -107,9 +102,9 @@ where
             "Initializing TripleGen protocol"
         );
 
-        if randousha_pairs.len() != self.n_triples
-            || random_shares_a.len() != self.n_triples
-            || random_shares_b.len() != self.n_triples
+        if randousha_pairs.len() != 2 * self.threshold + 1
+            || random_shares_a.len() != 2 * self.threshold + 1
+            || random_shares_b.len() != 2 * self.threshold + 1
         {
             return Err(TripleGenError::NotEnoughPreprocessing);
         }

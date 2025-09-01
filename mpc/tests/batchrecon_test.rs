@@ -28,7 +28,6 @@ mod tests {
         let n = 4;
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(4u64)];
         let session_id = SessionId::new(ProtocolType::BatchRecon, 0);
-
         assert_eq!(secrets.len(), t + 1);
 
         // Step 0: Generate shares

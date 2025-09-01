@@ -7,7 +7,7 @@ use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use stoffelmpc_network::{ClientId, Network};
+use stoffelnet::network_utils::{ClientId, Network};
 use tokio::sync::Mutex;
 use tracing::info;
 

@@ -16,7 +16,7 @@ use std::{
     ops::{Mul, Sub},
     sync::Arc,
 };
-use stoffelmpc_network::{Network, PartyId};
+use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;
 
@@ -95,7 +95,6 @@ impl<F: FftField> Multiply<F> {
         &self,
         msg: MultMessage,
     ) -> Result<Option<Vec<RobustShare<F>>>, MulError> {
-        //Get back original session id, I'm assuming the protocol type is Mul here, it could be different
         let session_id = SessionId::new(ProtocolType::Mul, msg.session_id.context_id());
         let open_message: Vec<F> =
             CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;

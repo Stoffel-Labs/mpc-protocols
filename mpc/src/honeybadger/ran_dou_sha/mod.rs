@@ -26,7 +26,7 @@ use tokio::sync::{
     Mutex,
 };
 
-use stoffelmpc_network::{Network, NetworkError, PartyId};
+use stoffelnet::network_utils::{Network, NetworkError, PartyId};
 use tracing::info;
 
 /// Error that occurs during the execution of the Random Double Share Error.

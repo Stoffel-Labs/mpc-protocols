@@ -16,11 +16,11 @@ use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{
     HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
+use stoffelnet::network_utils::{ClientId, Network, NetworkError};
 use tracing::warn;
 
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-use stoffelmpc_network::{ClientId, Network, NetworkError};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -379,17 +379,22 @@ pub fn receive<F, R, S, N>(
     }
 }
 
-pub fn create_global_nodes<F: FftField, R: RBC + 'static>(
+pub fn create_global_nodes<F: FftField, R: RBC + 'static, S, N>(
     n_parties: usize,
     t: usize,
     n_triples: usize,
     n_random_shares: usize,
     session_id: SessionId,
-) -> Vec<HoneyBadgerMPCNode<F, R>> {
+) -> Vec<HoneyBadgerMPCNode<F, R>>
+where
+    N: Network + Send + Sync + 'static,
+    S: SecretSharingScheme<F>,
+    HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts>,
+{
     let parameters =
         HoneyBadgerMPCNodeOpts::new(n_parties, t, n_triples, n_random_shares, session_id);
     (0..n_parties)
-        .map(|id| HoneyBadgerMPCNode::new(id, parameters.clone()).unwrap())
+        .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone()).unwrap())
         .collect()
 }
 
@@ -462,7 +467,6 @@ pub fn construct_e2e_input_ransha(
 /// Initializes all global nodes with their respective shares for ransha.
 pub async fn initialize_global_nodes_ransha<F, R, N>(
     nodes: Vec<HoneyBadgerMPCNode<F, R>>,
-    n_shares_t: &[Vec<RobustShare<F>>],
     session_id: SessionId,
     network: Arc<N>,
 ) where
@@ -470,17 +474,13 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
     R: RBC + 'static,
     N: Network + Send + Sync + 'static,
 {
-    assert!(nodes.len() == n_shares_t.len());
+    let mut rng = test_rng();
 
     for node in nodes {
         let mut node_rds = node.preprocess.share_gen;
         let node_id = node_rds.id;
         match node_rds
-            .init(
-                n_shares_t[node_id].clone(),
-                session_id,
-                Arc::clone(&network),
-            )
+            .init(session_id, &mut rng, Arc::clone(&network))
             .await
         {
             Ok(()) => (),

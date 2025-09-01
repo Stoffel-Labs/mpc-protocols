@@ -8,7 +8,7 @@ use crate::{
 use async_trait::async_trait;
 use bincode;
 use std::{collections::HashMap, sync::Arc};
-use stoffelmpc_network::Network;
+use stoffelnet::network_utils::Network;
 use threshold_crypto::{
     serde_impl::SerdeSecret, PublicKeySet, SecretKeySet, SecretKeyShare, SignatureShare,
 };
@@ -57,6 +57,10 @@ impl RBC for Bracha {
     /// Returns the unique identifier of the current party.
     fn id(&self) -> usize {
         self.id
+    }
+    async fn clear_store(&self) {
+        let mut store = self.store.lock().await;
+        store.clear();
     }
     /// This initiates the Bracha protocol.
     async fn init<N: Network + Send + Sync>(
@@ -455,6 +459,10 @@ impl RBC for Avid {
     }
     fn id(&self) -> usize {
         self.id
+    }
+    async fn clear_store(&self) {
+        let mut store = self.store.lock().await;
+        store.clear();
     }
     ///This initiates the Avid protocol.
     async fn init<N: Network + Send + Sync>(
@@ -987,6 +995,13 @@ impl RBC for ABA {
     }
     fn id(&self) -> usize {
         self.id
+    }
+    async fn clear_store(&self) {
+        let mut store = self.store.lock().await;
+        let mut coin_store = self.coin.lock().await;
+
+        store.clear();
+        coin_store.clear();
     }
     /// This initiates the ABA protocol.
     async fn init<N: Network + Send + Sync>(
