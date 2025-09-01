@@ -36,6 +36,18 @@ where
     pub fn bit_length(&self) -> usize {
         self.bit_length
     }
+
+    pub fn set_bit_length(&mut self, bit_length: usize) {
+        assert!(
+            ((bit_length) as u32) < F::BasePrimeField::MODULUS_BIT_SIZE,
+            "the bit length of the resulting multiplication does not fit into the field"
+        );
+        self.bit_length = bit_length;
+    }
+
+    pub fn set_bit_length_unchecked(&mut self, bit_length: usize) {
+        self.bit_length = bit_length;
+    }
 }
 
 impl<F, const N: usize, P> Mul<ClearInt<F>> for SecretInt<F, N, P>

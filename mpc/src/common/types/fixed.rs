@@ -26,6 +26,24 @@ impl FixedPointPrecision {
     pub fn f(&self) -> usize {
         self.f
     }
+
+    pub fn set_k(&mut self, k: usize) {
+        assert!(self.f < k, "the number of bits in the fractional fragment must be less than the total number of bits for the representation");
+        self.k = k;
+    }
+
+    pub fn set_f(&mut self, f: usize) {
+        assert!(f < self.k, "the number of bits in the fractional fragment must be less than the total number of bits for the representation");
+        self.f = f;
+    }
+
+    pub fn set_k_unchecked(&mut self, k: usize) {
+        self.k = k;
+    }
+
+    pub fn set_f_unchecked(&mut self, f: usize) {
+        self.f = f;
+    }
 }
 
 /// Represents a fixed-point number shared among the parties.
