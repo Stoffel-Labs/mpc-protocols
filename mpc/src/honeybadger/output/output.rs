@@ -1,6 +1,7 @@
 use crate::common::SecretSharingScheme;
 use crate::honeybadger::output::{OutputError, OutputMessage};
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use crate::honeybadger::WrappedMessage;
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
 use std::collections::HashMap;
@@ -37,7 +38,8 @@ impl OutputServer {
         let mut payload = Vec::new();
         shares.serialize_compressed(&mut payload)?;
         let msg = OutputMessage::new(self.id, payload);
-        let bytes = bincode::serialize(&msg)?;
+        let wrapped = WrappedMessage::Output(msg);
+        let bytes = bincode::serialize(&wrapped)?;
 
         //Send to the client
         net.send_to_client(client_id, &bytes).await?;

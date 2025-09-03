@@ -10,20 +10,19 @@ use stoffelmpc_mpc::common::rbc::RbcError;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
 use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::double_share::DoubleShamirShare;
+use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::share_gen::RanShaError;
 use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{
-    HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
+    HoneyBadgerMPCClient, HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
-use stoffelnet::network_utils::{ClientId, Network, NetworkError};
-use tracing::warn;
-
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+use stoffelnet::network_utils::{ClientId, Network, NetworkError};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
+use tracing::warn;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::FmtSubscriber;
 
@@ -545,4 +544,55 @@ pub async fn construct_e2e_input_mul(
         }
     }
     per_party_triples
+}
+
+//--------------------------CLIENT--------------------------
+pub fn create_clients<F: FftField, R: RBC + 'static>(
+    client_ids: Vec<ClientId>,
+    n_parties: usize,
+    t: usize,
+    instance_id: u64,
+    inputs: Vec<F>,
+    input_len: usize,
+) -> HashMap<ClientId, Arc<tokio::sync::Mutex<HoneyBadgerMPCClient<F, R>>>> {
+    client_ids
+        .into_iter()
+        .map(|id| {
+            let client =
+                HoneyBadgerMPCClient::new(id, n_parties, t, instance_id, inputs.clone(), input_len)
+                    .unwrap();
+            (id, Arc::new(tokio::sync::Mutex::new(client)))
+        })
+        .collect()
+}
+
+pub fn receive_client<F, R, N>(
+    mut receivers: HashMap<ClientId, Receiver<Vec<u8>>>,
+    clients: HashMap<ClientId, Arc<Mutex<HoneyBadgerMPCClient<F, R>>>>,
+    net: Arc<N>,
+) where
+    F: FftField + 'static,
+    R: RBC + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    assert_eq!(
+        receivers.len(),
+        clients.len(),
+        "Each node must have a receiver"
+    );
+
+    for (clientid, mut recv) in receivers.drain() {
+        let client = clients[&clientid].clone(); // Arc clone
+        let net_clone = net.clone();
+
+        tokio::spawn(async move {
+            while let Some(received) = recv.recv().await {
+                let mut guard = client.lock().await;
+                if let Err(e) = guard.process(received, net_clone.clone()).await {
+                    tracing::error!("Client {clientid} failed to process message: {e:?}");
+                }
+            }
+            tracing::info!("Receiver task for client {clientid} ended");
+        });
+    }
 }

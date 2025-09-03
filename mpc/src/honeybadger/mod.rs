@@ -32,8 +32,15 @@ use crate::{
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
-        input::{input::InputServer, InputError, InputMessage},
+        input::{
+            input::{InputClient, InputServer},
+            InputError, InputMessage,
+        },
         mul::{multiplication::Multiply, MulError, MultMessage},
+        output::{
+            output::{OutputClient, OutputServer},
+            OutputError, OutputMessage,
+        },
         ran_dou_sha::messages::RanDouShaMessage,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
         triple_gen::{ShamirBeaverTriple, TripleGenError, TripleGenMessage},
@@ -78,6 +85,8 @@ pub enum HoneyBadgerError {
     RbcError(#[from] RbcError),
     #[error("error in the Mul: {0:?}")]
     MulError(#[from] MulError),
+    #[error("error in the Output server: {0:?}")]
+    OutputError(#[from] OutputError),
     #[error("error in the Batch Reconstruction: {0:?}")]
     BatchReconError(#[from] BatchReconError),
     /// Error during the serialization using [`bincode`].
@@ -89,6 +98,42 @@ pub enum HoneyBadgerError {
     ChannelClosed,
 }
 
+pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
+    pub id: usize,
+    pub input: InputClient<F, R>,
+    pub output: OutputClient<F>,
+}
+
+impl<F: FftField, R: RBC> HoneyBadgerMPCClient<F, R> {
+    pub fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        instance_id: u64,
+        inputs: Vec<F>,
+        input_len: usize,
+    ) -> Result<Self, HoneyBadgerError> {
+        let input = InputClient::new(id, n, t, instance_id, inputs)?;
+        let output = OutputClient::new(id, n, t, input_len)?;
+        Ok(Self { id, input, output })
+    }
+    pub async fn process<N: Network + Send + Sync>(
+        &mut self,
+        raw_msg: Vec<u8>,
+        net: Arc<N>,
+    ) -> Result<(), HoneyBadgerError> {
+        let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
+
+        match wrapped {
+            WrappedMessage::Input(input_msg) => {
+                self.input.process(input_msg, net).await?;
+            }
+            WrappedMessage::Output(output_msg) => self.output.process(output_msg).await?,
+            _ => warn!("Incorrect message type recieved at input"),
+        }
+        Ok(())
+    }
+}
 /// Information pertaining a HoneyBadgerMPCNode protocol participant.
 #[derive(Clone, Debug)]
 pub struct HoneyBadgerMPCNode<F: FftField, R: RBC> {
@@ -100,7 +145,8 @@ pub struct HoneyBadgerMPCNode<F: FftField, R: RBC> {
     pub params: HoneyBadgerMPCNodeOpts,
     pub preprocess: PreprocessNodes<F, R>,
     pub operations: Operation<F, R>,
-    pub output: OutputChannels,
+    pub output: OutputServer,
+    pub outputchannels: OutputChannels,
 }
 
 #[derive(Clone, Debug)]
@@ -268,6 +314,7 @@ where
             share_gen_sender,
         )?;
         let input = InputServer::new(id, params.n_parties, params.threshold)?;
+        let output = OutputServer::new(id, params.n_parties)?;
         Ok(Self {
             id,
             preprocessing_material: Arc::new(
@@ -282,7 +329,8 @@ where
                 triple_gen: triple_gen_node,
             },
             operations: Operation { mul: mul_node },
-            output: OutputChannels {
+            output,
+            outputchannels: OutputChannels {
                 share_gen_channel: Arc::new(Mutex::new(share_gen_reciever)),
                 dou_sha_channel: Arc::new(Mutex::new(dou_sha_receiver)),
                 ran_dou_sha_channel: Arc::new(Mutex::new(ran_dou_sha_receiver)),
@@ -325,7 +373,7 @@ where
             .init(session_id, x, y, beaver_triples, network)
             .await?;
 
-        let mut rx = self.output.mul_channel.lock().await;
+        let mut rx = self.outputchannels.mul_channel.lock().await;
         while let Some(id) = rx.recv().await {
             if id == session_id {
                 let mul_store = self.operations.mul.mult_storage.lock().await;
@@ -407,6 +455,7 @@ where
                     }
                 }
             }
+            WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
         }
 
         Ok(())
@@ -498,7 +547,7 @@ where
             // ------------------------
             // Step 4. Collect triples
             // ------------------------
-            if let Some(sid) = self.output.triple_channel.lock().await.recv().await {
+            if let Some(sid) = self.outputchannels.triple_channel.lock().await.recv().await {
                 if sid == sessionid {
                     let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
                     let triple_storage_mutex = triple_gen_db.remove(&sid).unwrap();
@@ -566,7 +615,14 @@ where
                 .await?;
 
             // Collect its output
-            if let Some(id) = self.output.share_gen_channel.lock().await.recv().await {
+            if let Some(id) = self
+                .outputchannels
+                .share_gen_channel
+                .lock()
+                .await
+                .recv()
+                .await
+            {
                 if id == sessionid {
                     let mut share_store = self.preprocess.share_gen.store.lock().await;
                     let store_lock = share_store.remove(&id).unwrap();
@@ -629,7 +685,14 @@ where
                 .init(shares_deg_t, shares_deg_2t, sessionid, network.clone())
                 .await?;
 
-            if let Some(sid) = self.output.ran_dou_sha_channel.lock().await.recv().await {
+            if let Some(sid) = self
+                .outputchannels
+                .ran_dou_sha_channel
+                .lock()
+                .await
+                .recv()
+                .await
+            {
                 if sid == sessionid {
                     let mut ran_dou_sha_db = self.preprocess.ran_dou_sha.store.lock().await;
                     let ran_dou_sha_storage_mutex = ran_dou_sha_db.remove(&sid).unwrap();
@@ -660,7 +723,14 @@ where
             .await?;
 
         let mut dou_sha = Vec::new();
-        if let Some(sid) = self.output.dou_sha_channel.lock().await.recv().await {
+        if let Some(sid) = self
+            .outputchannels
+            .dou_sha_channel
+            .lock()
+            .await
+            .recv()
+            .await
+        {
             if sid == sessionid {
                 let mut dou_sha_db = self.preprocess.dou_sha.storage.lock().await;
                 let dou_sha_storage_mutex = dou_sha_db.remove(&sid).unwrap();
@@ -684,6 +754,7 @@ pub enum WrappedMessage {
     Triple(TripleGenMessage),
     Dousha(DouShaMessage),
     Mul(MultMessage),
+    Output(OutputMessage),
 }
 
 //-----------------Session-ID-----------------
