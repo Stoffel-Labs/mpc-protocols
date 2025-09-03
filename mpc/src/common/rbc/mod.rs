@@ -1,9 +1,10 @@
-use bincode::ErrorKind;
-use stoffelnet::network_utils::NetworkError;
-use thiserror::Error;
 pub mod rbc;
 pub mod rbc_store;
 pub mod utils;
+
+use bincode::ErrorKind;
+use stoffelnet::network_utils::NetworkError;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ShardError {

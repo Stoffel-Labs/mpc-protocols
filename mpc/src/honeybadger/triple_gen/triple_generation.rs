@@ -13,8 +13,7 @@ use crate::honeybadger::{
 };
 
 use crate::honeybadger::{
-    batch_recon::batch_recon::BatchReconNode,
-    robust_interpolate::robust_interpolate::RobustShare,
+    batch_recon::batch_recon::BatchReconNode, robust_interpolate::robust_interpolate::RobustShare,
 };
 
 /// Current state of the Shamir Beaver triple generation protocol.
@@ -103,9 +102,9 @@ where
             "Initializing TripleGen protocol"
         );
 
-        if randousha_pairs.len() != 2*self.threshold + 1
-            || random_shares_a.len() != 2*self.threshold + 1
-            || random_shares_b.len() != 2*self.threshold + 1
+        if randousha_pairs.len() != 2 * self.threshold + 1
+            || random_shares_a.len() != 2 * self.threshold + 1
+            || random_shares_b.len() != 2 * self.threshold + 1
         {
             return Err(TripleGenError::NotEnoughPreprocessing);
         }
