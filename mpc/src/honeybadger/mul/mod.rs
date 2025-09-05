@@ -127,3 +127,19 @@ where
         Self { a_sub_x, b_sub_x }
     }
 }
+
+pub fn concat_sorted<F: FftField>(map: &HashMap<u8, Vec<F>>) -> Vec<F> {
+    // collect and sort keys
+    let mut keys: Vec<_> = map.keys().cloned().collect();
+    keys.sort_unstable();
+
+    // pre-compute total size to reserve capacity
+    let total_len: usize = keys.iter().map(|k| map[k].len()).sum();
+
+    // build result with exact capacity
+    let mut out = Vec::with_capacity(total_len);
+    for k in keys {
+        out.extend_from_slice(&map[&k]);
+    }
+    out
+}

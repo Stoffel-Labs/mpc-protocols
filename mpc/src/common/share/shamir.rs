@@ -13,7 +13,7 @@ use std::{collections::HashSet, marker::PhantomData};
 
 #[derive(Clone, Debug)]
 pub struct Shamir;
-pub type Shamirshare<T: FftField> = ShamirShare<T, 1, Shamir>;
+pub type Shamirshare<T> = ShamirShare<T, 1, Shamir>;
 
 impl<F: FftField> Shamirshare<F> {
     pub fn new(share: F, id: usize, degree: usize) -> Self {

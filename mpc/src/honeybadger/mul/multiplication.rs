@@ -2,7 +2,10 @@ use crate::{
     common::{share::ShareError, SecretSharingScheme, ShamirShare, RBC},
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
-        mul::{MulError, MultMessage, MultProtocolState, MultStorage, ReconstructionMessage},
+        mul::{
+            concat_sorted, MulError, MultMessage, MultProtocolState, MultStorage,
+            ReconstructionMessage,
+        },
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         triple_gen::ShamirBeaverTriple,
         ProtocolType, SessionId, WrappedMessage,
@@ -160,45 +163,29 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         if msg.session_id.sub_id() == 1 {
             let open: Vec<F> =
                 CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
-            if msg.session_id.round_id() % 2 == 0 {
-                if storage
-                    .output_open_mult1
-                    .contains_key(&msg.session_id.round_id())
-                {
-                    return Err(MulError::Duplicate(format!(
-                        "Already received from {}",
-                        msg.sender
-                    )));
-                }
-                info!(
-                    self_id = self.id,
-                    "Received first open message for session_id: {:?} and round {:?}",
-                    session_id,
-                    msg.session_id.round_id()
-                );
-                storage
-                    .output_open_mult1
-                    .insert(msg.session_id.round_id(), open);
+            let round_id = msg.session_id.round_id();
+            let (target_map, label) = if round_id % 2 == 0 {
+                (&mut storage.output_open_mult1, "first")
             } else {
-                if storage
-                    .output_open_mult2
-                    .contains_key(&msg.session_id.round_id())
-                {
-                    return Err(MulError::Duplicate(format!(
-                        "Already received from {}",
-                        msg.sender
-                    )));
-                }
-                info!(
-                    self_id = self.id,
-                    "Received second open message for session_id: {:?} and round {:?}",
-                    session_id,
-                    msg.session_id.round_id()
-                );
-                storage
-                    .output_open_mult2
-                    .insert(msg.session_id.round_id(), open);
+                (&mut storage.output_open_mult2, "second")
+            };
+
+            if target_map.contains_key(&round_id) {
+                return Err(MulError::Duplicate(format!(
+                    "Already received from {}",
+                    msg.sender
+                )));
             }
+
+            info!(
+                self_id = self.id,
+                "Received {} open message for session_id: {:?} and round {:?}",
+                label,
+                session_id,
+                round_id
+            );
+
+            target_map.insert(round_id, open);
         } else if msg.session_id.sub_id() == 2 {
             info!(
                 self_id = self.id,
@@ -225,7 +212,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
 
         let mut a_sub_x: Vec<F> = Vec::new();
         let mut b_sub_x: Vec<F> = Vec::new();
-        if mul_len % (self.threshold + 1) != 0 {
+        if share_len != 0 {
             if storage.received_shares.len() >= 2 * self.threshold + 1 {
                 info!("Received enough shares to reconstruct");
                 let mut a_shares = vec![vec![]; share_len];
@@ -255,10 +242,10 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             return Err(MulError::WaitForOk);
         }
 
-        let mut concatenated_mult1: Vec<F> = self.concat_sorted(&storage.output_open_mult1);
+        let mut concatenated_mult1: Vec<F> = concat_sorted(&storage.output_open_mult1);
         concatenated_mult1.extend(a_sub_x);
 
-        let mut concatenated_mult2: Vec<F> = self.concat_sorted(&storage.output_open_mult2);
+        let mut concatenated_mult2: Vec<F> = concat_sorted(&storage.output_open_mult2);
         concatenated_mult2.extend(b_sub_x);
 
         let mut shares_mult = Vec::with_capacity(storage.share_mult_from_triple.len());
@@ -303,21 +290,5 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(MultStorage::empty())))
             .clone()
-    }
-
-    fn concat_sorted(&self, map: &HashMap<u8, Vec<F>>) -> Vec<F> {
-        // collect and sort keys
-        let mut keys: Vec<_> = map.keys().cloned().collect();
-        keys.sort_unstable();
-
-        // pre-compute total size to reserve capacity
-        let total_len: usize = keys.iter().map(|k| map[k].len()).sum();
-
-        // build result with exact capacity
-        let mut out = Vec::with_capacity(total_len);
-        for k in keys {
-            out.extend_from_slice(&map[&k]);
-        }
-        out
     }
 }
