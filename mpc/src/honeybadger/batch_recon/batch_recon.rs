@@ -208,7 +208,7 @@ impl<F: FftField> BatchReconNode<F> {
 
                             // Send the finalization message back to the triple generation or the
                             // multiplication protocol.
-                            match msg.session_id.protocol().unwrap() {
+                            match msg.session_id.calling_protocol().unwrap() {
                                 ProtocolType::Triple => {
                                     let mut bytes_message = Vec::new();
                                     result.serialize_compressed(&mut bytes_message)?;
@@ -222,18 +222,7 @@ impl<F: FftField> BatchReconNode<F> {
                                         bincode::serialize(&triple_gen_generic_msg)?;
                                     net.send(self.id, &bytes_generic_msg).await?;
                                 }
-                                ProtocolType::MulOne => {
-                                    let mut bytes_message = Vec::new();
-                                    result.serialize_compressed(&mut bytes_message)?;
-                                    let mult_generic_msg = WrappedMessage::Mul(MultMessage::new(
-                                        self.id,
-                                        msg.session_id,
-                                        bytes_message,
-                                    ));
-                                    let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
-                                    net.send(self.id, &bytes_generic_msg).await?;
-                                }
-                                ProtocolType::MulTwo => {
+                                ProtocolType::Mul => {
                                     let mut bytes_message = Vec::new();
                                     result.serialize_compressed(&mut bytes_message)?;
                                     let mult_generic_msg = WrappedMessage::Mul(MultMessage::new(

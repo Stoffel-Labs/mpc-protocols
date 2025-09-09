@@ -20,7 +20,7 @@ async fn test_triple_gen_e2e() {
     let n_parties = 13;
     let threshold = 2;
     let n_shares = 2 * threshold + 1;
-    let session_id = SessionId::new(ProtocolType::Triple, 111);
+    let session_id = SessionId::new(ProtocolType::Triple,0, 0, 111);
     let (random_shares_a, random_shares_b, randousha_pairs, a_values, b_values, _) =
         get_triple_init_test_shares(n_shares, n_parties, threshold);
     let (network, receivers, _) = test_setup(n_parties, vec![]);

@@ -1,3 +1,6 @@
+use crate::utils::test_utils::{
+    create_global_nodes, generate_independent_shares, receive, setup_tracing, test_setup,
+};
 use ark_bls12_381::Fr;
 use std::time::Duration;
 use stoffelmpc_mpc::{
@@ -5,14 +8,10 @@ use stoffelmpc_mpc::{
     honeybadger::{
         input::{input::InputClient, InputMessageType},
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
-        HoneyBadgerMPCNode, ProtocolType, SessionId, WrappedMessage,
+        HoneyBadgerMPCNode, WrappedMessage,
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
-
-use crate::utils::test_utils::{
-    create_global_nodes, generate_independent_shares, receive, setup_tracing, test_setup,
-};
 
 pub mod utils;
 #[tokio::test]
@@ -37,18 +36,12 @@ async fn test_multiple_clients_parallel_input() {
         .collect();
 
     let nodes: Vec<HoneyBadgerMPCNode<Fr, Avid>> =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-            n,
-            t,
-            0,
-            0,
-            SessionId::new(ProtocolType::Input, 0),
-        );
+        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111);
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
 
     for (i, &cid) in client_ids.iter().enumerate() {
         let input = inputs[i].clone();
-        let mut client = InputClient::<Fr, Avid>::new(cid, n, t, input.clone()).unwrap();
+        let mut client = InputClient::<Fr, Avid>::new(cid, n, t, 111, input.clone()).unwrap();
         let mut recv = client_recv.remove(&cid).unwrap();
         let net_clone = net.clone();
         tokio::spawn(async move {
@@ -101,14 +94,9 @@ async fn test_input_recovery_with_missing_server() {
 
     let (net, server_recv, mut client_recv) = test_setup(n, vec![clientid]);
     let local_shares = generate_independent_shares(&mask_values, t, n);
-    let mut client = InputClient::<Fr, Avid>::new(clientid, n, t, input_values.clone()).unwrap();
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n,
-        t,
-        0,
-        0,
-        SessionId::new(ProtocolType::Input, 0),
-    );
+    let mut client =
+        InputClient::<Fr, Avid>::new(clientid, n, t, 111, input_values.clone()).unwrap();
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111);
 
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
     let mut recv = client_recv.remove(&clientid).unwrap();
@@ -158,14 +146,8 @@ async fn test_input_with_too_many_faulty_shares() {
     let (net, server_recv, mut client_recv) = test_setup(n, vec![client_id]);
 
     let mut local_shares = generate_independent_shares(&[mask_value], t, n);
-    let mut client = InputClient::<Fr, Avid>::new(client_id, n, t, vec![input_value]).unwrap();
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n,
-        t,
-        0,
-        0,
-        SessionId::new(ProtocolType::Input, 0),
-    );
+    let mut client = InputClient::<Fr, Avid>::new(client_id, n, t, 111, vec![input_value]).unwrap();
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111);
 
     // Start server receiver loop
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());

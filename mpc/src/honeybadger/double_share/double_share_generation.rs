@@ -1,5 +1,3 @@
-use std::{collections::BTreeMap, sync::Arc};
-
 use crate::{
     common::{share::shamir::NonRobustShare, SecretSharingScheme},
     honeybadger::{
@@ -11,6 +9,7 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use itertools::izip;
+use std::{collections::BTreeMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;

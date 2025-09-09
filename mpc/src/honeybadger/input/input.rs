@@ -116,18 +116,26 @@ pub struct InputClient<F: FftField, R: RBC> {
     pub client_id: usize,
     pub n: usize,
     pub t: usize,
+    pub instance_id: u64,
     pub rbc: R,
     pub inputs: Arc<Mutex<Vec<F>>>,
     pub received_shares: Arc<Mutex<HashMap<usize, Vec<RobustShare<F>>>>>,
 }
 
 impl<F: FftField, R: RBC> InputClient<F, R> {
-    pub fn new(id: usize, n: usize, t: usize, inputs: Vec<F>) -> Result<Self, InputError> {
+    pub fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        instance_id: u64,
+        inputs: Vec<F>,
+    ) -> Result<Self, InputError> {
         let rbc = R::new(id, n, t, t + 1)?;
         Ok(Self {
             client_id: id,
             n,
             t,
+            instance_id,
             rbc,
             inputs: Arc::new(Mutex::new(inputs)),
             received_shares: Arc::new(Mutex::new(HashMap::new())),
@@ -186,7 +194,12 @@ impl<F: FftField, R: RBC> InputClient<F, R> {
             let wrapped = WrappedMessage::Input(msg);
             let bytes = bincode::serialize(&wrapped)?;
             //Broadcast to servers
-            let sessionid = SessionId::new(ProtocolType::Input, self.client_id as u64);
+            let sessionid = SessionId::new(
+                ProtocolType::Input,
+                self.client_id as u8,
+                0,
+                self.instance_id,
+            );
             self.rbc.init(bytes, sessionid, net).await?;
             info!(
                 "Client {} broadcasted masked input to all servers",

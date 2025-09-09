@@ -1,7 +1,5 @@
 use crate::common::share::ShareError;
 use crate::common::types::fixed::FixedPointPrecision;
-use crate::common::SecretSharingScheme;
-use ark_ff::FftField;
 use thiserror::Error;
 
 /// Implements the secure fixed-point arithmetic.

@@ -1762,9 +1762,9 @@ impl ACS {
 
         let mut store = self.store.lock().await;
 
-        if !store.has_aba_input(msg.session_id.context_id()) {
-            store.set_aba_input(msg.session_id.context_id(), true);
-            store.set_rbc_output(msg.session_id.context_id(), msg.payload);
+        if !store.has_aba_input(msg.session_id.sub_id().into()) {
+            store.set_aba_input(msg.session_id.sub_id().into(), true);
+            store.set_rbc_output(msg.session_id.sub_id().into(), msg.payload);
 
             //Initiate aba for session id
             let payload = set_value_round(true, 0);
@@ -1792,7 +1792,7 @@ impl ACS {
 
                 // Store ABA output
                 let mut store = store_clone.lock().await;
-                store.set_aba_output(msg.session_id.context_id(), output);
+                store.set_aba_output(msg.session_id.sub_id().into(), output);
 
                 // Check if enough parties agreed with output 1
                 let true_count = store.get_aba_output_one_count();
@@ -1813,8 +1813,12 @@ impl ACS {
                     } else {
                         for sid in uninitiated {
                             let payload = set_value_round(false, 0);
-                            let sessionid =
-                                SessionId::new(msg.session_id.protocol().unwrap(), sid as u64);
+                            let sessionid = SessionId::new(
+                                msg.session_id.calling_protocol().unwrap(),
+                                sid as u8,
+                                msg.session_id.round_id(),
+                                msg.session_id.instance_id(),
+                            );
                             let _ = self_clone
                                 .aba
                                 .init(payload, sessionid, net_clone.clone())
@@ -1859,9 +1863,12 @@ impl ACS {
                     }
                 }
             });
-        } else if store.get_rbc_output(msg.session_id.context_id()).is_none() {
+        } else if store
+            .get_rbc_output(msg.session_id.sub_id().into())
+            .is_none()
+        {
             // RBC finished *after* ABA started
-            store.set_rbc_output(msg.session_id.context_id(), msg.payload);
+            store.set_rbc_output(msg.session_id.sub_id().into(), msg.payload);
 
             // Now try finalizing in case all ABA + RBC outputs are ready
             let store_clone = self.store.clone();
