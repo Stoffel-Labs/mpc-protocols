@@ -55,7 +55,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
     }
 
     pub async fn init<N: Network>(
-        &mut self,
+        &self,
         session_id: SessionId,
         x: Vec<RobustShare<F>>,
         y: Vec<RobustShare<F>>,

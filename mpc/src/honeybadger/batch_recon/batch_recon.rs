@@ -1,4 +1,5 @@
 use super::*;
+use crate::honeybadger::rand_bit::RandBitMessage;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde},
@@ -16,6 +17,7 @@ use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
 use stoffelnet::network_utils::Network;
 use tracing::{debug, error, info, warn};
+
 /// --------------------------BatchRecPub--------------------------
 ///
 /// Goal: Publicly reconstruct t+1 secret-shared values [x₁, ..., x_{t+1}]
@@ -230,6 +232,15 @@ impl<F: FftField> BatchReconNode<F> {
                                         msg.session_id,
                                         bytes_message,
                                     ));
+                                    let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
+                                    net.send(self.id, &bytes_generic_msg).await?;
+                                }
+                                ProtocolType::RandBit => {
+                                    let mut bytes_message = Vec::new();
+                                    result.serialize_compressed(&mut bytes_message)?;
+                                    let mult_generic_msg = WrappedMessage::RandBit(
+                                        RandBitMessage::new(self.id, msg.session_id, bytes_message),
+                                    );
                                     let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
                                     net.send(self.id, &bytes_generic_msg).await?;
                                 }

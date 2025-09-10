@@ -22,8 +22,10 @@ pub mod triple_gen;
 pub mod input;
 pub mod mul;
 pub mod output;
+pub mod rand_bit;
 pub mod share_gen;
 
+use crate::honeybadger::rand_bit::{RandBit, RandBitError, RandBitMessage};
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
@@ -96,6 +98,8 @@ pub enum HoneyBadgerError {
     JoinError,
     #[error("output channel closed before result was received")]
     ChannelClosed,
+    #[error("error in random bit generation: {0:?}")]
+    RandBitError(#[from] RandBitError),
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -162,6 +166,7 @@ pub struct PreprocessNodes<F: FftField, R: RBC> {
     pub dou_sha: DoubleShareNode<F>,
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
+    pub rand_bit: RandBit<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -171,6 +176,7 @@ pub struct OutputChannels {
     pub ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub triple_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub mul_channel: Arc<Mutex<Receiver<SessionId>>>,
+    pub rand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 /// Preprocessing material for the HoneyBadgerMPCNode protocol.
@@ -291,10 +297,12 @@ where
         let (triple_sender, triple_receiver) = mpsc::channel(128);
         let (mul_sender, mul_receiver) = mpsc::channel(128);
         let (share_gen_sender, share_gen_reciever) = mpsc::channel(128);
+        let (rand_bit_sender, rand_bit_receiver) = mpsc::channel(128);
 
         // Create nodes for preprocessing.
         let dousha_node =
             DoubleShareNode::new(id, params.n_parties, params.threshold, dou_sha_sender);
+        let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold, rand_bit_sender)?;
         let ran_dou_sha_node = RanDouShaNode::new(
             id,
             ran_dou_sha_sender,
@@ -327,6 +335,7 @@ where
                 dou_sha: dousha_node,
                 ran_dou_sha: ran_dou_sha_node,
                 triple_gen: triple_gen_node,
+                rand_bit: rand_bit_node,
             },
             operations: Operation { mul: mul_node },
             output,
@@ -336,6 +345,7 @@ where
                 ran_dou_sha_channel: Arc::new(Mutex::new(ran_dou_sha_receiver)),
                 triple_channel: Arc::new(Mutex::new(triple_receiver)),
                 mul_channel: Arc::new(Mutex::new(mul_receiver)),
+                rand_bit_channel: Arc::new(Mutex::new(rand_bit_receiver)),
             },
         })
     }
@@ -454,6 +464,9 @@ where
                         );
                     }
                 }
+            }
+            WrappedMessage::RandBit(rand_bit_message) => {
+                self.preprocess.rand_bit.process(rand_bit_message).await?;
             }
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
         }
@@ -755,6 +768,7 @@ pub enum WrappedMessage {
     Dousha(DouShaMessage),
     Mul(MultMessage),
     Output(OutputMessage),
+    RandBit(RandBitMessage),
 }
 
 //-----------------Session-ID-----------------
@@ -771,6 +785,7 @@ pub enum ProtocolType {
     BatchRecon = 6,
     Dousha = 7,
     Mul = 8,
+    RandBit = 9,
 }
 
 impl TryFrom<u16> for ProtocolType {
