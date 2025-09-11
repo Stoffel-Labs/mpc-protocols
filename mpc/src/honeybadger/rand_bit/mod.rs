@@ -16,6 +16,7 @@ use std::ops::{Add, Mul};
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
 use thiserror::Error;
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 
@@ -41,6 +42,8 @@ pub enum RandBitError {
     SerializationError(#[from] SerializationError),
     #[error("error operating with the shares: {0:?}")]
     ShareError(#[from] ShareError),
+    #[error("error sending the finished session ID to the caller: {0:?}")]
+    SenderError(#[from] SendError<SessionId>),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -67,7 +70,7 @@ impl RandBitMessage {
     }
 }
 
-/// Represents the random bit generation.
+/// Represents the random bit generation protocol.
 ///
 /// # Output
 ///
@@ -164,7 +167,7 @@ where
             storage.a_share = Some(a.clone());
         }
 
-        // Step 1: Execute the multiplication to obtain a^2 mod p.
+        // Step 2: Execute the multiplication to obtain a^2 mod p.
         let a_copy = a.clone();
         let session_id_mult = SessionId::new(ProtocolType::Mul, 1, 1, session_id.instance_id());
         self.mult_node
@@ -206,6 +209,7 @@ where
         let a_square_array: Vec<F> =
             CanonicalDeserialize::deserialize_compressed(message.payload.as_slice())?;
 
+        // Step 4.
         for a_square in &a_square_array {
             if *a_square == F::zero() {
                 return Err(RandBitError::ZeroSquare);
@@ -256,6 +260,9 @@ where
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Finished;
         }
+
+        // You send the current session ID as finished to the sender channel.
+        self.output_channel.send(message.session_id).await?;
 
         Ok(d_share_array)
     }
