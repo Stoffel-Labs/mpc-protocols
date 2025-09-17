@@ -152,7 +152,7 @@ where
     pub async fn init<N>(
         &mut self,
         a: Vec<RobustShare<F>>,
-        mult_triple: ShamirBeaverTriple<F>,
+        mult_triple: Vec<ShamirBeaverTriple<F>>,
         session_id: SessionId,
         network: Arc<N>,
     ) -> Result<(), RandBitError>
@@ -171,13 +171,7 @@ where
         let a_copy = a.clone();
         let session_id_mult = SessionId::new(ProtocolType::Mul, 1, 1, session_id.instance_id());
         self.mult_node
-            .init(
-                session_id_mult,
-                a,
-                a_copy,
-                vec![mult_triple],
-                network.clone(),
-            )
+            .init(session_id_mult, a, a_copy, mult_triple, network.clone())
             .await?;
 
         let a_squre_share =
