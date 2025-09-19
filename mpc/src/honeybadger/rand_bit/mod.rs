@@ -169,13 +169,37 @@ where
 
         // Step 2: Execute the multiplication to obtain a^2 mod p.
         let a_copy = a.clone();
-        let session_id_mult = SessionId::new(ProtocolType::Mul, 1, 1, session_id.instance_id());
-        self.mult_node
-            .init(session_id_mult, a, a_copy, mult_triple, network.clone())
+        let session_id_mult = SessionId::new(ProtocolType::Mul, 0, 0, session_id.instance_id());
+    
+        let _ = self.mult_node
+            .init(
+                session_id_mult,
+                a,
+                a_copy,
+                mult_triple,
+                network.clone(),
+            )
             .await?;
 
-        let a_squre_share =
+            // let mut a_square_share = None;
+
+            // let mut rx = self.mult_output.lock().await;
+            // while let Some(id) = rx.recv().await {
+            //     if id == session_id_mult {
+            //         let mul_store = self.mult_node.mult_storage.lock().await;
+            //         if let Some(store) = mul_store.get(&session_id) {
+            //             let store = store.lock().await;
+            //             a_square_share = Some(store.protocol_output.clone());
+            //             // mul_store.remove(&session_id);
+            //             break;
+            //         }
+            //     }
+            // };
+
+        let a_square_share =
             if let Some(session_id_finished_mult) = self.mult_output.lock().await.recv().await {
+
+                if session_id_finished_mult == session_id_mult {
                 self.mult_node
                     .mult_storage
                     .lock()
@@ -186,12 +210,15 @@ where
                     .await
                     .protocol_output
                     .clone()
+                } else {
+                    return Err(RandBitError::SquareMult);
+                }
             } else {
                 return Err(RandBitError::SquareMult);
             };
 
         self.batch_recon
-            .init_batch_reconstruct(&a_squre_share, session_id, network.clone())
+            .init_batch_reconstruct(&a_square_share, session_id, network.clone())
             .await?;
         Ok(())
     }
@@ -253,6 +280,7 @@ where
             let storage_bind = self.get_or_crate_storage(message.session_id).await;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Finished;
+            storage.protocol_output = Some(d_share_array.clone());
         }
 
         // You send the current session ID as finished to the sender channel.
@@ -276,7 +304,7 @@ where
     pub protocol_state: ProtocolState,
     /// Output of the protocol. If the protocol is not finished yet, `protocol_output` will be
     /// [`None`].
-    pub protocol_output: Option<RobustShare<F>>,
+    pub protocol_output: Option<Vec<RobustShare<F>>>,
     /// Share of `a`
     pub a_share: Option<Vec<RobustShare<F>>>,
 }

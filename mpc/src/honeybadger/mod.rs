@@ -415,6 +415,10 @@ where
                     self.preprocess.input.rbc.process(rbc_msg, net).await?
                 }
                 Some(ProtocolType::Mul) => self.operations.mul.rbc.process(rbc_msg, net).await?,
+
+                Some(ProtocolType::RandBit) => {
+                    self.preprocess.rand_bit.mult_node.rbc.process(rbc_msg, net).await?
+                }
                 _ => {
                     warn!(
                         "Unknown protocol ID in session ID: {:?} in RBC",
@@ -454,6 +458,14 @@ where
                         self.preprocess
                             .triple_gen
                             .batch_recon_node
+                            .process(batch_msg, net)
+                            .await?
+                    }
+
+                    Some(ProtocolType::RandBit) => {
+                        self.preprocess
+                            .rand_bit
+                            .batch_recon
                             .process(batch_msg, net)
                             .await?
                     }
@@ -802,6 +814,7 @@ impl TryFrom<u16> for ProtocolType {
             6 => Ok(ProtocolType::BatchRecon),
             7 => Ok(ProtocolType::Dousha),
             8 => Ok(ProtocolType::Mul),
+            9 => Ok(ProtocolType::RandBit),
             _ => Err(()),
         }
     }
