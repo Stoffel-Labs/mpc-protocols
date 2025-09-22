@@ -803,7 +803,7 @@ async fn test_prand_bit() {
 
     // Wait for all tasks to finish
     futures::future::join_all(handles).await;
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_millis(300));
 
     //----------------------------------------VALIDATE VALUES----------------------------------------
 
@@ -811,7 +811,14 @@ async fn test_prand_bit() {
     let mut bit_shares = Vec::new();
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let store = node.preprocess.rand_bit.storage.lock().await.get(&session_id).cloned();
+        let store = node
+            .preprocess
+            .rand_bit
+            .storage
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned();
         if let Some(store) = store {
             let store_lock = store.lock().await;
             let store2 = store_lock.clone();
@@ -820,8 +827,10 @@ async fn test_prand_bit() {
             bit_shares.push(protocol_output.unwrap()[0].clone());
         }
     }
-    
-    let bit = RobustShare::recover_secret(&bit_shares, n_parties).unwrap().1;
+
+    let bit = RobustShare::recover_secret(&bit_shares, n_parties)
+        .unwrap()
+        .1;
     println!("recovered bit: {}", bit);
     // check if bit is 0 or 1
     assert!(bit == Fr::ZERO || bit == Fr::ONE);

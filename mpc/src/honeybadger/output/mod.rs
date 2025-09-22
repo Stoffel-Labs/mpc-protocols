@@ -8,7 +8,6 @@ use thiserror::Error;
 
 use crate::{common::rbc::RbcError, honeybadger::robust_interpolate::InterpolateError};
 
-
 #[derive(Debug, Error)]
 pub enum OutputError {
     #[error("inner error: {0}")]
@@ -38,10 +37,7 @@ pub struct OutputMessage {
 }
 
 impl OutputMessage {
-    pub fn new(sender_id: usize,  payload: Vec<u8>) -> OutputMessage {
-        Self {
-            sender_id,
-            payload,
-        }
+    pub fn new(sender_id: usize, payload: Vec<u8>) -> OutputMessage {
+        Self { sender_id, payload }
     }
 }

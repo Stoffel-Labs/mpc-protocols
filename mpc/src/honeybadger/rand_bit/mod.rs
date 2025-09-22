@@ -157,7 +157,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RandBitError>
     where
-        N: Network + Send + Sync,
+        N: Network + Send + Sync + 'static,
     {
         // Mark the protocol as initialized.
         {
@@ -170,56 +170,38 @@ where
         // Step 2: Execute the multiplication to obtain a^2 mod p.
         let a_copy = a.clone();
         let session_id_mult = SessionId::new(ProtocolType::Mul, 0, 0, session_id.instance_id());
-    
-        let _ = self.mult_node
-            .init(
-                session_id_mult,
-                a,
-                a_copy,
-                mult_triple,
-                network.clone(),
-            )
+
+        self
+            .mult_node
+            .init(session_id_mult, a, a_copy, mult_triple, network.clone())
             .await?;
 
-            // let mut a_square_share = None;
+        let mult_output = self.mult_output.clone();
+        let mult_storage = self.mult_node.mult_storage.clone();
+        let batch_recon = self.batch_recon.clone();
+        let network_clone = network.clone();
 
-            // let mut rx = self.mult_output.lock().await;
-            // while let Some(id) = rx.recv().await {
-            //     if id == session_id_mult {
-            //         let mul_store = self.mult_node.mult_storage.lock().await;
-            //         if let Some(store) = mul_store.get(&session_id) {
-            //             let store = store.lock().await;
-            //             a_square_share = Some(store.protocol_output.clone());
-            //             // mul_store.remove(&session_id);
-            //             break;
-            //         }
-            //     }
-            // };
+        tokio::spawn(async move {
+            if let Some(finished_session_id) = mult_output.lock().await.recv().await {
+                if finished_session_id == session_id_mult {
+                    let a_square_share = mult_storage
+                        .lock()
+                        .await
+                        .get(&session_id_mult)
+                        .unwrap()
+                        .lock()
+                        .await
+                        .protocol_output
+                        .clone();
 
-        let a_square_share =
-            if let Some(session_id_finished_mult) = self.mult_output.lock().await.recv().await {
-
-                if session_id_finished_mult == session_id_mult {
-                self.mult_node
-                    .mult_storage
-                    .lock()
-                    .await
-                    .remove(&session_id_finished_mult)
-                    .ok_or(RandBitError::SquareMult)?
-                    .lock()
-                    .await
-                    .protocol_output
-                    .clone()
-                } else {
-                    return Err(RandBitError::SquareMult);
+                    batch_recon
+                        .init_batch_reconstruct(&a_square_share, session_id, network_clone)
+                        .await
+                        .unwrap();
                 }
-            } else {
-                return Err(RandBitError::SquareMult);
-            };
+            }
+        });
 
-        self.batch_recon
-            .init_batch_reconstruct(&a_square_share, session_id, network.clone())
-            .await?;
         Ok(())
     }
 

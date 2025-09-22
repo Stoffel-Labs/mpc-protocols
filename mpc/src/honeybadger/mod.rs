@@ -416,9 +416,14 @@ where
                 }
                 Some(ProtocolType::Mul) => self.operations.mul.rbc.process(rbc_msg, net).await?,
 
-                Some(ProtocolType::RandBit) => {
-                    self.preprocess.rand_bit.mult_node.rbc.process(rbc_msg, net).await?
-                }
+                // Some(ProtocolType::RandBit) => {
+                //     self.preprocess
+                //         .rand_bit
+                //         .mult_node
+                //         .rbc
+                //         .process(rbc_msg, net)
+                //         .await?
+                // }
                 _ => {
                     warn!(
                         "Unknown protocol ID in session ID: {:?} in RBC",
