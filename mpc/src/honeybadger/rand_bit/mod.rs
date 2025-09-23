@@ -120,9 +120,9 @@ where
         n_parties: usize,
         threshold: usize,
         protocol_output: Sender<SessionId>,
+        shared_mult_node: Multiply<F, R>,                    
+        shared_mult_receiver: Arc<Mutex<Receiver<SessionId>>>,
     ) -> Result<Self, RandBitError> {
-        let (mult_sender, mult_receiver) = tokio::sync::mpsc::channel(100);
-        let mult_node = Multiply::new(id, n_parties, threshold, mult_sender)?;
 
         let batch_recon_node = BatchReconNode::new(id, n_parties, threshold)?;
 
@@ -132,8 +132,8 @@ where
             threshold,
             storage: Arc::new(Mutex::new(HashMap::new())),
             output_channel: protocol_output,
-            mult_node,
-            mult_output: Arc::new(Mutex::new(mult_receiver)),
+            mult_node: shared_mult_node,
+            mult_output: shared_mult_receiver,
             batch_recon: batch_recon_node,
         })
     }
@@ -176,31 +176,29 @@ where
             .init(session_id_mult, a, a_copy, mult_triple, network.clone())
             .await?;
 
-        let mult_output = self.mult_output.clone();
-        let mult_storage = self.mult_node.mult_storage.clone();
-        let batch_recon = self.batch_recon.clone();
-        let network_clone = network.clone();
-
-        tokio::spawn(async move {
-            if let Some(finished_session_id) = mult_output.lock().await.recv().await {
-                if finished_session_id == session_id_mult {
-                    let a_square_share = mult_storage
-                        .lock()
-                        .await
-                        .get(&session_id_mult)
-                        .unwrap()
-                        .lock()
-                        .await
-                        .protocol_output
-                        .clone();
-
-                    batch_recon
-                        .init_batch_reconstruct(&a_square_share, session_id, network_clone)
-                        .await
-                        .unwrap();
+        let a_square_share =
+            if let Some(session_id_finished_mult) = self.mult_output.lock().await.recv().await {
+                if session_id_finished_mult == session_id_mult {
+                self.mult_node
+                    .mult_storage
+                    .lock()
+                    .await
+                    .remove(&session_id_finished_mult)
+                    .ok_or(RandBitError::SquareMult)?
+                    .lock()
+                    .await
+                    .protocol_output
+                    .clone()
+                } else {
+                    return Err(RandBitError::SquareMult);
                 }
-            }
-        });
+            } else {
+                return Err(RandBitError::SquareMult);
+            };
+
+        self.batch_recon
+            .init_batch_reconstruct(&a_square_share, session_id, network.clone())
+            .await?;
 
         Ok(())
     }
@@ -209,6 +207,9 @@ where
         &self,
         message: RandBitMessage,
     ) -> Result<Vec<RobustShare<F>>, RandBitError> {
+        
+        tracing::info!("Rand_bit reconstruction msg received from node: {0:?}", message.sender);
+
         let a_square_array: Vec<F> =
             CanonicalDeserialize::deserialize_compressed(message.payload.as_slice())?;
 

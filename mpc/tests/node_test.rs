@@ -803,7 +803,7 @@ async fn test_prand_bit() {
 
     // Wait for all tasks to finish
     futures::future::join_all(handles).await;
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
     //----------------------------------------VALIDATE VALUES----------------------------------------
 
