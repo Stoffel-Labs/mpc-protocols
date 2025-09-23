@@ -748,7 +748,7 @@ async fn test_prand_bit() {
     let t = 1;
     let mut rng = test_rng();
     let session_id = SessionId::new(ProtocolType::RandBit, 0, 0, 111);
-    let no_of_rand_bits = 5;
+    let no_of_rand_bits = 2;
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
@@ -807,7 +807,6 @@ async fn test_prand_bit() {
 
     //----------------------------------------VALIDATE VALUES----------------------------------------
 
-    //TODO: only first bit is checked, should check all
     let mut bit_shares = Vec::new();
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
@@ -824,14 +823,26 @@ async fn test_prand_bit() {
             let store2 = store_lock.clone();
             let protocol_output = store2.protocol_output.clone();
             assert!(protocol_output.is_some());
-            bit_shares.push(protocol_output.unwrap()[0].clone());
+            bit_shares.push(protocol_output.unwrap().clone());
         }
     }
-
-    let bit = RobustShare::recover_secret(&bit_shares, n_parties)
+    let mut bit_share0 = Vec::new();
+    let mut bit_share1 = Vec::new();
+    for i in 0..n_parties {
+        bit_share0.push(bit_shares[i][0].clone());
+        bit_share1.push(bit_shares[i][1].clone());
+    }
+    let bit0 = RobustShare::recover_secret(&bit_share0, n_parties)
         .unwrap()
         .1;
-    println!("recovered bit: {}", bit);
+    println!("recovered bit: {}", bit0);
     // check if bit is 0 or 1
-    assert!(bit == Fr::ZERO || bit == Fr::ONE);
+    assert!(bit0 == Fr::ZERO || bit0 == Fr::ONE);
+
+    let bit1 = RobustShare::recover_secret(&bit_share1, n_parties)
+        .unwrap()
+        .1;
+    println!("recovered bit: {}", bit1);
+    // check if bit is 0 or 1
+    assert!(bit1 == Fr::ZERO || bit1 == Fr::ONE);
 }
