@@ -285,7 +285,7 @@ impl<F, R, N> MPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
 where
     N: Network + Send + Sync + 'static,
     F: FftField,
-    R: RBC,
+    R: RBC+ std::clone::Clone,
 {
     type MPCOpts = HoneyBadgerMPCNodeOpts;
     type Error = HoneyBadgerError;
@@ -302,7 +302,6 @@ where
         // Create nodes for preprocessing.
         let dousha_node =
             DoubleShareNode::new(id, params.n_parties, params.threshold, dou_sha_sender);
-        let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold, rand_bit_sender)?;
         let ran_dou_sha_node = RanDouShaNode::new(
             id,
             ran_dou_sha_sender,
@@ -313,7 +312,10 @@ where
 
         let triple_gen_node =
             TripleGenNode::new(id, params.n_parties, params.threshold, triple_sender)?;
+        let mul_receiver_arc = Arc::new(Mutex::new(mul_receiver));
         let mul_node = Multiply::new(id, params.n_parties, params.threshold, mul_sender)?;
+        let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold, rand_bit_sender, (&mul_node).clone(), mul_receiver_arc.clone())?;
+
         let share_gen = RanShaNode::new(
             id,
             params.n_parties,
@@ -344,7 +346,7 @@ where
                 dou_sha_channel: Arc::new(Mutex::new(dou_sha_receiver)),
                 ran_dou_sha_channel: Arc::new(Mutex::new(ran_dou_sha_receiver)),
                 triple_channel: Arc::new(Mutex::new(triple_receiver)),
-                mul_channel: Arc::new(Mutex::new(mul_receiver)),
+                mul_channel: mul_receiver_arc,
                 rand_bit_channel: Arc::new(Mutex::new(rand_bit_receiver)),
             },
         })
@@ -457,6 +459,14 @@ where
                             .process(batch_msg, net)
                             .await?
                     }
+
+                    Some(ProtocolType::RandBit) => {
+                        self.preprocess
+                            .rand_bit
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} at Batch reconstruction",
@@ -480,7 +490,7 @@ impl<F, R, N> PreprocessingMPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCN
 where
     N: Network + Send + Sync + 'static,
     F: FftField,
-    R: RBC,
+    R: RBC+ std::clone::Clone,
 {
     /// Runs preprocessing to produce Random shares and Beaver triples
     /// Steps:
@@ -802,6 +812,7 @@ impl TryFrom<u16> for ProtocolType {
             6 => Ok(ProtocolType::BatchRecon),
             7 => Ok(ProtocolType::Dousha),
             8 => Ok(ProtocolType::Mul),
+            9 => Ok(ProtocolType::RandBit),
             _ => Err(()),
         }
     }

@@ -281,7 +281,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         Ok(())
     }
 
-    async fn get_or_create_mult_storage(
+    pub async fn get_or_create_mult_storage(
         &self,
         session_id: SessionId,
     ) -> Arc<Mutex<MultStorage<F>>> {
