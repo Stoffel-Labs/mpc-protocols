@@ -771,6 +771,9 @@ pub enum ProtocolType {
     BatchRecon = 6,
     Dousha = 7,
     Mul = 8,
+    PRandbInt = 9,
+    PRandBitD = 10,
+    PRandBitL = 11,
 }
 
 impl TryFrom<u16> for ProtocolType {
@@ -787,6 +790,9 @@ impl TryFrom<u16> for ProtocolType {
             6 => Ok(ProtocolType::BatchRecon),
             7 => Ok(ProtocolType::Dousha),
             8 => Ok(ProtocolType::Mul),
+            9 => Ok(ProtocolType::PRandbInt),
+            10 => Ok(ProtocolType::PRandBitD),
+            11 => Ok(ProtocolType::PRandBitL),
             _ => Err(()),
         }
     }

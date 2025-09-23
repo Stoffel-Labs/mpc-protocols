@@ -97,30 +97,34 @@ impl PRandBitDMessage {
 }
 
 #[derive(Clone, Debug)]
-pub struct PRandBitDStore<F: PrimeField> {
+pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     /// For every maximal unqualified set T that excludes this player,
     /// we store the full mask r_T = sum_i r_T^i
     pub riss_shares: HashMap<Vec<usize>, HashMap<usize, i64>>, // tset -> {sender -> val}
     pub r_t: HashMap<Vec<usize>, i64>,
     pub no_of_tsets: Option<usize>,
     pub share_r_q: Option<F>,
+    pub share_r_p: Option<G>,
     pub share_b_q: Option<F>,
     pub share_r_2: Option<F2_8>,
     pub share_r_plus_b: HashMap<usize, F>,
     pub share_b_2: Option<F2_8>,
+    pub share_b_p: Option<G>,
 }
 
-impl<F: PrimeField> PRandBitDStore<F> {
+impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
     pub fn empty() -> Self {
         Self {
             riss_shares: HashMap::new(),
             r_t: HashMap::new(),
             no_of_tsets: None,
             share_r_q: None,
+            share_r_p: None,
             share_b_q: None,
             share_r_2: None,
             share_r_plus_b: HashMap::new(),
             share_b_2: None,
+            share_b_p: None,
         }
     }
 }

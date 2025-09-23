@@ -1,15 +1,17 @@
 pub mod utils;
 use crate::utils::test_utils::{setup_tracing, test_setup};
-use ark_bls12_381::Fr as F;
+use ark_bls12_381::Fr as G;
+use ark_bn254::Fr as F; // smaller prime field
 use ark_poly::Polynomial;
 use itertools::Itertools;
 use std::{sync::Arc, time::Duration};
+use stoffelmpc_mpc::common::lagrange_interpolate;
 use stoffelmpc_mpc::common::types::f256::{lagrange_interpolate_f2_8, F2_8};
 use stoffelmpc_mpc::{
     common::types::{prandbitd::PRandBitDNode, PRandBitDMessage},
     honeybadger::{ProtocolType, SessionId},
 };
-use tokio::task::JoinSet; // Example prime field
+use tokio::task::JoinSet;
 
 #[tokio::test]
 async fn test_prandbitd_end_to_end() {
@@ -23,7 +25,7 @@ async fn test_prandbitd_end_to_end() {
     // Build fake network
     let (network, mut recv, _) = test_setup(n, vec![]);
     // Initialize nodes
-    let mut nodes: Vec<PRandBitDNode<F>> =
+    let mut nodes: Vec<PRandBitDNode<F, G>> =
         (0..n).map(|i| PRandBitDNode::new(i, n, t, l, k)).collect();
 
     // Manually set share_b_q for each node (simulate [b]_p)
@@ -62,8 +64,8 @@ async fn test_prandbitd_end_to_end() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Check outputs
-    let mut x_vals = Vec::new();
-    let mut y_vals = Vec::new();
+    let mut x_vals_2 = Vec::new();
+    let mut y_vals_2 = Vec::new();
 
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
@@ -73,18 +75,36 @@ async fn test_prandbitd_end_to_end() {
             "Node {:?} missing share_b_2",
             node.id
         );
-        println!("Node {} final [b]_2 share: {:?}", node.id, store.share_b_2);
-        x_vals.push(F2_8::from(node.id as u16 + 1));
-        y_vals.push(store.share_b_2.unwrap());
+        x_vals_2.push(F2_8::from(node.id as u16 + 1));
+        y_vals_2.push(store.share_b_2.unwrap());
     }
 
-    let poly = lagrange_interpolate_f2_8(&x_vals, &y_vals);
-    let recovered_b: F2_8 = poly.evaluate(F2_8::zero());
+    let poly_2 = lagrange_interpolate_f2_8(&x_vals_2, &y_vals_2);
+    let recovered_b_2 = poly_2.coeffs[0];
+    println!("Recovered b (GF(2^8)) = {:?}", recovered_b_2);
+    assert_eq!(recovered_b_2, F2_8::from(1u16), "Recovered b_2 != expected");
 
-    println!("Recovered b (GF(2^8)) = {:?}", recovered_b);
+    // === Reconstruct [b]_p in G (bigger prime field) ===
+    let mut x_vals_p = Vec::new();
+    let mut y_vals_p = Vec::new();
 
-    // Expected b was 1 (set in share_b_q)
-    assert_eq!(recovered_b, F2_8::from(1u16), "Recovered b != expected");
+    for node in &mut nodes {
+        let binding = node.get_or_create_store(session_id).await;
+        let store = binding.lock().await;
+
+        assert!(
+            store.share_b_p.is_some(),
+            "Node {:?} missing share_b_p",
+            node.id
+        );
+        x_vals_p.push(G::from((node.id + 1) as u64));
+        y_vals_p.push(store.share_b_p.unwrap());
+    }
+
+    let poly_p = lagrange_interpolate(&x_vals_p, &y_vals_p).unwrap();
+    let recovered_b_p = poly_p.coeffs[0];
+    println!("Recovered b (prime field G) = {:?}", recovered_b_p);
+    assert_eq!(recovered_b_p, G::from(1u64), "Recovered b_p != expected");
 }
 
 #[tokio::test]
@@ -100,7 +120,7 @@ async fn test_prandbitd_r_reconstruction() {
     let (network, mut recv, _) = test_setup(n, vec![]);
 
     // Initialize nodes
-    let mut nodes: Vec<PRandBitDNode<F>> =
+    let mut nodes: Vec<PRandBitDNode<F, G>> =
         (0..n).map(|i| PRandBitDNode::new(i, n, t, l, k)).collect();
 
     // Manually set share_b_q (not used in this test, but required by protocol)
@@ -188,6 +208,46 @@ async fn test_prandbitd_r_reconstruction() {
     }
 
     println!("All r_t values consistent and all Shamir reconstructions matched ground truth");
+    // === Step 4: Reconstruct r0 (GF(2^8)) ===
+    let expected_r0 = F2_8::from((r_int & 1) as u8);
+
+    let mut shares_r2 = Vec::new();
+    for node in &mut nodes {
+        let binding = node.get_or_create_store(session_id).await;
+        let store = binding.lock().await;
+        shares_r2.push((node.id, store.share_r_2.expect("missing share_r_2")));
+    }
+
+    for combo in all_ids.iter().copied().combinations(needed) {
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        for &id in &combo {
+            xs.push(F2_8::from((id + 1) as u16));
+            let val = shares_r2.iter().find(|(i, _)| *i == id).unwrap().1;
+            ys.push(val);
+        }
+        let poly = lagrange_interpolate_f2_8(&xs, &ys);
+        let rec_r0 = poly.evaluate(F2_8::zero());
+        assert_eq!(rec_r0, expected_r0, "Mismatch in r0 for combo {:?}", combo);
+    }
+    println!("Shamir reconstruction of r0 matched expected parity");
+
+    // === Step 5: Per-node sanity: recompute share_r_2 from r_T values ===
+    for node in &mut nodes {
+        let binding = node.get_or_create_store(session_id).await;
+        let store = binding.lock().await;
+        let poly_f2 = node.build_all_f_polys_2_8(store.r_t.clone()).await.unwrap();
+        let xi2 = F2_8::from((node.id + 1) as u16);
+        let mut recomputed = F2_8::zero();
+        for (tset, r_t) in store.r_t.iter() {
+            let r2 = F2_8::from((r_t & 1) as u8);
+            let coeff = poly_f2[tset].evaluate(xi2);
+            recomputed = recomputed + (r2 * coeff);
+        }
+        let stored = store.share_r_2.expect("missing share_r_2");
+        assert_eq!(recomputed, stored, "Node {}: share_r_2 mismatch", node.id);
+    }
+    println!("Per-node share_r_2 matches recomputation");
 }
 
 fn reconstruct<F: ark_ff::PrimeField>(

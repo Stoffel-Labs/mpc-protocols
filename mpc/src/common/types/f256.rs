@@ -112,7 +112,7 @@ impl Sub for F2_8 {
 
 #[derive(Clone, Debug)]
 pub struct Poly {
-    coeffs: Vec<F2_8>, // coeffs[0] + coeffs[1] x + coeffs[2] x^2 + ...
+    pub coeffs: Vec<F2_8>, // coeffs[0] + coeffs[1] x + coeffs[2] x^2 + ...
 }
 
 impl Poly {
