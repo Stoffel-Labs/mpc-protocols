@@ -17,7 +17,7 @@ use crate::{
 
 #[repr(C)]
 pub enum ShareErrorCode {
-    Success,
+    ShareSuccess,
     // Insufficient shares to reconstruct the secret
     InsufficientShares,
     // Mismatch degree between shares
@@ -223,7 +223,7 @@ pub extern "C" fn shamir_share_compute_shares(
                     len: shares_vec.len(),
                 };
             };
-            return ShareErrorCode::Success;
+            return ShareErrorCode::ShareSuccess;
         }
         Err(e) => return e.into(),
     }
@@ -263,7 +263,7 @@ pub extern "C" fn shamir_share_recover_secret(
                 *output_secret = secret.into();
             }
 
-            return ShareErrorCode::Success;
+            return ShareErrorCode::ShareSuccess;
         }
         Err(e) => return e.into(),
     }
@@ -302,13 +302,16 @@ pub extern "C" fn robust_share_compute_shares(
                 .collect::<Vec<RobustShareBls12>>();
             // prevent Rust from dropping the vec
             let mut shares_vec = ManuallyDrop::new(shares_vec);
+            let output_shares_t = RobustShareSliceBls12 {
+                pointer: shares_vec.as_mut_ptr(),
+                len: shares_vec.len(),
+            };
+            let ptr = Box::into_raw(Box::new(output_shares_t)) as *mut RobustShareSliceBls12;
             unsafe {
-                *output_shares = RobustShareSliceBls12 {
-                    pointer: shares_vec.as_mut_ptr(),
-                    len: shares_vec.len(),
-                };
+                *output_shares = *Box::from_raw(ptr);
             }
-            return ShareErrorCode::Success;
+
+            return ShareErrorCode::ShareSuccess;
         }
         Err(e) => return e.into(),
     }
@@ -352,7 +355,7 @@ pub extern "C" fn robust_share_recover_secret(
                 *output_secret = secret.into();
             }
 
-            return ShareErrorCode::Success;
+            return ShareErrorCode::ShareSuccess;
         }
         Err(e) => return e.into(),
     }
@@ -395,7 +398,7 @@ pub extern "C" fn non_robust_share_compute_shares(
                 };
             }
 
-            return ShareErrorCode::Success;
+            return ShareErrorCode::ShareSuccess;
         }
         Err(e) => return e.into(),
     }
@@ -435,7 +438,7 @@ pub extern "C" fn non_robust_share_recover_secret(
                 *output_secret = secret.into()
             }
 
-            return ShareErrorCode::Success;
+            return ShareErrorCode::ShareSuccess;
         }
         Err(e) => return e.into(),
     }

@@ -21,8 +21,10 @@ This should also create .a and .so/.dylib files for stoffelmpc in `./target/rele
 ### Compile and run C test codes
 ```text
 gcc ./mpc/src/ffi/tests/secret_share.c -L target/release -lstoffelmpc_mpc -o ./mpc/src/ffi/share_test
+gcc ./mpc/src/ffi/tests/rbc_test.c -L target/release -lstoffelmpc_mpc -o ./mpc/src/ffi/rbc_test   
 ```
 ```text
 ./mpc/src/ffi/share_test
+./mpc/src/ffi/rbc_test  
 ```
 

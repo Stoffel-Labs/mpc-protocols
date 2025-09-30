@@ -15,7 +15,7 @@ ShareErrorCode test_create_and_recover_shamir_shares()
     ShamirShareBls12 _s = shamir_share_new(secret_fr, 9, 10);
     // create an array of shamir shares with provided ids
     ShareErrorCode e = shamir_share_compute_shares(secret_fr, 4, &ids, &output_shares);
-    if (e != Success)
+    if (e != ShareSuccess)
     {
         return e;
     }
@@ -33,7 +33,7 @@ ShareErrorCode test_create_and_recover_shamir_shares()
     struct Bls12Fr recovered_secret;
     struct Bls12FrSlice recovered_coeff;
     e = shamir_share_recover_secret(output_shares, &recovered_secret, &recovered_coeff);
-    if (e != Success)
+    if (e != ShareSuccess)
     {
         return e;
     }
@@ -53,7 +53,7 @@ ShareErrorCode test_create_and_recover_shamir_shares()
     free_shamir_share_bls12_slice(output_shares);
     free_bls12_fr_slice(recovered_coeff);
 
-    return Success;
+    return ShareSuccess;
 }
 
 ShareErrorCode test_create_and_recover_robust_shares()
@@ -66,7 +66,7 @@ ShareErrorCode test_create_and_recover_robust_shares()
     RobustShareBls12 _s = robust_share_new(secret_fr, 9, 10);
     // create an array of shamir shares with provided ids
     ShareErrorCode e = robust_share_compute_shares(secret_fr, 2, n, &output_shares);
-    if (e != Success)
+    if (e != ShareSuccess)
     {
         return e;
     }
@@ -84,7 +84,7 @@ ShareErrorCode test_create_and_recover_robust_shares()
     struct Bls12Fr recovered_secret;
     struct Bls12FrSlice recovered_coeff;
     e = robust_share_recover_secret(output_shares, n, &recovered_secret, &recovered_coeff);
-    if (e != Success)
+    if (e != ShareSuccess)
     {
         return e;
     }
@@ -104,7 +104,7 @@ ShareErrorCode test_create_and_recover_robust_shares()
     free_robust_share_bls12_slice(output_shares);
     free_bls12_fr_slice(recovered_coeff);
 
-    return Success;
+    return ShareSuccess;
 }
 
 ShareErrorCode test_create_and_recover_non_robust_shares()
@@ -117,7 +117,7 @@ ShareErrorCode test_create_and_recover_non_robust_shares()
     NonRobustShareBls12 _s = non_robust_share_new(secret_fr, 9, 10);
     // create an array of shamir shares with provided ids
     ShareErrorCode e = non_robust_share_compute_shares(secret_fr, 5, n, &output_shares);
-    if (e != Success)
+    if (e != ShareSuccess)
     {
         return e;
     }
@@ -135,7 +135,7 @@ ShareErrorCode test_create_and_recover_non_robust_shares()
     struct Bls12Fr recovered_secret;
     struct Bls12FrSlice recovered_coeff;
     e = non_robust_share_recover_secret(output_shares, n, &recovered_secret, &recovered_coeff);
-    if (e != Success)
+    if (e != ShareSuccess)
     {
         return e;
     }
@@ -155,14 +155,14 @@ ShareErrorCode test_create_and_recover_non_robust_shares()
     free_non_robust_share_bls12_slice(output_shares);
     free_bls12_fr_slice(recovered_coeff);
 
-    return Success;
+    return ShareSuccess;
 }
 
 int main()
 {
     printf("\n================================ shamir share ================================\n\n");
     ShareErrorCode e = test_create_and_recover_shamir_shares();
-    if (e != Success)
+    if (e != ShareSuccess)
     {
         printf("Error code: %d\n", e);
         return 1;
@@ -170,7 +170,7 @@ int main()
 
     printf("\n================================ robust share ================================\n\n");
     e = test_create_and_recover_robust_shares();
-    if (e != Success)
+    if (e != ShareSuccess)
     {
         printf("Error code: %d\n", e);
         return 1;
@@ -178,7 +178,7 @@ int main()
 
     printf("\n================================ non robust share ================================\n\n");
     e = test_create_and_recover_non_robust_shares();
-    if (e != Success)
+    if (e != ShareSuccess)
     {
         printf("Error code: %d\n", e);
         return 1;

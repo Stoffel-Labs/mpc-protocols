@@ -2,6 +2,10 @@ use ark_bls12_381::Fr;
 use ark_ff::{BigInt, BigInteger, PrimeField};
 use std::slice;
 
+use crate::honeybadger::SessionId;
+
+pub mod network;
+pub mod rbc;
 pub mod share;
 
 // a sequence of `u64` limbs, least-significant limb first
@@ -44,6 +48,52 @@ impl From<Fr> for Bls12Fr {
 pub struct UsizeSlice {
     pub pointer: *mut usize,
     pub len: usize,
+}
+
+// Used for re-routing inter-protocol messages
+#[repr(C)]
+pub enum ProtocolType {
+    None = 0,
+    Randousha = 1,
+    Ransha = 2,
+    Input = 3,
+    Rbc = 4,
+    Triple = 5,
+    BatchRecon = 6,
+    Dousha = 7,
+    Mul = 8,
+}
+
+impl From<ProtocolType> for crate::honeybadger::ProtocolType {
+    fn from(value: ProtocolType) -> Self {
+        match value {
+            ProtocolType::None => crate::honeybadger::ProtocolType::None,
+            ProtocolType::Randousha => crate::honeybadger::ProtocolType::Randousha,
+            ProtocolType::Ransha => crate::honeybadger::ProtocolType::Ransha,
+            ProtocolType::Input => crate::honeybadger::ProtocolType::Input,
+            ProtocolType::Rbc => crate::honeybadger::ProtocolType::Rbc,
+            ProtocolType::Triple => crate::honeybadger::ProtocolType::Triple,
+            ProtocolType::BatchRecon => crate::honeybadger::ProtocolType::BatchRecon,
+            ProtocolType::Dousha => crate::honeybadger::ProtocolType::Dousha,
+            ProtocolType::Mul => crate::honeybadger::ProtocolType::Mul,
+        }
+    }
+}
+
+impl From<crate::honeybadger::ProtocolType> for ProtocolType {
+    fn from(value: crate::honeybadger::ProtocolType) -> Self {
+        match value {
+            crate::honeybadger::ProtocolType::None => ProtocolType::None,
+            crate::honeybadger::ProtocolType::Randousha => ProtocolType::Randousha,
+            crate::honeybadger::ProtocolType::Ransha => ProtocolType::Ransha,
+            crate::honeybadger::ProtocolType::Input => ProtocolType::Input,
+            crate::honeybadger::ProtocolType::Rbc => ProtocolType::Rbc,
+            crate::honeybadger::ProtocolType::Triple => ProtocolType::Triple,
+            crate::honeybadger::ProtocolType::BatchRecon => ProtocolType::BatchRecon,
+            crate::honeybadger::ProtocolType::Dousha => ProtocolType::Dousha,
+            crate::honeybadger::ProtocolType::Mul => ProtocolType::Mul,
+        }
+    }
 }
 
 // free the memory of a Bls12FrSlice
@@ -98,4 +148,39 @@ pub extern "C" fn bls12_fr_to_le_bytes(fr: Bls12Fr) -> ByteSlice {
         pointer: bytes.as_mut_ptr(),
         len: bytes.len(),
     }
+}
+
+#[no_mangle]
+pub extern "C" fn new_session_id(
+    caller: ProtocolType,
+    sub_id: u8,
+    round_id: u8,
+    instance_id: u64,
+) -> u64 {
+    let session_id = SessionId::new(caller.into(), sub_id, round_id, instance_id);
+    session_id.as_u64()
+}
+
+#[no_mangle]
+pub extern "C" fn calling_protocol(session_id: u64) -> ProtocolType {
+    let session_id = unsafe { SessionId::from_u64(session_id) };
+    session_id.calling_protocol().unwrap().into()
+}
+
+#[no_mangle]
+pub extern "C" fn sub_id(session_id: u64) -> u8 {
+    let session_id = unsafe { SessionId::from_u64(session_id) };
+    session_id.sub_id()
+}
+
+#[no_mangle]
+pub extern "C" fn round_id(session_id: u64) -> u8 {
+    let session_id = unsafe { SessionId::from_u64(session_id) };
+    session_id.round_id()
+}
+
+#[no_mangle]
+pub extern "C" fn instance_id(session_id: u64) -> u64 {
+    let session_id = unsafe { SessionId::from_u64(session_id) };
+    session_id.instance_id()
 }
