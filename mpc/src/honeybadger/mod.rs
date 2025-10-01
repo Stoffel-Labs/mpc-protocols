@@ -830,4 +830,9 @@ impl SessionId {
     pub fn as_u64(self) -> u64 {
         self.0
     }
+
+    // Unsafe because the caller must ensure that the u64 is well-formed
+    pub unsafe fn from_u64(id: u64) -> Self {
+        SessionId(id)
+    }
 }
