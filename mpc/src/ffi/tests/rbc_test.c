@@ -141,10 +141,14 @@ void test_bracha_rbc_basic()
     // read output message from all parties
     for (size_t i = 0; i < n; i++)
     {
+        bool session_ended;
+        ByteSlice output;
         // make sure session has ended
-        bool session_ended = has_bracha_session_ended(prt_array[i], session_id);
+        RbcErrorCode r = has_bracha_session_ended(prt_array[i], session_id, &session_ended);
+        assert(r == RbcSuccess);
         assert(session_ended);
-        struct ByteSlice output = get_bracha_output(prt_array[i], session_id);
+        r = get_bracha_output(prt_array[i], session_id, &output);
+        assert(r == RbcSuccess);
         if (output.len == 0 || output.pointer == NULL)
         {
             printf("Error: output is empty for party %zu\n", i);
