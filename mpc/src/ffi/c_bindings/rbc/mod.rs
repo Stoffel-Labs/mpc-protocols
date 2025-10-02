@@ -1,4 +1,8 @@
-use std::{mem::ManuallyDrop, slice, sync::Arc};
+use std::{
+    mem::{self, ManuallyDrop},
+    slice,
+    sync::Arc,
+};
 
 use crate::{
     common::{
