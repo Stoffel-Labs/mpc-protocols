@@ -1,4 +1,8 @@
-use std::{mem::ManuallyDrop, slice, sync::Arc};
+use std::{
+    mem::{self, ManuallyDrop},
+    slice,
+    sync::Arc,
+};
 
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
 
@@ -12,6 +16,7 @@ use crate::{
         RBC,
     },
     ffi::c_bindings::{
+        free_bytes_slice,
         network::{
             fake_network::{FakeNetworkReceivers, FakeNetworkReceiversOpaque},
             GenericNetwork, NetworkOpaque,
@@ -109,6 +114,12 @@ impl From<Msg> for RbcMsg {
             msg_len: value.msg_len,
         }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn free_rbc_msg(msg: RbcMsg) {
+    free_bytes_slice(msg.payload);
+    free_bytes_slice(msg.metadata);
 }
 
 impl From<RbcError> for RbcErrorCode {
@@ -235,6 +246,15 @@ pub extern "C" fn bracha_new(
 }
 
 #[no_mangle]
+pub extern "C" fn free_bracha(bracha_pointer: *mut BrachaOpaque) {
+    if !bracha_pointer.is_null() {
+        unsafe {
+            let _ = Box::from_raw(bracha_pointer as *mut Bracha);
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn get_bracha_id(bracha_pointer: *mut BrachaOpaque) -> usize {
     let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha) };
     bracha.id
@@ -316,8 +336,6 @@ pub extern "C" fn sync_bracha_init(
     session_id: u64,
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
-    // prevent payload from being dropped
-    let payload = ManuallyDrop::new(payload);
     let payload = unsafe { slice::from_raw_parts(payload.pointer, payload.len) }.to_vec();
     let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
@@ -359,19 +377,15 @@ pub extern "C" fn sync_bracha_process(
 ) -> RbcErrorCode {
     let bracha = unsafe { &*(bracha_pointer as *mut Bracha) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
-    // prevent msg from being dropped
-    let msg = ManuallyDrop::new(msg);
-    let payload =
-        unsafe { Vec::from_raw_parts(msg.payload.pointer, msg.payload.len, msg.payload.len) };
-    let metadata =
-        unsafe { Vec::from_raw_parts(msg.metadata.pointer, msg.metadata.len, msg.metadata.len) };
+    let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
+    let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
-        payload: payload,
-        metadata: metadata,
+        payload: payload.to_vec(),
+        metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
         msg_len: msg.msg_len,
     };
@@ -398,19 +412,15 @@ pub extern "C" fn sync_bracha_broadcast(
 ) -> RbcErrorCode {
     let bracha = unsafe { &*(bracha_pointer as *mut Bracha) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
-    // prevent msg from being dropped
-    let msg = ManuallyDrop::new(msg);
-    let payload =
-        unsafe { Vec::from_raw_parts(msg.payload.pointer, msg.payload.len, msg.payload.len) };
-    let metadata =
-        unsafe { Vec::from_raw_parts(msg.metadata.pointer, msg.metadata.len, msg.metadata.len) };
+    let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
+    let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
-        payload: payload,
-        metadata: metadata,
+        payload: payload.to_vec(),
+        metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
         msg_len: msg.msg_len,
     };
@@ -438,19 +448,15 @@ pub extern "C" fn sync_bracha_send(
 ) -> RbcErrorCode {
     let bracha = unsafe { &*(bracha_pointer as *mut Bracha) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
-    // prevent msg from being dropped
-    let msg = ManuallyDrop::new(msg);
-    let payload =
-        unsafe { Vec::from_raw_parts(msg.payload.pointer, msg.payload.len, msg.payload.len) };
-    let metadata =
-        unsafe { Vec::from_raw_parts(msg.metadata.pointer, msg.metadata.len, msg.metadata.len) };
+    let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
+    let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
-        payload: payload,
-        metadata: metadata,
+        payload: payload.to_vec(),
+        metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
         msg_len: msg.msg_len,
     };
@@ -466,14 +472,5 @@ pub extern "C" fn sync_bracha_send(
     match result {
         Ok(()) => RbcErrorCode::RbcSuccess,
         Err(e) => e.into(),
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn free_bracha(bracha_pointer: *mut BrachaOpaque) {
-    if !bracha_pointer.is_null() {
-        unsafe {
-            let _ = Box::from_raw(bracha_pointer as *mut Bracha);
-        }
     }
 }
