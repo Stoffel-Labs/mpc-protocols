@@ -1,15 +1,16 @@
 use crate::{
-    common::{
-        lagrange_interpolate,
-        types::{
-            f256::{lagrange_interpolate_f2_8, Poly, F2_8},
+    common::lagrange_interpolate,
+    honeybadger::{
+        fpmul::{
+            build_all_f_polys,
+            f256::{build_all_f_polys_2_8, F2_8},
             MessageType, PRandBitDMessage, PRandBitDStore, PRandError,
         },
+        ProtocolType, SessionId,
     },
-    honeybadger::{ProtocolType, SessionId},
 };
 use ark_ff::{BigInteger, PrimeField};
-use ark_poly::{univariate::DensePolynomial, Polynomial};
+use ark_poly::Polynomial;
 use itertools::Itertools;
 use rand::Rng;
 use std::{collections::HashMap, sync::Arc};
@@ -61,12 +62,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         store.no_of_tsets = Some(my_tsets.len());
 
         // Step 2: P_i samples randomness and sends
-        // Random integer range: [-2^(l+k), 2^(l+k)]
+        // Random integer range: [0, 2^(l+k)]
         let bound: i64 = 1 << (self.l + self.k);
         for tset in tsets {
-            if tset.contains(&self.id) {
-                continue;
-            }
             let r_t_i = rand::thread_rng().gen_range(0, bound + 1);
             // send to all players not in T
             for j in 0..self.n {
@@ -116,27 +114,20 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         tset_entry.insert(msg.sender_id, msg.r_t);
 
         // Check if we have all expected contributors
-        let expected = self.n - msg.tset.len(); // all not in T
-        if tset_entry.len() == expected {
+        if tset_entry.len() == self.n {
             // Compute r_T = sum of contributions
             let r_t_sum: i64 = tset_entry.values().copied().sum();
             store.r_t.insert(msg.tset.clone(), r_t_sum);
-
-            if msg.session_id.calling_protocol() == Some(ProtocolType::PRandbInt) {
-                //output the shared random integer,r_t
-                info!(node_id = self.id, "Output for PRandInt");
-                return Ok(());
-            }
         }
         // Check if all tsets are done
         if store.r_t.len() == total_tsets {
             info!(node_id = self.id, "Constructing Polynomials");
 
             // Ready to do the conversions of shares
-            let poly_fq = self.build_all_f_polys::<F>(store.r_t.clone()).await?;
-            let poly_fp = self.build_all_f_polys::<G>(store.r_t.clone()).await?;
+            let poly_fq = build_all_f_polys::<F>(store.r_t.clone()).await?;
+            let poly_fp = build_all_f_polys::<G>(store.r_t.clone()).await?;
             //build f polys for Fq and F_2^8
-            let poly_f2 = self.build_all_f_polys_2_8(store.r_t.clone()).await?;
+            let poly_f2 = build_all_f_polys_2_8(store.r_t.clone());
 
             // My evaluation points in each field
             let xi_q = F::from(self.id as u64 + 1);
@@ -173,14 +164,19 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             store.share_r_p = Some(share_p);
             store.share_r_2 = Some(share_2);
 
+            if msg.session_id.calling_protocol() == Some(ProtocolType::PRandbInt) {
+                //output the shared random integer,r_t that is converted to r_p
+                //stored in share_r_p
+                info!(node_id = self.id, "Output for PRandInt");
+                return Ok(());
+            }
+
             //Compute
             // Require that [b]_p is already set, otherwise return an error
-            let share_b_p = store.share_b_q.ok_or_else(|| {
-                PRandError::NotSet // or define a more specific error variant if you prefer
-            })?;
+            let share_b_q = store.share_b_q.ok_or_else(|| PRandError::NotSet)?;
 
             // share of r + b
-            let share_rplusb = share_q + share_b_p;
+            let share_rplusb = share_q + share_b_q;
 
             // Broadcast to everyone
             let mut payload = Vec::new();
@@ -289,47 +285,5 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(PRandBitDStore::empty())))
             .clone()
-    }
-
-    pub async fn build_all_f_polys<H: PrimeField>(
-        &mut self,
-        tsets: HashMap<Vec<usize>, i64>,
-    ) -> Result<HashMap<Vec<usize>, DensePolynomial<H>>, PRandError> {
-        tsets
-            .into_iter()
-            .map(|(tset, _)| {
-                // Construct interpolation points
-                let xs = std::iter::once(H::zero())
-                    .chain(tset.iter().map(|&j| H::from((j + 1) as u64)))
-                    .collect::<Vec<_>>();
-                let ys = std::iter::once(H::one())
-                    .chain(std::iter::repeat(H::zero()).take(tset.len()))
-                    .collect::<Vec<_>>();
-                // Interpolate polynomial
-                let poly = lagrange_interpolate(&xs, &ys)?;
-                Ok((tset, poly))
-            })
-            .collect()
-    }
-
-    pub async fn build_all_f_polys_2_8(
-        &mut self,
-        tsets: HashMap<Vec<usize>, i64>,
-    ) -> Result<HashMap<Vec<usize>, Poly>, PRandError> {
-        tsets
-            .into_iter()
-            .map(|(tset, _)| {
-                // Construct interpolation points
-                let xs = std::iter::once(F2_8::zero())
-                    .chain(tset.iter().map(|&j| F2_8::from((j + 1) as u16)))
-                    .collect::<Vec<_>>();
-                let ys = std::iter::once(F2_8::one())
-                    .chain(std::iter::repeat(F2_8::zero()).take(tset.len()))
-                    .collect::<Vec<_>>();
-                // Interpolate polynomial
-                let poly = lagrange_interpolate_f2_8(&xs, &ys);
-                Ok((tset, poly))
-            })
-            .collect()
     }
 }

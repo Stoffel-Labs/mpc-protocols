@@ -19,6 +19,7 @@ pub mod double_share;
 /// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
 pub mod triple_gen;
 
+pub mod fpmul;
 pub mod input;
 pub mod mul;
 pub mod output;

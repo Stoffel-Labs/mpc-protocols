@@ -2,15 +2,20 @@ pub mod utils;
 use crate::utils::test_utils::{setup_tracing, test_setup};
 use ark_bls12_381::Fr as G;
 use ark_bn254::Fr as F; // smaller prime field
-use ark_poly::Polynomial;
+use ark_poly::univariate::DensePolynomial;
+use ark_poly::{DenseUVPolynomial, Polynomial};
+use ark_std::test_rng;
 use itertools::Itertools;
 use std::{sync::Arc, time::Duration};
 use stoffelmpc_mpc::common::lagrange_interpolate;
-use stoffelmpc_mpc::common::types::f256::{lagrange_interpolate_f2_8, F2_8};
-use stoffelmpc_mpc::{
-    common::types::{prandbitd::PRandBitDNode, PRandBitDMessage},
-    honeybadger::{ProtocolType, SessionId},
+use stoffelmpc_mpc::honeybadger::fpmul::f256::{
+    build_all_f_polys_2_8, lagrange_interpolate_f2_8, F2_8,
 };
+use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitDNode;
+use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
+use stoffelmpc_mpc::honeybadger::fpmul::{PRandBitDMessage, TruncPrMessage};
+use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 #[tokio::test]
@@ -28,11 +33,11 @@ async fn test_prandbitd_end_to_end() {
     let mut nodes: Vec<PRandBitDNode<F, G>> =
         (0..n).map(|i| PRandBitDNode::new(i, n, t, l, k)).collect();
 
-    // Manually set share_b_q for each node (simulate [b]_p)
+    // Manually set share_b_q for each node (simulate [b]_q)
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
         let mut store = binding.lock().await;
-        store.share_b_q = Some(F::from(1u64)); // bit b=1
+        store.share_b_q = Some(F::from(1u64)); //if all the shares are 1 then the secret is 1
     }
 
     // Run distributed RISS generation
@@ -127,7 +132,7 @@ async fn test_prandbitd_r_reconstruction() {
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
         let mut store = binding.lock().await;
-        store.share_b_q = Some(F::from(1u64));
+        store.share_b_q = Some(F::from(1u64)); //if all the shares are 1 then the secret is 1
     }
 
     // Run distributed RISS generation
@@ -236,7 +241,7 @@ async fn test_prandbitd_r_reconstruction() {
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
         let store = binding.lock().await;
-        let poly_f2 = node.build_all_f_polys_2_8(store.r_t.clone()).await.unwrap();
+        let poly_f2 = build_all_f_polys_2_8(store.r_t.clone());
         let xi2 = F2_8::from((node.id + 1) as u16);
         let mut recomputed = F2_8::zero();
         for (tset, r_t) in store.r_t.iter() {
@@ -256,4 +261,104 @@ fn reconstruct<F: ark_ff::PrimeField>(
 ) -> Result<F, stoffelmpc_mpc::common::share::ShareError> {
     let poly = stoffelmpc_mpc::common::lagrange_interpolate(x_vals, y_vals)?;
     Ok(poly.evaluate(&F::zero()))
+}
+
+#[tokio::test]
+async fn test_truncpr_end_to_end() {
+    use ark_std::Zero;
+
+    setup_tracing();
+    let n = 4;
+    let t = 1;
+    let k = 16; // total bitlength (example)
+    let m = 4; // fractional bits to truncate
+    let session_id = SessionId::new(ProtocolType::None, 0, 0, 999);
+
+    // === Build fake network ===
+    let (network, mut recv, _) = test_setup(n, vec![]);
+
+    // === Initialize nodes ===
+    let (trunc_sender, _) = mpsc::channel(128);
+    let mut nodes: Vec<TruncPrNode<F>> = (0..n)
+        .map(|i| TruncPrNode::new(i, n, t, trunc_sender.clone()))
+        .collect();
+
+    // === Preload randomness (simulate PRandBitL + PRandInt) ===
+    // Fake random bits [r_i]
+    let r_bits: Vec<F> = (0..m).map(|i| F::from((i % 2) as u64)).collect();
+    // Fake random integer [r'']
+    let r_int = F::from(3 as u64);
+    for node in &mut nodes {
+        let store = node.get_or_create_store(session_id).await;
+        let mut s = store.lock().await;
+        s.r_bits = Some(r_bits.clone());
+        s.r_int = Some(r_int);
+    }
+
+    // === Input secret [a] (same across parties for test) ===
+    let mut rng = test_rng();
+    let mut poly = DensePolynomial::rand(t, &mut rng);
+    poly[0] = F::from(12345u64);
+    let a_val: Vec<F> = (0..n)
+        .map(|id| {
+            let x = F::from(id as u64);
+            poly.evaluate(&x)
+        })
+        .collect();
+
+    // === Run init() for each node ===
+    for node in &mut nodes {
+        node.init(a_val[node.id], k, m, session_id, network.clone())
+            .await
+            .unwrap();
+    }
+
+    // === Spawn receivers to process messages ===
+    let mut set = JoinSet::new();
+    for i in 0..n {
+        let mut receiver = recv.remove(0);
+        let mut node = nodes[i].clone();
+        let net = Arc::clone(&network);
+
+        set.spawn(async move {
+            while let Some(received) = receiver.recv().await {
+                let msg: TruncPrMessage = match bincode::deserialize(&received) {
+                    Ok(w) => w,
+                    Err(_) => continue,
+                };
+                let _ = node.process(msg, net.clone()).await;
+            }
+        });
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // === Reconstruct [d] (the truncated output) ===
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+
+    for node in &mut nodes {
+        let store = node.get_or_create_store(session_id).await;
+        let s = store.lock().await;
+
+        assert!(s.share_d.is_some(), "Node {:?} missing share_d", node.id);
+        xs.push(F::from(node.id as u64));
+        ys.push(s.share_d.unwrap());
+    }
+
+    let poly = lagrange_interpolate(&xs, &ys).unwrap();
+    let d_reconstructed = poly.evaluate(&F::zero());
+
+    println!("Reconstructed [d] = {:?}", d_reconstructed);
+
+    // === Verify correctness: expected floor(a / 2^m) ===
+    let expected = F::from((12345u64 >> m) as u64);
+    let expected_plus1 = F::from(((12345u64 >> m) + 1) as u64);
+    assert!(
+        d_reconstructed == expected || d_reconstructed == expected_plus1,
+        "TruncPr probabilistic mismatch: got {:?}, expected {:?} or {:?}",
+        d_reconstructed,
+        expected,
+        expected_plus1
+    );
 }

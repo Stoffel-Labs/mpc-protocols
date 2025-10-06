@@ -1,4 +1,7 @@
-use std::ops::{Add, Mul, Sub};
+use std::{
+    collections::HashMap,
+    ops::{Add, Mul, Sub},
+};
 /// Finite field GF(2^8) with AES modulus x^8 + x^4 + x^3 + x + 1 (0x11B)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct F2_8(pub u8);
@@ -187,4 +190,21 @@ pub fn lagrange_interpolate_f2_8(x_vals: &[F2_8], y_vals: &[F2_8]) -> Poly {
     }
 
     result
+}
+pub fn build_all_f_polys_2_8(tsets: HashMap<Vec<usize>, i64>) -> HashMap<Vec<usize>, Poly> {
+    tsets
+        .into_iter()
+        .map(|(tset, _)| {
+            // Construct interpolation points
+            let xs = std::iter::once(F2_8::zero())
+                .chain(tset.iter().map(|&j| F2_8::from((j + 1) as u16)))
+                .collect::<Vec<_>>();
+            let ys = std::iter::once(F2_8::one())
+                .chain(std::iter::repeat(F2_8::zero()).take(tset.len()))
+                .collect::<Vec<_>>();
+            // Interpolate polynomial
+            let poly = lagrange_interpolate_f2_8(&xs, &ys);
+            (tset, poly)
+        })
+        .collect()
 }
