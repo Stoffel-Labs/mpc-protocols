@@ -1,9 +1,13 @@
 use ark_bls12_381::Fr;
 use ark_ff::{BigInt, BigInteger, PrimeField};
-use std::slice;
+use std::{
+    ffi::{c_char, CString},
+    slice,
+};
 
 use crate::honeybadger::SessionId;
 
+pub mod honey_badger_mpc_client;
 pub mod network;
 pub mod rbc;
 pub mod share;
@@ -112,6 +116,16 @@ pub extern "C" fn free_bytes_slice(slice: ByteSlice) {
     if !slice.pointer.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(slice.pointer, slice.len, slice.len);
+        }
+    }
+}
+
+// free the memory of a CString
+#[no_mangle]
+pub extern "C" fn free_c_string(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        unsafe {
+            let _ = CString::from_raw(ptr);
         }
     }
 }

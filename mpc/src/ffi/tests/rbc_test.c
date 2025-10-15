@@ -3,8 +3,9 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <pthread.h>
+#include <unistd.h>
 
-#include "../shamirshare.h"
+#include "../honey_badger_bindings.h"
 
 void setup_bracha_parties(size_t n, size_t t, BrachaOpaque **parties)
 {

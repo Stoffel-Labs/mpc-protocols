@@ -7,7 +7,7 @@ use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
 use stoffelnet::network_utils::ClientId;
 use tokio::sync::mpsc::Receiver;
 
-// struct that includes a FakeNetwork instance and its receivers
+// struct that includes receivers of the FakeNetwork
 pub struct FakeNetworkReceivers {
     pub node_receivers: Vec<Receiver<Vec<u8>>>,
     pub client_receivers: HashMap<ClientId, Receiver<Vec<u8>>>,
