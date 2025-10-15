@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <assert.h>
 
-#include "../shamirshare.h"
+#include "../honey_badger_bindings.h"
 
 ShareErrorCode test_create_and_recover_shamir_shares()
 {

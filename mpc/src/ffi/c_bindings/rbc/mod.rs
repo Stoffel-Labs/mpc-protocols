@@ -1,10 +1,4 @@
-use std::{
-    mem::{self, ManuallyDrop},
-    slice,
-    sync::Arc,
-};
-
-use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+use std::{mem::ManuallyDrop, slice, sync::Arc};
 
 use crate::{
     common::{
@@ -17,16 +11,11 @@ use crate::{
     },
     ffi::c_bindings::{
         free_bytes_slice,
-        network::{
-            fake_network::{FakeNetworkReceivers, FakeNetworkReceiversOpaque},
-            GenericNetwork, NetworkOpaque,
-        },
+        network::{GenericNetwork, NetworkOpaque},
         ByteSlice,
     },
     honeybadger::{SessionId, WrappedMessage},
 };
-
-//TODO - create cleanup functions
 
 #[repr(C)]
 pub enum RbcErrorCode {
