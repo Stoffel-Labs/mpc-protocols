@@ -10,33 +10,39 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{sync::Arc, collections::HashMap};
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
-use tokio::sync::mpsc::error::SendError;
+use tokio::sync::{oneshot::{error::RecvError, channel, Sender, Receiver}};
 
 pub mod multiplication;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MultProtocolState {
     NotInitialized,
     Finished,
     NotFinished,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MultStorage<F>
 where
     F: FftField,
 {
     pub no_of_mul: Option<usize>,
+    /// opened a-x values reconstructed using batch reconstruction
     pub output_open_mult1: HashMap<u8, Vec<F>>,
+    /// opened b-y values reconstructed using batch reconstruction
     pub output_open_mult2: HashMap<u8, Vec<F>>,
     pub inputs: (Vec<RobustShare<F>>, Vec<RobustShare<F>>),
     pub protocol_state: MultProtocolState,
-    pub protocol_output: Vec<RobustShare<F>>,
     pub share_mult_from_triple: Vec<RobustShare<F>>,
+    /// shares for reconstruction using RBC
     pub received_shares: HashMap<PartyId, (Vec<RobustShare<F>>, Vec<RobustShare<F>>)>,
+    /// opened a-x and b-y values reconstructed using RBC
+    pub openings: Option<(Vec<F>, Vec<F>)>,
+    pub output_sender: Option<Sender<Vec<RobustShare<F>>>>,
+    pub output_receiver: Option<Receiver<Vec<RobustShare<F>>>>
 }
 
 impl<F> MultStorage<F>
@@ -44,15 +50,19 @@ where
     F: FftField,
 {
     pub fn empty() -> Self {
+        let (output_sender, output_receiver) = channel();
+
         Self {
             no_of_mul: None,
             output_open_mult1: HashMap::new(),
             output_open_mult2: HashMap::new(),
             inputs: (Vec::new(), Vec::new()),
             protocol_state: MultProtocolState::NotInitialized,
-            protocol_output: Vec::new(),
             share_mult_from_triple: Vec::new(),
             received_shares: HashMap::new(),
+            openings: None,
+            output_sender: Some(output_sender),
+            output_receiver: Some(output_receiver)
         }
     }
 }
@@ -71,8 +81,10 @@ pub enum MulError {
     ArkSerialization(#[from] SerializationError),
     #[error("error while serializing an arkworks object: {0:?}")]
     ArkDeserialization(SerializationError),
-    #[error("error sending the thread asynchronously")]
-    SendError(#[from] SendError<SessionId>),
+    #[error("error sending the result: {0:?}")]
+    SendError(SessionId),
+    #[error("error receiving the result: {0:?}")]
+    ReceiveError(SessionId),
     #[error("Batch reconstruction error : {0:?}")]
     BatchReconError(#[from] BatchReconError),
     #[error("Duplicate input: {0}")]
@@ -83,8 +95,14 @@ pub enum MulError {
     BincodeSerializationError(#[from] Box<ErrorKind>),
     #[error("Interpolate error: {0:?}")]
     InterpolateError(#[from] InterpolateError),
+    #[error("no such session ID exists: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("result already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
     #[error("waiting for more openings")]
     WaitForOk,
+    #[error("multiplication {0:?} did not complete in time")]
+    Timeout(SessionId)
 }
 
 /// Generic message for the multiplication protocol.
@@ -115,7 +133,7 @@ impl MultMessage {
 #[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct ReconstructionMessage<F: FftField> {
     pub a_sub_x: Vec<RobustShare<F>>,
-    pub b_sub_x: Vec<RobustShare<F>>,
+    pub b_sub_y: Vec<RobustShare<F>>,
 }
 
 impl<F> ReconstructionMessage<F>
@@ -123,8 +141,8 @@ where
     F: FftField,
 {
     /// Creates a message for the reconstruction phase.
-    pub fn new(a_sub_x: Vec<RobustShare<F>>, b_sub_x: Vec<RobustShare<F>>) -> Self {
-        Self { a_sub_x, b_sub_x }
+    pub fn new(a_sub_x: Vec<RobustShare<F>>, b_sub_y: Vec<RobustShare<F>>) -> Self {
+        Self { a_sub_x, b_sub_y }
     }
 }
 

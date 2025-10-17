@@ -545,7 +545,7 @@ pub async fn construct_e2e_input_mul(
     n_parties: usize,
     n_triples: usize,
     threshold: usize,
-) -> Vec<Vec<ShamirBeaverTriple<Fr>>> {
+) -> ((Vec<Fr>, Vec<Fr>, Vec<Fr>), Vec<Vec<ShamirBeaverTriple<Fr>>>) {
     let mut rng = test_rng();
     let mut secrets_a = Vec::new();
     let mut secrets_b = Vec::new();
@@ -581,7 +581,7 @@ pub async fn construct_e2e_input_mul(
             per_party_triples[pid].push(triple);
         }
     }
-    per_party_triples
+    ((secrets_a, secrets_b, secrets_c), per_party_triples)
 }
 
 //--------------------------CLIENT--------------------------
