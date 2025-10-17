@@ -12,9 +12,12 @@ use ark_ff::PrimeField;
 use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use thiserror::Error;
-use tokio::sync::{
-    mpsc::{self, error::SendError, Receiver, Sender},
-    Mutex,
+use tokio::{
+    time::Duration,
+    sync::{
+        mpsc::{self, error::SendError, Receiver, Sender},
+        Mutex,
+    }
 };
 
 #[derive(Error, Debug)]
@@ -41,7 +44,6 @@ where
     pub n_parties: usize,
     pub threshold: usize,
     pub mult_node: Multiply<F, R>,
-    pub mult_output: Arc<Mutex<Receiver<SessionId>>>,
     pub trunc_node: TruncPrNode<F, R>,
     pub trunc_output: Arc<Mutex<Receiver<SessionId>>>,
     pub protocol_output: Option<SecretFixedPoint<F, RobustShare<F>>>,
@@ -59,17 +61,15 @@ where
         threshold: usize,
         output_channel: Sender<SessionId>,
     ) -> Result<Self, FPError> {
-        let (mul_sender, mul_receiver) = mpsc::channel(128);
         let (trunc_sender, trunc_receiver) = mpsc::channel(128);
 
         let trunc_node = TruncPrNode::new(id, n_parties, threshold, trunc_sender)?;
-        let mult_node = Multiply::new(id, n_parties, threshold, mul_sender)?;
+        let mult_node = Multiply::new(id, n_parties, threshold)?;
         Ok(Self {
             id,
             n_parties,
             threshold,
             mult_node,
-            mult_output: Arc::new(Mutex::new(mul_receiver)),
             trunc_output: Arc::new(Mutex::new(trunc_receiver)),
             trunc_node,
             protocol_output: None,
@@ -103,16 +103,8 @@ where
             )
             .await?;
 
-        let mut trunc_input = Vec::new();
-        let mut rx = self.mult_output.lock().await;
-        if let Some(id) = rx.recv().await {
-            if id == session_id {
-                let mut mul_store = self.mult_node.mult_storage.lock().await;
-                let mul_lock = mul_store.remove(&id).unwrap();
-                let store = mul_lock.lock().await;
-                trunc_input = store.protocol_output.clone();
-            }
-        }
+        let trunc_input = self.mult_node.wait_for_result(session_id, Duration::from_millis(500)).await?;
+
         self.mult_node.clear_store().await;
         self.trunc_node
             .init(
