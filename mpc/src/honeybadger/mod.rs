@@ -69,9 +69,12 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, sync::{Arc, atomic::{Ordering, AtomicU8}}};
 use stoffelnet::network_utils::{Network, NetworkError, ClientId, PartyId};
 use thiserror::Error;
-use tokio::sync::{
-    mpsc::{self, Receiver},
-    Mutex,
+use tokio::{
+    sync::{
+        mpsc::{self, Receiver},
+        Mutex,
+    },
+    time::Duration
 };
 use tracing::{info, warn};
 use triple_gen::triple_generation::TripleGenNode;
@@ -198,7 +201,6 @@ pub struct OutputChannels {
     pub dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub triple_channel: Arc<Mutex<Receiver<SessionId>>>,
-    pub mul_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub rand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub prand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub prand_int_channel: Arc<Mutex<Receiver<SessionId>>>,
@@ -419,7 +421,6 @@ where
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
         let (triple_sender, triple_receiver) = mpsc::channel(128);
-        let (mul_sender, mul_receiver) = mpsc::channel(128);
         let (share_gen_sender, share_gen_reciever) = mpsc::channel(128);
         let (rand_bit_sender, rand_bit_receiver) = mpsc::channel(128);
         let (prand_bit_sender, prand_bit_receiver) = mpsc::channel(128);
@@ -447,7 +448,7 @@ where
 
         let triple_gen_node =
             TripleGenNode::new(id, params.n_parties, params.threshold, triple_sender)?;
-        let mul_node = Multiply::new(id, params.n_parties, params.threshold, mul_sender)?;
+        let mul_node = Multiply::new(id, params.n_parties, params.threshold)?;
         let share_gen = RanShaNode::new(
             id,
             params.n_parties,
@@ -481,7 +482,6 @@ where
                 dou_sha_channel: Arc::new(Mutex::new(dou_sha_receiver)),
                 ran_dou_sha_channel: Arc::new(Mutex::new(ran_dou_sha_receiver)),
                 triple_channel: Arc::new(Mutex::new(triple_receiver)),
-                mul_channel: Arc::new(Mutex::new(mul_receiver)),
                 rand_bit_channel: Arc::new(Mutex::new(rand_bit_receiver)),
                 prand_bit_channel: Arc::new(Mutex::new(prand_bit_receiver)),
                 prand_int_channel: Arc::new(Mutex::new(prand_int_receiver)),
@@ -524,17 +524,7 @@ where
             .init(session_id, x, y, beaver_triples, network)
             .await?;
 
-        let mut rx = self.outputchannels.mul_channel.lock().await;
-        while let Some(id) = rx.recv().await {
-            if id == session_id {
-                let mul_store = self.operations.mul.mult_storage.lock().await;
-                if let Some(mul_lock) = mul_store.get(&id) {
-                    let store = mul_lock.lock().await;
-                    return Ok(store.protocol_output.clone());
-                }
-            }
-        }
-        Err(HoneyBadgerError::ChannelClosed)
+        self.operations.mul.wait_for_result(session_id, Duration::MAX).await.map_err(HoneyBadgerError::from)
     }
 
     async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {

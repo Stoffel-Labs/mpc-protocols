@@ -15,6 +15,7 @@ use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
+use tokio::time::Duration;
 
 /// Represents the random bit generation protocol.
 ///
@@ -50,8 +51,6 @@ where
     pub output_channel: Sender<SessionId>,
     /// Node to execute a secure multiplication.
     pub mult_node: Multiply<F, R>,
-    /// Channel to receive the session ID of the secure multiplication protocol.
-    pub mult_output: Arc<Mutex<Receiver<SessionId>>>,
     /// Batch reconstruction node to reconstruct `a^2 mod p`.
     pub batch_recon: BatchReconNode<F>,
 }
@@ -68,8 +67,7 @@ where
         protocol_output: Sender<SessionId>,
     ) -> Result<Self, RandBitError> {
         let batch_recon_node = BatchReconNode::new(id, n_parties, threshold)?;
-        let (mul_sender, mul_receiver) = mpsc::channel(128);
-        let mult_node = Multiply::new(id, n_parties, threshold, mul_sender)?;
+        let mult_node = Multiply::new(id, n_parties, threshold)?;
         Ok(Self {
             id,
             n_parties,
@@ -77,7 +75,6 @@ where
             storage: Arc::new(Mutex::new(HashMap::new())),
             output_channel: protocol_output,
             mult_node,
-            mult_output: Arc::new(Mutex::new(mul_receiver)),
             batch_recon: batch_recon_node,
         })
     }
@@ -127,25 +124,7 @@ where
             .init(session_id, a, a_copy, mult_triple, network.clone())
             .await?;
 
-        let a_square_share =
-            if let Some(session_id_finished_mult) = self.mult_output.lock().await.recv().await {
-                if session_id_finished_mult == session_id {
-                    self.mult_node
-                        .mult_storage
-                        .lock()
-                        .await
-                        .remove(&session_id_finished_mult)
-                        .ok_or(RandBitError::SquareMult)?
-                        .lock()
-                        .await
-                        .protocol_output
-                        .clone()
-                } else {
-                    return Err(RandBitError::SquareMult);
-                }
-            } else {
-                return Err(RandBitError::SquareMult);
-            };
+        let a_square_share = self.mult_node.wait_for_result(session_id, Duration::from_millis(500)).await?;
 
         tracing::info!("Multiplication at Rand_bit done: {0:?}", self.id);
 
