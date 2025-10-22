@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+typedef enum FieldKind {
+  Bls12_381Fr,
+} FieldKind;
+
 typedef enum HoneyBadgerErrorCode {
   HoneyBadgerSuccess,
   HoneyBadgerNetworkError,
@@ -95,14 +99,14 @@ typedef enum ShareErrorCode {
   DecodingError,
 } ShareErrorCode;
 
-typedef struct Bls12Fr {
+typedef struct U256 {
   uint64_t data[4];
-} Bls12Fr;
+} U256;
 
-typedef struct Bls12FrSlice {
-  struct Bls12Fr *pointer;
+typedef struct U256Slice {
+  struct U256 *pointer;
   uintptr_t len;
-} Bls12FrSlice;
+} U256Slice;
 
 typedef struct ByteSlice {
   uint8_t *pointer;
@@ -156,56 +160,60 @@ typedef struct AbaOpaque {
 
 } AbaOpaque;
 
-typedef struct ShamirShareBls12 {
-  struct Bls12Fr share;
+typedef struct FieldOpaque {
+
+} FieldOpaque;
+
+typedef struct ShamirShare {
+  struct FieldOpaque *share;
   uintptr_t id;
   uintptr_t degree;
-} ShamirShareBls12;
+} ShamirShare;
 
-typedef struct ShamirShareSliceBls12 {
-  struct ShamirShareBls12 *pointer;
+typedef struct ShamirShareSlice {
+  struct ShamirShare *pointer;
   uintptr_t len;
-} ShamirShareSliceBls12;
+} ShamirShareSlice;
 
-typedef struct RobustShareBls12 {
-  struct Bls12Fr share;
+typedef struct RobustShare {
+  struct FieldOpaque *share;
   uintptr_t id;
   uintptr_t degree;
-} RobustShareBls12;
+} RobustShare;
 
-typedef struct RobustShareSliceBls12 {
-  struct RobustShareBls12 *pointer;
+typedef struct RobustShareSlice {
+  struct RobustShare *pointer;
   uintptr_t len;
-} RobustShareSliceBls12;
+} RobustShareSlice;
 
-typedef struct NonRobustShareBls12 {
-  struct Bls12Fr share;
+typedef struct NonRobustShare {
+  struct FieldOpaque *share;
   uintptr_t id;
   uintptr_t degree;
-} NonRobustShareBls12;
+} NonRobustShare;
 
-typedef struct NonRobustShareSliceBls12 {
-  struct NonRobustShareBls12 *pointer;
+typedef struct NonRobustShareSlice {
+  struct NonRobustShare *pointer;
   uintptr_t len;
-} NonRobustShareSliceBls12;
+} NonRobustShareSlice;
 
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
 
-void free_bls12_fr_slice(struct Bls12FrSlice slice);
+void free_u256_slice(struct U256Slice slice);
 
 void free_bytes_slice(struct ByteSlice slice);
 
 void free_c_string(char *ptr);
 
-struct Bls12Fr be_bytes_to_bls12_fr(struct ByteSlice bytes);
+struct U256 be_bytes_to_u256(struct ByteSlice bytes);
 
-struct Bls12Fr le_bytes_to_bls12_fr(struct ByteSlice bytes);
+struct U256 le_bytes_to_u256(struct ByteSlice bytes);
 
-struct ByteSlice bls12_fr_to_be_bytes(struct Bls12Fr fr);
+struct ByteSlice u256_to_be_bytes(struct U256 num);
 
-struct ByteSlice bls12_fr_to_le_bytes(struct Bls12Fr fr);
+struct ByteSlice u256_to_le_bytes(struct U256 num);
 
 uint64_t new_session_id(enum ProtocolType caller,
                         uint8_t sub_id,
@@ -224,15 +232,17 @@ struct HoneyBadgerMPCClientOpaque *new_honey_badger_mpc_client(uintptr_t id,
                                                                uintptr_t n,
                                                                uintptr_t t,
                                                                uint64_t instance_id,
-                                                               struct Bls12FrSlice inputs,
-                                                               uintptr_t input_len);
+                                                               struct U256Slice inputs,
+                                                               uintptr_t input_len,
+                                                               enum FieldKind field_kind);
 
 enum HoneyBadgerErrorCode hb_client_process(struct HoneyBadgerMPCClientOpaque *client_ptr,
                                             struct NetworkOpaque *net_ptr,
                                             struct ByteSlice raw_msg);
 
 enum HoneyBadgerErrorCode hb_client_get_output(struct HoneyBadgerMPCClientOpaque *client_ptr,
-                                               struct Bls12Fr *returned_output);
+                                               struct U256 *returned_output,
+                                               enum FieldKind field_kind);
 
 void free_honey_badger_mpc_client(struct HoneyBadgerMPCClientOpaque *client_ptr);
 
@@ -469,24 +479,34 @@ enum RbcErrorCode sync_aba_send(struct AbaOpaque *aba_pointer,
                                 struct NetworkOpaque *net_ptr,
                                 uintptr_t recv);
 
-void free_shamir_share_bls12_slice(struct ShamirShareSliceBls12 slice);
+struct ByteSlice field_ptr_to_bytes(struct FieldOpaque *field, bool be);
 
-void free_robust_share_bls12_slice(struct RobustShareSliceBls12 slice);
+void free_shamir_share_slice(struct ShamirShareSlice slice);
 
-void free_non_robust_share_bls12_slice(struct NonRobustShareSliceBls12 slice);
+void free_robust_share_slice(struct RobustShareSlice slice);
 
-struct ShamirShareBls12 shamir_share_new(struct Bls12Fr secret, uintptr_t id, uintptr_t degree);
+void free_non_robust_share_slice(struct NonRobustShareSlice slice);
 
-enum ShareErrorCode shamir_share_compute_shares(struct Bls12Fr secret,
+struct ShamirShare shamir_share_new(struct U256 secret,
+                                    uintptr_t id,
+                                    uintptr_t degree,
+                                    enum FieldKind field_kind);
+
+enum ShareErrorCode shamir_share_compute_shares(struct U256 secret,
                                                 uintptr_t degree,
                                                 const struct UsizeSlice *ids,
-                                                struct ShamirShareSliceBls12 *output_shares);
+                                                enum FieldKind field_kind,
+                                                struct ShamirShareSlice *output_shares);
 
-enum ShareErrorCode shamir_share_recover_secret(struct ShamirShareSliceBls12 shares,
-                                                struct Bls12Fr *output_secret,
-                                                struct Bls12FrSlice *output_coeffs);
+enum ShareErrorCode shamir_share_recover_secret(struct ShamirShareSlice shares,
+                                                struct U256 *output_secret,
+                                                struct U256Slice *output_coeffs,
+                                                enum FieldKind field_kind);
 
-struct RobustShareBls12 robust_share_new(struct Bls12Fr secret, uintptr_t id, uintptr_t degree);
+struct RobustShare robust_share_new(struct U256 secret,
+                                    uintptr_t id,
+                                    uintptr_t degree,
+                                    enum FieldKind field_kind);
 
 /**
  * Generates `n` secret shares for a `value` using a degree `t` polynomial,
@@ -498,10 +518,11 @@ struct RobustShareBls12 robust_share_new(struct Bls12Fr secret, uintptr_t id, ui
  * - `InvalidInput` if `n` is not greater than `t`.
  * - `NoSuitableDomain` if a suitable FFT evaluation domain of size `n` isn't found.
  */
-enum ShareErrorCode robust_share_compute_shares(struct Bls12Fr secret,
+enum ShareErrorCode robust_share_compute_shares(struct U256 secret,
                                                 uintptr_t degree,
                                                 uintptr_t n,
-                                                struct RobustShareSliceBls12 *output_shares);
+                                                struct RobustShareSlice *output_shares,
+                                                enum FieldKind field_kind);
 
 /**
  * Full robust interpolation combining optimistic decoding and error correction
@@ -510,24 +531,28 @@ enum ShareErrorCode robust_share_compute_shares(struct Bls12Fr secret,
  * * `n` - total number of shares
  * * `shares` - pointer to the RobustShareSlice, unordered
  */
-enum ShareErrorCode robust_share_recover_secret(struct RobustShareSliceBls12 shares,
+enum ShareErrorCode robust_share_recover_secret(struct RobustShareSlice shares,
                                                 uintptr_t n,
-                                                struct Bls12Fr *output_secret,
-                                                struct Bls12FrSlice *output_coeffs);
+                                                struct U256 *output_secret,
+                                                struct U256Slice *output_coeffs,
+                                                enum FieldKind field_kind);
 
-struct NonRobustShareBls12 non_robust_share_new(struct Bls12Fr secret,
-                                                uintptr_t id,
-                                                uintptr_t degree);
+struct NonRobustShare non_robust_share_new(struct U256 secret,
+                                           uintptr_t id,
+                                           uintptr_t degree,
+                                           enum FieldKind field_kind);
 
-enum ShareErrorCode non_robust_share_compute_shares(struct Bls12Fr secret,
+enum ShareErrorCode non_robust_share_compute_shares(struct U256 secret,
                                                     uintptr_t degree,
                                                     uintptr_t n,
-                                                    struct NonRobustShareSliceBls12 *output_shares);
+                                                    struct NonRobustShareSlice *output_shares,
+                                                    enum FieldKind field_kind);
 
-enum ShareErrorCode non_robust_share_recover_secret(struct NonRobustShareSliceBls12 shares,
+enum ShareErrorCode non_robust_share_recover_secret(struct NonRobustShareSlice shares,
                                                     uintptr_t n,
-                                                    struct Bls12Fr *output_secret,
-                                                    struct Bls12FrSlice *output_coeffs);
+                                                    struct U256 *output_secret,
+                                                    struct U256Slice *output_coeffs,
+                                                    enum FieldKind field_kind);
 
 #ifdef __cplusplus
 }  // extern "C"

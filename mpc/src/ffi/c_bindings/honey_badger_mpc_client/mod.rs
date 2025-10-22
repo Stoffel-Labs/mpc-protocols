@@ -6,7 +6,8 @@ use crate::{
     common::{rbc::rbc::Bracha, RBC},
     ffi::c_bindings::{
         network::{self, GenericNetwork},
-        Bls12Fr, Bls12FrSlice, ByteSlice,
+        share::FieldKind,
+        ByteSlice, U256Slice, U256,
     },
     honeybadger::{output, HoneyBadgerError, HoneyBadgerMPCClient},
 };
@@ -67,17 +68,28 @@ pub extern "C" fn new_honey_badger_mpc_client(
     n: usize,
     t: usize,
     instance_id: u64,
-    inputs: Bls12FrSlice,
+    inputs: U256Slice,
     input_len: usize,
+    field_kind: FieldKind,
 ) -> *mut HoneyBadgerMPCClientOpaque {
     let inputs_slice = unsafe { &*slice_from_raw_parts(inputs.pointer, inputs.len) };
-    let inputs_vec = inputs_slice
-        .iter()
-        .map(|fr| Fr::from(fr.clone()))
-        .collect::<Vec<_>>();
-    let client =
-        HoneyBadgerMPCClient::<_, Bracha>::new(id, n, t, instance_id, inputs_vec, input_len);
-    Box::into_raw(Box::new(client)) as *mut HoneyBadgerMPCClientOpaque
+    match field_kind {
+        FieldKind::Bls12_381Fr => {
+            let inputs_vec = inputs_slice
+                .iter()
+                .map(|fr| Fr::from(fr.clone()))
+                .collect::<Vec<_>>();
+            let client = HoneyBadgerMPCClient::<_, Bracha>::new(
+                id,
+                n,
+                t,
+                instance_id,
+                inputs_vec,
+                input_len,
+            );
+            Box::into_raw(Box::new(client)) as *mut HoneyBadgerMPCClientOpaque
+        }
+    }
 }
 
 #[no_mangle]
@@ -107,16 +119,21 @@ pub extern "C" fn hb_client_process(
 #[no_mangle]
 pub extern "C" fn hb_client_get_output(
     client_ptr: *mut HoneyBadgerMPCClientOpaque,
-    returned_output: *mut Bls12Fr,
+    returned_output: *mut U256,
+    field_kind: FieldKind,
 ) -> HoneyBadgerErrorCode {
-    let client = unsafe { &mut *(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha>) };
-    let output_client = &client.output;
-    let output = output_client.output;
-    match output {
-        None => return HoneyBadgerErrorCode::HoneyBadgerOutputNotReady,
-        Some(out) => unsafe { *returned_output = out.into() },
+    match field_kind {
+        FieldKind::Bls12_381Fr => {
+            let client = unsafe { &mut *(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha>) };
+            let output_client = &client.output;
+            let output = output_client.output;
+            match output {
+                None => return HoneyBadgerErrorCode::HoneyBadgerOutputNotReady,
+                Some(out) => unsafe { *returned_output = out.into() },
+            }
+            HoneyBadgerErrorCode::HoneyBadgerSuccess
+        }
     }
-    HoneyBadgerErrorCode::HoneyBadgerSuccess
 }
 
 #[no_mangle]
