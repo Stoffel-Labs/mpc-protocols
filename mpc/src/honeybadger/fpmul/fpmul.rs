@@ -1,11 +1,11 @@
 use crate::{
-    common::RBC,
+    common::{types::fixed::SecretFixedPoint, RBC},
     honeybadger::{
         fpmul::{truncpr::TruncPrNode, TruncPrError},
         mul::{multiplication::Multiply, MulError},
         robust_interpolate::robust_interpolate::RobustShare,
         triple_gen::ShamirBeaverTriple,
-        ProtocolType, SessionId,
+        SessionId,
     },
 };
 use ark_ff::PrimeField;
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use thiserror::Error;
 use tokio::sync::{
-    mpsc::{self, Receiver},
+    mpsc::{self, error::SendError, Receiver, Sender},
     Mutex,
 };
 
@@ -25,6 +25,10 @@ pub enum FPMulError {
     TruncPrError(#[from] TruncPrError),
     #[error("FpMul failed")]
     Failed,
+    #[error("Incompatible precision")]
+    Incompatible,
+    #[error("error sending the thread asynchronously")]
+    SendError(#[from] SendError<SessionId>),
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +44,8 @@ where
     pub mult_output: Arc<Mutex<Receiver<SessionId>>>,
     pub trunc_node: TruncPrNode<F>,
     pub trunc_output: Arc<Mutex<Receiver<SessionId>>>,
+    pub protocol_output: Option<SecretFixedPoint<F, RobustShare<F>>>,
+    pub output_channel: Sender<SessionId>,
 }
 
 impl<F, R> FPMulNode<F, R>
@@ -47,7 +53,12 @@ where
     F: PrimeField,
     R: RBC,
 {
-    pub fn new(id: usize, n_parties: usize, threshold: usize) -> Result<Self, FPMulError> {
+    pub fn new(
+        id: usize,
+        n_parties: usize,
+        threshold: usize,
+        output_channel: Sender<SessionId>,
+    ) -> Result<Self, FPMulError> {
         let (mul_sender, mul_receiver) = mpsc::channel(128);
         let (trunc_sender, trunc_receiver) = mpsc::channel(128);
 
@@ -61,49 +72,79 @@ where
             mult_output: Arc::new(Mutex::new(mul_receiver)),
             trunc_output: Arc::new(Mutex::new(trunc_receiver)),
             trunc_node,
+            protocol_output: None,
+            output_channel,
         })
     }
 
     pub async fn init<N: Network + Send + Sync + 'static>(
         &mut self,
-        a: RobustShare<F>,
-        b: RobustShare<F>,
-        triple: Vec<ShamirBeaverTriple<F>>,
-        k: usize,
-        m: usize,
+        a: SecretFixedPoint<F, RobustShare<F>>,
+        b: SecretFixedPoint<F, RobustShare<F>>,
+        triple: ShamirBeaverTriple<F>,
+        r_bits: Vec<RobustShare<F>>,
+        r_int: RobustShare<F>,
         session_id: SessionId,
         network: Arc<N>,
-    ) -> Result<F, FPMulError> {
-        let session_id_mult = SessionId::new(ProtocolType::Mul, 0, 0, session_id.instance_id());
+    ) -> Result<(), FPMulError> {
+        let p = if a.precision() == b.precision() {
+            a.precision()
+        } else {
+            return Err(FPMulError::Incompatible);
+        };
 
         self.mult_node
-            .init(session_id_mult, vec![a], vec![b], triple, network.clone())
+            .init(
+                session_id,
+                vec![a.value().clone()],
+                vec![b.value().clone()],
+                vec![triple],
+                network.clone(),
+            )
             .await?;
 
         let mut trunc_input = Vec::new();
         let mut rx = self.mult_output.lock().await;
         while let Some(id) = rx.recv().await {
-            if id == session_id_mult {
+            if id == session_id {
                 let mul_store = self.mult_node.mult_storage.lock().await;
                 if let Some(mul_lock) = mul_store.get(&id) {
                     let store = mul_lock.lock().await;
                     trunc_input = store.protocol_output.clone();
+                    self.mult_node.clear_store().await;
                 }
             }
         }
 
-        let session_id_trunc = SessionId::new(ProtocolType::None, 0, 0, session_id.instance_id());
         self.trunc_node
-            .init(trunc_input[0].share[0], k, m, session_id_trunc, network)
+            .init(
+                trunc_input[0].clone(),
+                2 * p.k(),
+                p.f(),
+                r_bits,
+                r_int,
+                session_id,
+                network,
+            )
             .await?;
 
         let mut rx = self.trunc_output.lock().await;
         while let Some(id) = rx.recv().await {
-            if id == session_id_trunc {
+            if id == session_id {
                 let trunc_store = self.trunc_node.store.lock().await;
                 if let Some(trunc_lock) = trunc_store.get(&id) {
                     let store = trunc_lock.lock().await;
-                    return Ok(store.share_d.unwrap());
+                    self.protocol_output = Some(SecretFixedPoint::new(
+                        store.share_d.clone().ok_or_else(|| {
+                            FPMulError::TruncPrError(TruncPrError::NotSet(
+                                "Output not set for truncation".to_string(),
+                            ))
+                        })?,
+                        *p,
+                    ));
+                    self.output_channel.send(session_id).await?;
+                    self.trunc_node.clear_store().await;
+                    return Ok(());
                 }
             }
         }

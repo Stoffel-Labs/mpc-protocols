@@ -1,13 +1,13 @@
 use crate::{
-    common::lagrange_interpolate,
+    common::SecretSharingScheme,
     honeybadger::{
         fpmul::{mod_pow2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore},
-        SessionId,
+        robust_interpolate::robust_interpolate::RobustShare,
+        SessionId, WrappedMessage,
     },
 };
 use ark_ff::PrimeField;
-use ark_poly::Polynomial;
-use ark_serialize::CanonicalDeserialize;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use tokio::sync::{mpsc::Sender, Mutex};
@@ -40,15 +40,21 @@ impl<F: PrimeField> TruncPrNode<F> {
             .clone()
     }
 
+    pub async fn clear_store(&self) {
+        let mut store = self.store.lock().await;
+        store.clear();
+    }
     /// Start TruncPr:
     /// - builds [r'] and [r] from preseeded randomness,
     /// - forms share of (b + r) where b = 2^{k-1} + [a],
     /// - broadcasts the share for opening.
     pub async fn init<N: Network>(
         &mut self,
-        a: F,
+        a: RobustShare<F>,
         k: usize,
         m: usize,
+        r_bits: Vec<RobustShare<F>>,
+        r_int: RobustShare<F>,
         session: SessionId,
         network: Arc<N>,
     ) -> Result<(), TruncPrError> {
@@ -58,44 +64,30 @@ impl<F: PrimeField> TruncPrNode<F> {
         let mut s = store.lock().await;
         s.k = k;
         s.m = m;
-        s.share_a = Some(a);
+        s.share_a = Some(a.clone());
 
         // b = 2^{k-1} + [a]   (2^{k-1} is public constant in the field)
-        let b = pow2_f::<F>(k - 1) + a;
-
-        let r_bits = match &s.r_bits {
-            Some(r) if r.len() >= m => r,
-            _ => {
-                // Run PRandBitL to generate a fresh batch of m bits
-                todo!()
-            }
-        };
-        let r_int = match s.r_int {
-            Some(r) => r,
-            None => {
-                // Run PRandInt to generate int
-                todo!()
-            }
-        };
+        let b = (a + pow2_f::<F>(k - 1))?;
 
         // [r'] = sum_{i=0}^{m-1} 2^i [r_i]
-        let mut r_dash = F::zero();
+        let mut r_dash = RobustShare::new(F::zero(), self.id, self.t);
         for (i, bit_share) in r_bits.iter().take(m).enumerate() {
-            r_dash += pow2_f::<F>(i) * (*bit_share);
+            r_dash = (r_dash + (bit_share.clone() * pow2_f::<F>(i))?)?;
         }
-        s.r_dash = Some(r_dash);
+        s.r_dash = Some(r_dash.clone());
 
         // [r] = 2^m [r''] + [r']
-        let r = pow2_f::<F>(m) * r_int + r_dash;
+        let r = ((r_int * pow2_f::<F>(m))? + r_dash)?;
 
         // share of (b + r)
-        let open_share = b + r;
+        let open_share = (b + r)?;
 
         // serialize and broadcast
         let mut payload = Vec::new();
         open_share.serialize_compressed(&mut payload)?;
         let msg = TruncPrMessage::new(self.id, session, payload);
-        network.broadcast(&bincode::serialize(&msg)?).await?;
+        let wrapped = WrappedMessage::Trunc(msg);
+        network.broadcast(&bincode::serialize(&wrapped)?).await?;
         Ok(())
     }
 
@@ -109,7 +101,8 @@ impl<F: PrimeField> TruncPrNode<F> {
         let mut s = store.lock().await;
 
         // de-serialize incoming share of (b + r)
-        let share_i: F = CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
+        let share_i: RobustShare<F> =
+            CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 
         // dedup
         if s.open_buf.contains_key(&msg.sender_id) {
@@ -118,35 +111,31 @@ impl<F: PrimeField> TruncPrNode<F> {
         s.open_buf.insert(msg.sender_id, share_i);
 
         // reconstruct when we have t+1
-        if s.open_buf.len() >= (self.t + 1) {
-            // collect first t+1 shares
-            let mut xs = Vec::with_capacity(self.t + 1);
-            let mut ys = Vec::with_capacity(self.t + 1);
-            for (&sid, val) in s.open_buf.iter().take(self.t + 1) {
-                xs.push(F::from(sid as u64));
-                ys.push(*val);
-            }
-            let poly = lagrange_interpolate(&xs, &ys)?;
-            let c = poly.evaluate(&F::zero()); // opened (b + r) as field element
+        if s.open_buf.len() >= 2 * self.t + 1 {
+            let shares: Vec<RobustShare<F>> = s.open_buf.values().cloned().collect();
+            let (_, c) = RobustShare::recover_secret(&shares, self.n)?;
 
             // c' = c mod 2^m  (public integer)
             let m = s.m;
             let c_mod = mod_pow2_from_field::<F>(c, m);
 
             // [a'] = c' - [r']  (work in the field; lift c' into F)
-            let r_dash = s.r_dash.ok_or(TruncPrError::NotSet("r_dash".to_string()))?;
-            let a_prime = c_mod - r_dash;
+            let r_dash = s
+                .r_dash
+                .clone()
+                .ok_or(TruncPrError::NotSet("r_dash".to_string()))?;
+            let a_prime = RobustShare::from_scalar_sub(c_mod, &r_dash);
 
             // [d] = ([a] - [a']) * (2^{-m} mod q)
             let a = s
                 .share_a
+                .clone()
                 .ok_or(TruncPrError::NotSet("share_a".to_string()))?;
             let inv_2m = pow2_f::<F>(m).inverse().expect("2^m invertible mod q");
-            let d = (a - a_prime) * inv_2m;
+            let d = ((a - a_prime)? * inv_2m)?;
 
             s.share_d = Some(d);
             s.open_buf.clear();
-
             self.output_channel.send(msg.session_id).await?;
         }
 

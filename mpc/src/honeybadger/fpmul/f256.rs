@@ -2,12 +2,40 @@ use std::{
     collections::HashMap,
     ops::{Add, Mul, Sub},
 };
+
+use thiserror::Error;
+
+/// Error type for GF(2^8) field and domain operations.
+#[derive(Error, Debug)]
+pub enum F2_8Error {
+    /// Division or inversion by zero.
+    #[error("Division by zero in GF(2^8)")]
+    DivisionByZero,
+
+    /// Element has no multiplicative inverse (should only occur for 0).
+    #[error("Element {0:?} has no multiplicative inverse")]
+    NotInvertible(F2_8),
+
+    /// Invalid domain size (must be ≤ 255).
+    #[error("Invalid domain size for GF(2^8): n = {0}")]
+    InvalidDomainSize(usize),
+
+    /// Internal polynomial operation error or custom failure.
+    #[error("Polynomial operation failed: {0}")]
+    PolynomialOperationError(String),
+}
+
 /// Finite field GF(2^8) with AES modulus x^8 + x^4 + x^3 + x + 1 (0x11B)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct F2_8(pub u8);
 
 impl F2_8 {
     pub const MODULUS: u16 = 0x11B;
+    pub const GENERATOR: F2_8 = F2_8(0x03);
+
+    pub fn generator() -> Self {
+        Self::GENERATOR
+    }
 
     pub fn new(value: u8) -> Self {
         F2_8(value)
@@ -191,13 +219,17 @@ pub fn lagrange_interpolate_f2_8(x_vals: &[F2_8], y_vals: &[F2_8]) -> Poly {
 
     result
 }
-pub fn build_all_f_polys_2_8(tsets: HashMap<Vec<usize>, i64>) -> HashMap<Vec<usize>, Poly> {
-    tsets
+pub fn build_all_f_polys_2_8(
+    n: usize,
+    tsets: Vec<Vec<usize>>,
+) -> Result<HashMap<Vec<usize>, Poly>, F2_8Error> {
+    let domain_2 = F2_8Domain::new(n)?;
+    Ok(tsets
         .into_iter()
-        .map(|(tset, _)| {
+        .map(|tset| {
             // Construct interpolation points
             let xs = std::iter::once(F2_8::zero())
-                .chain(tset.iter().map(|&j| F2_8::from((j + 1) as u16)))
+                .chain(tset.iter().map(|&j| domain_2.element(j)))
                 .collect::<Vec<_>>();
             let ys = std::iter::once(F2_8::one())
                 .chain(std::iter::repeat(F2_8::zero()).take(tset.len()))
@@ -206,5 +238,41 @@ pub fn build_all_f_polys_2_8(tsets: HashMap<Vec<usize>, i64>) -> HashMap<Vec<usi
             let poly = lagrange_interpolate_f2_8(&xs, &ys);
             (tset, poly)
         })
-        .collect()
+        .collect())
+}
+
+//---------------------------------SHARE---------------------------------
+
+#[derive(Clone, Debug)]
+pub struct F2_8ShamirShare {
+    pub share: F2_8,
+    ///index of the share(x-values),can be different from the reciever ID
+    pub id: usize,
+    pub degree: usize,
+}
+
+//---------------------------------DOMAIN---------------------------------
+
+pub struct F2_8Domain {
+    pub elements: Vec<F2_8>,
+}
+
+impl F2_8Domain {
+    pub fn new(size: usize) -> Result<Self, F2_8Error> {
+        if size > 255 {
+            return Err(F2_8Error::InvalidDomainSize(size));
+        }
+
+        let mut elements = Vec::with_capacity(size);
+        let mut x = F2_8::one();
+        for _ in 0..size {
+            elements.push(x);
+            x = x.mul(F2_8::GENERATOR);
+        }
+        Ok(Self { elements })
+    }
+
+    pub fn element(&self, i: usize) -> F2_8 {
+        self.elements[i]
+    }
 }

@@ -4,7 +4,7 @@ use crate::utils::test_utils::{
     receive, receive_client, setup_tracing, test_setup,
 };
 use ark_bls12_381::Fr;
-use ark_ff::UniformRand;
+use ark_ff::{AdditiveGroup, Field, UniformRand};
 use ark_std::{
     rand::{
         rngs::{OsRng, StdRng},
@@ -40,17 +40,18 @@ pub mod utils;
 #[tokio::test]
 async fn randousha_e2e() {
     setup_tracing();
-    let n_parties = 10;
-    let t = 3;
+    let n_parties = 5;
+    let t = 1;
     let session_id = SessionId::new(ProtocolType::Randousha, 0, 0, 111);
-    let degree_t = 3;
+    let degree_t = 1;
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
     let (_, n_shares_t, n_shares_2t) = construct_e2e_input(n_parties, degree_t);
     // create global nodes
-    let mut nodes =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n_parties, t, 0, 0, 111);
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties, t, 0, 0, 111, 0, 0, 0, 0,
+    );
     // spawn tasks to process received messages
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
@@ -103,15 +104,16 @@ async fn randousha_e2e() {
 #[tokio::test]
 async fn ransha_e2e() {
     setup_tracing();
-    let n_parties = 10;
-    let t = 3;
+    let n_parties = 5;
+    let t = 1;
     let session_id = SessionId::new(ProtocolType::Randousha, 0, 0, 111);
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
     // create global nodes
-    let mut nodes =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n_parties, t, 0, 0, 111);
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties, t, 0, 0, 111, 0, 0, 0, 0,
+    );
     // spawn tasks to process received messages
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
@@ -164,7 +166,8 @@ async fn test_input_protocol_e2e() {
     // Set up InputServers/InputClient
     let mut client =
         InputClient::<Fr, Avid>::new(clientid[0], n, t, 111, input_values.clone()).unwrap();
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111);
+    let nodes =
+        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111, 0, 0, 0, 0);
 
     //Receive at server
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
@@ -232,8 +235,9 @@ async fn gen_masks_for_input_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     //Create global nodes for InputServers
-    let mut nodes =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n_parties, t, 0, 0, 111);
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties, t, 0, 0, 111, 0, 0, 0, 0,
+    );
     //Create nodes for InputClient
     let mut client =
         InputClient::<Fr, Avid>::new(clientid[0], n_parties, t, 111, input_values.clone()).unwrap();
@@ -365,8 +369,9 @@ async fn mul_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n_parties, t, 0, 0, 111);
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties, t, 0, 0, 111, 0, 0, 0, 0,
+    );
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
@@ -379,7 +384,7 @@ async fn mul_e2e() {
         node.preprocessing_material
             .lock()
             .await
-            .add(Some(triple[pid].clone()), None);
+            .add(Some(triple[pid].clone()), None, None, None);
     }
 
     // init all nodes
@@ -465,6 +470,10 @@ async fn mul_e2e_with_preprocessing() {
         no_of_triples,
         2 + 2 * no_of_triples,
         111,
+        0,
+        0,
+        0,
+        0,
     );
 
     //Create Clients
@@ -551,7 +560,7 @@ async fn mul_e2e_with_preprocessing() {
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     //----------------------------------------VALIDATE VALUES----------------------------------------
-    
+
     let output_clientid: ClientId = 200;
     // Each server sends its output shares
     for (i, server) in nodes.iter().enumerate() {
@@ -625,6 +634,10 @@ async fn preprocessing_e2e() {
         no_of_triples,
         2 * no_of_triples,
         111,
+        0,
+        0,
+        0,
+        0,
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -658,7 +671,7 @@ async fn preprocessing_e2e() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_shares) = node.preprocessing_material.lock().await.len();
+        let (n_triples, n_shares, _, _) = node.preprocessing_material.lock().await.len();
         assert_eq!(n_triples, no_of_triples);
         assert_eq!(n_shares, 0);
     }
@@ -737,4 +750,121 @@ async fn test_output_protocol_e2e() {
         recovered,
         output_values
     );
+}
+
+#[tokio::test]
+async fn test_rand_bit() {
+    setup_tracing();
+
+    let n_parties = 5;
+    let t = 1;
+    let mut rng = test_rng();
+    let session_id = SessionId::new(ProtocolType::RandBit, 0, 0, 111);
+    let no_of_rand_bits = 2;
+
+    //Setup
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
+
+    // The construction of triples is same as that of mul
+    let per_party_tripes = construct_e2e_input_mul(n_parties, no_of_rand_bits, t).await;
+
+    // assumes each party holds shares of some secrets
+    let mut a = Vec::new();
+    let mut shares_a = Vec::new();
+    for _ in 0..no_of_rand_bits {
+        let a_value = Fr::rand(&mut rng);
+        a.push(a_value);
+        let shares = RobustShare::compute_shares(a_value, n_parties, t, None, &mut rng).unwrap();
+        shares_a.push(shares);
+    }
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    // create global nodes
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        no_of_rand_bits,
+        no_of_rand_bits,
+        111,
+        0,
+        0,
+        0,
+        0,
+    );
+
+    //----------------------------------------RECIEVE----------------------------------------
+    // spawn tasks to process received messages
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
+
+    // init all nodes
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        let mut prand_bit_node = node.preprocess.rand_bit;
+        let net = network.clone();
+
+        // Prepare the input shares for this party
+        let mut a_value = Vec::new();
+        for i in 0..no_of_rand_bits {
+            a_value.push(shares_a[i][pid].clone());
+        }
+        assert!(a_value.len() == no_of_rand_bits);
+
+        let mult_triple = per_party_tripes[pid].clone().clone();
+
+        let handle = tokio::spawn(async move {
+            {
+                prand_bit_node
+                    .init(a_value, mult_triple, session_id, net.clone())
+                    .await
+                    .expect("rand bit init failed");
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all tasks to finish
+    futures::future::join_all(handles).await;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+
+    let mut bit_shares = Vec::new();
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        let store = node
+            .preprocess
+            .rand_bit
+            .storage
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned();
+        if let Some(store) = store {
+            let store_lock = store.lock().await;
+            let store2 = store_lock.clone();
+            let protocol_output = store2.protocol_output.clone();
+            assert!(protocol_output.is_some());
+            bit_shares.push(protocol_output.unwrap().clone());
+        }
+    }
+    let mut bit_share0 = Vec::new();
+    let mut bit_share1 = Vec::new();
+    for i in 0..n_parties {
+        bit_share0.push(bit_shares[i][0].clone());
+        bit_share1.push(bit_shares[i][1].clone());
+    }
+    let bit0 = RobustShare::recover_secret(&bit_share0, n_parties)
+        .unwrap()
+        .1;
+    println!("recovered bit: {}", bit0);
+    // check if bit is 0 or 1
+    assert!(bit0 == Fr::ZERO || bit0 == Fr::ONE);
+
+    let bit1 = RobustShare::recover_secret(&bit_share1, n_parties)
+        .unwrap()
+        .1;
+    println!("recovered bit: {}", bit1);
+    // check if bit is 0 or 1
+    assert!(bit1 == Fr::ZERO || bit1 == Fr::ONE);
 }

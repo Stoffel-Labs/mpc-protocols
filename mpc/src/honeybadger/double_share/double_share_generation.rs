@@ -12,7 +12,7 @@ use itertools::izip;
 use std::{collections::BTreeMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::DoubleShamirShare;
 
@@ -130,7 +130,10 @@ where
                 WrappedMessage::Dousha(DouShaMessage::new(self.id, session_id, payload));
             let bytes_generic_msg = bincode::serialize(&generic_message)?;
 
-            info!("sending shares from {:?} to {:?}", self.id, recipient_id);
+            info!(
+                "sending double shares from {:?} to {:?}",
+                self.id, recipient_id
+            );
             network.send(recipient_id, &bytes_generic_msg).await?;
         }
 
@@ -149,13 +152,21 @@ where
             CanonicalDeserialize::deserialize_compressed(recv_message.payload.as_slice())?;
         let binding = self.get_or_create_store(recv_message.session_id).await;
         let mut dousha_storage = binding.lock().await;
-        dousha_storage.protocol_output.push(double_share);
+        if dousha_storage.share.contains_key(&recv_message.sender_id) {
+            warn!(
+                session_id = recv_message.session_id.as_u64(),
+                "Duplicate double share received from party {:?}, ignoring.",
+                recv_message.sender_id
+            );
+            return Ok(()); // ignore duplicate message
+        }
+
+        dousha_storage
+            .share
+            .insert(recv_message.sender_id, double_share);
         info!(
             session_id = recv_message.session_id.as_u64(),
-            share_amount = dousha_storage.protocol_output.len(),
-            "party {:?} received shares from {:?}",
-            self.id,
-            recv_message.sender_id,
+            "party {:?} received double shares from {:?}", self.id, recv_message.sender_id,
         );
         dousha_storage.reception_tracker[recv_message.sender_id] = true;
 
@@ -165,6 +176,11 @@ where
             .iter()
             .all(|&received| received)
         {
+            dousha_storage.protocol_output = dousha_storage
+                .share
+                .iter()
+                .map(|(_, v)| v.clone())
+                .collect();
             dousha_storage.state = ProtocolState::Finished;
             self.output_sender.send(recv_message.session_id).await?;
         }

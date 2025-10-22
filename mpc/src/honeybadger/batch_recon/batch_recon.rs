@@ -5,8 +5,9 @@ use crate::{
         SecretSharingScheme,
     },
     honeybadger::{
-        mul::MultMessage, robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::TripleGenMessage, ProtocolType, WrappedMessage,
+        fpmul::RandBitMessage, mul::MultMessage,
+        robust_interpolate::robust_interpolate::RobustShare, triple_gen::TripleGenMessage,
+        ProtocolType, WrappedMessage,
     },
 };
 use ark_ff::FftField;
@@ -232,6 +233,33 @@ impl<F: FftField> BatchReconNode<F> {
                                     ));
                                     let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
                                     net.send(self.id, &bytes_generic_msg).await?;
+                                }
+                                ProtocolType::RandBit => {
+                                    let mut bytes_message = Vec::new();
+                                    result.serialize_compressed(&mut bytes_message)?;
+                                    if msg.session_id.round_id() == 0
+                                        && msg.session_id.sub_id() == 0
+                                    {
+                                        let rand_generic_msg =
+                                            WrappedMessage::RandBit(RandBitMessage::new(
+                                                self.id,
+                                                msg.session_id,
+                                                bytes_message,
+                                            ));
+                                        let bytes_generic_msg =
+                                            bincode::serialize(&rand_generic_msg)?;
+                                        net.send(self.id, &bytes_generic_msg).await?;
+                                    } else {
+                                        let mult_generic_msg =
+                                            WrappedMessage::Mul(MultMessage::new(
+                                                self.id,
+                                                msg.session_id,
+                                                bytes_message,
+                                            ));
+                                        let bytes_generic_msg =
+                                            bincode::serialize(&mult_generic_msg)?;
+                                        net.send(self.id, &bytes_generic_msg).await?;
+                                    }
                                 }
                                 _ => return Ok(()),
                             }

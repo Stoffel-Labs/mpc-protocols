@@ -1,12 +1,15 @@
 use crate::{
     common::{lagrange_interpolate, share::ShareError},
     honeybadger::{
-        batch_recon::BatchReconError, fpmul::f256::F2_8, mul::MulError,
-        robust_interpolate::robust_interpolate::RobustShare, SessionId,
+        batch_recon::BatchReconError,
+        fpmul::f256::{F2_8Error, F2_8},
+        mul::MulError,
+        robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
+        SessionId,
     },
 };
 use ark_ff::{BigInteger, FftField, PrimeField};
-use ark_poly::univariate::DensePolynomial;
+use ark_poly::{univariate::DensePolynomial, EvaluationDomain, GeneralEvaluationDomain};
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
@@ -115,10 +118,16 @@ pub enum PRandError {
     Abort,
     #[error("Duplicate input: {0}")]
     Duplicate(String),
-    #[error("No of tsets not set")]
-    NotSet,
+    #[error("Not set:{0}")]
+    NotSet(String),
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
+    #[error("error sending the finished session ID to the caller: {0:?}")]
+    SenderError(#[from] SendError<SessionId>),
+    #[error("F2_8 Error: {0}")]
+    F2_8Error(#[from] F2_8Error),
+    #[error("InterpolateError: {0}")]
+    InterpolateError(#[from] InterpolateError),
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -135,7 +144,7 @@ pub struct PRandBitDMessage {
     pub msg_type: MessageType,
     pub session_id: SessionId,
     pub tset: Vec<usize>,
-    pub r_t: i64,
+    pub r_t: Vec<i64>,
     pub payload: Vec<u8>,
 }
 
@@ -146,7 +155,7 @@ impl PRandBitDMessage {
         msg_type: MessageType,
         session_id: SessionId,
         tset: Vec<usize>,
-        r_t: i64,
+        r_t: Vec<i64>,
         payload: Vec<u8>,
     ) -> Self {
         Self {
@@ -164,16 +173,16 @@ impl PRandBitDMessage {
 pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     /// For every maximal unqualified set T that excludes this player,
     /// we store the full mask r_T = sum_i r_T^i
-    pub riss_shares: HashMap<Vec<usize>, HashMap<usize, i64>>, // tset -> {sender -> val}
-    pub r_t: HashMap<Vec<usize>, i64>,
+    pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<i64>>>, // tset -> {sender -> val}
+    pub r_t: HashMap<Vec<usize>, Vec<i64>>,
     pub no_of_tsets: Option<usize>,
-    pub share_r_q: Option<F>, //smaller field
-    pub share_r_p: Option<G>,
-    pub share_b_q: Option<F>, //smaller field
-    pub share_r_2: Option<F2_8>,
-    pub share_r_plus_b: HashMap<usize, F>,
-    pub share_b_2: Option<F2_8>,
-    pub share_b_p: Option<G>,
+    pub share_r_q: Option<Vec<RobustShare<F>>>, //smaller field
+    pub share_r_p: Option<Vec<RobustShare<G>>>, // PrandInt output
+    pub share_b_q: Option<Vec<RobustShare<F>>>, //smaller field
+    pub share_r_2: Option<Vec<F2_8>>,
+    pub share_r_plus_b: HashMap<usize, Vec<RobustShare<F>>>,
+    pub share_b_2: Vec<F2_8>,           //PrandBitD output
+    pub share_b_p: Vec<RobustShare<G>>, //PrandBitD/PrandBitL output
 }
 
 impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
@@ -187,21 +196,24 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
             share_b_q: None,
             share_r_2: None,
             share_r_plus_b: HashMap::new(),
-            share_b_2: None,
-            share_b_p: None,
+            share_b_2: Vec::new(),
+            share_b_p: Vec::new(),
         }
     }
 }
 
 pub async fn build_all_f_polys<H: PrimeField>(
-    tsets: HashMap<Vec<usize>, i64>,
+    n: usize,
+    tsets: Vec<Vec<usize>>,
 ) -> Result<HashMap<Vec<usize>, DensePolynomial<H>>, ShareError> {
+    let domain =
+        GeneralEvaluationDomain::<H>::new(n).ok_or_else(|| ShareError::NoSuitableDomain(n))?;
     tsets
         .into_iter()
-        .map(|(tset, _)| {
+        .map(|tset| {
             // Construct interpolation points
             let xs = std::iter::once(H::zero())
-                .chain(tset.iter().map(|&j| H::from((j + 1) as u64)))
+                .chain(tset.iter().map(|j| domain.element(*j)))
                 .collect::<Vec<_>>();
             let ys = std::iter::once(H::one())
                 .chain(std::iter::repeat(H::zero()).take(tset.len()))
@@ -236,6 +248,8 @@ pub enum TruncPrError {
     ShareError(#[from] ShareError),
     #[error("error sending the thread asynchronously")]
     SendError(#[from] SendError<SessionId>),
+    #[error("InterpolateError: {0}")]
+    InterpolateError(#[from] InterpolateError),
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -259,12 +273,10 @@ impl TruncPrMessage {
 pub struct TruncPrStore<F: PrimeField> {
     pub m: usize,
     pub k: usize,
-    pub r_bits: Option<Vec<F>>, // [r_i] for i=0..m-1 (bit shares in Z_q)
-    pub r_int: Option<F>,       // [r''] (integer share in Z_q)
-    pub r_dash: Option<F>,      // [r'] = sum 2^i [r_i]
-    pub share_a: Option<F>,
-    pub open_buf: HashMap<usize, F>, // sender_id -> share of (b + r)
-    pub share_d: Option<F>,          // [d]
+    pub r_dash: Option<RobustShare<F>>, // [r'] = sum 2^i [r_i]
+    pub share_a: Option<RobustShare<F>>,
+    pub open_buf: HashMap<usize, RobustShare<F>>, // sender_id -> share of (b + r)
+    pub share_d: Option<RobustShare<F>>,          // [d]
 }
 
 impl<F: PrimeField> TruncPrStore<F> {
@@ -272,8 +284,6 @@ impl<F: PrimeField> TruncPrStore<F> {
         Self {
             m: 0,
             k: 0,
-            r_bits: None,
-            r_int: None,
             r_dash: None,
             share_a: None,
             open_buf: HashMap::new(),

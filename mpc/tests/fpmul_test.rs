@@ -1,21 +1,22 @@
 pub mod utils;
 use crate::utils::test_utils::{setup_tracing, test_setup};
 use ark_bls12_381::Fr as G;
-use ark_bn254::Fr as F; // smaller prime field
-use ark_poly::univariate::DensePolynomial;
-use ark_poly::{DenseUVPolynomial, Polynomial};
+use ark_bn254::Fr as F;
+use ark_ff::Field;
 use ark_std::test_rng;
 use itertools::Itertools;
+use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
-use stoffelmpc_mpc::common::lagrange_interpolate;
+use stoffelmpc_mpc::common::{SecretSharingScheme, ShamirShare};
 use stoffelmpc_mpc::honeybadger::fpmul::f256::{
-    build_all_f_polys_2_8, lagrange_interpolate_f2_8, F2_8,
+    build_all_f_polys_2_8, lagrange_interpolate_f2_8, F2_8Domain, F2_8,
 };
-use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitDNode;
+use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitNode;
 use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
-use stoffelmpc_mpc::honeybadger::fpmul::{PRandBitDMessage, TruncPrMessage};
-use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
-use tokio::sync::mpsc;
+use stoffelmpc_mpc::honeybadger::fpmul::PRandBitDMessage;
+use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::{Robust, RobustShare};
+use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
+use tokio::sync::mpsc::{self, Sender};
 use tokio::task::JoinSet;
 
 #[tokio::test]
@@ -25,26 +26,45 @@ async fn test_prandbitd_end_to_end() {
     let t = 1;
     let l = 8;
     let k = 4;
+    let batch_size = 2;
     let session_id = SessionId::new(ProtocolType::None, 0, 0, 111);
-
+    let mut rng = test_rng();
     // Build fake network
     let (network, mut recv, _) = test_setup(n, vec![]);
-    // Initialize nodes
-    let mut nodes: Vec<PRandBitDNode<F, G>> =
-        (0..n).map(|i| PRandBitDNode::new(i, n, t, l, k)).collect();
 
-    // Manually set share_b_q for each node (simulate [b]_q)
-    for node in &mut nodes {
-        let binding = node.get_or_create_store(session_id).await;
-        let mut store = binding.lock().await;
-        store.share_b_q = Some(F::from(1u64)); //if all the shares are 1 then the secret is 1
-    }
+    let sender_channels: Vec<Sender<_>> = (0..n)
+        .map(|_| {
+            let (sender, _) = mpsc::channel(128);
+            sender
+        })
+        .collect();
+
+    // Initialize nodes
+    let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
+        .map(|i| PRandBitNode::new(i, n, t, sender_channels[i].clone()))
+        .collect();
 
     // Run distributed RISS generation
-    for node in &mut nodes {
-        node.generate_riss(session_id, network.clone())
-            .await
-            .unwrap();
+    let mut node_shares: Vec<Vec<RobustShare<F>>> = vec![Vec::new(); n];
+    for _ in 0..batch_size {
+        let shares = RobustShare::compute_shares(F::ONE, n, t, None, &mut rng)
+            .expect("share generation failed");
+        for (j, share) in shares.into_iter().enumerate() {
+            node_shares[j].push(share);
+        }
+    }
+
+    for (i, node) in &mut nodes.iter_mut().enumerate() {
+        node.generate_riss(
+            session_id,
+            node_shares[i].clone(),
+            l,
+            k,
+            batch_size,
+            network.clone(),
+        )
+        .await
+        .unwrap();
     }
 
     // Process all messages
@@ -68,48 +88,60 @@ async fn test_prandbitd_end_to_end() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Check outputs
+    //Check outputs
     let mut x_vals_2 = Vec::new();
-    let mut y_vals_2 = Vec::new();
+    let mut y_vals_2 = vec![Vec::new(); batch_size];
+    let domain_2 = F2_8Domain::new(n).unwrap();
 
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
         let store = binding.lock().await;
         assert!(
-            store.share_b_2.is_some(),
+            store.share_b_2.len() == batch_size,
             "Node {:?} missing share_b_2",
             node.id
         );
-        x_vals_2.push(F2_8::from(node.id as u16 + 1));
-        y_vals_2.push(store.share_b_2.unwrap());
+        x_vals_2.push(domain_2.element(node.id));
+        for (i, y) in store.share_b_2.iter().enumerate() {
+            y_vals_2[i].push(*y);
+        }
     }
 
-    let poly_2 = lagrange_interpolate_f2_8(&x_vals_2, &y_vals_2);
-    let recovered_b_2 = poly_2.coeffs[0];
-    println!("Recovered b (GF(2^8)) = {:?}", recovered_b_2);
-    assert_eq!(recovered_b_2, F2_8::from(1u16), "Recovered b_2 != expected");
+    for y in y_vals_2 {
+        let poly_2 = lagrange_interpolate_f2_8(&x_vals_2, &y);
+        let recovered_b_2 = poly_2.coeffs[0];
+        println!("Recovered b (GF(2^8)) = {:?}", recovered_b_2);
+        assert_eq!(recovered_b_2, F2_8::from(1u16), "Recovered b_2 != expected");
+    }
 
     // === Reconstruct [b]_p in G (bigger prime field) ===
-    let mut x_vals_p = Vec::new();
-    let mut y_vals_p = Vec::new();
+    let mut shares = vec![Vec::new(); batch_size];
 
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
-        let store = binding.lock().await;
+        {
+            let store = binding.lock().await;
 
-        assert!(
-            store.share_b_p.is_some(),
-            "Node {:?} missing share_b_p",
-            node.id
-        );
-        x_vals_p.push(G::from((node.id + 1) as u64));
-        y_vals_p.push(store.share_b_p.unwrap());
+            assert!(
+                store.share_b_p.len() == batch_size,
+                "Node {:?} missing share_b_p",
+                node.id
+            );
+
+            for (i, y) in store.share_b_p.iter().enumerate() {
+                shares[i].push(y.clone());
+            }
+        }
     }
 
-    let poly_p = lagrange_interpolate(&x_vals_p, &y_vals_p).unwrap();
-    let recovered_b_p = poly_p.coeffs[0];
-    println!("Recovered b (prime field G) = {:?}", recovered_b_p);
-    assert_eq!(recovered_b_p, G::from(1u64), "Recovered b_p != expected");
+    for y in shares {
+        let owned: Vec<ShamirShare<_, 1, Robust>> = y.iter().map(|s| (*s).clone()).collect();
+        let (_, v) = RobustShare::recover_secret(&owned, n).unwrap();
+        let recovered_b_p = v;
+
+        println!("Recovered b (prime field G) = {:?}", recovered_b_p);
+        assert_eq!(recovered_b_p, G::from(1u64), "Recovered b_p != expected");
+    }
 }
 
 #[tokio::test]
@@ -119,27 +151,44 @@ async fn test_prandbitd_r_reconstruction() {
     let t = 1;
     let l = 8;
     let k = 4;
+    let batch_size = 2;
     let session_id = SessionId::new(ProtocolType::None, 0, 0, 222);
-
+    let mut rng = test_rng();
     // Build fake network
     let (network, mut recv, _) = test_setup(n, vec![]);
 
-    // Initialize nodes
-    let mut nodes: Vec<PRandBitDNode<F, G>> =
-        (0..n).map(|i| PRandBitDNode::new(i, n, t, l, k)).collect();
+    let sender_channels: Vec<Sender<_>> = (0..n)
+        .map(|_| {
+            let (sender, _) = mpsc::channel(128);
+            sender
+        })
+        .collect();
 
-    // Manually set share_b_q (not used in this test, but required by protocol)
-    for node in &mut nodes {
-        let binding = node.get_or_create_store(session_id).await;
-        let mut store = binding.lock().await;
-        store.share_b_q = Some(F::from(1u64)); //if all the shares are 1 then the secret is 1
-    }
+    // Initialize nodes
+    let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
+        .map(|i| PRandBitNode::new(i, n, t, sender_channels[i].clone()))
+        .collect();
 
     // Run distributed RISS generation
+    let mut node_shares: Vec<Vec<RobustShare<F>>> = vec![Vec::new(); n];
+    for _ in 0..batch_size {
+        let shares = RobustShare::compute_shares(F::ONE, n, t, None, &mut rng)
+            .expect("share generation failed");
+        for (j, share) in shares.into_iter().enumerate() {
+            node_shares[j].push(share);
+        }
+    }
     for node in &mut nodes {
-        node.generate_riss(session_id, network.clone())
-            .await
-            .unwrap();
+        node.generate_riss(
+            session_id,
+            node_shares[node.id].clone(),
+            l,
+            k,
+            batch_size,
+            network.clone(),
+        )
+        .await
+        .unwrap();
     }
 
     // Spawn receivers for each node
@@ -164,7 +213,7 @@ async fn test_prandbitd_r_reconstruction() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // === Step 1: Collect all r_T values from all nodes ===
-    let mut all_r_t: std::collections::HashMap<Vec<usize>, i64> = std::collections::HashMap::new();
+    let mut all_r_t: HashMap<Vec<usize>, Vec<i64>> = HashMap::new();
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
         let store = binding.lock().await;
@@ -177,63 +226,84 @@ async fn test_prandbitd_r_reconstruction() {
                     tset
                 );
             } else {
-                all_r_t.insert(tset.clone(), *val);
+                all_r_t.insert(tset.clone(), val.clone());
             }
         }
     }
 
     // === Step 2: Compute ground truth replicated secret ===
-    let r_int: i64 = all_r_t.values().copied().sum();
-    println!("Ground truth r (integer) = {}", r_int);
+    let mut r_int = Vec::new();
+    for vec in all_r_t.values() {
+        if r_int.is_empty() {
+            r_int = vec.clone();
+        } else {
+            for (i, val) in vec.iter().enumerate() {
+                r_int[i] += val;
+            }
+        }
+    }
+    println!("Ground truth r (vector sum) = {:?}", r_int);
 
     // === Step 3: Reconstruct from all (t+1)-subsets of Shamir shares ===
-    let needed = t + 1;
+    let needed = 2 * t + 1;
     let all_ids: Vec<usize> = (0..n).collect();
 
     for combo in all_ids.iter().copied().combinations(needed) {
-        let mut x_vals = Vec::with_capacity(needed);
-        let mut y_vals = Vec::with_capacity(needed);
+        let mut shares: Vec<Vec<ShamirShare<_, 1, Robust>>> =
+            vec![Vec::with_capacity(needed); batch_size];
 
         for &id in &combo {
             let binding = nodes[id].get_or_create_store(session_id).await;
             let store = binding.lock().await;
-            let share = store.share_r_q.expect("missing share_r_q");
+            let share = store.share_r_q.clone().expect("missing share_r_q");
 
-            x_vals.push(F::from((id + 1) as u64));
-            y_vals.push(share);
+            for (i, y) in share.iter().enumerate() {
+                shares[i].push(y.clone());
+            }
         }
 
-        let rec_r = reconstruct::<F>(&x_vals, &y_vals).unwrap();
-        assert_eq!(
-            rec_r,
-            F::from(r_int),
-            "Reconstructed r mismatch for combo {:?}",
-            combo
-        );
+        for i in 0..batch_size {
+            let (_, rec_r) = RobustShare::recover_secret(&shares[i], n).unwrap();
+            assert_eq!(
+                rec_r,
+                F::from(r_int[i]),
+                "Reconstructed r mismatch for combo {:?}",
+                combo
+            );
+        }
     }
 
     println!("All r_t values consistent and all Shamir reconstructions matched ground truth");
     // === Step 4: Reconstruct r0 (GF(2^8)) ===
-    let expected_r0 = F2_8::from((r_int & 1) as u8);
+    let domain_2 = F2_8Domain::new(n).unwrap();
+    let expected_r0: Vec<F2_8> = r_int.iter().map(|i| F2_8::from((i & 1) as u8)).collect();
 
     let mut shares_r2 = Vec::new();
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
         let store = binding.lock().await;
-        shares_r2.push((node.id, store.share_r_2.expect("missing share_r_2")));
+        shares_r2.push((node.id, store.share_r_2.clone().expect("missing share_r_2")));
     }
 
     for combo in all_ids.iter().copied().combinations(needed) {
         let mut xs = Vec::new();
-        let mut ys = Vec::new();
+        let mut ys = vec![Vec::new(); batch_size];
         for &id in &combo {
-            xs.push(F2_8::from((id + 1) as u16));
-            let val = shares_r2.iter().find(|(i, _)| *i == id).unwrap().1;
-            ys.push(val);
+            xs.push(domain_2.element(id));
+            let val = shares_r2.iter().find(|(i, _)| *i == id).unwrap().1.clone();
+            for (i, y) in val.iter().enumerate() {
+                ys[i].push(*y);
+            }
         }
-        let poly = lagrange_interpolate_f2_8(&xs, &ys);
-        let rec_r0 = poly.evaluate(F2_8::zero());
-        assert_eq!(rec_r0, expected_r0, "Mismatch in r0 for combo {:?}", combo);
+        for i in 0..batch_size {
+            let poly = lagrange_interpolate_f2_8(&xs, &ys[i]);
+            let rec_r0 = poly.evaluate(F2_8::zero());
+            assert_eq!(
+                rec_r0, expected_r0[i],
+                "Mismatch in r0 for combo {:?}",
+                combo
+            );
+        }
     }
     println!("Shamir reconstruction of r0 matched expected parity");
 
@@ -241,32 +311,25 @@ async fn test_prandbitd_r_reconstruction() {
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
         let store = binding.lock().await;
-        let poly_f2 = build_all_f_polys_2_8(store.r_t.clone());
-        let xi2 = F2_8::from((node.id + 1) as u16);
-        let mut recomputed = F2_8::zero();
+        let tsets: Vec<Vec<usize>> = store.r_t.keys().cloned().collect();
+        let poly_f2 = build_all_f_polys_2_8(n, tsets).unwrap();
+        let xi2 = domain_2.element(node.id);
+        let mut recomputed = vec![F2_8::zero(); batch_size];
         for (tset, r_t) in store.r_t.iter() {
-            let r2 = F2_8::from((r_t & 1) as u8);
             let coeff = poly_f2[tset].evaluate(xi2);
-            recomputed = recomputed + (r2 * coeff);
+            for i in 0..batch_size {
+                let r2 = F2_8::from((r_t[i] & 1) as u8);
+                recomputed[i] = recomputed[i] + (r2 * coeff);
+            }
         }
-        let stored = store.share_r_2.expect("missing share_r_2");
+        let stored = store.share_r_2.clone().expect("missing share_r_2");
         assert_eq!(recomputed, stored, "Node {}: share_r_2 mismatch", node.id);
     }
     println!("Per-node share_r_2 matches recomputation");
 }
 
-fn reconstruct<F: ark_ff::PrimeField>(
-    x_vals: &[F],
-    y_vals: &[F],
-) -> Result<F, stoffelmpc_mpc::common::share::ShareError> {
-    let poly = stoffelmpc_mpc::common::lagrange_interpolate(x_vals, y_vals)?;
-    Ok(poly.evaluate(&F::zero()))
-}
-
 #[tokio::test]
 async fn test_truncpr_end_to_end() {
-    use ark_std::Zero;
-
     setup_tracing();
     let n = 4;
     let t = 1;
@@ -283,34 +346,30 @@ async fn test_truncpr_end_to_end() {
         .map(|i| TruncPrNode::new(i, n, t, trunc_sender.clone()))
         .collect();
 
-    // === Preload randomness (simulate PRandBitL + PRandInt) ===
-    // Fake random bits [r_i]
-    let r_bits: Vec<F> = (0..m).map(|i| F::from((i % 2) as u64)).collect();
-    // Fake random integer [r'']
-    let r_int = F::from(3 as u64);
-    for node in &mut nodes {
-        let store = node.get_or_create_store(session_id).await;
-        let mut s = store.lock().await;
-        s.r_bits = Some(r_bits.clone());
-        s.r_int = Some(r_int);
-    }
-
     // === Input secret [a] (same across parties for test) ===
     let mut rng = test_rng();
-    let mut poly = DensePolynomial::rand(t, &mut rng);
-    poly[0] = F::from(12345u64);
-    let a_val: Vec<F> = (0..n)
-        .map(|id| {
-            let x = F::from(id as u64);
-            poly.evaluate(&x)
-        })
-        .collect();
-
+    let a_val = RobustShare::compute_shares(F::from(12345u64), n, t, None, &mut rng).unwrap();
+    let r_int = RobustShare::compute_shares(F::from(3), n, t, None, &mut rng).unwrap();
+    let mut r_bits = vec![Vec::new(); m];
+    for j in 0..m {
+        let x = RobustShare::compute_shares(F::from((j % 2) as u64), n, t, None, &mut rng).unwrap();
+        for (i, share) in x.iter().enumerate() {
+            r_bits[i].push(share.clone());
+        }
+    }
     // === Run init() for each node ===
     for node in &mut nodes {
-        node.init(a_val[node.id], k, m, session_id, network.clone())
-            .await
-            .unwrap();
+        node.init(
+            a_val[node.id].clone(),
+            k,
+            m,
+            r_bits[node.id].clone(),
+            r_int[node.id].clone(),
+            session_id,
+            network.clone(),
+        )
+        .await
+        .unwrap();
     }
 
     // === Spawn receivers to process messages ===
@@ -322,9 +381,10 @@ async fn test_truncpr_end_to_end() {
 
         set.spawn(async move {
             while let Some(received) = receiver.recv().await {
-                let msg: TruncPrMessage = match bincode::deserialize(&received) {
-                    Ok(w) => w,
-                    Err(_) => continue,
+                let wrapped: WrappedMessage = bincode::deserialize(&received).unwrap();
+                let msg = match wrapped {
+                    WrappedMessage::Trunc(w) => w,
+                    _ => continue,
                 };
                 let _ = node.process(msg, net.clone()).await;
             }
@@ -334,21 +394,17 @@ async fn test_truncpr_end_to_end() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // === Reconstruct [d] (the truncated output) ===
-    let mut xs = Vec::new();
-    let mut ys = Vec::new();
+    let mut shares = Vec::new();
 
     for node in &mut nodes {
         let store = node.get_or_create_store(session_id).await;
         let s = store.lock().await;
 
         assert!(s.share_d.is_some(), "Node {:?} missing share_d", node.id);
-        xs.push(F::from(node.id as u64));
-        ys.push(s.share_d.unwrap());
+        shares.push(s.share_d.clone().unwrap());
     }
 
-    let poly = lagrange_interpolate(&xs, &ys).unwrap();
-    let d_reconstructed = poly.evaluate(&F::zero());
-
+    let (_, d_reconstructed) = RobustShare::recover_secret(&shares, n).unwrap();
     println!("Reconstructed [d] = {:?}", d_reconstructed);
 
     // === Verify correctness: expected floor(a / 2^m) ===

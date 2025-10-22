@@ -1,5 +1,5 @@
 use ark_bls12_381::Fr;
-use ark_ff::{FftField, UniformRand};
+use ark_ff::{FftField, PrimeField, UniformRand};
 use ark_std::test_rng;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -350,7 +350,7 @@ pub fn receive<F, R, S, N>(
     mut nodes: Vec<HoneyBadgerMPCNode<F, R>>,
     net: Arc<N>,
 ) where
-    F: FftField,
+    F: PrimeField,
     R: RBC + 'static,
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
@@ -378,20 +378,33 @@ pub fn receive<F, R, S, N>(
     }
 }
 
-pub fn create_global_nodes<F: FftField, R: RBC + 'static, S, N>(
+pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     n_parties: usize,
     t: usize,
     n_triples: usize,
     n_random_shares: usize,
     instance_id: u64,
+    n_prandbit: usize,
+    n_prandint: usize,
+    l: usize,
+    k: usize,
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
     HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts>,
 {
-    let parameters =
-        HoneyBadgerMPCNodeOpts::new(n_parties, t, n_triples, n_random_shares, instance_id);
+    let parameters = HoneyBadgerMPCNodeOpts::new(
+        n_parties,
+        t,
+        n_triples,
+        n_random_shares,
+        instance_id,
+        n_prandbit,
+        n_prandint,
+        l,
+        k,
+    );
     (0..n_parties)
         .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone()).unwrap())
         .collect()
@@ -405,7 +418,7 @@ pub async fn initialize_global_nodes_randousha<F, R, N>(
     session_id: SessionId,
     network: Arc<N>,
 ) where
-    F: FftField,
+    F: PrimeField,
     R: RBC + 'static,
     N: Network + Send + Sync + 'static,
 {
@@ -469,7 +482,7 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
     session_id: SessionId,
     network: Arc<N>,
 ) where
-    F: FftField,
+    F: PrimeField,
     R: RBC + 'static,
     N: Network + Send + Sync + 'static,
 {

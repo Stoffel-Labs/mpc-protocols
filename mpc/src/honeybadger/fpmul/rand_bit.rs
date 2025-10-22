@@ -4,7 +4,7 @@ use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitMessage, Ran
 use crate::honeybadger::mul::multiplication::Multiply;
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::triple_gen::ShamirBeaverTriple;
-use crate::honeybadger::{ProtocolType, SessionId};
+use crate::honeybadger::SessionId;
 use ark_ff::FftField;
 use ark_serialize::CanonicalDeserialize;
 use itertools::izip;
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::ops::{Add, Mul};
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 
 /// Represents the random bit generation protocol.
@@ -65,21 +65,27 @@ where
         n_parties: usize,
         threshold: usize,
         protocol_output: Sender<SessionId>,
-        shared_mult_node: Multiply<F, R>,
-        shared_mult_receiver: Arc<Mutex<Receiver<SessionId>>>,
     ) -> Result<Self, RandBitError> {
         let batch_recon_node = BatchReconNode::new(id, n_parties, threshold)?;
-
+        let (mul_sender, mul_receiver) = mpsc::channel(128);
+        let mult_node = Multiply::new(id, n_parties, threshold, mul_sender)?;
         Ok(Self {
             id,
             n_parties,
             threshold,
             storage: Arc::new(Mutex::new(HashMap::new())),
             output_channel: protocol_output,
-            mult_node: shared_mult_node,
-            mult_output: shared_mult_receiver,
+            mult_node,
+            mult_output: Arc::new(Mutex::new(mul_receiver)),
             batch_recon: batch_recon_node,
         })
+    }
+
+    pub async fn clear_store(&self) {
+        let mut store = self.storage.lock().await;
+        store.clear();
+        self.mult_node.clear_store().await;
+        self.batch_recon.clear_store().await;
     }
 
     pub async fn get_or_crate_storage(
@@ -113,15 +119,13 @@ where
 
         // Step 2: Execute the multiplication to obtain a^2 mod p.
         let a_copy = a.clone();
-        let session_id_mult = SessionId::new(ProtocolType::Mul, 0, 0, session_id.instance_id());
-
         self.mult_node
-            .init(session_id_mult, a, a_copy, mult_triple, network.clone())
+            .init(session_id, a, a_copy, mult_triple, network.clone())
             .await?;
 
         let a_square_share =
             if let Some(session_id_finished_mult) = self.mult_output.lock().await.recv().await {
-                if session_id_finished_mult == session_id_mult {
+                if session_id_finished_mult == session_id {
                     self.mult_node
                         .mult_storage
                         .lock()
@@ -139,6 +143,7 @@ where
                 return Err(RandBitError::SquareMult);
             };
 
+        tracing::info!("Multiplication at Rand_bit done: {0:?}", self.id);
         self.batch_recon
             .init_batch_reconstruct(&a_square_share, session_id, network.clone())
             .await?;
