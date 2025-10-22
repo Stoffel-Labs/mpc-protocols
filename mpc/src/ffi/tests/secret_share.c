@@ -7,14 +7,14 @@
 
 ShareErrorCode test_create_and_recover_shamir_shares()
 {
-    struct Bls12Fr secret_fr = {{520, 86, 9, 18}};
-    struct ShamirShareSliceBls12 output_shares;
+    struct U256 secret_fr = {{520, 86, 9, 18}};
+    struct ShamirShareSlice output_shares;
     uintptr_t id[6] = {1, 2, 3, 4, 5, 6};
     struct UsizeSlice ids = {id, 6};
     // create a single shamir share
-    ShamirShareBls12 _s = shamir_share_new(secret_fr, 9, 10);
+    ShamirShare _s = shamir_share_new(secret_fr, 9, 10, Bls12_381Fr);
     // create an array of shamir shares with provided ids
-    ShareErrorCode e = shamir_share_compute_shares(secret_fr, 4, &ids, &output_shares);
+    ShareErrorCode e = shamir_share_compute_shares(secret_fr, 4, &ids, Bls12_381Fr, &output_shares);
     if (e != ShareSuccess)
     {
         return e;
@@ -22,17 +22,19 @@ ShareErrorCode test_create_and_recover_shamir_shares()
     // print returned shamir shares
     for (int i = 0; i < output_shares.len; i++)
     {
-        ShamirShareBls12 share = output_shares.pointer[i];
+        ShamirShare share = output_shares.pointer[i];
+        ByteSlice bytes = field_ptr_to_bytes(share.share, true);
+        U256 u256_share = be_bytes_to_u256(bytes);
         printf("share_id_%zu = [ %llu, %llu, %llu, %llu ]\n",
                share.id,
-               share.share.data[0], share.share.data[1],
-               share.share.data[2], share.share.data[3]);
+               u256_share.data[0], u256_share.data[1],
+               u256_share.data[2], u256_share.data[3]);
     }
 
     // recover the original secret with shares
-    struct Bls12Fr recovered_secret;
-    struct Bls12FrSlice recovered_coeff;
-    e = shamir_share_recover_secret(output_shares, &recovered_secret, &recovered_coeff);
+    struct U256 recovered_secret;
+    struct U256Slice recovered_coeff;
+    e = shamir_share_recover_secret(output_shares, &recovered_secret, &recovered_coeff, Bls12_381Fr);
     if (e != ShareSuccess)
     {
         return e;
@@ -50,22 +52,22 @@ ShareErrorCode test_create_and_recover_shamir_shares()
     int result = memcmp(recovered_secret.data, secret_fr.data, sizeof(uint64_t) * 4);
     assert(result == 0);
     // free the memory of slices in rust
-    free_shamir_share_bls12_slice(output_shares);
-    free_bls12_fr_slice(recovered_coeff);
+    free_shamir_share_slice(output_shares);
+    free_u256_slice(recovered_coeff);
 
     return ShareSuccess;
 }
 
 ShareErrorCode test_create_and_recover_robust_shares()
 {
-    struct Bls12Fr secret_fr = {{3, 3, 22, 22}};
-    struct RobustShareSliceBls12 output_shares;
+    struct U256 secret_fr = {{3, 3, 22, 22}};
+    struct RobustShareSlice output_shares;
     // number of nodes
     uintptr_t n = 6;
     // create a single robust share
-    RobustShareBls12 _s = robust_share_new(secret_fr, 9, 10);
+    RobustShare _s = robust_share_new(secret_fr, 9, 10, Bls12_381Fr);
     // create an array of shamir shares with provided ids
-    ShareErrorCode e = robust_share_compute_shares(secret_fr, 2, n, &output_shares);
+    ShareErrorCode e = robust_share_compute_shares(secret_fr, 2, n, &output_shares, Bls12_381Fr);
     if (e != ShareSuccess)
     {
         return e;
@@ -73,17 +75,19 @@ ShareErrorCode test_create_and_recover_robust_shares()
     // print returned shamir shares
     for (int i = 0; i < output_shares.len; i++)
     {
-        RobustShareBls12 share = output_shares.pointer[i];
+        RobustShare share = output_shares.pointer[i];
+        ByteSlice bytes = field_ptr_to_bytes(share.share, false);
+        U256 u256_share = le_bytes_to_u256(bytes);
         printf("share_id_%zu = [ %llu, %llu, %llu, %llu ]\n",
                share.id,
-               share.share.data[0], share.share.data[1],
-               share.share.data[2], share.share.data[3]);
+               u256_share.data[0], u256_share.data[1],
+               u256_share.data[2], u256_share.data[3]);
     }
 
     // recover the original secret with shares
-    struct Bls12Fr recovered_secret;
-    struct Bls12FrSlice recovered_coeff;
-    e = robust_share_recover_secret(output_shares, n, &recovered_secret, &recovered_coeff);
+    struct U256 recovered_secret;
+    struct U256Slice recovered_coeff;
+    e = robust_share_recover_secret(output_shares, n, &recovered_secret, &recovered_coeff, Bls12_381Fr);
     if (e != ShareSuccess)
     {
         return e;
@@ -101,22 +105,22 @@ ShareErrorCode test_create_and_recover_robust_shares()
     int result = memcmp(recovered_secret.data, secret_fr.data, sizeof(uint64_t) * 4);
     assert(result == 0);
     // free the memory of slices in rust
-    free_robust_share_bls12_slice(output_shares);
-    free_bls12_fr_slice(recovered_coeff);
+    free_robust_share_slice(output_shares);
+    free_u256_slice(recovered_coeff);
 
     return ShareSuccess;
 }
 
 ShareErrorCode test_create_and_recover_non_robust_shares()
 {
-    struct Bls12Fr secret_fr = {{16, 33, 44, 81}};
-    struct NonRobustShareSliceBls12 output_shares;
+    struct U256 secret_fr = {{16, 33, 44, 81}};
+    struct NonRobustShareSlice output_shares;
     // number of nodes
     uintptr_t n = 6;
     // create a single robust share
-    NonRobustShareBls12 _s = non_robust_share_new(secret_fr, 9, 10);
+    NonRobustShare _s = non_robust_share_new(secret_fr, 9, 10, Bls12_381Fr);
     // create an array of shamir shares with provided ids
-    ShareErrorCode e = non_robust_share_compute_shares(secret_fr, 5, n, &output_shares);
+    ShareErrorCode e = non_robust_share_compute_shares(secret_fr, 5, n, &output_shares, Bls12_381Fr);
     if (e != ShareSuccess)
     {
         return e;
@@ -124,17 +128,19 @@ ShareErrorCode test_create_and_recover_non_robust_shares()
     // print returned shamir shares
     for (int i = 0; i < output_shares.len; i++)
     {
-        NonRobustShareBls12 share = output_shares.pointer[i];
+        NonRobustShare share = output_shares.pointer[i];
+        ByteSlice bytes = field_ptr_to_bytes(share.share, false);
+        U256 u256_share = le_bytes_to_u256(bytes);
         printf("share_id_%zu = [ %llu, %llu, %llu, %llu ]\n",
                share.id,
-               share.share.data[0], share.share.data[1],
-               share.share.data[2], share.share.data[3]);
+               u256_share.data[0], u256_share.data[1],
+               u256_share.data[2], u256_share.data[3]);
     }
 
     // recover the original secret with shares
-    struct Bls12Fr recovered_secret;
-    struct Bls12FrSlice recovered_coeff;
-    e = non_robust_share_recover_secret(output_shares, n, &recovered_secret, &recovered_coeff);
+    struct U256 recovered_secret;
+    struct U256Slice recovered_coeff;
+    e = non_robust_share_recover_secret(output_shares, n, &recovered_secret, &recovered_coeff, Bls12_381Fr);
     if (e != ShareSuccess)
     {
         return e;
@@ -152,8 +158,8 @@ ShareErrorCode test_create_and_recover_non_robust_shares()
     int result = memcmp(recovered_secret.data, secret_fr.data, sizeof(uint64_t) * 4);
     assert(result == 0);
     // free the memory of slices in rust
-    free_non_robust_share_bls12_slice(output_shares);
-    free_bls12_fr_slice(recovered_coeff);
+    free_non_robust_share_slice(output_shares);
+    free_u256_slice(recovered_coeff);
 
     return ShareSuccess;
 }
