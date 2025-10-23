@@ -612,7 +612,8 @@ async fn preprocessing_e2e() {
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 5;
     let t = 1;
-    let no_of_triples = 2 * t + 1;
+    let no_of_triples = 7;
+    let no_of_randomshares = 16; // 2(inputs) + 2 * 7 (no of triples)
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
@@ -623,7 +624,7 @@ async fn preprocessing_e2e() {
         n_parties,
         t,
         no_of_triples,
-        2 * no_of_triples,
+        no_of_randomshares,
         111,
     );
 
@@ -659,8 +660,8 @@ async fn preprocessing_e2e() {
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
         let (n_triples, n_shares) = node.preprocessing_material.lock().await.len();
-        assert_eq!(n_triples, no_of_triples);
-        assert_eq!(n_shares, 0);
+        assert_eq!(n_triples, 9); //>no_of_triples
+        assert_eq!(n_shares, 3); //>no_of_randomshares
     }
 }
 

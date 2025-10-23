@@ -471,7 +471,7 @@ where
 {
     /// Runs preprocessing to produce Random shares and Beaver triples
     /// Steps:
-    /// 1. Ensure enough random shares are available (This includes the ones that will be used for triples).
+    /// 1. Ensure enough random shares are available = No of inputs + 2 * No of triples
     /// 2. Generate double shares if missing.
     /// 3. Generate RanDouSha pairs if missing.
     /// 4. Generate Beaver triples from all the above.
@@ -484,26 +484,73 @@ where
         N: 'async_trait,
         G: Rng + Send,
     {
-        // ------------------------
-        // Step 1. Ensure random shares
-        // ------------------------
-        self.ensure_random_shares(network.clone(), rng).await?;
-        info!("Random share generation done");
-
-        let (no_of_triples_avail, _) = {
+        // Get how many triples and random shares are already available
+        let (no_of_triples_avail, no_of_random_shares_avail) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
-        let no_of_triples = self.params.n_triples;
+        // Desired total counts from protocol parameters
+        let mut no_of_triples = self.params.n_triples;
+        let mut no_of_random_shares = self.params.n_random_shares;
+        // Each triple batch produces (2t + 1) triples at a time
+        let group_size = 2 * self.params.threshold + 1;
+        // Variables that store how many we will actually generate this run
+        let mut total_triples_to_generate = 0;
+        let mut total_random_shares_to_generate = 0;
+
         if no_of_triples_avail >= no_of_triples {
-            info!("There are enough Beaver triples");
+            // Already have enough triples — skip generation
+            no_of_triples = 0;
+        } else {
+            // Need more triples; round up to nearest multiple of (2t + 1)
+            // so we generate full groups of triples each time
+            total_triples_to_generate =
+                ((no_of_triples + group_size - 1) / group_size) * group_size;
+        }
+
+        // Random shares are always required for inputs + 2 × (triples generated).
+        // Even if we already have enough baseline random shares, we may still
+        // need to generate *extra* shares if we're producing new triples.
+        if no_of_random_shares_avail >= no_of_random_shares {
+            // We already have enough random shares for the baseline requirement
+            no_of_random_shares = 0;
+            // But if we're generating more triples, we still need additional
+            // random shares for those new triples (overshoot case)
+            if total_triples_to_generate > 0 {
+                // Add only the additional shares corresponding to the new triples
+                // = 2 × (new_triples - old_triples)
+                total_random_shares_to_generate = 2 * total_triples_to_generate - 2 * no_of_triples;
+            }
+        } else {
+            // We don't have enough random shares yet
+            if total_triples_to_generate > 0 {
+                // We don't have enough random shares yet
+                total_random_shares_to_generate =
+                    no_of_random_shares - 2 * no_of_triples + 2 * total_triples_to_generate;
+            } else {
+                // We don't have enough random shares yet
+                total_random_shares_to_generate = no_of_random_shares;
+            }
+        }
+
+        if no_of_triples == 0 && no_of_random_shares == 0 {
+            info!("There are enough Random shares and Beaver triples");
             return Ok(());
         }
 
         // ------------------------
+        // Step 1. Ensure random shares
+        // ------------------------
+        self.ensure_random_shares(network.clone(), rng, total_random_shares_to_generate)
+            .await?;
+        info!("Random share generation done");
+
+        // ------------------------
         // Step 2. Ensure RanDouSha pair
         // ------------------------
-        let ran_dou_sha_pair = self.ensure_ran_dou_sha_pair(network.clone(), rng).await?;
+        let ran_dou_sha_pair = self
+            .ensure_ran_dou_sha_pair(network.clone(), rng, total_triples_to_generate)
+            .await?;
         info!("Randousha pair generation done");
 
         // ------------------------
@@ -515,20 +562,17 @@ where
             .preprocessing_material
             .lock()
             .await
-            .take_random_shares(no_of_triples)?;
+            .take_random_shares(total_triples_to_generate)?;
         let random_shares_b = self
             .preprocessing_material
             .lock()
             .await
-            .take_random_shares(no_of_triples)?;
+            .take_random_shares(total_triples_to_generate)?;
 
         //Outputs 2t+1 triples at a time
-        let group_size = 2 * self.params.threshold + 1;
-        assert!(no_of_triples % group_size == 0);
-
         let a_chunks = random_shares_a.chunks_exact(group_size);
         let b_chunks = random_shares_b.chunks_exact(group_size);
-        let r_chunks = ran_dou_sha_pair[0..no_of_triples].chunks_exact(group_size);
+        let r_chunks = ran_dou_sha_pair[..total_triples_to_generate].chunks_exact(group_size);
 
         for (i, ((a, b), r)) in a_chunks.zip(b_chunks).zip(r_chunks).enumerate() {
             let sessionid =
@@ -579,23 +623,15 @@ where
         &mut self,
         network: Arc<N>,
         rng: &mut G,
+        needed: usize,
     ) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
         G: Rng,
     {
-        // How many shares are already present?
-        let (_, no_shares) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-
-        // How many more do we need?
-        let missing = self.params.n_random_shares.saturating_sub(no_shares);
-
         // Outputs in batches of (n-2t)
         let batch = self.params.n_parties - 2 * self.params.threshold;
-        let run = (missing + batch - 1) / batch; // ceil(missing / batch)
+        let run = (needed + batch - 1) / batch; // ceil(missing / batch)
 
         if run == 0 {
             info!("There are enough random shares");
@@ -648,6 +684,7 @@ where
         &mut self,
         network: Arc<N>,
         rng: &mut G,
+        needed: usize,
     ) -> Result<Vec<DoubleShamirShare<F>>, HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
@@ -655,16 +692,9 @@ where
     {
         let mut pair = Vec::new();
 
-        // How many triples are still missing?
-        let (no_of_triples, _) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-
-        let missing = self.params.n_triples.saturating_sub(no_of_triples);
-        // How many batches do we need to cover the missing amount?
+        // How many batches do we need to cover?
         let batch = self.params.threshold + 1;
-        let run = (missing + batch - 1) / batch; // ceil(missing / batch)
+        let run = (needed + batch - 1) / batch; // ceil(missing / batch)
 
         for i in 0..run {
             let sessionid =
