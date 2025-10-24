@@ -471,7 +471,7 @@ where
 {
     /// Runs preprocessing to produce Random shares and Beaver triples
     /// Steps:
-    /// 1. Ensure enough random shares are available = No of inputs + 2 * No of triples
+    /// 1. Ensure enough random shares are available = No of inputs
     /// 2. Generate double shares if missing.
     /// 3. Generate RanDouSha pairs if missing.
     /// 4. Generate Beaver triples from all the above.
@@ -494,44 +494,29 @@ where
         let mut no_of_random_shares = self.params.n_random_shares;
         // Each triple batch produces (2t + 1) triples at a time
         let group_size = 2 * self.params.threshold + 1;
-        // Variables that store how many we will actually generate this run
-        let mut total_triples_to_generate = 0;
-        let mut total_random_shares_to_generate = 0;
 
-        if no_of_triples_avail >= no_of_triples {
-            // Already have enough triples — skip generation
+        let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
             no_of_triples = 0;
+            0
         } else {
-            // Need more triples; round up to nearest multiple of (2t + 1)
-            // so we generate full groups of triples each time
-            total_triples_to_generate =
-                ((no_of_triples + group_size - 1) / group_size) * group_size;
-        }
+            ((no_of_triples + group_size - 1) / group_size) * group_size
+        };
 
-        // Random shares are always required for inputs + 2 × (triples generated).
-        // Even if we already have enough baseline random shares, we may still
-        // need to generate *extra* shares if we're producing new triples.
-        if no_of_random_shares_avail >= no_of_random_shares {
-            // We already have enough random shares for the baseline requirement
-            no_of_random_shares = 0;
-            // But if we're generating more triples, we still need additional
-            // random shares for those new triples (overshoot case)
-            if total_triples_to_generate > 0 {
-                // Add only the additional shares corresponding to the new triples
-                // = 2 × (new_triples - old_triples)
-                total_random_shares_to_generate = 2 * total_triples_to_generate - 2 * no_of_triples;
-            }
-        } else {
-            // We don't have enough random shares yet
-            if total_triples_to_generate > 0 {
-                // We don't have enough random shares yet
-                total_random_shares_to_generate =
-                    no_of_random_shares - 2 * no_of_triples + 2 * total_triples_to_generate;
+        let total_random_shares_to_generate = if total_triples_to_generate > 0 {
+            // Always add 2× per triple group
+            let baseline = if no_of_random_shares_avail < no_of_random_shares {
+                no_of_random_shares
             } else {
-                // We don't have enough random shares yet
-                total_random_shares_to_generate = no_of_random_shares;
-            }
-        }
+                no_of_random_shares = 0;
+                0
+            };
+            baseline + 2 * total_triples_to_generate
+        } else if no_of_random_shares_avail < no_of_random_shares {
+            no_of_random_shares
+        } else {
+            no_of_random_shares = 0;
+            0
+        };
 
         if no_of_triples == 0 && no_of_random_shares == 0 {
             info!("There are enough Random shares and Beaver triples");

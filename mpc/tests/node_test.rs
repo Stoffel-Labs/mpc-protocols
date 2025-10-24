@@ -463,7 +463,7 @@ async fn mul_e2e_with_preprocessing() {
         n_parties,
         t,
         no_of_triples,
-        2 + 2 * no_of_triples,
+        2,
         111,
     );
 
@@ -551,7 +551,7 @@ async fn mul_e2e_with_preprocessing() {
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     //----------------------------------------VALIDATE VALUES----------------------------------------
-    
+
     let output_clientid: ClientId = 200;
     // Each server sends its output shares
     for (i, server) in nodes.iter().enumerate() {
@@ -613,7 +613,7 @@ async fn preprocessing_e2e() {
     let n_parties = 5;
     let t = 1;
     let no_of_triples = 7;
-    let no_of_randomshares = 16; // 2(inputs) + 2 * 7 (no of triples)
+    let no_of_randomshares = 2;
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
