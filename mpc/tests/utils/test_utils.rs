@@ -17,8 +17,9 @@ use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{
     HoneyBadgerMPCClient, HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
+use stoffelmpc_network::bad_fake_network::{BadFakeNetwork, BadFakeNetworkConfig};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-use stoffelnet::network_utils::{ClientId, Network, NetworkError};
+use stoffelnet::network_utils::{ClientId, PartyId, Network, NetworkError};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -96,6 +97,22 @@ pub fn test_setup(
     let (network, receivers, client_recv) = FakeNetwork::new(n, Some(clientid), config);
     let network = Arc::new(network);
     (network, receivers, client_recv)
+}
+
+pub fn test_setup_bad(
+    n: usize,
+    clientid: Vec<ClientId>,
+) -> (
+    Arc<BadFakeNetwork>,
+    Receiver<(PartyId, Vec<u8>)>,
+    Vec<Sender<Vec<u8>>>,
+    Vec<Receiver<Vec<u8>>>,
+    HashMap<ClientId, Receiver<Vec<u8>>>,
+) {
+    let config = BadFakeNetworkConfig::new(500);
+    let (network, net_rx, node_channels, receivers, client_recv) = BadFakeNetwork::new(n, Some(clientid), config);
+    let network = Arc::new(network);
+    (network, net_rx, node_channels, receivers, client_recv)
 }
 
 pub fn get_reconstruct_input(
