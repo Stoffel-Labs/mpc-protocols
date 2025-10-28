@@ -39,7 +39,8 @@ use crate::{
             fpmul::{FPMulError, FPMulNode},
             prandbitd::PRandBitNode,
             rand_bit::RandBit,
-            PRandError, RandBitError, RandBitMessage, TruncPrError, TruncPrMessage,
+            PRandBitDMessage, PRandError, RandBitError, RandBitMessage, TruncPrError,
+            TruncPrMessage,
         },
         input::{
             input::{InputClient, InputServer},
@@ -199,6 +200,7 @@ pub struct OutputChannels {
     pub mul_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub rand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub prand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
+    pub prand_int_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub fpmul_channel: Arc<Mutex<Receiver<SessionId>>>,
 }
 
@@ -376,14 +378,20 @@ where
         let (share_gen_sender, share_gen_reciever) = mpsc::channel(128);
         let (rand_bit_sender, rand_bit_receiver) = mpsc::channel(128);
         let (prand_bit_sender, prand_bit_receiver) = mpsc::channel(128);
+        let (prand_int_sender, prand_int_receiver) = mpsc::channel(128);
         let (fpmul_sender, fpmul_receiver) = mpsc::channel(128);
 
         // Create nodes for preprocessing.
         let dousha_node =
             DoubleShareNode::new(id, params.n_parties, params.threshold, dou_sha_sender);
         let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold, rand_bit_sender)?;
-        let prand_bit_node =
-            PRandBitNode::new(id, params.n_parties, params.threshold, prand_bit_sender);
+        let prand_bit_node = PRandBitNode::new(
+            id,
+            params.n_parties,
+            params.threshold,
+            prand_bit_sender,
+            prand_int_sender,
+        )?;
         let ran_dou_sha_node = RanDouShaNode::new(
             id,
             ran_dou_sha_sender,
@@ -431,6 +439,7 @@ where
                 mul_channel: Arc::new(Mutex::new(mul_receiver)),
                 rand_bit_channel: Arc::new(Mutex::new(rand_bit_receiver)),
                 prand_bit_channel: Arc::new(Mutex::new(prand_bit_receiver)),
+                prand_int_channel: Arc::new(Mutex::new(prand_int_receiver)),
                 fpmul_channel: Arc::new(Mutex::new(fpmul_receiver)),
             },
         })
@@ -509,6 +518,23 @@ where
                         .process(rbc_msg, net)
                         .await?
                 }
+                Some(ProtocolType::FpMul) => {
+                    if rbc_msg.session_id.sub_id() == 0 {
+                        self.type_ops
+                            .fpmul
+                            .trunc_node
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?
+                    } else {
+                        self.type_ops
+                            .fpmul
+                            .mult_node
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?
+                    }
+                }
                 _ => {
                     warn!(
                         "Unknown protocol ID in session ID: {:?} in RBC",
@@ -562,9 +588,7 @@ where
                             .await?
                     }
                     Some(ProtocolType::RandBit) => {
-                        if batch_msg.session_id.round_id() == 0
-                            && batch_msg.session_id.sub_id() == 0
-                        {
+                        if batch_msg.session_id.sub_id() == 0 {
                             self.preprocess
                                 .rand_bit
                                 .batch_recon
@@ -578,6 +602,13 @@ where
                                 .process(batch_msg, net)
                                 .await?
                         }
+                    }
+                    Some(ProtocolType::PRandBit) => {
+                        self.preprocess
+                            .prand_bit
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?
                     }
                     Some(ProtocolType::FpMul) => {
                         self.type_ops
@@ -597,6 +628,12 @@ where
             }
             WrappedMessage::RandBit(rand_bit_message) => {
                 self.preprocess.rand_bit.process(rand_bit_message).await?;
+            }
+            WrappedMessage::PRandBit(prand_message) => {
+                self.preprocess
+                    .prand_bit
+                    .process(prand_message, net)
+                    .await?;
             }
             WrappedMessage::Trunc(trunc_message) => {
                 match trunc_message.session_id.calling_protocol() {
@@ -751,10 +788,10 @@ where
 {
     /// Runs preprocessing to produce Random shares and Beaver triples
     /// Steps:
-    /// 1. Ensure enough random shares are available (This includes the ones that will be used for triples).
+    /// 1. Ensure enough random shares are available = No of inputs + No of PRandbit
     /// 2. Generate double shares if missing.
     /// 3. Generate RanDouSha pairs if missing.
-    /// 4. Generate Beaver triples from all the above.
+    /// 4. Generate Beaver triples from all the above. No of Multiplications + No of Multiplication of PRandbit
     async fn run_preprocessing<G>(
         &mut self,
         network: Arc<N>,
@@ -764,85 +801,115 @@ where
         N: 'async_trait,
         G: Rng + Send,
     {
-        // ------------------------
-        // Step 1. Ensure random shares
-        // ------------------------
-        self.ensure_random_shares(network.clone(), rng).await?;
-        info!("Random share generation done");
-
-        let (no_of_triples_avail, _, _, _) = {
+        // Get how many triples and random shares are already available
+        let (no_of_triples_avail, no_of_random_shares_avail, _, _) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
-        let no_of_triples = self.params.n_triples;
-        if no_of_triples_avail >= no_of_triples {
-            info!("There are enough Beaver triples");
-            return Ok(());
-        }
-
-        // ------------------------
-        // Step 2. Ensure RanDouSha pair
-        // ------------------------
-        let ran_dou_sha_pair = self.ensure_ran_dou_sha_pair(network.clone(), rng).await?;
-        info!("Randousha pair generation done");
-
-        // ------------------------
-        // Step 3. Generate triples
-        // ------------------------
-
-        // Take random shares for triples
-        let random_shares_a = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(no_of_triples)?;
-        let random_shares_b = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(no_of_triples)?;
-
-        //Outputs 2t+1 triples at a time
+        // Desired total counts from protocol parameters
+        let mut no_of_triples = self.params.n_triples;
+        let mut no_of_random_shares = self.params.n_random_shares;
+        // Each triple batch produces (2t + 1) triples at a time
         let group_size = 2 * self.params.threshold + 1;
-        assert!(no_of_triples % group_size == 0);
+        let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
+            no_of_triples = 0;
+            0
+        } else {
+            ((no_of_triples + group_size - 1) / group_size) * group_size
+        };
 
-        let a_chunks = random_shares_a.chunks_exact(group_size);
-        let b_chunks = random_shares_b.chunks_exact(group_size);
-        let r_chunks = ran_dou_sha_pair[0..no_of_triples].chunks_exact(group_size);
+        let total_random_shares_to_generate = if total_triples_to_generate > 0 {
+            // Always add 2× per triple group
+            let baseline = if no_of_random_shares_avail < no_of_random_shares {
+                no_of_random_shares
+            } else {
+                no_of_random_shares = 0;
+                0
+            };
+            baseline + 2 * total_triples_to_generate
+        } else if no_of_random_shares_avail < no_of_random_shares {
+            no_of_random_shares
+        } else {
+            no_of_random_shares = 0;
+            0
+        };
 
-        for (i, ((a, b), r)) in a_chunks.zip(b_chunks).zip(r_chunks).enumerate() {
-            let sessionid =
-                SessionId::new(ProtocolType::Triple, 0, i as u8, self.params.instance_id);
-            self.preprocess
-                .triple_gen
-                .init(
-                    a.to_vec(),
-                    b.to_vec(),
-                    r.to_vec(),
-                    sessionid,
-                    network.clone(),
-                )
+        if no_of_triples == 0 && no_of_random_shares == 0 {
+            info!("There are enough Random shares and Beaver triples");
+            // return Ok(());
+        } else {
+            // ------------------------
+            // Step 1. Ensure random shares
+            // ------------------------
+            self.ensure_random_shares(network.clone(), rng, total_random_shares_to_generate)
                 .await?;
+            info!("Random share generation done");
 
             // ------------------------
-            // Step 4. Collect triples
+            // Step 2. Ensure RanDouSha pair
             // ------------------------
-            if let Some(sid) = self.outputchannels.triple_channel.lock().await.recv().await {
-                if sid == sessionid {
-                    let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
-                    let triple_storage_mutex = triple_gen_db.remove(&sid).unwrap();
-                    let triple_storage = triple_storage_mutex.lock().await;
-                    let triples = triple_storage.protocol_output.clone();
+            let ran_dou_sha_pair = self
+                .ensure_ran_dou_sha_pair(network.clone(), rng, total_triples_to_generate)
+                .await?;
+            info!("Randousha pair generation done");
 
-                    self.preprocessing_material
-                        .lock()
-                        .await
-                        .add(Some(triples), None, None, None);
-                    self.preprocess
-                        .triple_gen
-                        .batch_recon_node
-                        .clear_store()
-                        .await;
+            // ------------------------
+            // Step 3. Generate triples
+            // ------------------------
+
+            // Take random shares for triples
+            let random_shares_a = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_random_shares(total_triples_to_generate)?;
+            let random_shares_b = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_random_shares(total_triples_to_generate)?;
+
+            //Outputs 2t+1 triples at a time
+            let a_chunks = random_shares_a.chunks_exact(group_size);
+            let b_chunks = random_shares_b.chunks_exact(group_size);
+            let r_chunks = ran_dou_sha_pair[..total_triples_to_generate].chunks_exact(group_size);
+
+            for (i, ((a, b), r)) in a_chunks.zip(b_chunks).zip(r_chunks).enumerate() {
+                let sessionid =
+                    SessionId::new(ProtocolType::Triple, 0, i as u8, self.params.instance_id);
+                self.preprocess
+                    .triple_gen
+                    .init(
+                        a.to_vec(),
+                        b.to_vec(),
+                        r.to_vec(),
+                        sessionid,
+                        network.clone(),
+                    )
+                    .await?;
+
+                // ------------------------
+                // Step 4. Collect triples
+                // ------------------------
+                if let Some(sid) = self.outputchannels.triple_channel.lock().await.recv().await {
+                    if sid == sessionid {
+                        let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
+                        let triple_storage_mutex = triple_gen_db.remove(&sid).unwrap();
+                        let triple_storage = triple_storage_mutex.lock().await;
+                        let triples = triple_storage.protocol_output.clone();
+
+                        self.preprocessing_material.lock().await.add(
+                            Some(triples),
+                            None,
+                            None,
+                            None,
+                        );
+                        self.preprocess
+                            .triple_gen
+                            .batch_recon_node
+                            .clear_store()
+                            .await;
+                    }
                 }
             }
         }
@@ -852,9 +919,9 @@ where
         self.ensure_prandbit_shares(network.clone()).await?;
         info!("PrandBit share generation done");
 
-        // // ------------------------
-        // // Step 6. Generate Random Int
-        // // ------------------------
+        // ------------------------
+        // Step 6. Generate Random Int
+        // ------------------------
         self.ensure_prandint_shares(network.clone()).await?;
         info!("PrandInt share generation done");
         Ok(())
@@ -870,28 +937,15 @@ where
         &mut self,
         network: Arc<N>,
         rng: &mut G,
+        needed: usize,
     ) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
         G: Rng,
     {
-        // How many shares are already present?
-        let (_, no_shares, _, _) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-
-        // How many more do we need?
-        let missing = self.params.n_random_shares.saturating_sub(no_shares);
-
         // Outputs in batches of (n-2t)
         let batch = self.params.n_parties - 2 * self.params.threshold;
-        let run = (missing + batch - 1) / batch; // ceil(missing / batch)
-
-        if run == 0 {
-            info!("There are enough random shares");
-            return Ok(());
-        }
+        let run = (needed + batch - 1) / batch; // ceil(missing / batch)
 
         for i in 0..run {
             info!("Random share generation run {}", i);
@@ -938,6 +992,7 @@ where
         &mut self,
         network: Arc<N>,
         rng: &mut G,
+        needed: usize,
     ) -> Result<Vec<DoubleShamirShare<F>>, HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
@@ -945,16 +1000,9 @@ where
     {
         let mut pair = Vec::new();
 
-        // How many triples are still missing?
-        let (no_of_triples, _, _, _) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-
-        let missing = self.params.n_triples.saturating_sub(no_of_triples);
-        // How many batches do we need to cover the missing amount?
+        // How many batches do we need to cover?
         let batch = self.params.threshold + 1;
-        let run = (missing + batch - 1) / batch; // ceil(missing / batch)
+        let run = (needed + batch - 1) / batch; // ceil(missing / batch)
 
         for i in 0..run {
             let sessionid =
@@ -1041,66 +1089,63 @@ where
             store.len()
         };
 
-        // How many more do we need?
-        let missing = self.params.n_prandbit.saturating_sub(no_shares);
-
-        // Outputs in batches of (t+1)
-        let batch = self.params.threshold + 1;
-        let run = (missing + batch - 1) / batch; // ceil(missing / batch)
-
-        let mut randbit_output: Vec<ShamirShare<F, 1, Robust>> = Vec::new();
-
-        if run == 0 {
+        if no_shares >= self.params.n_prandbit {
             info!("There are enough prandbit shares");
             return Ok(());
         }
 
+        // How many more do we need?
+        let missing = self.params.n_prandbit.saturating_sub(no_shares);
+        let batch = self.params.threshold + 1;
+        let total_randbit_to_generate = ((missing + batch - 1) / batch) * batch;
+
+        let mut randbit_output: Vec<ShamirShare<F, 1, Robust>> = Vec::new();
+
         // Randbit share generation
-        for i in 0..run {
-            info!("Randbit share generation run {}", i);
+        info!("Randbit share generation run");
 
-            let sessionid = SessionId::new(ProtocolType::RandBit, 0, 0, self.params.instance_id);
+        let sessionid = SessionId::new(ProtocolType::RandBit, 0, 0, self.params.instance_id);
 
-            let random_shares_a = self
-                .preprocessing_material
-                .lock()
-                .await
-                .take_random_shares(batch)?;
+        let random_shares_a = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(total_randbit_to_generate)?;
 
-            let beaver_triples = self
-                .preprocessing_material
-                .lock()
-                .await
-                .take_beaver_triples(batch)?;
+        let beaver_triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(total_randbit_to_generate)?;
 
-            // Run Randbit share protocol
-            self.preprocess
-                .rand_bit
-                .init(random_shares_a, beaver_triples, sessionid, network.clone())
-                .await?;
+        // Run Randbit share protocol
+        self.preprocess
+            .rand_bit
+            .init(random_shares_a, beaver_triples, sessionid, network.clone())
+            .await?;
 
-            // Collect its output
-            if let Some(id) = self
-                .outputchannels
-                .rand_bit_channel
-                .lock()
-                .await
-                .recv()
-                .await
-            {
-                if id == sessionid {
-                    let mut share_store = self.preprocess.rand_bit.storage.lock().await;
-                    let store_lock = share_store.remove(&id).unwrap();
-                    let store = store_lock.lock().await;
-                    let output = store.protocol_output.clone().unwrap();
+        // Collect its output
+        if let Some(id) = self
+            .outputchannels
+            .rand_bit_channel
+            .lock()
+            .await
+            .recv()
+            .await
+        {
+            if id == sessionid {
+                let mut share_store = self.preprocess.rand_bit.storage.lock().await;
+                let store_lock = share_store.remove(&id).unwrap();
+                let store = store_lock.lock().await;
+                let output = store.protocol_output.clone().unwrap();
 
-                    //Collect the randbit outputs
-                    randbit_output.extend(output);
-                    // Clear stores
-                    self.preprocess.rand_bit.clear_store().await;
-                }
+                //Collect the randbit outputs
+                randbit_output.extend(output);
             }
         }
+
+        // Clear stores
+        self.preprocess.rand_bit.clear_store().await;
 
         //Prandbit share generation
         info!("PRandbit share generation");
@@ -1114,7 +1159,7 @@ where
                 randbit_output,
                 self.params.l,
                 self.params.k,
-                missing,
+                total_randbit_to_generate,
                 network,
             )
             .await?;
@@ -1134,22 +1179,19 @@ where
                 let store = store_lock.lock().await;
                 let bigbit = store.share_b_p.clone();
                 let smallbit = store.share_b_2.clone();
-                let output = bigbit
+                let output: Vec<(ShamirShare<F, 1, Robust>, F2_8)> = bigbit
                     .iter()
                     .zip(smallbit)
                     .map(|(a, b)| (a.clone(), b))
                     .collect();
-
                 self.preprocessing_material
                     .lock()
                     .await
                     .add(None, None, Some(output), None);
-
-                // Clear RBC store
-                self.preprocess.prand_bit.clear_store().await;
             }
         }
 
+        self.preprocess.prand_bit.clear_store().await;
         Ok(())
     }
 
@@ -1163,11 +1205,16 @@ where
             store.len()
         };
 
+        if no_shares >= self.params.n_prandint {
+            info!("There are enough prandbit shares");
+            return Ok(());
+        }
+
         // How many more do we need?
         let missing = self.params.n_prandint.saturating_sub(no_shares);
 
         //Prandbit share generation
-        info!("PRandbit share generation");
+        info!("PRandInt share generation");
         let sessionid = SessionId::new(ProtocolType::PRandInt, 0, 0, self.params.instance_id);
 
         // Run PRandBit protocol
@@ -1186,7 +1233,7 @@ where
         // Collect its output
         if let Some(id) = self
             .outputchannels
-            .prand_bit_channel
+            .prand_int_channel
             .lock()
             .await
             .recv()
@@ -1202,12 +1249,10 @@ where
                     .lock()
                     .await
                     .add(None, None, None, Some(output));
-
-                // Clear RBC store
-                self.preprocess.prand_bit.clear_store().await;
             }
         }
-
+        // Clear store
+        self.preprocess.prand_bit.clear_store().await;
         Ok(())
     }
 }
@@ -1226,6 +1271,7 @@ pub enum WrappedMessage {
     Output(OutputMessage),
     RandBit(RandBitMessage),
     Trunc(TruncPrMessage),
+    PRandBit(PRandBitDMessage),
 }
 
 //-----------------Session-ID-----------------
@@ -1246,6 +1292,7 @@ pub enum ProtocolType {
     PRandBit = 10,
     RandBit = 11,
     FpMul = 12,
+    Trunc = 13,
 }
 
 impl TryFrom<u16> for ProtocolType {
@@ -1266,6 +1313,7 @@ impl TryFrom<u16> for ProtocolType {
             10 => Ok(ProtocolType::PRandBit),
             11 => Ok(ProtocolType::RandBit),
             12 => Ok(ProtocolType::FpMul),
+            13 => Ok(ProtocolType::Trunc),
             _ => Err(()),
         }
     }

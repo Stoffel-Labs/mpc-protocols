@@ -42,7 +42,7 @@ where
     pub threshold: usize,
     pub mult_node: Multiply<F, R>,
     pub mult_output: Arc<Mutex<Receiver<SessionId>>>,
-    pub trunc_node: TruncPrNode<F>,
+    pub trunc_node: TruncPrNode<F, R>,
     pub trunc_output: Arc<Mutex<Receiver<SessionId>>>,
     pub protocol_output: Option<SecretFixedPoint<F, RobustShare<F>>>,
     pub output_channel: Sender<SessionId>,
@@ -62,7 +62,7 @@ where
         let (mul_sender, mul_receiver) = mpsc::channel(128);
         let (trunc_sender, trunc_receiver) = mpsc::channel(128);
 
-        let trunc_node = TruncPrNode::new(id, n_parties, threshold, trunc_sender);
+        let trunc_node = TruncPrNode::new(id, n_parties, threshold, trunc_sender)?;
         let mult_node = Multiply::new(id, n_parties, threshold, mul_sender)?;
         Ok(Self {
             id,
@@ -105,17 +105,15 @@ where
 
         let mut trunc_input = Vec::new();
         let mut rx = self.mult_output.lock().await;
-        while let Some(id) = rx.recv().await {
+        if let Some(id) = rx.recv().await {
             if id == session_id {
-                let mul_store = self.mult_node.mult_storage.lock().await;
-                if let Some(mul_lock) = mul_store.get(&id) {
-                    let store = mul_lock.lock().await;
-                    trunc_input = store.protocol_output.clone();
-                    self.mult_node.clear_store().await;
-                }
+                let mut mul_store = self.mult_node.mult_storage.lock().await;
+                let mul_lock = mul_store.remove(&id).unwrap();
+                let store = mul_lock.lock().await;
+                trunc_input = store.protocol_output.clone();
             }
         }
-
+        self.mult_node.clear_store().await;
         self.trunc_node
             .init(
                 trunc_input[0].clone(),
@@ -129,25 +127,24 @@ where
             .await?;
 
         let mut rx = self.trunc_output.lock().await;
-        while let Some(id) = rx.recv().await {
+        if let Some(id) = rx.recv().await {
             if id == session_id {
-                let trunc_store = self.trunc_node.store.lock().await;
-                if let Some(trunc_lock) = trunc_store.get(&id) {
-                    let store = trunc_lock.lock().await;
-                    self.protocol_output = Some(SecretFixedPoint::new(
-                        store.share_d.clone().ok_or_else(|| {
-                            FPMulError::TruncPrError(TruncPrError::NotSet(
-                                "Output not set for truncation".to_string(),
-                            ))
-                        })?,
-                        *p,
-                    ));
-                    self.output_channel.send(session_id).await?;
-                    self.trunc_node.clear_store().await;
-                    return Ok(());
-                }
+                let mut trunc_store = self.trunc_node.store.lock().await;
+                let trunc_lock = trunc_store.remove(&id).unwrap();
+                let store = trunc_lock.lock().await;
+                self.protocol_output = Some(SecretFixedPoint::new(
+                    store.share_d.clone().ok_or_else(|| {
+                        FPMulError::TruncPrError(TruncPrError::NotSet(
+                            "Output not set for truncation".to_string(),
+                        ))
+                    })?,
+                    *p,
+                ));
+                self.output_channel.send(session_id).await?;
+                return Ok(());
             }
         }
+        self.trunc_node.clear_store().await;
         Err(FPMulError::Failed)
     }
 }

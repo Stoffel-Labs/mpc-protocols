@@ -1,5 +1,5 @@
 use crate::{
-    common::SecretSharingScheme,
+    common::{SecretSharingScheme, RBC},
     honeybadger::{
         fpmul::{mod_pow2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore},
         robust_interpolate::robust_interpolate::RobustShare,
@@ -14,23 +14,31 @@ use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;
 
 #[derive(Debug, Clone)]
-pub struct TruncPrNode<F: PrimeField> {
+pub struct TruncPrNode<F: PrimeField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TruncPrStore<F>>>>>>,
     pub output_channel: Sender<SessionId>,
+    pub rbc: R,
 }
 
-impl<F: PrimeField> TruncPrNode<F> {
-    pub fn new(id: usize, n: usize, t: usize, output_channel: Sender<SessionId>) -> Self {
-        Self {
+impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
+    pub fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        output_channel: Sender<SessionId>,
+    ) -> Result<Self, TruncPrError> {
+        let rbc = R::new(id, n, t, t + 1)?;
+        Ok(Self {
             id,
             n,
             t,
             store: Arc::new(Mutex::new(HashMap::new())),
             output_channel,
-        }
+            rbc,
+        })
     }
 
     pub async fn get_or_create_store(&mut self, session: SessionId) -> Arc<Mutex<TruncPrStore<F>>> {
@@ -42,13 +50,14 @@ impl<F: PrimeField> TruncPrNode<F> {
 
     pub async fn clear_store(&self) {
         let mut store = self.store.lock().await;
+        self.rbc.clear_store().await;
         store.clear();
     }
     /// Start TruncPr:
     /// - builds [r'] and [r] from preseeded randomness,
     /// - forms share of (b + r) where b = 2^{k-1} + [a],
     /// - broadcasts the share for opening.
-    pub async fn init<N: Network>(
+    pub async fn init<N: Network + Send + Sync>(
         &mut self,
         a: RobustShare<F>,
         k: usize,
@@ -75,7 +84,7 @@ impl<F: PrimeField> TruncPrNode<F> {
             r_dash = (r_dash + (bit_share.clone() * pow2_f::<F>(i))?)?;
         }
         s.r_dash = Some(r_dash.clone());
-
+        drop(s);
         // [r] = 2^m [r''] + [r']
         let r = ((r_int * pow2_f::<F>(m))? + r_dash)?;
 
@@ -85,9 +94,22 @@ impl<F: PrimeField> TruncPrNode<F> {
         // serialize and broadcast
         let mut payload = Vec::new();
         open_share.serialize_compressed(&mut payload)?;
-        let msg = TruncPrMessage::new(self.id, session, payload);
-        let wrapped = WrappedMessage::Trunc(msg);
-        network.broadcast(&bincode::serialize(&wrapped)?).await?;
+        let wrapped = WrappedMessage::Trunc(TruncPrMessage::new(self.id, session, payload));
+        let bytes_wrapped = bincode::serialize(&wrapped)?;
+
+        let sessionid = SessionId::new(
+            session.calling_protocol().unwrap(),
+            0,
+            self.id as u8,
+            session.instance_id(),
+        );
+        self.rbc
+            .init(
+                bytes_wrapped,
+                sessionid, // A unique session id per node
+                Arc::clone(&network),
+            )
+            .await?;
         Ok(())
     }
 

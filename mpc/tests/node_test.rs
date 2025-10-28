@@ -16,9 +16,12 @@ use futures::future::join_all;
 use std::{sync::Arc, time::Duration};
 use stoffelmpc_mpc::{
     common::{
-        rbc::rbc::Avid, MPCProtocol, PreprocessingMPCProtocol, SecretSharingScheme, ShamirShare,
+        rbc::rbc::Avid,
+        types::fixed::{FixedPointPrecision, SecretFixedPoint},
+        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, SecretSharingScheme, ShamirShare,
     },
     honeybadger::{
+        fpmul::f256::F2_8,
         input::input::InputClient,
         output::output::{OutputClient, OutputServer},
         ran_dou_sha::RanDouShaState,
@@ -468,7 +471,7 @@ async fn mul_e2e_with_preprocessing() {
         n_parties,
         t,
         no_of_triples,
-        2 + 2 * no_of_triples,
+        2,
         111,
         0,
         0,
@@ -621,7 +624,13 @@ async fn preprocessing_e2e() {
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 5;
     let t = 1;
-    let no_of_triples = 2 * t + 1;
+    let l = 8;
+    let k = 4;
+    let no_of_triples = 7;
+    let no_of_randomshares = 4;
+    let instance_id = 111;
+    let n_prandbit = 4;
+    let n_prandint = 4;
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
@@ -632,12 +641,12 @@ async fn preprocessing_e2e() {
         n_parties,
         t,
         no_of_triples,
-        2 * no_of_triples,
-        111,
-        0,
-        0,
-        0,
-        0,
+        no_of_randomshares,
+        instance_id,
+        n_prandbit,
+        n_prandint,
+        l,
+        k,
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -671,9 +680,12 @@ async fn preprocessing_e2e() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_shares, _, _) = node.preprocessing_material.lock().await.len();
-        assert_eq!(n_triples, no_of_triples);
-        assert_eq!(n_shares, 0);
+        let (n_triples, n_shares, n_prandbit, n_prandint) =
+            node.preprocessing_material.lock().await.len();
+        assert_eq!(n_triples, 5); //>no_of_triples
+        assert_eq!(n_shares, 2); //>no_of_randomshares
+        assert_eq!(n_prandbit, 4);
+        assert_eq!(n_prandint, 4);
     }
 }
 
@@ -867,4 +879,194 @@ async fn test_rand_bit() {
     println!("recovered bit: {}", bit1);
     // check if bit is 0 or 1
     assert!(bit1 == Fr::ZERO || bit1 == Fr::ONE);
+}
+//----------------------------------------MUL----------------------------------------
+
+#[tokio::test]
+async fn fpmul_e2e() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 5;
+    let t = 1;
+    let mut rng = test_rng();
+    let no_of_multiplication = 1;
+
+    //Setup
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
+
+    // Prepare inputs for multiplication
+    let k = 16; // total bitlength
+    let m = 4; // fractional bits to truncate
+    let precision = FixedPointPrecision::new(k, m);
+    let mut a_fix = Vec::new();
+    let mut b_fix = Vec::new();
+
+    //x = 5.5 * 2^4=88, y = 3.25 * 2^4=52
+    //x*y = 17.875 * 2^8 = 4576
+    //17.875 * 2^8/2^4 = 4576/2^4
+    //17.875 * 2^4 = 286
+    let x = RobustShare::compute_shares(Fr::from(88), n_parties, t, None, &mut rng).unwrap();
+    let y = RobustShare::compute_shares(Fr::from(52), n_parties, t, None, &mut rng).unwrap();
+    for i in 0..n_parties {
+        a_fix.push(SecretFixedPoint::new(x[i].clone(), precision));
+        b_fix.push(SecretFixedPoint::new(y[i].clone(), precision));
+    }
+
+    let triple = construct_e2e_input_mul(n_parties, no_of_multiplication, t).await;
+    let r_int = RobustShare::compute_shares(Fr::from(3), n_parties, t, None, &mut rng).unwrap();
+    let mut r_bits = vec![Vec::new(); n_parties];
+    for j in 0..m {
+        let x = RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
+            .unwrap();
+        for (i, share) in x.iter().enumerate() {
+            r_bits[i].push((share.clone(), F2_8::one()));
+        }
+    }
+    //----------------------------------------SETUP NODES----------------------------------------
+    // create global nodes
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties, t, 0, 0, 111, 0, 0, 0, 0,
+    );
+
+    //----------------------------------------RECIEVE----------------------------------------
+    // spawn tasks to process received messages
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
+
+    //----------------------------------------RUN PROTOCOL----------------------------------------
+    //Load
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        node.preprocessing_material.lock().await.add(
+            Some(triple[pid].clone()),
+            None,
+            Some(r_bits[pid].clone()),
+            Some(vec![r_int[pid].clone()]),
+        );
+    }
+
+    // init all nodes
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let a = a_fix[pid].clone();
+        let b = b_fix[pid].clone();
+
+        let handle =
+            tokio::spawn(async move { node.mul_fixed(a, b, net).await.expect("mul failed") });
+        handles.push(handle);
+    }
+
+    // wait for all tasks and collect their results
+    let output_fixed: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.expect("task panicked"))
+        .collect();
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+
+    let shares: Vec<_> = output_fixed
+        .iter()
+        .map(|s| {
+            assert_eq!(*s.precision(), precision);
+            s.value().clone()
+        })
+        .collect();
+    let (_, rec) = RobustShare::recover_secret(&shares, n_parties).expect("interpolate failed");
+    assert_eq!(rec, Fr::from(286));
+}
+
+#[tokio::test]
+async fn fpmul_e2e_with_preprocessing() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 5;
+    let t = 1;
+    let instance_id = 111;
+    let mut rng = test_rng();
+    let k = 16; // total bitlength
+    let m = 4; // fractional bits to truncate
+    let precision = FixedPointPrecision::new(k, m);
+    let n_triples = 1 + m; // 1 (fpmul) + m(no of random bits)
+    let n_random_shares = m; // no of random bits
+    let n_prandbit = m;
+    let n_prandint = 1;
+    let bound_l = 8;
+    let security_k = 4;
+
+    //Setup
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
+
+    // Prepare inputs for multiplication
+
+    let mut a_fix = Vec::new();
+    let mut b_fix = Vec::new();
+
+    //x = 5.5 * 2^4=88, y = 3.25 * 2^4=52
+    //x*y = 17.875 * 2^8 = 4576
+    //17.875 * 2^8/2^4 = 4576/2^4
+    //17.875 * 2^4 = 286
+    let x = RobustShare::compute_shares(Fr::from(88), n_parties, t, None, &mut rng).unwrap();
+    let y = RobustShare::compute_shares(Fr::from(52), n_parties, t, None, &mut rng).unwrap();
+    for i in 0..n_parties {
+        a_fix.push(SecretFixedPoint::new(x[i].clone(), precision));
+        b_fix.push(SecretFixedPoint::new(y[i].clone(), precision));
+    }
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    // create global nodes
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        n_triples,
+        n_random_shares,
+        instance_id,
+        n_prandbit,
+        n_prandint,
+        bound_l,
+        security_k,
+    );
+
+    //----------------------------------------RECIEVE----------------------------------------
+    // spawn tasks to process received messages
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
+
+    //----------------------------------------RUN PROTOCOL----------------------------------------
+
+    // init all nodes
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let a = a_fix[pid].clone();
+        let b = b_fix[pid].clone();
+
+        let handle =
+            tokio::spawn(async move { node.mul_fixed(a, b, net).await.expect("mul failed") });
+        handles.push(handle);
+    }
+
+    // wait for all tasks and collect their results
+    let output_fixed: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.expect("task panicked"))
+        .collect();
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+
+    let shares: Vec<_> = output_fixed
+        .iter()
+        .map(|s| {
+            assert_eq!(*s.precision(), precision);
+            s.value().clone()
+        })
+        .collect();
+    let (_, rec) = RobustShare::recover_secret(&shares, n_parties).expect("interpolate failed");
+    assert_eq!(rec, Fr::from(286));
 }

@@ -1,24 +1,25 @@
 use crate::{
-    common::{share::ShareError, SecretSharingScheme},
+    common::share::ShareError,
     honeybadger::{
+        batch_recon::batch_recon::BatchReconNode,
         fpmul::{
             build_all_f_polys,
             f256::{build_all_f_polys_2_8, F2_8Domain, F2_8},
-            MessageType, PRandBitDMessage, PRandBitDStore, PRandError,
+            PRandBitDMessage, PRandBitDStore, PRandError, PRandMessageType,
         },
+        mul::concat_sorted,
         robust_interpolate::robust_interpolate::RobustShare,
-        ProtocolType, SessionId,
+        ProtocolType, SessionId, WrappedMessage,
     },
 };
 use ark_ff::{BigInteger, PrimeField};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
-use ark_serialize::CanonicalSerialize;
 use itertools::Itertools;
 use rand::Rng;
 use std::{collections::HashMap, sync::Arc, vec};
 use stoffelnet::network_utils::Network;
 use tokio::sync::{mpsc::Sender, Mutex};
-use tracing::info;
+use tracing::{debug, info};
 
 /// Represents the shares stored by a player
 #[derive(Debug, Clone)]
@@ -28,32 +29,43 @@ pub struct PRandBitNode<F: PrimeField, G: PrimeField> {
     pub t: usize,
     pub l: usize,
     pub k: usize,
-    pub batch_size: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PRandBitDStore<F, G>>>>>>,
-    pub output_channel: Sender<SessionId>,
+    pub output_bit_channel: Sender<SessionId>,
+    pub output_int_channel: Sender<SessionId>,
+    pub batch_recon: BatchReconNode<F>,
 }
 
 impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     /// Creates a new PRandBitDNode with empty shares.
-    pub fn new(id: usize, n: usize, t: usize, output_channel: Sender<SessionId>) -> Self {
-        Self {
+    pub fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        output_bit_channel: Sender<SessionId>,
+        output_int_channel: Sender<SessionId>,
+    ) -> Result<Self, PRandError> {
+        let batch_recon = BatchReconNode::new(id, n, t)?;
+        Ok(Self {
             id,
             n,
             t,
             l: 0,
             k: 0,
-            batch_size: 0,
             store: Arc::new(Mutex::new(HashMap::new())),
-            output_channel,
-        }
+            output_bit_channel,
+            output_int_channel,
+            batch_recon,
+        })
     }
 
     pub async fn clear_store(&self) {
         let mut store = self.store.lock().await;
+        self.batch_recon.clear_store().await;
         store.clear();
     }
 
     /// Distributed RISS generation
+    /// generates shares in multiples of (t+1)
     pub async fn generate_riss<N: Network>(
         &mut self,
         session_id: SessionId,
@@ -64,9 +76,13 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         network: Arc<N>,
     ) -> Result<(), PRandError> {
         info!(node_id = self.id, "RISS started");
+        if batch_size % (self.t + 1) != 0
+            && session_id.calling_protocol() == Some(ProtocolType::PRandBit)
+        {
+            return Err(PRandError::Incompatible);
+        }
         self.l = l;
         self.k = k;
-        self.batch_size = batch_size;
         // Step 1: compute all maximal unqualified sets
         let tsets: Vec<Vec<usize>> = (0..self.n).combinations(self.t).collect();
 
@@ -78,32 +94,35 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             .filter(|ts| !ts.contains(&self.id))
             .collect();
         store.no_of_tsets = Some(my_tsets.len());
-        if smallfield_bits.len() != self.batch_size {
+        if smallfield_bits.len() != batch_size
+            && session_id.calling_protocol() == Some(ProtocolType::PRandBit)
+        {
             return Err(PRandError::NotSet(
                 "Not enough bits from the smaller field".to_string(),
             ));
         }
         store.share_b_q = Some(smallfield_bits);
-
+        store.batch_size = Some(batch_size);
+        drop(store);
         // Step 2: P_i samples randomness and sends
         // Random integer range: [0, 2^(l+k)]
         let bound: i64 = 1 << (self.l + self.k);
         for tset in tsets {
-            let r_t_i: Vec<i64> = (0..self.batch_size)
+            let r_t_i: Vec<i64> = (0..batch_size)
                 .map(|_| rand::thread_rng().gen_range(0, bound + 1))
                 .collect();
 
             // send to all players not in T
             for j in 0..self.n {
                 if !tset.contains(&j) {
-                    let msg = PRandBitDMessage::new(
+                    let msg = WrappedMessage::PRandBit(PRandBitDMessage::new(
                         self.id,
-                        MessageType::RissMessage,
+                        PRandMessageType::RissMessage,
                         session_id,
                         tset.clone(),
                         r_t_i.clone(),
                         vec![],
-                    );
+                    ));
                     let bytes_msg = bincode::serialize(&msg)?;
                     network.send(j, &bytes_msg).await?;
                 }
@@ -112,7 +131,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         Ok(())
     }
 
-    pub async fn riss_handler<N: Network>(
+    pub async fn riss_handler<N: Network + Send + Sync>(
         &mut self,
         msg: PRandBitDMessage,
         network: Arc<N>,
@@ -121,9 +140,6 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
 
         let binding = self.get_or_create_store(msg.session_id).await;
         let mut store = binding.lock().await;
-        let total_tsets = store
-            .no_of_tsets
-            .ok_or_else(|| PRandError::NotSet("No of tsets not set".to_string()))?;
 
         // Get or create entry for this tset
         let tset_entry = store
@@ -157,6 +173,19 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             store.r_t.insert(msg.tset.clone(), r_t_sum);
         }
         // Check if all tsets are done
+        if store.batch_size.is_none() {
+            debug!("Waiting for initiating");
+            return Ok(());
+        }
+        let batch_size = store
+            .batch_size
+            .ok_or_else(|| PRandError::NotSet("Batch size not set at riss handler".to_string()))?;
+        let total_tsets = store.no_of_tsets.ok_or_else(|| {
+            PRandError::NotSet(format!(
+                "No of tsets not set {:?}",
+                msg.session_id.calling_protocol().unwrap()
+            ))
+        })?;
         if store.r_t.len() == total_tsets {
             info!(node_id = self.id, "Constructing Polynomials");
 
@@ -177,9 +206,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             let xi_p = domain_g.element(self.id);
             let xi_2 = domain_2.element(self.id);
 
-            let mut share_q = vec![RobustShare::new(F::zero(), self.id, self.t); self.batch_size];
-            let mut share_p = vec![RobustShare::new(G::zero(), self.id, self.t); self.batch_size];
-            let mut share_2 = vec![F2_8::zero(); self.batch_size];
+            let mut share_q = vec![RobustShare::new(F::zero(), self.id, self.t); batch_size];
+            let mut share_p = vec![RobustShare::new(G::zero(), self.id, self.t); batch_size];
+            let mut share_2 = vec![F2_8::zero(); batch_size];
 
             for (tset, r_t) in store.r_t.clone() {
                 let poly_q = &poly_fq[&tset];
@@ -191,7 +220,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 let coeff_p = poly_p.evaluate(&xi_p);
                 let coeff_2 = poly_2.evaluate(xi_2);
 
-                for i in 0..self.batch_size {
+                for i in 0..batch_size {
                     // Reduce r_T into each field
                     let r_q = F::from(r_t[i]);
                     let r_p = G::from(r_t[i]);
@@ -213,6 +242,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 //output the shared random integer,r_t that is converted to r_p
                 //stored in share_r_p
                 info!(node_id = self.id, "Output for PRandInt");
+                self.output_int_channel.send(msg.session_id).await?;
                 return Ok(());
             }
 
@@ -235,20 +265,18 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 })
                 .collect();
 
-            // Broadcast to everyone
-            let mut payload = Vec::new();
-            share_rplusb.serialize_compressed(&mut payload)?;
-            let msg = PRandBitDMessage::new(
-                self.id,
-                MessageType::OutputMessage,
-                msg.session_id,
-                vec![],
-                vec![],
-                payload,
-            );
-            let bytes_msg = bincode::serialize(&msg)?;
-            info!(node_id = self.id, "Broadcasting r+b");
-            network.broadcast(&bytes_msg).await?;
+            // Batch reconstruct r+b
+            for (i, chunk) in share_rplusb.chunks(self.t + 1).enumerate() {
+                let session_id_batch = SessionId::new(
+                    msg.session_id.calling_protocol().unwrap(),
+                    0,
+                    i as u8,
+                    msg.session_id.instance_id(),
+                );
+                self.batch_recon
+                    .init_batch_reconstruct(chunk, session_id_batch, network.clone())
+                    .await?;
+            }
         }
 
         Ok(())
@@ -257,36 +285,41 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     pub async fn output_handler(&mut self, msg: PRandBitDMessage) -> Result<(), PRandError> {
         info!(node_id = self.id, "At output handler");
 
-        let binding = self.get_or_create_store(msg.session_id).await;
+        let session_id = SessionId::new(
+            msg.session_id.calling_protocol().unwrap(),
+            0,
+            0,
+            msg.session_id.instance_id(),
+        );
+
+        let binding = self.get_or_create_store(session_id).await;
         let mut store = binding.lock().await;
+        let batch_size = store
+            .batch_size
+            .ok_or_else(|| PRandError::NotSet("Batch size not set at riss handler".to_string()))?;
+        let no_of_batches = batch_size / (self.t + 1);
 
         // deserialize the field element from the payload
-        let share_i_list: Vec<RobustShare<F>> =
+        let share_i_list: Vec<F> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
-
-        // Deduplicate
-        if store.share_r_plus_b.contains_key(&msg.sender_id) {
+        let round_id = msg.session_id.round_id();
+        if store.output_open.contains_key(&round_id) {
             return Err(PRandError::Duplicate(format!(
-                "Already received output share from {}",
+                "Already received from {}",
                 msg.sender_id
             )));
         }
+        store.output_open.insert(round_id, share_i_list);
+        if store.output_open.len() != no_of_batches {
+            debug!("Waiting for more openings");
+            return Ok(());
+        }
 
-        store.share_r_plus_b.insert(msg.sender_id, share_i_list);
+        let share_r_plus_b: Vec<F> = concat_sorted(&store.output_open);
 
-        // Check if we have enough shares to reconstruct (t + 1)
-        let needed = 2 * self.t + 1;
-        if store.share_r_plus_b.len() >= needed && store.share_b_2.len() != self.batch_size {
-            for i in 0..self.batch_size {
-                let x_vals: Vec<RobustShare<F>> = store
-                    .share_r_plus_b
-                    .values()
-                    .map(|shares| shares[i].clone())
-                    .collect();
-
-                // interpolate polynomial and evaluate at 0
-                let (_, v) = RobustShare::recover_secret(&x_vals, self.n)?;
-
+        // Check if we have enough shares to reconstruct
+        if store.share_b_2.len() != batch_size {
+            for (i, v) in share_r_plus_b.iter().enumerate() {
                 // Compute lsb(v)
                 // BigInteger has is_odd() method.
                 let repr = v.into_bigint();
@@ -297,6 +330,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 let v_g = G::from_le_bytes_mod_order(&bytes); // reduction into G
 
                 // Now finalize GF(2^8) share: b = r0 XOR lsb
+                if store.share_r_2.is_none() {
+                    debug!("Waiting for F_2^8 field share to be set");
+                    return Ok(());
+                }
                 let my_r0_share_2 = store
                     .share_r_2
                     .clone()
@@ -316,21 +353,22 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 info!(node_id = self.id, "Generated [b] shares");
                 store.share_b_2.push(my_b2_share);
                 store.share_b_p.push(my_b_p_share);
-                info!(len = store.share_b_2.len(), "here");
             }
+            info!(id = self.id, "Prandbit finished");
+            self.output_bit_channel.send(session_id).await?;
+            return Ok(());
         }
-        self.output_channel.send(msg.session_id).await?;
 
         Ok(())
     }
-    pub async fn process<N: Network>(
+    pub async fn process<N: Network + Send + Sync>(
         &mut self,
         msg: PRandBitDMessage,
         network: Arc<N>,
     ) -> Result<(), PRandError> {
         match msg.msg_type {
-            MessageType::RissMessage => self.riss_handler(msg, network).await?,
-            MessageType::OutputMessage => self.output_handler(msg).await?,
+            PRandMessageType::RissMessage => self.riss_handler(msg, network).await?,
+            PRandMessageType::OutputMessage => self.output_handler(msg).await?,
         }
         Ok(())
     }

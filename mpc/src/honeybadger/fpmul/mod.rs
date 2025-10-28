@@ -1,5 +1,5 @@
 use crate::{
-    common::{lagrange_interpolate, share::ShareError},
+    common::{lagrange_interpolate, rbc::RbcError, share::ShareError},
     honeybadger::{
         batch_recon::BatchReconError,
         fpmul::f256::{F2_8Error, F2_8},
@@ -40,6 +40,12 @@ pub enum RandBitError {
     Inverse,
     #[error("not initialized error")]
     NotInitialized,
+    #[error("number of random shares is not a multiple of (t+1)")]
+    Incompatible,
+    #[error("Duplicate input: {0}")]
+    Duplicate(String),
+    #[error("waiting for more openings")]
+    WaitForOk,
     #[error("error in batch reconstruction: {0:?}")]
     BatchRecError(#[from] BatchReconError),
     #[error("error during deserialization: {0:?}")]
@@ -86,6 +92,7 @@ where
     pub protocol_output: Option<Vec<RobustShare<F>>>,
     /// Share of `a`
     pub a_share: Option<Vec<RobustShare<F>>>,
+    pub output_open: HashMap<u8, Vec<F>>,
 }
 
 impl<F> RandBitStorage<F>
@@ -97,6 +104,7 @@ where
             protocol_state: ProtocolState::NotInitialized,
             protocol_output: None,
             a_share: None,
+            output_open: HashMap::new(),
         }
     }
 }
@@ -118,6 +126,8 @@ pub enum PRandError {
     Abort,
     #[error("Duplicate input: {0}")]
     Duplicate(String),
+    #[error("number of random shares is not a multiple of (t+1)")]
+    Incompatible,
     #[error("Not set:{0}")]
     NotSet(String),
     #[error("ShareError: {0}")]
@@ -128,10 +138,12 @@ pub enum PRandError {
     F2_8Error(#[from] F2_8Error),
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
+    #[error("error in batch reconstruction: {0:?}")]
+    BatchRecError(#[from] BatchReconError),
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-pub enum MessageType {
+pub enum PRandMessageType {
     RissMessage,
     OutputMessage,
 }
@@ -141,7 +153,7 @@ pub enum MessageType {
 pub struct PRandBitDMessage {
     /// ID of the sender of the message.
     pub sender_id: usize,
-    pub msg_type: MessageType,
+    pub msg_type: PRandMessageType,
     pub session_id: SessionId,
     pub tset: Vec<usize>,
     pub r_t: Vec<i64>,
@@ -152,7 +164,7 @@ impl PRandBitDMessage {
     /// Creates a new PRandBitDMessage.
     pub fn new(
         sender_id: usize,
-        msg_type: MessageType,
+        msg_type: PRandMessageType,
         session_id: SessionId,
         tset: Vec<usize>,
         r_t: Vec<i64>,
@@ -173,6 +185,8 @@ impl PRandBitDMessage {
 pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     /// For every maximal unqualified set T that excludes this player,
     /// we store the full mask r_T = sum_i r_T^i
+    pub batch_size: Option<usize>,
+    pub output_open: HashMap<u8, Vec<F>>,
     pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<i64>>>, // tset -> {sender -> val}
     pub r_t: HashMap<Vec<usize>, Vec<i64>>,
     pub no_of_tsets: Option<usize>,
@@ -180,7 +194,6 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     pub share_r_p: Option<Vec<RobustShare<G>>>, // PrandInt output
     pub share_b_q: Option<Vec<RobustShare<F>>>, //smaller field
     pub share_r_2: Option<Vec<F2_8>>,
-    pub share_r_plus_b: HashMap<usize, Vec<RobustShare<F>>>,
     pub share_b_2: Vec<F2_8>,           //PrandBitD output
     pub share_b_p: Vec<RobustShare<G>>, //PrandBitD/PrandBitL output
 }
@@ -188,6 +201,8 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
 impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
     pub fn empty() -> Self {
         Self {
+            batch_size: None,
+            output_open: HashMap::new(),
             riss_shares: HashMap::new(),
             r_t: HashMap::new(),
             no_of_tsets: None,
@@ -195,7 +210,6 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
             share_r_p: None,
             share_b_q: None,
             share_r_2: None,
-            share_r_plus_b: HashMap::new(),
             share_b_2: Vec::new(),
             share_b_p: Vec::new(),
         }
@@ -244,6 +258,8 @@ pub enum TruncPrError {
     Duplicate(usize),
     #[error("Not set:{0}")]
     NotSet(String),
+    #[error("Rbc error: {0}")]
+    RbcError(#[from] RbcError),
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
     #[error("error sending the thread asynchronously")]

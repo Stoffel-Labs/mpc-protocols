@@ -7,13 +7,13 @@ use ark_std::test_rng;
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
-use stoffelmpc_mpc::common::{SecretSharingScheme, ShamirShare};
+use stoffelmpc_mpc::common::rbc::rbc::Avid;
+use stoffelmpc_mpc::common::{SecretSharingScheme, ShamirShare, RBC};
 use stoffelmpc_mpc::honeybadger::fpmul::f256::{
     build_all_f_polys_2_8, lagrange_interpolate_f2_8, F2_8Domain, F2_8,
 };
 use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitNode;
 use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
-use stoffelmpc_mpc::honeybadger::fpmul::PRandBitDMessage;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::{Robust, RobustShare};
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use tokio::sync::mpsc::{self, Sender};
@@ -27,7 +27,7 @@ async fn test_prandbitd_end_to_end() {
     let l = 8;
     let k = 4;
     let batch_size = 2;
-    let session_id = SessionId::new(ProtocolType::None, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::PRandBit, 0, 0, 111);
     let mut rng = test_rng();
     // Build fake network
     let (network, mut recv, _) = test_setup(n, vec![]);
@@ -41,7 +41,16 @@ async fn test_prandbitd_end_to_end() {
 
     // Initialize nodes
     let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
-        .map(|i| PRandBitNode::new(i, n, t, sender_channels[i].clone()))
+        .map(|i| {
+            PRandBitNode::new(
+                i,
+                n,
+                t,
+                sender_channels[i].clone(),
+                sender_channels[i].clone(),
+            )
+            .unwrap()
+        })
         .collect();
 
     // Run distributed RISS generation
@@ -76,12 +85,16 @@ async fn test_prandbitd_end_to_end() {
 
         set.spawn(async move {
             while let Some(received) = receiver.recv().await {
-                let msg: PRandBitDMessage = match bincode::deserialize(&received) {
-                    Ok(w) => w,
-                    Err(_) => continue,
-                };
-
-                let _ = node.process(msg, net.clone()).await;
+                let wrapped: WrappedMessage = bincode::deserialize(&received).unwrap();
+                match wrapped {
+                    WrappedMessage::PRandBit(msg) => {
+                        let _ = node.process(msg, net.clone()).await;
+                    }
+                    WrappedMessage::BatchRecon(msg) => {
+                        let _ = node.batch_recon.process(msg, net.clone()).await;
+                    }
+                    _ => continue,
+                }
             }
         });
     }
@@ -152,7 +165,7 @@ async fn test_prandbitd_r_reconstruction() {
     let l = 8;
     let k = 4;
     let batch_size = 2;
-    let session_id = SessionId::new(ProtocolType::None, 0, 0, 222);
+    let session_id = SessionId::new(ProtocolType::PRandBit, 0, 0, 222);
     let mut rng = test_rng();
     // Build fake network
     let (network, mut recv, _) = test_setup(n, vec![]);
@@ -166,7 +179,16 @@ async fn test_prandbitd_r_reconstruction() {
 
     // Initialize nodes
     let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
-        .map(|i| PRandBitNode::new(i, n, t, sender_channels[i].clone()))
+        .map(|i| {
+            PRandBitNode::new(
+                i,
+                n,
+                t,
+                sender_channels[i].clone(),
+                sender_channels[i].clone(),
+            )
+            .unwrap()
+        })
         .collect();
 
     // Run distributed RISS generation
@@ -200,11 +222,16 @@ async fn test_prandbitd_r_reconstruction() {
 
         set.spawn(async move {
             while let Some(received) = receiver.recv().await {
-                let msg: PRandBitDMessage = match bincode::deserialize(&received) {
-                    Ok(w) => w,
-                    Err(_) => continue,
-                };
-                let _ = node.process(msg, net.clone()).await;
+                let wrapped: WrappedMessage = bincode::deserialize(&received).unwrap();
+                match wrapped {
+                    WrappedMessage::PRandBit(msg) => {
+                        let _ = node.process(msg, net.clone()).await;
+                    }
+                    WrappedMessage::BatchRecon(msg) => {
+                        let _ = node.batch_recon.process(msg, net.clone()).await;
+                    }
+                    _ => continue,
+                }
             }
         });
     }
@@ -335,22 +362,22 @@ async fn test_truncpr_end_to_end() {
     let t = 1;
     let k = 16; // total bitlength (example)
     let m = 4; // fractional bits to truncate
-    let session_id = SessionId::new(ProtocolType::None, 0, 0, 999);
+    let session_id = SessionId::new(ProtocolType::Trunc, 0, 0, 999);
 
     // === Build fake network ===
     let (network, mut recv, _) = test_setup(n, vec![]);
 
     // === Initialize nodes ===
     let (trunc_sender, _) = mpsc::channel(128);
-    let mut nodes: Vec<TruncPrNode<F>> = (0..n)
-        .map(|i| TruncPrNode::new(i, n, t, trunc_sender.clone()))
+    let mut nodes: Vec<TruncPrNode<F, Avid>> = (0..n)
+        .map(|i| TruncPrNode::new(i, n, t, trunc_sender.clone()).unwrap())
         .collect();
 
     // === Input secret [a] (same across parties for test) ===
     let mut rng = test_rng();
     let a_val = RobustShare::compute_shares(F::from(12345u64), n, t, None, &mut rng).unwrap();
     let r_int = RobustShare::compute_shares(F::from(3), n, t, None, &mut rng).unwrap();
-    let mut r_bits = vec![Vec::new(); m];
+    let mut r_bits = vec![Vec::new(); n];
     for j in 0..m {
         let x = RobustShare::compute_shares(F::from((j % 2) as u64), n, t, None, &mut rng).unwrap();
         for (i, share) in x.iter().enumerate() {
@@ -382,16 +409,20 @@ async fn test_truncpr_end_to_end() {
         set.spawn(async move {
             while let Some(received) = receiver.recv().await {
                 let wrapped: WrappedMessage = bincode::deserialize(&received).unwrap();
-                let msg = match wrapped {
-                    WrappedMessage::Trunc(w) => w,
+                match wrapped {
+                    WrappedMessage::Trunc(msg) => {
+                        let _ = node.process(msg, net.clone()).await;
+                    }
+                    WrappedMessage::Rbc(msg) => {
+                        let _ = node.rbc.process(msg, net.clone()).await;
+                    }
                     _ => continue,
-                };
-                let _ = node.process(msg, net.clone()).await;
+                }
             }
         });
     }
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // === Reconstruct [d] (the truncated output) ===
     let mut shares = Vec::new();

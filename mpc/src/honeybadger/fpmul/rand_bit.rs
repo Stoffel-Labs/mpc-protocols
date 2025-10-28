@@ -1,6 +1,7 @@
 use crate::common::RBC;
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
 use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitMessage, RandBitStorage};
+use crate::honeybadger::mul::concat_sorted;
 use crate::honeybadger::mul::multiplication::Multiply;
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::triple_gen::ShamirBeaverTriple;
@@ -21,7 +22,7 @@ use tokio::sync::Mutex;
 ///
 /// If `t + 1` random elements are provided, then the protocol will return `t + 1` random bits. The
 /// number of random elements is limited by the amount of shared elements that the batch
-/// reconstruction protocol can reconstruct.
+/// reconstruction protocol can reconstruct. (Updated to generate multiples of (t+1))
 ///
 /// # Assumptions
 ///
@@ -88,7 +89,7 @@ where
         self.batch_recon.clear_store().await;
     }
 
-    pub async fn get_or_crate_storage(
+    pub async fn get_or_create_storage(
         &self,
         session_id: SessionId,
     ) -> Arc<Mutex<RandBitStorage<F>>> {
@@ -109,9 +110,12 @@ where
     where
         N: Network + Send + Sync + 'static,
     {
+        if a.len() % (self.threshold + 1) != 0 {
+            return Err(RandBitError::Incompatible);
+        }
         // Mark the protocol as initialized.
         {
-            let storage_bind = self.get_or_crate_storage(session_id).await;
+            let storage_bind = self.get_or_create_storage(session_id).await;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.a_share = Some(a.clone());
@@ -144,9 +148,18 @@ where
             };
 
         tracing::info!("Multiplication at Rand_bit done: {0:?}", self.id);
-        self.batch_recon
-            .init_batch_reconstruct(&a_square_share, session_id, network.clone())
-            .await?;
+
+        for (i, chunk) in a_square_share.chunks(self.threshold + 1).enumerate() {
+            let session_id_batch = SessionId::new(
+                session_id.calling_protocol().unwrap(),
+                0,
+                i as u8,
+                session_id.instance_id(),
+            );
+            self.batch_recon
+                .init_batch_reconstruct(chunk, session_id_batch, network.clone())
+                .await?;
+        }
 
         Ok(())
     }
@@ -159,10 +172,36 @@ where
             "Rand_bit reconstruction msg received from node: {0:?}",
             message.sender
         );
+        let session_id = SessionId::new(
+            message.session_id.calling_protocol().unwrap(),
+            0,
+            0,
+            message.session_id.instance_id(),
+        );
+        let storage_bind = self.get_or_create_storage(session_id).await;
+        let mut storage = storage_bind.lock().await;
+        let a = storage
+            .a_share
+            .clone()
+            .ok_or(RandBitError::NotInitialized)?;
+        let batch_size = a.len() / (self.threshold + 1);
 
-        let a_square_array: Vec<F> =
+        let open: Vec<F> =
             CanonicalDeserialize::deserialize_compressed(message.payload.as_slice())?;
+        let round_id = message.session_id.round_id();
+        if storage.output_open.contains_key(&round_id) {
+            return Err(RandBitError::Duplicate(format!(
+                "Already received from {}",
+                message.sender
+            )));
+        }
+        storage.output_open.insert(round_id, open);
+        if storage.output_open.len() != batch_size {
+            return Err(RandBitError::WaitForOk);
+        }
 
+        let a_square_array: Vec<F> = concat_sorted(&storage.output_open);
+        drop(storage);
         // Step 4.
         for a_square in &a_square_array {
             if *a_square == F::zero() {
@@ -185,7 +224,7 @@ where
         }
 
         let a_share_array = self
-            .get_or_crate_storage(message.session_id)
+            .get_or_create_storage(session_id)
             .await
             .lock()
             .await
@@ -210,14 +249,14 @@ where
 
         // Mark the protocol as finished.
         {
-            let storage_bind = self.get_or_crate_storage(message.session_id).await;
+            let storage_bind = self.get_or_create_storage(session_id).await;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Finished;
             storage.protocol_output = Some(d_share_array.clone());
         }
 
         // You send the current session ID as finished to the sender channel.
-        self.output_channel.send(message.session_id).await?;
+        self.output_channel.send(session_id).await?;
 
         Ok(d_share_array)
     }

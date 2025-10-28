@@ -282,6 +282,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
 
         storage.protocol_output = shares_mult.clone();
         storage.protocol_state = MultProtocolState::Finished;
+        info!(id = self.id, "Multiplication finished",);
         self.sender_finished_mults.send(session_id).await?;
 
         Ok(Some(shares_mult))
