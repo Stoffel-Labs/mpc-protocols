@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use futures::future::join_all;
-use std::{cmp::{Ord, PartialOrd, PartialEq, Ordering, Reverse}, collections::{HashMap, BinaryHeap}, marker::Send};
+use std::{sync::atomic::{AtomicUsize, Ordering}, cmp, cmp::{Ord, PartialOrd, PartialEq, Reverse}, collections::{HashMap, BinaryHeap}, marker::Send};
 use tokio::{spawn, time::{sleep, Duration, Instant}, sync::mpsc::{self, Receiver, Sender}, task::JoinHandle};
 use ark_std::rand::{
     distributions::Distribution,
@@ -21,6 +21,10 @@ use tracing::{info, warn};
  */
 
 //pub static mut MAX: Duration = Duration::ZERO;
+//static NO_SENT: AtomicUsize = AtomicUsize::new(0);
+//static NO_RECVD: AtomicUsize = AtomicUsize::new(0);
+//static NO_NET_RECVD: AtomicUsize = AtomicUsize::new(0);
+//static NO_NET_SENT: AtomicUsize = AtomicUsize::new(0);
 
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
 
@@ -40,6 +44,7 @@ async fn send_next_msgs(net_msgs: &mut BinaryHeap<KeyedMessage>, node_channels: 
             if result.is_err() {
                 panic!("network thread encountered error {}", result.unwrap_err());
             }
+            //info!("NO_NET_SENT={}", NO_NET_SENT.fetch_add(1, Ordering::SeqCst)+1);
         } else {
             //warn!("TIME: msg for {} not ready yet: elapsed_time={:?} < delay={:?}", msg.1.0, elapsed_time, msg.0);
             msg.0 -= elapsed_time;
@@ -67,13 +72,13 @@ impl PartialEq for KeyedMessage {
 
 impl Eq for KeyedMessage { }
 impl PartialOrd for KeyedMessage {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         return Some(Reverse(self.0).cmp(&Reverse(other.0)));
     }
 }
 
 impl Ord for KeyedMessage {
-    fn cmp(&self, other: &Self) -> Ordering {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
         return Reverse(self.0).cmp(&Reverse(other.0));
     }
 }
@@ -160,6 +165,7 @@ impl BadFakeNetwork {
     
                 tokio::select! {
                     id_msg = net_rx.recv() => {
+                        //info!("NO_NET_RECVD={}", NO_NET_RECVD.fetch_add(1, Ordering::SeqCst)+1);
                         if id_msg.is_none() {
                             panic!("channel closed");
                         }
@@ -204,6 +210,7 @@ impl Network for BadFakeNetwork {
                 .send((recipient, message.to_vec()))
                 .await
                 .map_err(|_| NetworkError::SendError)?;
+            //info!("NO_SENT={}", NO_SENT.fetch_add(1, Ordering::SeqCst)+1);
             Ok(message.len())
         } else {
             Err(NetworkError::PartyNotFound(recipient))
@@ -228,6 +235,7 @@ impl Network for BadFakeNetwork {
             .map(|(i, sender)| sender.send((i, msg.clone())));
 
         let results = join_all(futures).await;
+        //info!("NO_SENT={}", NO_SENT.fetch_add(self.net_channels.len(), Ordering::SeqCst)+self.net_channels.len());
 
         if results.iter().any(|r| r.is_err()) {
             return Err(NetworkError::SendError);
