@@ -17,7 +17,7 @@ mod tests {
             ProtocolType, SessionId, WrappedMessage,
         },
     };
-    use tokio::time::timeout;
+    use tokio::{sync::Barrier, time::timeout};
     use tracing::warn;
 
     #[test]
@@ -125,12 +125,15 @@ mod tests {
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(6u64)];
         let all_shares = generate_independent_shares(&secrets, t, n);
 
+        let barrier = Arc::new(Barrier::new(n));
+
         let mut handles = vec![];
         for i in 0..n {
             let mut node = BatchReconNode::new(i, n, t).unwrap();
             let shares = all_shares[i].clone();
             let net_clone = Arc::clone(&net);
             let mut recv = receivers.remove(0);
+            let barrier_i = barrier.clone();
 
             handles.push(tokio::spawn(async move {
                 match node
@@ -170,6 +173,8 @@ mod tests {
                         _ => todo!(),
                     }
                 }
+
+                barrier_i.wait().await; // synchronize, so no receivers are dropped prematurely
 
                 // Return recovered secrets
                 let recovered = session_store.lock().await.secrets.clone().unwrap();
