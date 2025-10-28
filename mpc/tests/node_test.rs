@@ -369,7 +369,7 @@ async fn mul_e2e_bad_net() {
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
     let nodes =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n_parties, t, 0, 0, 111);
+        create_global_nodes::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(n_parties, t, 0, 0, 111);
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
@@ -579,11 +579,11 @@ async fn mul_e2e_with_preprocessing_bad_net() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(
         n_parties,
         t,
         no_of_triples,
-        2 + 2 * no_of_triples,
+        2,
         111,
     );
 
