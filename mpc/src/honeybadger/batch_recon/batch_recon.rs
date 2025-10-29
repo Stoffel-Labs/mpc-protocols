@@ -47,9 +47,9 @@ impl<F: FftField> BatchReconNode<F> {
         Ok(Self { id, n, t, store })
     }
 
-    pub async fn clear_store(&self) {
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.store.lock().await;
-        store.clear();
+        store.remove(&session_id).is_some()
     }
 
     /// Initiates the batch reconstruction protocol for a given node.

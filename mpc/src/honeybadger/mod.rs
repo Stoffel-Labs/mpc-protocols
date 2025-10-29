@@ -587,11 +587,11 @@ where
                         .lock()
                         .await
                         .add(Some(triples), None);
-                    self.preprocess
-                        .triple_gen
-                        .batch_recon_node
-                        .clear_store()
-                        .await;
+                    assert!(self.preprocess
+                                .triple_gen
+                                .batch_recon_node
+                                .clear_store(sessionid)
+                                .await);
                 }
             }
         }
