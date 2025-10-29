@@ -988,6 +988,73 @@ async fn preprocessing_e2e() {
 }
 
 #[tokio::test]
+async fn preprocessing_e2e_bad_net() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 5;
+    let t = 1;
+    let no_of_triples = 4;
+    let no_of_randomshares = 0;
+
+    //Setup
+    let (network, net_rx, node_channels, receivers, _) = test_setup_bad(n_parties, vec![]);
+
+    BadFakeNetwork::start(net_rx, node_channels.clone(), StdRng::seed_from_u64(1u64), Uniform::new_inclusive(1, 3));
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    // create global nodes
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(
+        n_parties,
+        t,
+        no_of_triples,
+        no_of_randomshares,
+        111,
+        0,
+        0,
+        0,
+        0
+    );
+
+    //----------------------------------------RECIEVE----------------------------------------
+    // spawn tasks to process received messages
+    receive::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(receivers, nodes.clone(), network.clone());
+
+    //----------------------------------------RUN PROTOCOL----------------------------------------
+
+    // init all nodes
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let mut rng = StdRng::from_rng(OsRng).unwrap();
+
+        let handle = tokio::spawn(async move {
+            {
+                node.run_preprocessing(net, &mut rng)
+                    .await
+                    .expect("Preprocessing failed");
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all mul tasks to finish
+    futures::future::join_all(handles).await;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        let (n_triples, n_random_shares, n_prandbit_shares, n_prandint_shares) = node.preprocessing_material.lock().await.len();
+        assert_eq!(n_triples, 6); //>no_of_triples
+        assert_eq!(n_random_shares, 0); //>no_of_randomshares
+        assert_eq!(n_prandbit_shares, 0);
+        assert_eq!(n_prandint_shares, 0);
+    }
+}
+
+#[tokio::test]
 async fn test_output_protocol_e2e() {
     setup_tracing();
     let n = 4;
