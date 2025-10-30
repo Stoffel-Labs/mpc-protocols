@@ -322,6 +322,13 @@ static TRACING_INIT: Lazy<()> = Lazy::new(|| {
         .pretty()
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    let old_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        old_hook(info);
+        tracing::error!("{}", info);
+        std::process::exit(1);
+    }));
 });
 
 pub fn setup_tracing() {
