@@ -55,7 +55,7 @@ use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 use stoffelnet::network_utils::{Network, NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::{
@@ -807,8 +807,20 @@ impl TryFrom<u16> for ProtocolType {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Hash)]
+#[derive(PartialOrd, Ord, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(u64);
+
+impl fmt::Debug for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        let caller = ((self.0 >> 60) & 0xF) as u16;
+        let sub_id = self.sub_id();
+        let round_id = self.round_id();
+        let instance_id = self.instance_id();
+
+        write!(f, "[caller={},sub_id={},round_id={},instance_id={}]", caller, sub_id, round_id, instance_id)
+    }
+}
+
 
 impl SessionId {
     pub fn new(caller: ProtocolType, sub_id: u8, round_id: u8, instance_id: u64) -> Self {
