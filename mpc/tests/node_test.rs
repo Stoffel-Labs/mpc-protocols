@@ -43,7 +43,7 @@ async fn randousha_e2e() {
     setup_tracing();
     let n_parties = 10;
     let t = 3;
-    let session_id = SessionId::new(ProtocolType::Randousha, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Randousha, 123, 0, 0, 111);
     let degree_t = 3;
 
     //Setup
@@ -106,7 +106,7 @@ async fn ransha_e2e() {
     setup_tracing();
     let n_parties = 10;
     let t = 3;
-    let session_id = SessionId::new(ProtocolType::Randousha, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Randousha, 123, 0, 0, 111);
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
@@ -225,7 +225,7 @@ async fn gen_masks_for_input_e2e() {
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 4;
     let t = 1;
-    let session_id = SessionId::new(ProtocolType::Ransha, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Ransha, 123, 0, 0, 111);
     let clientid: Vec<ClientId> = vec![100];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     //Setup the network for servers and client
@@ -333,7 +333,7 @@ async fn mul_e2e_bad_net() {
     let n_parties = 5;
     let t = 1;
     let mut rng = test_rng();
-    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111);
     let no_of_multiplication = 5;
 
     //Setup
@@ -451,7 +451,7 @@ async fn mul_e2e() {
     let n_parties = 5;
     let t = 1;
     let mut rng = test_rng();
-    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111);   // foresees the session ID
     let no_of_multiplication = 5;
 
     //Setup
@@ -567,7 +567,7 @@ async fn mul_e2e_with_preprocessing_bad_net() {
     let n_parties = 5;
     let t = 1;
     let no_of_triples = 2 * t + 1;
-    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111);
     let clientid: Vec<ClientId> = vec![100, 200];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     let no_of_multiplications = 2; // 10*10, 20*20
@@ -730,7 +730,7 @@ async fn mul_e2e_with_preprocessing() {
     let n_parties = 5;
     let t = 1;
     let no_of_triples = 2 * t + 1;
-    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111);
     let clientid: Vec<ClientId> = vec![100, 200];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     let no_of_multiplications = 2; // 10*10, 20*20
