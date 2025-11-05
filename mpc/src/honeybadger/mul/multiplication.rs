@@ -99,12 +99,14 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         for (i, (chunk_a, chunk_b)) in a_full.chunks(t + 1).zip(b_full.chunks(t + 1)).enumerate() {
             let session_id1 = SessionId::new(
                 ProtocolType::Mul,
+                session_id.exec_id(),
                 1,
                 (2 * i) as u8,
                 session_id.instance_id(),
             );
             let session_id2 = SessionId::new(
                 ProtocolType::Mul,
+                session_id.exec_id(),
                 1,
                 (2 * i + 1) as u8,
                 session_id.instance_id(),
@@ -129,6 +131,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
 
             let sessionid = SessionId::new(
                 ProtocolType::Mul,
+                session_id.exec_id(),
                 2,
                 self.id as u8,
                 session_id.instance_id(),
@@ -149,10 +152,11 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         &self,
         msg: MultMessage,
     ) -> Result<Option<Vec<RobustShare<F>>>, MulError> {
-        let session_id = SessionId::new(ProtocolType::Mul, 0, 0, msg.session_id.instance_id());
+        let session_id = SessionId::new(ProtocolType::Mul, msg.session_id.exec_id(), 0, 0, msg.session_id.instance_id());
 
         let storage_bind = self.get_or_create_mult_storage(session_id).await;
         let mut storage = storage_bind.lock().await;
+
         let mul_len = storage.no_of_mul.ok_or(MulError::InvalidInput(format!(
             "No. of multiplications not set for node {}",
             self.id

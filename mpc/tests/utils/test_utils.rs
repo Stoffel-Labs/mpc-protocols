@@ -407,7 +407,7 @@ pub fn create_global_nodes<F: FftField, R: RBC + 'static, S, N>(
     t: usize,
     n_triples: usize,
     n_random_shares: usize,
-    instance_id: u64,
+    instance_id: u32,
     input_ids: Vec<ClientId>
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
@@ -576,7 +576,7 @@ pub fn create_clients<F: FftField, R: RBC + 'static>(
     client_ids: Vec<ClientId>,
     n_parties: usize,
     t: usize,
-    instance_id: u64,
+    instance_id: u32,
     inputs: Vec<F>,
     input_len: usize,
 ) -> HashMap<ClientId, Arc<tokio::sync::Mutex<HoneyBadgerMPCClient<F, R>>>> {
