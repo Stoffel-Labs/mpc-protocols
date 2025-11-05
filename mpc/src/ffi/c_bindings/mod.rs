@@ -184,11 +184,12 @@ pub extern "C" fn u256_to_le_bytes(num: U256) -> ByteSlice {
 #[no_mangle]
 pub extern "C" fn new_session_id(
     caller: ProtocolType,
+    exec_id: u8,
     sub_id: u8,
     round_id: u8,
-    instance_id: u64,
+    instance_id: u32,
 ) -> u64 {
-    let session_id = SessionId::new(caller.into(), sub_id, round_id, instance_id);
+    let session_id = SessionId::new(caller.into(), exec_id, sub_id, round_id, instance_id);
     session_id.as_u64()
 }
 
@@ -196,6 +197,12 @@ pub extern "C" fn new_session_id(
 pub extern "C" fn calling_protocol(session_id: u64) -> ProtocolType {
     let session_id = unsafe { SessionId::from_u64(session_id) };
     session_id.calling_protocol().unwrap().into()
+}
+
+#[no_mangle]
+pub extern "C" fn exec_id(session_id: u64) -> u8 {
+    let session_id = unsafe { SessionId::from_u64(session_id) };
+    session_id.exec_id()
 }
 
 #[no_mangle]
@@ -211,7 +218,7 @@ pub extern "C" fn round_id(session_id: u64) -> u8 {
 }
 
 #[no_mangle]
-pub extern "C" fn instance_id(session_id: u64) -> u64 {
+pub extern "C" fn instance_id(session_id: u64) -> u32 {
     let session_id = unsafe { SessionId::from_u64(session_id) };
     session_id.instance_id()
 }

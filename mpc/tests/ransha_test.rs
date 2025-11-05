@@ -27,7 +27,7 @@ async fn test_reconstruct_handler_incorrect_share() {
     setup_tracing();
     let n_parties = 10;
     let t = 3;
-    let session_id = SessionId::new(ProtocolType::Ransha, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Ransha, 123, 0, 0, 111);
 
     let (network, mut receivers, _) = test_setup(n_parties, vec![]);
     let secret = Fr::from(1234);
@@ -142,7 +142,7 @@ async fn test_output_handler() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = SessionId::new(ProtocolType::Ransha, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Ransha, 123, 0, 0, 111);
     let degree_t = 3;
 
     let (network, _receivers, _) = test_setup(n_parties, vec![]);

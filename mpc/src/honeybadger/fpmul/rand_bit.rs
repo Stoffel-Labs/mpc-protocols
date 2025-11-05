@@ -152,6 +152,7 @@ where
         for (i, chunk) in a_square_share.chunks(self.threshold + 1).enumerate() {
             let session_id_batch = SessionId::new(
                 session_id.calling_protocol().unwrap(),
+                session_id.exec_id(),
                 0,
                 i as u8,
                 session_id.instance_id(),
@@ -174,6 +175,7 @@ where
         );
         let session_id = SessionId::new(
             message.session_id.calling_protocol().unwrap(),
+            message.session_id.exec_id(),
             0,
             0,
             message.session_id.instance_id(),

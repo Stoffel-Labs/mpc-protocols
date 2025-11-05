@@ -75,7 +75,7 @@ pub extern "C" fn new_honey_badger_mpc_client(
     id: usize,
     n: usize,
     t: usize,
-    instance_id: u64,
+    instance_id: u32,
     inputs: U256Slice,
     input_len: usize,
     field_kind: FieldKind,
