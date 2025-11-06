@@ -846,7 +846,8 @@ impl SessionId {
         self.0
     }
 
-    // Unsafe because the caller must ensure that the u64 is well-formed
+    //Unsafe because this is meant for the FFI
+    //The caller must ensure that the u64 is well-formed
     pub unsafe fn from_u64(id: u64) -> Self {
         SessionId(id)
     }
