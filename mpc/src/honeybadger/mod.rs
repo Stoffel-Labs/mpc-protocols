@@ -471,7 +471,7 @@ where
 {
     /// Runs preprocessing to produce Random shares and Beaver triples
     /// Steps:
-    /// 1. Ensure enough random shares are available (This includes the ones that will be used for triples).
+    /// 1. Ensure enough random shares are available = No of inputs
     /// 2. Generate double shares if missing.
     /// 3. Generate RanDouSha pairs if missing.
     /// 4. Generate Beaver triples from all the above.
@@ -484,26 +484,58 @@ where
         N: 'async_trait,
         G: Rng + Send,
     {
-        // ------------------------
-        // Step 1. Ensure random shares
-        // ------------------------
-        self.ensure_random_shares(network.clone(), rng).await?;
-        info!("Random share generation done");
-
-        let (no_of_triples_avail, _) = {
+        // Get how many triples and random shares are already available
+        let (no_of_triples_avail, no_of_random_shares_avail) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
-        let no_of_triples = self.params.n_triples;
-        if no_of_triples_avail >= no_of_triples {
-            info!("There are enough Beaver triples");
+        // Desired total counts from protocol parameters
+        let mut no_of_triples = self.params.n_triples;
+        let mut no_of_random_shares = self.params.n_random_shares;
+        // Each triple batch produces (2t + 1) triples at a time
+        let group_size = 2 * self.params.threshold + 1;
+
+        let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
+            no_of_triples = 0;
+            0
+        } else {
+            ((no_of_triples + group_size - 1) / group_size) * group_size
+        };
+
+        let total_random_shares_to_generate = if total_triples_to_generate > 0 {
+            // Always add 2× per triple group
+            let baseline = if no_of_random_shares_avail < no_of_random_shares {
+                no_of_random_shares
+            } else {
+                no_of_random_shares = 0;
+                0
+            };
+            baseline + 2 * total_triples_to_generate
+        } else if no_of_random_shares_avail < no_of_random_shares {
+            no_of_random_shares
+        } else {
+            no_of_random_shares = 0;
+            0
+        };
+
+        if no_of_triples == 0 && no_of_random_shares == 0 {
+            info!("There are enough Random shares and Beaver triples");
             return Ok(());
         }
 
         // ------------------------
+        // Step 1. Ensure random shares
+        // ------------------------
+        self.ensure_random_shares(network.clone(), rng, total_random_shares_to_generate)
+            .await?;
+        info!("Random share generation done");
+
+        // ------------------------
         // Step 2. Ensure RanDouSha pair
         // ------------------------
-        let ran_dou_sha_pair = self.ensure_ran_dou_sha_pair(network.clone(), rng).await?;
+        let ran_dou_sha_pair = self
+            .ensure_ran_dou_sha_pair(network.clone(), rng, total_triples_to_generate)
+            .await?;
         info!("Randousha pair generation done");
 
         // ------------------------
@@ -515,20 +547,17 @@ where
             .preprocessing_material
             .lock()
             .await
-            .take_random_shares(no_of_triples)?;
+            .take_random_shares(total_triples_to_generate)?;
         let random_shares_b = self
             .preprocessing_material
             .lock()
             .await
-            .take_random_shares(no_of_triples)?;
+            .take_random_shares(total_triples_to_generate)?;
 
         //Outputs 2t+1 triples at a time
-        let group_size = 2 * self.params.threshold + 1;
-        assert!(no_of_triples % group_size == 0);
-
         let a_chunks = random_shares_a.chunks_exact(group_size);
         let b_chunks = random_shares_b.chunks_exact(group_size);
-        let r_chunks = ran_dou_sha_pair[0..no_of_triples].chunks_exact(group_size);
+        let r_chunks = ran_dou_sha_pair[..total_triples_to_generate].chunks_exact(group_size);
 
         for (i, ((a, b), r)) in a_chunks.zip(b_chunks).zip(r_chunks).enumerate() {
             let sessionid =
@@ -579,23 +608,15 @@ where
         &mut self,
         network: Arc<N>,
         rng: &mut G,
+        needed: usize,
     ) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
         G: Rng,
     {
-        // How many shares are already present?
-        let (_, no_shares) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-
-        // How many more do we need?
-        let missing = self.params.n_random_shares.saturating_sub(no_shares);
-
         // Outputs in batches of (n-2t)
         let batch = self.params.n_parties - 2 * self.params.threshold;
-        let run = (missing + batch - 1) / batch; // ceil(missing / batch)
+        let run = (needed + batch - 1) / batch; // ceil(missing / batch)
 
         if run == 0 {
             info!("There are enough random shares");
@@ -648,6 +669,7 @@ where
         &mut self,
         network: Arc<N>,
         rng: &mut G,
+        needed: usize,
     ) -> Result<Vec<DoubleShamirShare<F>>, HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
@@ -655,16 +677,9 @@ where
     {
         let mut pair = Vec::new();
 
-        // How many triples are still missing?
-        let (no_of_triples, _) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-
-        let missing = self.params.n_triples.saturating_sub(no_of_triples);
-        // How many batches do we need to cover the missing amount?
+        // How many batches do we need to cover?
         let batch = self.params.threshold + 1;
-        let run = (missing + batch - 1) / batch; // ceil(missing / batch)
+        let run = (needed + batch - 1) / batch; // ceil(missing / batch)
 
         for i in 0..run {
             let sessionid =
@@ -829,5 +844,11 @@ impl SessionId {
 
     pub fn as_u64(self) -> u64 {
         self.0
+    }
+
+    //Unsafe because this is meant for the FFI
+    //The caller must ensure that the u64 is well-formed
+    pub unsafe fn from_u64(id: u64) -> Self {
+        SessionId(id)
     }
 }

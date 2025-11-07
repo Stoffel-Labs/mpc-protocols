@@ -12,6 +12,8 @@ tokio.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 stoffelnet.workspace = true
+ark-std.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 ark-bls12-381.workspace = true
