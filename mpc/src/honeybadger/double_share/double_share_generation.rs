@@ -152,6 +152,7 @@ where
             CanonicalDeserialize::deserialize_compressed(recv_message.payload.as_slice())?;
         let binding = self.get_or_create_store(recv_message.session_id).await;
         let mut dousha_storage = binding.lock().await;
+        //todo: Better handle duplicate messages from a sender, check the shares
         if dousha_storage.share.contains_key(&recv_message.sender_id) {
             warn!(
                 session_id = recv_message.session_id.as_u64(),
