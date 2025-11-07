@@ -9,7 +9,7 @@ cargo install --force cbindgen
 
 ### Create header file for binding
 ```text
-cbindgen --config ./mpc/src/ffi/c_bindings/cbindgen.toml --crate stoffelmpc-mpc --output ./mpc/src/ffi/shamirshare.h
+cbindgen --config ./mpc/src/ffi/c_bindings/cbindgen.toml --crate stoffelmpc-mpc --output ./mpc/src/ffi/honey_badger_bindings.h
 ```
 
 ### Compile Rust codes
@@ -21,10 +21,12 @@ This should also create .a and .so/.dylib files for stoffelmpc in `./target/rele
 ### Compile and run C test codes
 ```text
 gcc ./mpc/src/ffi/tests/secret_share.c -L target/release -lstoffelmpc_mpc -o ./mpc/src/ffi/share_test
-gcc ./mpc/src/ffi/tests/rbc_test.c -L target/release -lstoffelmpc_mpc -o ./mpc/src/ffi/rbc_test   
+gcc ./mpc/src/ffi/tests/rbc_test.c -L target/release -lstoffelmpc_mpc -o ./mpc/src/ffi/rbc_test
+gcc ./mpc/src/ffi/tests/network_test.c -L target/release -lstoffelmpc_mpc -o ./mpc/src/ffi/network_test   
 ```
 ```text
 ./mpc/src/ffi/share_test
-./mpc/src/ffi/rbc_test  
+./mpc/src/ffi/rbc_test
+./mpc/src/ffi/network_test  
 ```
 

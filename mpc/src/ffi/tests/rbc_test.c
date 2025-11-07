@@ -3,8 +3,9 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <pthread.h>
+#include <unistd.h>
 
-#include "../shamirshare.h"
+#include "../honey_badger_bindings.h"
 
 void setup_bracha_parties(size_t n, size_t t, BrachaOpaque **parties)
 {
@@ -39,9 +40,11 @@ void *recv_msg(void *arg)
         }
         struct RbcMsg rbc_msg;
         enum RbcErrorCode re = deserialize_rbc_msg(msg, &rbc_msg);
+        free_bytes_slice(msg);
         if (re != RbcSuccess)
         {
             printf("Error in deserializing rbc message for party %zu, error code: %d\n", params->node_index, re);
+            // free_rbc_msg(rbc_msg);
             pthread_exit(NULL);
         }
         printf("Party %zu received message of length %lu from sender %lu\n", params->node_index, rbc_msg.msg_len, rbc_msg.sender_id);
@@ -50,11 +53,13 @@ void *recv_msg(void *arg)
         if (e == RbcSessionEnded)
         {
             printf("Bracha protocol finished for party %zu\n", params->node_index);
+            free_rbc_msg(rbc_msg);
             pthread_exit(NULL);
         }
         if (e != RbcSuccess)
         {
             printf("Error in bracha process for party %zu, error code: %d\n", params->node_index, e);
+            free_rbc_msg(rbc_msg);
             pthread_exit(NULL);
         }
     }
@@ -137,10 +142,14 @@ void test_bracha_rbc_basic()
     // read output message from all parties
     for (size_t i = 0; i < n; i++)
     {
+        bool session_ended;
+        ByteSlice output;
         // make sure session has ended
-        bool session_ended = has_bracha_session_ended(prt_array[i], session_id);
+        RbcErrorCode r = has_bracha_session_ended(prt_array[i], session_id, &session_ended);
+        assert(r == RbcSuccess);
         assert(session_ended);
-        struct ByteSlice output = get_bracha_output(prt_array[i], session_id);
+        r = get_bracha_output(prt_array[i], session_id, &output);
+        assert(r == RbcSuccess);
         if (output.len == 0 || output.pointer == NULL)
         {
             printf("Error: output is empty for party %zu\n", i);
@@ -149,6 +158,11 @@ void test_bracha_rbc_basic()
         printf("Output for party %zu: %s\n", i, output.pointer);
         assert(strcmp((char *)output.pointer, myString) == 0);
     }
+    for (size_t i = 0; i < n; i++)
+    {
+        free_bracha(prt_array[i]);
+    }
+    free_network(net);
 }
 
 int main()
