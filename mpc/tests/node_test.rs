@@ -1,12 +1,13 @@
 use crate::utils::test_utils::{
     construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
     generate_independent_shares, initialize_global_nodes_randousha, initialize_global_nodes_ransha,
-    receive, receive_client, setup_tracing, test_setup,
+    receive, receive_client, setup_tracing, test_setup, test_setup_bad,
 };
 use ark_bls12_381::Fr;
 use ark_ff::{AdditiveGroup, Field, UniformRand};
 use ark_std::{
     rand::{
+        distributions::Uniform,
         rngs::{OsRng, StdRng},
         SeedableRng,
     },
@@ -30,7 +31,7 @@ use stoffelmpc_mpc::{
         ProtocolType, SessionId, WrappedMessage,
     },
 };
-use stoffelmpc_network::fake_network::FakeNetwork;
+use stoffelmpc_network::{bad_fake_network::BadFakeNetwork, fake_network::FakeNetwork};
 use stoffelnet::network_utils::ClientId;
 use tokio::{
     sync::Mutex,
@@ -334,7 +335,7 @@ async fn gen_masks_for_input_e2e() {
 //----------------------------------------MUL----------------------------------------
 
 #[tokio::test]
-async fn mul_e2e() {
+async fn mul_e2e_bad_net() {
     setup_tracing();
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 5;
@@ -344,7 +345,14 @@ async fn mul_e2e() {
     let no_of_multiplication = 5;
 
     //Setup
-    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    let (network, net_rx, node_channels, receivers, _) = test_setup_bad(n_parties, vec![]);
+
+    BadFakeNetwork::start(
+        net_rx,
+        node_channels.clone(),
+        StdRng::seed_from_u64(1u64),
+        Uniform::new(1, 100),
+    );
     //Generate triples
     let triple = construct_e2e_input_mul(n_parties, no_of_multiplication, t).await;
 
@@ -378,7 +386,7 @@ async fn mul_e2e() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
     //Load the triples
@@ -451,7 +459,7 @@ async fn mul_e2e() {
 }
 
 #[tokio::test]
-async fn mul_e2e_with_preprocessing() {
+async fn mul_e2e_with_preprocessing_bad_net() {
     setup_tracing();
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 5;
