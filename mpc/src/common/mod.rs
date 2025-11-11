@@ -29,7 +29,7 @@ use std::{
     sync::Arc,
     usize,
 };
-use stoffelnet::network_utils::{Network, PartyId};
+use stoffelnet::network_utils::{Network, ClientId, PartyId};
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
@@ -290,7 +290,7 @@ where
     type MPCOpts;
     type Error: std::fmt::Debug;
 
-    fn setup(id: PartyId, params: Self::MPCOpts) -> Result<Self, Self::Error>
+    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, Self::Error>
     where
         Self: Sized;
 
