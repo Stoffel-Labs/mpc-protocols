@@ -37,6 +37,10 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerJoinError,
     HoneyBadgerChannelClosed,
     HoneyBadgerOutputNotReady,
+    HoneyBadgerRandBitError,
+    HoneyBadgerPRandError,
+    HoneyBadgerFPMulError,
+    HoneyBadgerTruncPrError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -58,6 +62,10 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             }
             HoneyBadgerError::JoinError => Self::HoneyBadgerJoinError,
             HoneyBadgerError::ChannelClosed => Self::HoneyBadgerChannelClosed,
+            HoneyBadgerError::RandBitError(_) => Self::HoneyBadgerRandBitError,
+            HoneyBadgerError::PRandError(_) => Self::HoneyBadgerPRandError,
+            HoneyBadgerError::FPMulError(_) => Self::HoneyBadgerFPMulError,
+            HoneyBadgerError::TruncPrError(_) => Self::HoneyBadgerTruncPrError,
         }
     }
 }
