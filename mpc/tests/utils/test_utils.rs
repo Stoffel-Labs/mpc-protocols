@@ -408,6 +408,7 @@ pub fn create_global_nodes<F: FftField, R: RBC + 'static, S, N>(
     n_triples: usize,
     n_random_shares: usize,
     instance_id: u64,
+    input_ids: Vec<ClientId>
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
     N: Network + Send + Sync + 'static,
@@ -417,7 +418,7 @@ where
     let parameters =
         HoneyBadgerMPCNodeOpts::new(n_parties, t, n_triples, n_random_shares, instance_id);
     (0..n_parties)
-        .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone()).unwrap())
+        .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), input_ids.clone()).unwrap())
         .collect()
 }
 

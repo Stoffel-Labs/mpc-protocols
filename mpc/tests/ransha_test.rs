@@ -50,7 +50,7 @@ async fn test_reconstruct_handler_incorrect_share() {
     }
     // create global nodes
     let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n_parties, t, 0, 0, 111,
+        n_parties, t, 0, 0, 111, vec![]
     );
 
     // receiver randousha node

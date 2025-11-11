@@ -56,7 +56,7 @@ use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
-use stoffelnet::network_utils::{Network, NetworkError, PartyId};
+use stoffelnet::network_utils::{Network, NetworkError, ClientId, PartyId};
 use thiserror::Error;
 use tokio::sync::{
     mpsc::{self, Receiver},
@@ -284,7 +284,7 @@ where
     type MPCOpts = HoneyBadgerMPCNodeOpts;
     type Error = HoneyBadgerError;
 
-    fn setup(id: PartyId, params: Self::MPCOpts) -> Result<Self, HoneyBadgerError> {
+    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, HoneyBadgerError> {
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
@@ -313,7 +313,7 @@ where
             params.threshold + 1,
             share_gen_sender,
         )?;
-        let input = InputServer::new(id, params.n_parties, params.threshold)?;
+        let input = InputServer::new(id, params.n_parties, params.threshold, input_ids)?;
         let output = OutputServer::new(id, params.n_parties)?;
         Ok(Self {
             id,
