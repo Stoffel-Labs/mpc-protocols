@@ -459,7 +459,297 @@ async fn mul_e2e_bad_net() {
 }
 
 #[tokio::test]
+async fn mul_e2e() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 5;
+    let t = 1;
+    let mut rng = test_rng();
+    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 111);
+    let no_of_multiplication = 5;
+
+    //Setup
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    //Generate triples
+    let triple = construct_e2e_input_mul(n_parties, no_of_multiplication, t).await;
+
+    // Prepare inputs for multiplication
+    let mut x_values = Vec::new();
+    let mut y_values = Vec::new();
+
+    let mut x_inputs_per_node = vec![Vec::new(); n_parties];
+    let mut y_inputs_per_node = vec![Vec::new(); n_parties];
+
+    for _i in 0..no_of_multiplication {
+        let x_value = Fr::rand(&mut rng);
+        x_values.push(x_value);
+        let y_value = Fr::rand(&mut rng);
+        y_values.push(y_value);
+
+        let shares_x = RobustShare::compute_shares(x_value, n_parties, t, None, &mut rng).unwrap();
+        let shares_y = RobustShare::compute_shares(y_value, n_parties, t, None, &mut rng).unwrap();
+
+        for p in 0..n_parties {
+            x_inputs_per_node[p].push(shares_x[p].clone());
+            y_inputs_per_node[p].push(shares_y[p].clone());
+        }
+    }
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    // create global nodes
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties, t, 0, 0, 111, 0, 0, 0, 0,
+    );
+
+    //----------------------------------------RECIEVE----------------------------------------
+    // spawn tasks to process received messages
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
+
+    //----------------------------------------RUN PROTOCOL----------------------------------------
+    //Load the triples
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        node.preprocessing_material
+            .lock()
+            .await
+            .add(Some(triple[pid].clone()), None, None, None);
+    }
+
+    // init all nodes
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let x_shares = x_inputs_per_node[pid].clone();
+        let y_shares = y_inputs_per_node[pid].clone();
+
+        let handle = tokio::spawn(async move {
+            {
+                node.mul(x_shares.clone(), y_shares.clone(), net.clone())
+                    .await
+                    .expect("mul failed");
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all mul tasks to finish
+    futures::future::join_all(handles).await;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+
+    let mut per_multiplication_shares: Vec<Vec<RobustShare<Fr>>> =
+        vec![Vec::new(); no_of_multiplication];
+
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        let storage_map = node.operations.mul.mult_storage.lock().await;
+        if let Some(storage_mutex) = storage_map.get(&session_id) {
+            let storage = storage_mutex.lock().await;
+
+            if storage.protocol_output.is_empty() {
+                panic!("protocol_output empty for node {}", pid);
+            }
+            let shares_mult_for_node: Vec<RobustShare<Fr>> = storage.protocol_output.clone();
+            assert_eq!(shares_mult_for_node.len(), no_of_multiplication);
+
+            for i in 0..no_of_multiplication {
+                per_multiplication_shares[i].push(shares_mult_for_node[i].clone());
+            }
+        } else {
+            panic!(
+                "no mult_storage entry for session {:?} on node {}",
+                session_id, pid
+            );
+        }
+    }
+
+    for i in 0..no_of_multiplication {
+        let shares_for_i = per_multiplication_shares[i][0..=(2 * t)].to_vec();
+        let (_, z_rec) =
+            RobustShare::recover_secret(&shares_for_i, n_parties).expect("interpolate failed");
+        let expected = x_values[i] * y_values[i];
+
+        assert_eq!(z_rec, expected, "multiplication mismatch at index {}", i);
+    }
+}
+
+#[tokio::test]
 async fn mul_e2e_with_preprocessing_bad_net() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 5;
+    let t = 1;
+    let no_of_triples = 2 * t + 1;
+    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 111);
+    let clientid: Vec<ClientId> = vec![100, 200];
+    let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
+    let no_of_multiplications = 2; // 10*10, 20*20
+
+    //Setup
+    let (network, net_rx, node_channels, receivers, client_recv) =
+        test_setup_bad(n_parties, clientid.clone());
+    BadFakeNetwork::start(
+        net_rx,
+        node_channels.clone(),
+        StdRng::seed_from_u64(1u64),
+        Uniform::new(1, 10),
+    );
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    // create global nodes
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        no_of_triples,
+        2,
+        111,
+        0,
+        0,
+        0,
+        0,
+    );
+
+    //Create Clients
+    let clients = create_clients::<Fr, Avid>(clientid.clone(), n_parties, t, 111, input_values, 2);
+
+    //----------------------------------------RECIEVE----------------------------------------
+    //At servers
+    receive::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(receivers, nodes.clone(), network.clone());
+
+    //At client
+    receive_client(client_recv, clients.clone(), network.clone());
+
+    //----------------------------------------RUN PREPROCESSING----------------------------------------
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let mut rng = StdRng::from_rng(OsRng).unwrap();
+
+        let handle = tokio::spawn(async move {
+            {
+                node.run_preprocessing(net, &mut rng)
+                    .await
+                    .expect("Preprocessing failed");
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all mul tasks to finish
+    futures::future::join_all(handles).await;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    //----------------------------------------RUN INPUT----------------------------------------
+    for (_, node) in nodes.iter_mut().enumerate() {
+        let local_shares = node
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(2)
+            .unwrap();
+        match node
+            .preprocess
+            .input
+            .init(clientid[0], local_shares, 2, network.clone())
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                eprint!("{e}");
+            }
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    //----------------------------------------RUN MULTIPLICATION----------------------------------------
+
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+
+        let (x_shares, y_shares) = {
+            let input_store = node.preprocess.input.input_shares.lock().await;
+            let inputs = input_store.get(&clientid[0]).unwrap();
+            (
+                vec![inputs[0].clone(), inputs[1].clone()],
+                vec![inputs[0].clone(), inputs[1].clone()],
+            )
+        };
+
+        let handle = tokio::spawn(async move {
+            {
+                node.mul(x_shares.clone(), y_shares.clone(), net.clone())
+                    .await
+                    .expect("mul failed");
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all mul tasks to finish
+    futures::future::join_all(handles).await;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+
+    let output_clientid: ClientId = 200;
+    // Each server sends its output shares
+    for (i, server) in nodes.iter().enumerate() {
+        let net = network.clone();
+        let storage_map = server.operations.mul.mult_storage.lock().await;
+        if let Some(storage_mutex) = storage_map.get(&session_id) {
+            let storage = storage_mutex.lock().await;
+
+            if storage.protocol_output.is_empty() {
+                panic!("protocol_output empty for node {}", i);
+            }
+            let shares_mult_for_node: Vec<RobustShare<Fr>> = storage.protocol_output.clone();
+            assert_eq!(shares_mult_for_node.len(), no_of_multiplications);
+            match server
+                .output
+                .init(
+                    output_clientid,
+                    shares_mult_for_node,
+                    no_of_multiplications,
+                    net.clone(),
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(e) => eprintln!("Server init error: {e}"),
+            }
+        } else {
+            panic!(
+                "no mult_storage entry for session {:?} on node {}",
+                session_id, i
+            );
+        }
+    }
+
+    // Give async tasks time to run
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Collect reconstructed result
+    let final_output = clients[&output_clientid].lock().await.output.output.clone();
+    assert!(
+        final_output.is_some(),
+        "Client failed to reconstruct output"
+    );
+    let recovered = final_output.unwrap();
+    let output_values = vec![Fr::from(100), Fr::from(400)];
+    assert!(
+        output_values.contains(&recovered),
+        "Recovered output {} not in expected values {:?}",
+        recovered,
+        output_values
+    );
+}
+
+#[tokio::test]
+async fn mul_e2e_with_preprocessing() {
     setup_tracing();
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 5;
