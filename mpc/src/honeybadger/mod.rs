@@ -23,12 +23,18 @@ pub mod fpmul;
 pub mod input;
 pub mod mul;
 pub mod output;
+pub mod preprocessing;
 pub mod share_gen;
+pub mod fpdiv;
 
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
-        types::fixed::SecretFixedPoint,
+        types::{
+            fixed::{ClearFixedPoint, SecretFixedPoint},
+            integer::{ClearInt, SecretInt},
+            TypeError,
+        },
         MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ShamirShare, RBC,
     },
     honeybadger::{
@@ -51,10 +57,11 @@ use crate::{
             output::{OutputClient, OutputServer},
             OutputError, OutputMessage,
         },
+        preprocessing::HoneyBadgerMPCNodePreprocMaterial,
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
-        triple_gen::{ShamirBeaverTriple, TripleGenError, TripleGenMessage},
+        triple_gen::{TripleGenError, TripleGenMessage},
     },
 };
 use ark_ff::{FftField, PrimeField};
@@ -108,6 +115,10 @@ pub enum HoneyBadgerError {
     FPMulError(#[from] FPMulError),
     #[error("error in Truncation: {0:?}")]
     TruncPrError(#[from] TruncPrError),
+    #[error("error in types: {0:?}")]
+    TypeError(#[from] TypeError),
+    #[error("Already reserved batch")]
+    AlreadyReserved,
     /// Error during the serialization using [`bincode`].
     #[error("error during the serialization using bincode: {0:?}")]
     BincodeSerializationError(#[from] Box<ErrorKind>),
@@ -202,109 +213,6 @@ pub struct OutputChannels {
     pub prand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub prand_int_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub fpmul_channel: Arc<Mutex<Receiver<SessionId>>>,
-}
-
-/// Preprocessing material for the HoneyBadgerMPCNode protocol.
-#[derive(Clone, Debug)]
-pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
-    /// A pool of random double shares used for secure multiplication.
-    beaver_triples: Vec<ShamirBeaverTriple<F>>,
-    /// A pool of random shares used for inputing private data for the protocol.
-    random_shares: Vec<RobustShare<F>>,
-    ///A pool of PRandBit outputs for truncation
-    prandbit_shares: Vec<(RobustShare<F>, F2_8)>,
-    ///A pool of PRandInt outputs for truncation
-    prandint_shares: Vec<RobustShare<F>>,
-}
-
-impl<F> HoneyBadgerMPCNodePreprocMaterial<F>
-where
-    F: FftField,
-{
-    /// Generates empty preprocessing material storage.
-    pub fn empty() -> Self {
-        Self {
-            random_shares: Vec::new(),
-            beaver_triples: Vec::new(),
-            prandbit_shares: Vec::new(),
-            prandint_shares: Vec::new(),
-        }
-    }
-
-    /// Adds the provided new preprocessing material to the current pool.
-    pub fn add(
-        &mut self,
-        mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
-        mut random_shares: Option<Vec<RobustShare<F>>>,
-        mut prandbit_shares: Option<Vec<(RobustShare<F>, F2_8)>>,
-        mut prandbit_int: Option<Vec<RobustShare<F>>>,
-    ) {
-        if let Some(pairs) = &mut triples {
-            self.beaver_triples.append(pairs);
-        }
-
-        if let Some(shares) = &mut random_shares {
-            self.random_shares.append(shares);
-        }
-
-        if let Some(shares) = &mut prandbit_shares {
-            self.prandbit_shares.append(shares);
-        }
-        if let Some(shares) = &mut prandbit_int {
-            self.prandint_shares.append(shares);
-        }
-    }
-
-    /// Returns the number of random double share pairs, and the number of random shares
-    /// respectively.
-    pub fn len(&self) -> (usize, usize, usize, usize) {
-        (
-            self.beaver_triples.len(),
-            self.random_shares.len(),
-            self.prandbit_shares.len(),
-            self.prandint_shares.len(),
-        )
-    }
-
-    /// Take up to n pairs of random double sharings from the preprocessing material.
-    pub fn take_beaver_triples(
-        &mut self,
-        n_triples: usize,
-    ) -> Result<Vec<ShamirBeaverTriple<F>>, HoneyBadgerError> {
-        if n_triples > self.beaver_triples.len() {
-            return Err(HoneyBadgerError::NotEnoughPreprocessing);
-        }
-        Ok(self.beaver_triples.drain(0..n_triples).collect())
-    }
-
-    /// Take up to n random shares from the preprocessing material.
-    pub fn take_random_shares(
-        &mut self,
-        n_shares: usize,
-    ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
-        if n_shares > self.random_shares.len() {
-            return Err(HoneyBadgerError::NotEnoughPreprocessing);
-        }
-        Ok(self.random_shares.drain(0..n_shares).collect())
-    }
-    pub fn take_prandbit_shares(
-        &mut self,
-        n_prandbit: usize,
-    ) -> Result<Vec<(RobustShare<F>, F2_8)>, HoneyBadgerError> {
-        if n_prandbit > self.prandbit_shares.len() {
-            return Err(HoneyBadgerError::NotEnoughPreprocessing);
-        }
-        Ok(self.prandbit_shares.drain(0..n_prandbit).collect())
-    }
-    pub fn take_prandint_shares(
-        &mut self,
-        n_prandint: usize,
-    ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
-        if n_prandint > self.prandint_shares.len() {
-            return Err(HoneyBadgerError::NotEnoughPreprocessing);
-        }
-        Ok(self.prandint_shares.drain(0..n_prandint).collect())
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -666,25 +574,40 @@ where
     R: RBC,
 {
     type Error = HoneyBadgerError;
+    type Sfix = SecretFixedPoint<F, RobustShare<F>>;
+    type Sint = SecretInt<F, RobustShare<F>>;
+    type Cfix = ClearFixedPoint<F>;
+    type Cint = ClearInt<F>;
 
     /// Fixed-point addition: x + y
     async fn add_fixed(
         &self,
-        _x: Vec<SecretFixedPoint<F, RobustShare<F>>>,
-        _y: Vec<SecretFixedPoint<F, RobustShare<F>>>,
-        _net: Arc<N>,
-    ) -> Result<Vec<SecretFixedPoint<F, RobustShare<F>>>, Self::Error> {
-        todo!()
+        x: Vec<Self::Sfix>,
+        y: Vec<Self::Sfix>,
+    ) -> Result<Vec<Self::Sfix>, Self::Error> {
+        if x.len() != y.len() {
+            return Err(HoneyBadgerError::FPMulError(FPMulError::Incompatible));
+        }
+        Ok(x.into_iter()
+            .zip(y)
+            .map(|(a, b)| a + b)
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Fixed-point subtraction: x - y
     async fn sub_fixed(
         &self,
-        _x: Vec<SecretFixedPoint<F, RobustShare<F>>>,
-        _y: Vec<SecretFixedPoint<F, RobustShare<F>>>,
-        _net: Arc<N>,
-    ) -> Result<Vec<SecretFixedPoint<F, RobustShare<F>>>, Self::Error> {
-        todo!()
+        x: Vec<Self::Sfix>,
+        y: Vec<Self::Sfix>,
+    ) -> Result<Vec<Self::Sfix>, Self::Error> {
+        if x.len() != y.len() {
+            return Err(HoneyBadgerError::FPMulError(FPMulError::Incompatible));
+        }
+
+        Ok(x.into_iter()
+            .zip(y)
+            .map(|(a, b)| a - b)
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Fixed-point multiplication with truncation for fixed precision
@@ -759,23 +682,72 @@ where
     /// Integer addition (int8/16/32/64)
     async fn add_int(
         &self,
-        _x: Vec<RobustShare<F>>,
-        _y: Vec<RobustShare<F>>,
-        _bit_width: usize,
-        _net: Arc<N>,
-    ) -> Result<Vec<RobustShare<F>>, Self::Error> {
-        todo!()
+        x: Vec<Self::Sint>,
+        y: Vec<Self::Sint>,
+    ) -> Result<Vec<Self::Sint>, Self::Error> {
+        if x.len() != y.len() {
+            return Err(HoneyBadgerError::FPMulError(FPMulError::Incompatible));
+        }
+
+        let mut out = Vec::with_capacity(x.len());
+        for (a, b) in x.into_iter().zip(y.into_iter()) {
+            // Local addition of shares
+            let sum = (a + b)?;
+            out.push(sum);
+        }
+        Ok(out)
+    }
+
+    /// Integer addition (int8/16/32/64)
+    async fn sub_int(
+        &self,
+        x: Vec<Self::Sint>,
+        y: Vec<Self::Sint>,
+    ) -> Result<Vec<Self::Sint>, Self::Error> {
+        if x.len() != y.len() {
+            return Err(HoneyBadgerError::FPMulError(FPMulError::Incompatible));
+        }
+        let mut out = Vec::with_capacity(x.len());
+        for (a, b) in x.into_iter().zip(y.into_iter()) {
+            // Local addition of shares
+            let sum = (a - b)?;
+            out.push(sum);
+        }
+        Ok(out)
     }
 
     /// Integer multiplication (int8/16/32/64)
     async fn mul_int(
-        &self,
-        _x: Vec<RobustShare<F>>,
-        _y: Vec<RobustShare<F>>,
-        _bit_width: usize,
-        _net: Arc<N>,
-    ) -> Result<Vec<RobustShare<F>>, Self::Error> {
-        todo!()
+        &mut self,
+        x: Vec<Self::Sint>,
+        y: Vec<Self::Sint>,
+        net: Arc<N>,
+    ) -> Result<Vec<Self::Sint>, Self::Error> {
+        if x.len() != y.len() {
+            return Err(HoneyBadgerError::FPMulError(FPMulError::Incompatible));
+        }
+
+        let bitlen = x
+            .first()
+            .map(|v| v.bit_length())
+            .ok_or(HoneyBadgerError::FPMulError(FPMulError::Incompatible))?;
+
+        let all_same_bitlen = x.iter().chain(y.iter()).all(|v| v.bit_length() == bitlen);
+
+        if !all_same_bitlen {
+            return Err(HoneyBadgerError::FPMulError(FPMulError::Incompatible));
+        }
+
+        let a: Vec<ShamirShare<F, 1, Robust>> = x.iter().map(|x| x.share().clone()).collect();
+        let b: Vec<ShamirShare<F, 1, Robust>> = y.iter().map(|y| y.share().clone()).collect();
+
+        // Perform secure Beaver multiplication
+        let result = self.mul(a, b, net).await?;
+        let sresult = result
+            .iter()
+            .map(|a| SecretInt::new(a.clone(), bitlen))
+            .collect();
+        Ok(sresult)
     }
 }
 

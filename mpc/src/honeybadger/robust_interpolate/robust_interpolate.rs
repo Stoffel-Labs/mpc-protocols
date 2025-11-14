@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::marker::PhantomData;
 
 use super::*;
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug,PartialEq)]
 pub struct Robust;
 pub type RobustShare<T> = ShamirShare<T, 1, Robust>;
 
