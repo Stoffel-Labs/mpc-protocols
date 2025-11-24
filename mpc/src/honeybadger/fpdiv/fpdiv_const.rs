@@ -1,7 +1,7 @@
 use crate::common::types::fixed::ClearFixedPoint;
 use crate::common::types::TypeError;
 use crate::honeybadger::fpdiv::fixed_point_reciprocal_scaled;
-use crate::honeybadger::{fpmul::TruncPrError, mul::MulError, SessionId};
+use crate::honeybadger::{fpmul::TruncPrError, SessionId};
 use crate::{
     common::{types::fixed::SecretFixedPoint, RBC},
     honeybadger::{
@@ -21,8 +21,8 @@ use tokio::sync::{
 
 #[derive(Error, Debug)]
 pub enum FPDivConstError {
-    #[error("Multiplication error: {0:?}")]
-    MulError(#[from] MulError),
+    #[error("Incompatible precision")]
+    Incompatible,
     #[error("Truncation error: {0:?}")]
     TruncPrError(#[from] TruncPrError),
     #[error("Division failed")]

@@ -30,7 +30,7 @@ use std::{
 };
 use stoffelnet::network_utils::{Network, PartyId};
 
-#[derive(Clone, Debug,PartialEq, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
     pub share: [F; N],
     ///index of the share(x-values),can be different from the reciever ID
@@ -349,6 +349,14 @@ where
         &mut self,
         x: Self::Sfix,
         y: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error>;
+
+    /// Fixed-point Division with const
+    async fn div_with_const_fixed(
+        &mut self,
+        x: Self::Sfix,
+        y: Self::Cfix,
         net: Arc<N>,
     ) -> Result<Self::Sfix, Self::Error>;
 

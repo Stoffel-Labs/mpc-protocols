@@ -19,13 +19,13 @@ pub mod double_share;
 /// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
 pub mod triple_gen;
 
+pub mod fpdiv;
 pub mod fpmul;
 pub mod input;
 pub mod mul;
 pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
-pub mod fpdiv;
 
 use crate::{
     common::{
@@ -40,6 +40,7 @@ use crate::{
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
+        fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
             f256::F2_8,
             fpmul::{FPMulError, FPMulNode},
@@ -113,6 +114,8 @@ pub enum HoneyBadgerError {
     PRandError(#[from] PRandError),
     #[error("error in FPMul: {0:?}")]
     FPMulError(#[from] FPMulError),
+    #[error("error in FPDiv_Const: {0:?}")]
+    FPDivConstError(#[from] FPDivConstError),
     #[error("error in Truncation: {0:?}")]
     TruncPrError(#[from] TruncPrError),
     #[error("error in types: {0:?}")]
@@ -188,6 +191,7 @@ pub struct Operation<F: FftField, R: RBC> {
 #[derive(Clone, Debug)]
 pub struct TypeOperations<F: PrimeField, R: RBC> {
     pub fpmul: FPMulNode<F, R>,
+    pub fpdiv_const: FPDivConstNode<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -213,6 +217,7 @@ pub struct OutputChannels {
     pub prand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub prand_int_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub fpmul_channel: Arc<Mutex<Receiver<SessionId>>>,
+    pub fpdiv_const_channel: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -288,6 +293,7 @@ where
         let (prand_bit_sender, prand_bit_receiver) = mpsc::channel(128);
         let (prand_int_sender, prand_int_receiver) = mpsc::channel(128);
         let (fpmul_sender, fpmul_receiver) = mpsc::channel(128);
+        let (fpdiv_const_sender, fpdiv_const_receiver) = mpsc::channel(128);
 
         // Create nodes for preprocessing.
         let dousha_node =
@@ -319,6 +325,8 @@ where
             share_gen_sender,
         )?;
         let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold, fpmul_sender)?;
+        let fpdiv_const_node =
+            FPDivConstNode::new(id, params.n_parties, params.threshold, fpdiv_const_sender)?;
         let input = InputServer::new(id, params.n_parties, params.threshold)?;
         let output = OutputServer::new(id, params.n_parties)?;
         Ok(Self {
@@ -337,7 +345,10 @@ where
                 prand_bit: prand_bit_node,
             },
             operations: Operation { mul: mul_node },
-            type_ops: TypeOperations { fpmul: fpmul_node },
+            type_ops: TypeOperations {
+                fpmul: fpmul_node,
+                fpdiv_const: fpdiv_const_node,
+            },
             output,
             outputchannels: OutputChannels {
                 share_gen_channel: Arc::new(Mutex::new(share_gen_reciever)),
@@ -349,6 +360,7 @@ where
                 prand_bit_channel: Arc::new(Mutex::new(prand_bit_receiver)),
                 prand_int_channel: Arc::new(Mutex::new(prand_int_receiver)),
                 fpmul_channel: Arc::new(Mutex::new(fpmul_receiver)),
+                fpdiv_const_channel: Arc::new(Mutex::new(fpdiv_const_receiver)),
             },
         })
     }
@@ -442,6 +454,14 @@ where
                             .process(rbc_msg, net)
                             .await?
                     }
+                }
+                Some(ProtocolType::FpDivConst) => {
+                    self.type_ops
+                        .fpdiv_const
+                        .trunc_node
+                        .rbc
+                        .process(rbc_msg, net)
+                        .await?
                 }
                 _ => {
                     warn!(
@@ -548,6 +568,13 @@ where
                     Some(ProtocolType::FpMul) => {
                         self.type_ops
                             .fpmul
+                            .trunc_node
+                            .process(trunc_message, net)
+                            .await?;
+                    }
+                    Some(ProtocolType::FpDivConst) => {
+                        self.type_ops
+                            .fpdiv_const
                             .trunc_node
                             .process(trunc_message, net)
                             .await?;
@@ -676,6 +703,79 @@ where
                 return Ok(output);
             }
         }
+        Err(HoneyBadgerError::ChannelClosed)
+    }
+
+    async fn div_with_const_fixed(
+        &mut self,
+        x: SecretFixedPoint<F, RobustShare<F>>,
+        y: ClearFixedPoint<F>,
+        net: Arc<N>,
+    ) -> Result<SecretFixedPoint<F, RobustShare<F>>, Self::Error> {
+        // 1. Precision check ---------------------------------------------
+        if x.precision() != y.precision() {
+            return Err(HoneyBadgerError::FPDivConstError(
+                FPDivConstError::Incompatible,
+            ));
+        }
+
+        // 2. Check preprocessing inventory --------------------------------
+        let (_, _, no_rand_bit, no_rand_int) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+
+        // Need f random bits and 1 random integer for truncation
+        if no_rand_bit < x.precision().f() || no_rand_int == 0 {
+            // Run full preprocessing if insufficient
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        // 3. Pull preprocessing randomness --------------------------------
+        let r_bits_vec = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandbit_shares(x.precision().f())?;
+
+        let r_int = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandint_shares(1)?;
+
+        // Extract just the shares (drop F2_8 auxiliary)
+        let r_bits_only = r_bits_vec
+            .iter()
+            .map(|(a, _)| a.clone())
+            .collect::<Vec<_>>();
+
+        // 4. Prepare SessionId --------------------------------------------
+        let session_id = SessionId::new(ProtocolType::FpDivConst, 0, 0, self.params.instance_id);
+
+        // 5. Call the division node ---------------------------------------
+        self.type_ops
+            .fpdiv_const
+            .init(x, y, r_bits_only, r_int[0].clone(), session_id, net.clone())
+            .await?;
+
+        // 6. Wait for output on the channel --------------------------------
+        let mut rx = self.outputchannels.fpdiv_const_channel.lock().await;
+
+        while let Some(id) = rx.recv().await {
+            if id == session_id {
+                let output = self
+                    .type_ops
+                    .fpdiv_const
+                    .protocol_output
+                    .clone()
+                    .ok_or(HoneyBadgerError::FPDivConstError(FPDivConstError::Failed))?;
+
+                return Ok(output);
+            }
+        }
+
         Err(HoneyBadgerError::ChannelClosed)
     }
 
@@ -1265,6 +1365,7 @@ pub enum ProtocolType {
     RandBit = 11,
     FpMul = 12,
     Trunc = 13,
+    FpDivConst = 14,
 }
 
 impl TryFrom<u16> for ProtocolType {
@@ -1286,6 +1387,7 @@ impl TryFrom<u16> for ProtocolType {
             11 => Ok(ProtocolType::RandBit),
             12 => Ok(ProtocolType::FpMul),
             13 => Ok(ProtocolType::Trunc),
+            14 => Ok(ProtocolType::FpDivConst),
             _ => Err(()),
         }
     }

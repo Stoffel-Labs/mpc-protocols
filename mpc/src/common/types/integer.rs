@@ -249,7 +249,6 @@ mod tests {
 
     use super::*;
     use ark_bn254::Fr;
-    use ark_ff::Field;
     use ark_std::test_rng;
 
     #[test]
@@ -417,14 +416,18 @@ mod tests {
 
         // secret = 20, divide by 4 → expected = 5
         let shares = RobustShare::compute_shares(Fr::from(20u64), n, t, None, &mut rng).unwrap();
-        let secret = SecretInt::<Fr, RobustShare<Fr>>::new(shares[0].clone(), bitlen);
+        let mut s = Vec::new();
+        for i in shares {
+            s.push(
+                SecretInt::<Fr, RobustShare<Fr>>::new(i.clone(), bitlen)
+                    .div_by_const(4)
+                    .unwrap(),
+            );
+        }
+        let new_shares: Vec<_> = s.iter().map(|s| s.share.clone()).collect();
+        let expected = RobustShare::recover_secret(&new_shares, n).unwrap();
 
-        let res = secret.div_by_const(4).unwrap();
-
-        let inv_4 = Fr::from(4u64).inverse().expect("no inverse for 4");
-        let expected = (shares[0].clone() * inv_4).expect("share multiplication failed");
-
-        assert_eq!(res.share(), &expected);
-        assert_eq!(res.bit_length(), bitlen);
+        assert_eq!(Fr::from(5), expected.1);
+        s.iter().for_each(|i| assert_eq!(i.bit_length(), bitlen));
     }
 }

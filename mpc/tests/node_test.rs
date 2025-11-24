@@ -18,7 +18,7 @@ use stoffelmpc_mpc::{
     common::{
         rbc::rbc::Avid,
         types::{
-            fixed::{FixedPointPrecision, SecretFixedPoint},
+            fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
             integer::SecretInt,
         },
         MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, SecretSharingScheme, ShamirShare,
@@ -1421,4 +1421,116 @@ async fn mul_int_e2e_with_preprocessing() {
     let (_, rec) = RobustShare::recover_secret(&shares, n_parties).unwrap();
 
     assert_eq!(rec, Fr::from(42u64)); // 7 * 6
+}
+
+//----------------------------------------DIV----------------------------------------
+
+#[tokio::test]
+async fn fpdiv_const_e2e() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 5;
+    let t = 1;
+    let mut rng = test_rng();
+
+    //Setup
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
+
+    // Prepare inputs for division
+    let k = 16; // total bitlength
+    let m = 4; // fractional bits
+    let precision = FixedPointPrecision::new(k, m);
+
+    let mut a_fix = Vec::new();
+    let mut denom_fix = Vec::new();
+
+    // x = 5.5 -> 5.5 * 2^4 = 88
+    // d = 2.0 -> 2.0 * 2^4 = 32
+    // x/d = 2.75 -> scaled = 2.75 * 2^4 = 44
+
+    let x_shares = RobustShare::compute_shares(Fr::from(88), n_parties, t, None, &mut rng).unwrap();
+
+    // denom is *public*, but each party needs ClearFixedPoint
+    let denom_clear = ClearFixedPoint::new_with_precision(Fr::from(32u64), precision);
+
+    for i in 0..n_parties {
+        a_fix.push(SecretFixedPoint::new_with_precision(
+            x_shares[i].clone(),
+            precision,
+        ));
+        denom_fix.push(denom_clear.clone());
+    }
+
+    // ----------------------------------------PREPROCESSING INPUTS----------------------------------------
+    // PRandInt
+    let r_int = RobustShare::compute_shares(Fr::from(3u64), n_parties, t, None, &mut rng).unwrap();
+
+    // PRandBits: m bits
+    let mut r_bits = vec![Vec::new(); n_parties];
+    for j in 0..m {
+        let bit_shares =
+            RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
+                .unwrap();
+        for (i, share) in bit_shares.iter().enumerate() {
+            r_bits[i].push((share.clone(), F2_8::one()));
+        }
+    }
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties, t, 0, 0, 222, 0, 0, 0, 0,
+    );
+
+    //----------------------------------------RECEIVE LOOP----------------------------------------
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
+
+    //----------------------------------------LOAD PREPROCESSING----------------------------------------
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        node.preprocessing_material.lock().await.add(
+            None, // No Beaver triple needed
+            None,
+            Some(r_bits[pid].clone()),      // PRandBit[]
+            Some(vec![r_int[pid].clone()]), // PRandInt[]
+        );
+    }
+
+    //----------------------------------------RUN PROTOCOL----------------------------------------
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let a = a_fix[pid].clone();
+        let d = denom_fix[pid].clone();
+
+        let handle = tokio::spawn(async move {
+            node.div_with_const_fixed(a, d, net)
+                .await
+                .expect("division failed")
+        });
+        handles.push(handle);
+    }
+
+    // wait for all nodes
+    let output_fixed: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.expect("task panicked"))
+        .collect();
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    //----------------------------------------VALIDATE RESULT----------------------------------------
+    let shares: Vec<_> = output_fixed
+        .iter()
+        .map(|s| {
+            assert_eq!(*s.precision(), precision);
+            s.value().clone()
+        })
+        .collect();
+
+    let (_, rec) = RobustShare::recover_secret(&shares, n_parties).expect("interpolate failed");
+
+    // 2.75 * 2^4 = 44
+    assert_eq!(rec, Fr::from(44u64));
 }
