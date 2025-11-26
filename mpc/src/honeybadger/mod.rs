@@ -140,6 +140,21 @@ pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
     pub output: OutputClient<F>,
 }
 
+// implement manually because derive(Clone) requires R: Clone, which is not needed at all
+impl<F, R> Clone for HoneyBadgerMPCClient<F, R>
+where
+    F: FftField,
+    R: RBC,
+{
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            input: self.input.clone(),
+            output: self.output.clone(),
+        }
+    }
+}
+
 impl<F: FftField, R: RBC> HoneyBadgerMPCClient<F, R> {
     pub fn new(
         id: usize,
@@ -236,6 +251,9 @@ impl GetNext<u8> for SubProtocolCounter {
     }
 }
 
+/// Per sub-protocol there is a counter to increment the exec ID within the
+/// session ID and distinguish different executions of the same sub-protocol.
+/// Since the exec ID is a `u8`, the counter is an `AtomicU8`.
 #[derive(Clone, Debug)]
 pub struct SubProtocolCounters {
     pub ran_dou_sha_counter: SubProtocolCounter,
