@@ -179,7 +179,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         }
         let batch_size = store
             .batch_size
-            .ok_or_else(|| PRandError::NotSet("Batch size not set at riss handler".to_string()))?;
+            .ok_or_else(|| PRandError::NotSet("Batch size not set at RISS handler".to_string()))?;
         let total_tsets = store.no_of_tsets.ok_or_else(|| {
             PRandError::NotSet(format!(
                 "No of tsets not set {:?}",
@@ -191,8 +191,8 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
 
             // Ready to do the conversions of shares
             let tsets: Vec<Vec<usize>> = store.r_t.keys().cloned().collect();
-            let poly_fq = build_all_f_polys::<F>(self.n, tsets.clone()).await?;
-            let poly_fp = build_all_f_polys::<G>(self.n, tsets.clone()).await?;
+            let poly_fq = build_all_f_polys::<F>(self.n, tsets.clone())?;
+            let poly_fp = build_all_f_polys::<G>(self.n, tsets.clone())?;
             //build f polys for Fq and F_2^8
             let poly_f2 = build_all_f_polys_2_8(self.n, tsets)?;
 
@@ -251,7 +251,8 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 .share_b_q
                 .clone()
                 .ok_or_else(|| PRandError::NotSet("Small field bits not set".to_string()))?;
-
+            drop(store);
+            
             // share of r + b
             let share_rplusb: Vec<RobustShare<F>> = share_q
                 .iter()
@@ -296,7 +297,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         let mut store = binding.lock().await;
         let batch_size = store
             .batch_size
-            .ok_or_else(|| PRandError::NotSet("Batch size not set at riss handler".to_string()))?;
+            .ok_or_else(|| PRandError::NotSet("Batch size not set at RISS handler".to_string()))?;
         let no_of_batches = batch_size / (self.t + 1);
 
         // deserialize the field element from the payload

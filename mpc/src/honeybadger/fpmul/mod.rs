@@ -216,7 +216,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
     }
 }
 
-pub async fn build_all_f_polys<H: PrimeField>(
+pub fn build_all_f_polys<H: PrimeField>(
     n: usize,
     tsets: Vec<Vec<usize>>,
 ) -> Result<HashMap<Vec<usize>, DensePolynomial<H>>, ShareError> {

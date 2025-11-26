@@ -266,7 +266,7 @@ where
         )
     }
 
-    /// Take up to n pairs of random double sharings from the preprocessing material.
+    /// Take n pairs  of random double sharings or none if n not available.
     pub fn take_beaver_triples(
         &mut self,
         n_triples: usize,
@@ -277,7 +277,7 @@ where
         Ok(self.beaver_triples.drain(0..n_triples).collect())
     }
 
-    /// Take up to n random shares from the preprocessing material.
+    /// Take n random shares or none if n not available
     pub fn take_random_shares(
         &mut self,
         n_shares: usize,
@@ -695,7 +695,9 @@ where
         net: Arc<N>,
     ) -> Result<SecretFixedPoint<F, RobustShare<F>>, Self::Error> {
         if x.precision() != y.precision() {
-            return Err(HoneyBadgerError::FPMulError(FPMulError::Incompatible));
+            return Err(HoneyBadgerError::FPMulError(
+                FPMulError::IncompatiblePrecision,
+            ));
         }
         let (_, _, no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;

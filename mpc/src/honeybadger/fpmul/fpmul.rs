@@ -26,7 +26,7 @@ pub enum FPMulError {
     #[error("FpMul failed")]
     Failed,
     #[error("Incompatible precision")]
-    Incompatible,
+    IncompatiblePrecision,
     #[error("error sending the thread asynchronously")]
     SendError(#[from] SendError<SessionId>),
 }
@@ -90,7 +90,7 @@ where
         let p = if a.precision() == b.precision() {
             a.precision()
         } else {
-            return Err(FPMulError::Incompatible);
+            return Err(FPMulError::IncompatiblePrecision);
         };
 
         self.mult_node
