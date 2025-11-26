@@ -134,10 +134,15 @@ pub extern "C" fn hb_client_get_output(
         FieldKind::Bls12_381Fr => {
             let client = unsafe { &mut *(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha>) };
             let output_client = &client.output;
-            let output = output_client.output;
+            let output = output_client.get_output();
             match output {
                 None => return HoneyBadgerErrorCode::HoneyBadgerOutputNotReady,
-                Some(out) => unsafe { *returned_output = out.into() },
+                Some(out) => {
+                    if out.len() > 1 {
+                        unimplemented!();
+                    }
+                    unsafe { *returned_output = out[0].into() }
+                }
             }
             HoneyBadgerErrorCode::HoneyBadgerSuccess
         }

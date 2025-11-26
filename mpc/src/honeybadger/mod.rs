@@ -126,6 +126,21 @@ pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
     pub output: OutputClient<F>,
 }
 
+// implement manually because derive(Clone) requires R: Clone, which is not needed at all
+impl<F, R> Clone for HoneyBadgerMPCClient<F, R>
+where
+    F: FftField,
+    R: RBC,
+{
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            input: self.input.clone(),
+            output: self.output.clone(),
+        }
+    }
+}
+
 impl<F: FftField, R: RBC> HoneyBadgerMPCClient<F, R> {
     pub fn new(
         id: usize,
