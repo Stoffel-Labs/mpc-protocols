@@ -592,21 +592,21 @@ pub fn create_clients<F: FftField, R: RBC + 'static>(
     instance_id: u32,
     inputs: Vec<F>,
     input_len: usize,
-) -> HashMap<ClientId, Arc<tokio::sync::Mutex<HoneyBadgerMPCClient<F, R>>>> {
+) -> HashMap<ClientId, HoneyBadgerMPCClient<F, R>> {
     client_ids
         .into_iter()
         .map(|id| {
             let client =
                 HoneyBadgerMPCClient::new(id, n_parties, t, instance_id, inputs.clone(), input_len)
                     .unwrap();
-            (id, Arc::new(tokio::sync::Mutex::new(client)))
+            (id, client)
         })
         .collect()
 }
 
 pub fn receive_client<F, R, N>(
     mut receivers: HashMap<ClientId, Receiver<Vec<u8>>>,
-    clients: HashMap<ClientId, Arc<Mutex<HoneyBadgerMPCClient<F, R>>>>,
+    clients: HashMap<ClientId, HoneyBadgerMPCClient<F, R>>,
     net: Arc<N>,
 ) where
     F: FftField + 'static,
@@ -620,13 +620,12 @@ pub fn receive_client<F, R, N>(
     );
 
     for (clientid, mut recv) in receivers.drain() {
-        let client = clients[&clientid].clone(); // Arc clone
+        let mut client = clients[&clientid].clone();
         let net_clone = net.clone();
 
         tokio::spawn(async move {
             while let Some(received) = recv.recv().await {
-                let mut guard = client.lock().await;
-                if let Err(e) = guard.process(received, net_clone.clone()).await {
+                if let Err(e) = client.process(received, net_clone.clone()).await {
                     tracing::error!("Client {clientid} failed to process message: {e:?}");
                 }
             }

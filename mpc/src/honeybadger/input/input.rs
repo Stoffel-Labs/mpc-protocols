@@ -288,6 +288,20 @@ pub struct InputClient<F: FftField, R: RBC> {
     client_data: Arc<Mutex<InputClientData<F, R>>>
 }
 
+// implement manually because derive(Clone) requires R: Clone, which is not needed at all
+impl<F: FftField, R: RBC> Clone for InputClient<F, R> 
+{
+    fn clone(&self) -> Self {
+        Self {
+            client_id: self.client_id,
+            n: self.n,
+            t: self.t,
+            instance_id: self.instance_id,
+            client_data: Arc::clone(&self.client_data),
+        }
+    }
+}
+
 impl<F: FftField, R: RBC> InputClient<F, R> {
     pub fn new(
         id: usize,
