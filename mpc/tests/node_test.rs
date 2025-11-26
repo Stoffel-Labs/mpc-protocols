@@ -619,7 +619,7 @@ async fn mul_e2e_with_preprocessing_bad_net() {
     );
 
     //Create Clients
-    let clients = create_clients::<Fr, Avid>(clientid.clone(), n_parties, t, 111, input_values, 2);
+    let mut clients = create_clients::<Fr, Avid>(clientid.clone(), n_parties, t, 111, input_values, 2);
 
     //----------------------------------------RECIEVE----------------------------------------
     //At servers
@@ -741,19 +741,16 @@ async fn mul_e2e_with_preprocessing_bad_net() {
         }
     }
 
-    // Give async tasks time to run
-    tokio::time::sleep(Duration::from_millis(100)).await;
     // Collect reconstructed result
-    let final_output = clients[&output_clientid].lock().await.output.output.clone();
-    assert!(
-        final_output.is_some(),
-        "Client failed to reconstruct output"
-    );
-    let recovered = final_output.unwrap();
+    let recovered = match clients.get_mut(&output_clientid).unwrap().output.wait_for_output(Duration::from_millis(500)).await {
+        Err(e) => panic!("Client failed to reconstruct output: {e}"),
+        Ok(output) => output
+    };
+
     let output_values = vec![Fr::from(100), Fr::from(400)];
     assert!(
-        output_values.contains(&recovered),
-        "Recovered output {} not in expected values {:?}",
+        output_values == recovered,
+        "Recovered output {:?} not equal to expected values {:?}",
         recovered,
         output_values
     );
@@ -790,7 +787,7 @@ async fn mul_e2e_with_preprocessing() {
     );
 
     //Create Clients
-    let clients = create_clients::<Fr, Avid>(clientid.clone(), n_parties, t, 111, input_values, 2);
+    let mut clients = create_clients::<Fr, Avid>(clientid.clone(), n_parties, t, 111, input_values, 2);
 
     //----------------------------------------RECIEVE----------------------------------------
     //At servers
@@ -910,19 +907,15 @@ async fn mul_e2e_with_preprocessing() {
         }
     }
 
-    // Give async tasks time to run
-    tokio::time::sleep(Duration::from_millis(100)).await;
     // Collect reconstructed result
-    let final_output = clients[&output_clientid].lock().await.output.output.clone();
-    assert!(
-        final_output.is_some(),
-        "Client failed to reconstruct output"
-    );
-    let recovered = final_output.unwrap();
+    let recovered = match clients.get_mut(&output_clientid).unwrap().output.wait_for_output(Duration::from_millis(1000)).await {
+        Err(e) => panic!("Client failed to reconstruct output: {e}"),
+        Ok(output) => output
+    };
     let output_values = vec![Fr::from(100), Fr::from(400)];
     assert!(
-        output_values.contains(&recovered),
-        "Recovered output {} not in expected values {:?}",
+        output_values == recovered,
+        "Recovered output {:?} not equal to expected values {:?}",
         recovered,
         output_values
     );
@@ -1087,26 +1080,26 @@ async fn test_output_protocol_e2e() {
     let output_shares = generate_independent_shares(&output_values, t, n);
 
     // Set up OutputServers and OutputClient
-    let client = Arc::new(Mutex::new(
-        OutputClient::<Fr>::new(clientid, n, t, output_values.len()).unwrap(),
-    ));
+    let mut client = OutputClient::<Fr>::new(clientid, n, t, output_values.len()).unwrap();
     let servers: Vec<OutputServer> = (0..n).map(|i| OutputServer::new(i, n).unwrap()).collect();
 
     // Spawn receiver task for client
-    let client_clone = client.clone();
     let mut recv = client_recv.remove(&clientid).unwrap();
-    tokio::spawn(async move {
-        while let Some(received) = recv.recv().await {
-            let wrapped: WrappedMessage = match bincode::deserialize(&received) {
-                Ok(w) => w,
-                Err(_) => continue,
-            };
-            match wrapped {
-                WrappedMessage::Output(msg) => match client_clone.lock().await.process(msg).await {
-                    Ok(_) => {}
-                    Err(e) => eprintln!("Processing error : {}", e),
-                },
-                _ => continue,
+    tokio::spawn({
+        let mut client = client.clone();
+        async move {
+            while let Some(received) = recv.recv().await {
+                let wrapped: WrappedMessage = match bincode::deserialize(&received) {
+                    Ok(w) => w,
+                    Err(_) => continue,
+                };
+                match wrapped {
+                    WrappedMessage::Output(msg) => match client.process(msg).await {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("Processing error : {}", e),
+                    },
+                    _ => continue,
+                }
             }
         }
     });
@@ -1127,21 +1120,15 @@ async fn test_output_protocol_e2e() {
         }
     }
 
-    // Give async tasks time to run
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     // Collect reconstructed result
-    let client_locked = client.lock().await;
-    let final_output = client_locked.output.clone();
-    assert!(
-        final_output.is_some(),
-        "Client failed to reconstruct output"
-    );
+    let recovered = match client.wait_for_output(Duration::MAX).await {
+        Err(e) => panic!("Client failed to reconstruct output: {e}"),
+        Ok(output) => output
+    };
 
-    let recovered = final_output.unwrap();
     assert!(
-        output_values.contains(&recovered),
-        "Recovered output {} not in expected values {:?}",
+        output_values == recovered,
+        "Recovered output {:?} not equal to expected values {:?}",
         recovered,
         output_values
     );
