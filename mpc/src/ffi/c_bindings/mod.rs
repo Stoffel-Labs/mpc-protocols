@@ -68,6 +68,11 @@ pub enum ProtocolType {
     BatchRecon = 6,
     Dousha = 7,
     Mul = 8,
+    PRandInt = 9,
+    PRandBit = 10,
+    RandBit = 11,
+    FpMul = 12,
+    Trunc = 13,
 }
 
 impl From<ProtocolType> for crate::honeybadger::ProtocolType {
@@ -82,6 +87,11 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             ProtocolType::BatchRecon => crate::honeybadger::ProtocolType::BatchRecon,
             ProtocolType::Dousha => crate::honeybadger::ProtocolType::Dousha,
             ProtocolType::Mul => crate::honeybadger::ProtocolType::Mul,
+            ProtocolType::PRandInt => crate::honeybadger::ProtocolType::PRandInt,
+            ProtocolType::PRandBit => crate::honeybadger::ProtocolType::PRandBit,
+            ProtocolType::RandBit => crate::honeybadger::ProtocolType::RandBit,
+            ProtocolType::FpMul => crate::honeybadger::ProtocolType::FpMul,
+            ProtocolType::Trunc => crate::honeybadger::ProtocolType::Trunc,
         }
     }
 }
@@ -98,6 +108,11 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::BatchRecon => ProtocolType::BatchRecon,
             crate::honeybadger::ProtocolType::Dousha => ProtocolType::Dousha,
             crate::honeybadger::ProtocolType::Mul => ProtocolType::Mul,
+            crate::honeybadger::ProtocolType::PRandInt => ProtocolType::PRandInt,
+            crate::honeybadger::ProtocolType::PRandBit => ProtocolType::RandBit,
+            crate::honeybadger::ProtocolType::RandBit => ProtocolType::RandBit,
+            crate::honeybadger::ProtocolType::FpMul => ProtocolType::FpMul,
+            crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
         }
     }
 }

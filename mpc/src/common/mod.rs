@@ -13,6 +13,7 @@ use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
         share::ShareError,
+        types::fixed::SecretFixedPoint,
     },
     honeybadger::SessionId,
 };
@@ -188,6 +189,17 @@ impl<F: FftField, const N: usize, P> Sub<F> for ShamirShare<F, N, P> {
         })
     }
 }
+impl<F: FftField, const N: usize, P> ShamirShare<F, N, P> {
+    pub fn from_scalar_sub(scalar: F, other: &Self) -> Self {
+        let new_share: [F; N] = std::array::from_fn(|i| scalar - other.share[i]);
+        Self {
+            share: new_share,
+            id: other.id,
+            degree: other.degree,
+            _sharetype: PhantomData,
+        }
+    }
+}
 
 impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
     type Output = Result<Self, ShareError>;
@@ -304,4 +316,56 @@ where
     where
         N: 'async_trait,
         R: Rng + Send;
+}
+
+#[async_trait]
+pub trait MPCTypeOps<F, S, N>: Send + Sync
+where
+    N: Network,
+    F: FftField,
+    S: SecretSharingScheme<F>,
+{
+    type Error;
+
+    /// Fixed-point addition: x + y
+    async fn add_fixed(
+        &self,
+        x: Vec<SecretFixedPoint<F, S>>,
+        y: Vec<SecretFixedPoint<F, S>>,
+        net: Arc<N>,
+    ) -> Result<Vec<SecretFixedPoint<F, S>>, Self::Error>;
+
+    /// Fixed-point subtraction: x - y
+    async fn sub_fixed(
+        &self,
+        x: Vec<SecretFixedPoint<F, S>>,
+        y: Vec<SecretFixedPoint<F, S>>,
+        net: Arc<N>,
+    ) -> Result<Vec<SecretFixedPoint<F, S>>, Self::Error>;
+
+    /// Fixed-point multiplication with truncation for fixed precision
+    async fn mul_fixed(
+        &mut self,
+        x: SecretFixedPoint<F, S>,
+        y: SecretFixedPoint<F, S>,
+        net: Arc<N>,
+    ) -> Result<SecretFixedPoint<F, S>, Self::Error>;
+
+    /// Integer addition (int8/16/32/64)
+    async fn add_int(
+        &self,
+        x: Vec<S>,
+        y: Vec<S>,
+        bit_width: usize,
+        net: Arc<N>,
+    ) -> Result<Vec<S>, Self::Error>;
+
+    /// Integer multiplication (int8/16/32/64)
+    async fn mul_int(
+        &self,
+        x: Vec<S>,
+        y: Vec<S>,
+        bit_width: usize,
+        net: Arc<N>,
+    ) -> Result<Vec<S>, Self::Error>;
 }

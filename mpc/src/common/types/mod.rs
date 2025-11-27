@@ -6,10 +6,10 @@ use thiserror::Error;
 ///
 /// The implementation of secure fixed-point arithmetic follows the paper "Secure Computation With
 /// Fixed-Point Numbers" by Catrina and Saxena.
-mod fixed;
+pub mod fixed;
 
 /// Implements the secure fixed-point arithmetic between shared values.
-mod integer;
+pub mod integer;
 
 #[derive(Error, Debug)]
 pub enum Error {

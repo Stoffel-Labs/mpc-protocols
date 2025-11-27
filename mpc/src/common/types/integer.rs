@@ -193,7 +193,7 @@ where
     /// Creates a new clear integer, encoding the integer in the field.
     ///
     /// The `bit_length` must satisfy that `2 ^ bit_length < q` to avoid overflow.
-    fn new(value: F, bit_length: usize) -> Self {
+    pub fn new(value: F, bit_length: usize) -> Self {
         assert!(
             (bit_length as u32) < F::BasePrimeField::MODULUS_BIT_SIZE,
             "the bit length in the representation does not fit into the field"
