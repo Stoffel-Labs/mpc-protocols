@@ -19,7 +19,7 @@ async fn generate_faulty_double_shares_e2e() {
     setup_tracing();
     let n_parties = 5;
     let threshold = 2;
-    let session_id = SessionId::new(ProtocolType::Dousha, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Dousha, 123, 0, 0, 111);
 
     let (network, receivers, _) = test_setup(n_parties, vec![]);
 

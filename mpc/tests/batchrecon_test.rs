@@ -27,7 +27,7 @@ mod tests {
         let t = 1;
         let n = 4;
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(4u64)];
-        let session_id = SessionId::new(ProtocolType::BatchRecon, 0, 0, 111);
+        let session_id = SessionId::new(ProtocolType::BatchRecon, 123, 0, 0, 111);
         assert_eq!(secrets.len(), t + 1);
 
         // Step 0: Generate shares
@@ -117,7 +117,7 @@ mod tests {
 
         let n = 4;
         let t = 1;
-        let session_id = SessionId::new(ProtocolType::BatchRecon, 0, 0, 111);
+        let session_id = SessionId::new(ProtocolType::BatchRecon, 123, 0, 0, 111);
         let config = FakeNetworkConfig::new(100);
         let (network, mut receivers, _) = FakeNetwork::new(n, None, config);
         let net = Arc::new(network);
