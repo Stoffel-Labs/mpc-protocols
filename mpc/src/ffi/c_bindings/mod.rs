@@ -1,9 +1,15 @@
 use ark_bls12_381::Fr;
+use ark_ff::biginteger;
 use ark_ff::{BigInt, BigInteger, PrimeField};
-use std::slice;
+use num_bigint::BigUint;
+use std::{
+    ffi::{c_char, CString},
+    slice,
+};
 
 use crate::honeybadger::SessionId;
 
+pub mod honey_badger_mpc_client;
 pub mod network;
 pub mod rbc;
 pub mod share;
@@ -11,14 +17,14 @@ pub mod share;
 // a sequence of `u64` limbs, least-significant limb first
 #[repr(C)]
 #[derive(Clone, Debug)]
-pub struct Bls12Fr {
+pub struct U256 {
     pub data: [u64; 4],
 }
 
-// &[Bls12Fr] pointer and length
+// &[U256] pointer and length
 #[repr(C)]
-pub struct Bls12FrSlice {
-    pub pointer: *mut Bls12Fr,
+pub struct U256Slice {
+    pub pointer: *mut U256,
     pub len: usize,
 }
 
@@ -29,13 +35,13 @@ pub struct ByteSlice {
     pub len: usize,
 }
 
-impl From<Bls12Fr> for Fr {
-    fn from(value: Bls12Fr) -> Self {
+impl From<U256> for Fr {
+    fn from(value: U256) -> Self {
         Fr::from_bigint(BigInt::new(value.data)).unwrap()
     }
 }
 
-impl From<Fr> for Bls12Fr {
+impl From<Fr> for U256 {
     fn from(value: Fr) -> Self {
         Self {
             data: value.into_bigint().0,
@@ -62,6 +68,11 @@ pub enum ProtocolType {
     BatchRecon = 6,
     Dousha = 7,
     Mul = 8,
+    PRandInt = 9,
+    PRandBit = 10,
+    RandBit = 11,
+    FpMul = 12,
+    Trunc = 13,
 }
 
 impl From<ProtocolType> for crate::honeybadger::ProtocolType {
@@ -76,6 +87,11 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             ProtocolType::BatchRecon => crate::honeybadger::ProtocolType::BatchRecon,
             ProtocolType::Dousha => crate::honeybadger::ProtocolType::Dousha,
             ProtocolType::Mul => crate::honeybadger::ProtocolType::Mul,
+            ProtocolType::PRandInt => crate::honeybadger::ProtocolType::PRandInt,
+            ProtocolType::PRandBit => crate::honeybadger::ProtocolType::PRandBit,
+            ProtocolType::RandBit => crate::honeybadger::ProtocolType::RandBit,
+            ProtocolType::FpMul => crate::honeybadger::ProtocolType::FpMul,
+            ProtocolType::Trunc => crate::honeybadger::ProtocolType::Trunc,
         }
     }
 }
@@ -92,13 +108,18 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::BatchRecon => ProtocolType::BatchRecon,
             crate::honeybadger::ProtocolType::Dousha => ProtocolType::Dousha,
             crate::honeybadger::ProtocolType::Mul => ProtocolType::Mul,
+            crate::honeybadger::ProtocolType::PRandInt => ProtocolType::PRandInt,
+            crate::honeybadger::ProtocolType::PRandBit => ProtocolType::RandBit,
+            crate::honeybadger::ProtocolType::RandBit => ProtocolType::RandBit,
+            crate::honeybadger::ProtocolType::FpMul => ProtocolType::FpMul,
+            crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
         }
     }
 }
 
-// free the memory of a Bls12FrSlice
+// free the memory of a U256Slice
 #[no_mangle]
-pub extern "C" fn free_bls12_fr_slice(slice: Bls12FrSlice) {
+pub extern "C" fn free_u256_slice(slice: U256Slice) {
     if !slice.pointer.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(slice.pointer, slice.len, slice.len);
@@ -116,25 +137,35 @@ pub extern "C" fn free_bytes_slice(slice: ByteSlice) {
     }
 }
 
+// free the memory of a CString
 #[no_mangle]
-pub extern "C" fn be_bytes_to_bls12_fr(bytes: ByteSlice) -> Bls12Fr {
-    let bytes_slice = unsafe { slice::from_raw_parts(bytes.pointer, bytes.len) };
-    Bls12Fr {
-        data: Fr::from_be_bytes_mod_order(bytes_slice).into_bigint().0,
+pub extern "C" fn free_c_string(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        unsafe {
+            let _ = CString::from_raw(ptr);
+        }
     }
 }
 
 #[no_mangle]
-pub extern "C" fn le_bytes_to_bls12_fr(bytes: ByteSlice) -> Bls12Fr {
+pub extern "C" fn be_bytes_to_u256(bytes: ByteSlice) -> U256 {
     let bytes_slice = unsafe { slice::from_raw_parts(bytes.pointer, bytes.len) };
-    Bls12Fr {
-        data: Fr::from_le_bytes_mod_order(bytes_slice).into_bigint().0,
-    }
+    let big_uint = BigInt::<4>::try_from(BigUint::from_bytes_be(bytes_slice))
+        .expect("bytes too long for u256");
+    U256 { data: big_uint.0 }
 }
 
 #[no_mangle]
-pub extern "C" fn bls12_fr_to_be_bytes(fr: Bls12Fr) -> ByteSlice {
-    let mut bytes = BigInt::new(fr.data).to_bytes_be();
+pub extern "C" fn le_bytes_to_u256(bytes: ByteSlice) -> U256 {
+    let bytes_slice = unsafe { slice::from_raw_parts(bytes.pointer, bytes.len) };
+    let big_uint = BigInt::<4>::try_from(BigUint::from_bytes_le(bytes_slice))
+        .expect("bytes too long for u256");
+    U256 { data: big_uint.0 }
+}
+
+#[no_mangle]
+pub extern "C" fn u256_to_be_bytes(num: U256) -> ByteSlice {
+    let mut bytes = BigInt::new(num.data).to_bytes_be();
     ByteSlice {
         pointer: bytes.as_mut_ptr(),
         len: bytes.len(),
@@ -142,8 +173,8 @@ pub extern "C" fn bls12_fr_to_be_bytes(fr: Bls12Fr) -> ByteSlice {
 }
 
 #[no_mangle]
-pub extern "C" fn bls12_fr_to_le_bytes(fr: Bls12Fr) -> ByteSlice {
-    let mut bytes = BigInt::new(fr.data).to_bytes_le();
+pub extern "C" fn u256_to_le_bytes(num: U256) -> ByteSlice {
+    let mut bytes = BigInt::new(num.data).to_bytes_le();
     ByteSlice {
         pointer: bytes.as_mut_ptr(),
         len: bytes.len(),

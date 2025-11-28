@@ -51,6 +51,7 @@ impl FixedPointPrecision {
 /// The fields of this struct are private to prevent erroneous mutation of the precision and the
 /// share. The share and the bit size must be consistent in that the integer representation must
 /// fit into the field to guarantee correctness.
+#[derive(Copy, Debug, Clone, PartialEq)]
 pub struct SecretFixedPoint<F, S>
 where
     F: FftField,
