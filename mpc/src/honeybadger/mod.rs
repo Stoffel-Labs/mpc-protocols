@@ -976,11 +976,11 @@ where
                             None,
                             None,
                         );
-                        self.preprocess
+                        assert!(self.preprocess
                             .triple_gen
                             .batch_recon_node
-                            .clear_store()
-                            .await;
+                            .clear_store(sessionid)
+                            .await);
                     }
                 }
             }
