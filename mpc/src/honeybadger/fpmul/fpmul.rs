@@ -138,7 +138,6 @@ where
                             "Output not set for truncation".to_string(),
                         ))
                     })?,
-                    *p,
                 ));
                 self.output_channel.send(session_id).await?;
                 return Ok(());
