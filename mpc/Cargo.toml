@@ -28,6 +28,7 @@ itertools.workspace = true
 stoffelnet.workspace = true
 rustls.workspace = true
 num-bigint.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 once_cell = "1.21.3"

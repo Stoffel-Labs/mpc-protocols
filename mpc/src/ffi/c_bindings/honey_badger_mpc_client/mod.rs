@@ -41,6 +41,9 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerPRandError,
     HoneyBadgerFPMulError,
     HoneyBadgerTruncPrError,
+    HoneyBadgerFPDivConstError,
+    HoneyBadgerTypesError,
+    HoneyBadgerAlreadyReservedError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -66,6 +69,9 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::PRandError(_) => Self::HoneyBadgerPRandError,
             HoneyBadgerError::FPMulError(_) => Self::HoneyBadgerFPMulError,
             HoneyBadgerError::TruncPrError(_) => Self::HoneyBadgerTruncPrError,
+            HoneyBadgerError::FPDivConstError(_) => Self::HoneyBadgerFPDivConstError,
+            HoneyBadgerError::TypeError(_) => Self::HoneyBadgerTypesError,
+            HoneyBadgerError::AlreadyReserved => Self::HoneyBadgerAlreadyReservedError,
         }
     }
 }

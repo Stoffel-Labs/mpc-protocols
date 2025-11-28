@@ -73,6 +73,7 @@ pub enum ProtocolType {
     RandBit = 11,
     FpMul = 12,
     Trunc = 13,
+    FpDivConst = 14,
 }
 
 impl From<ProtocolType> for crate::honeybadger::ProtocolType {
@@ -92,6 +93,7 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             ProtocolType::RandBit => crate::honeybadger::ProtocolType::RandBit,
             ProtocolType::FpMul => crate::honeybadger::ProtocolType::FpMul,
             ProtocolType::Trunc => crate::honeybadger::ProtocolType::Trunc,
+            ProtocolType::FpDivConst => crate::honeybadger::ProtocolType::FpDivConst,
         }
     }
 }
@@ -113,6 +115,7 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::RandBit => ProtocolType::RandBit,
             crate::honeybadger::ProtocolType::FpMul => ProtocolType::FpMul,
             crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
+            crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
         }
     }
 }
