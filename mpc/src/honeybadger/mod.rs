@@ -145,7 +145,7 @@ pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
     pub output: OutputClient<F>,
 }
 
-// implement manually because derive(Clone) requires R: Clone, which is not needed at all
+// Implement manually because derive(Clone) requires R: Clone, which is not needed at all
 impl<F, R> Clone for HoneyBadgerMPCClient<F, R>
 where
     F: FftField,

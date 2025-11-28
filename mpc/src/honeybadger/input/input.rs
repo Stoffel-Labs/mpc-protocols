@@ -26,9 +26,9 @@ use tracing::info;
 ///   3. each server receives that masked value and subtracts their respective random share to
 ///      obtain a share of the input
 ///
-///   InputServer                                            InputClient     
-///                                                                          
-/// ┌──────────────────────────┐ one random share per input                  
+///   InputServer                                            InputClient
+///
+/// ┌──────────────────────────┐ one random share per input
 /// │         init             │ ─────────────────────────► ┌──────────────────┐
 /// │                          │                            │ init_handler     │
 /// │store local random shares;│                            │                  │
@@ -42,12 +42,12 @@ use tracing::info;
 ///      ┌─────────────────────┐                            │                  │
 ///      │ input_handler       │   broadcast masked inputs  │                  │
 ///      │                     │  ◄───────────────────────  └──────────────────┘
-///      │store masked inputs; │                     
+///      │store masked inputs; │
 ///      │if init called,      │
-///      │calculate input      │                         
+///      │calculate input      │
 ///      │shares (3)           │
-///      └─────────────────────┘                                          
-///                   
+///      └─────────────────────┘
+///
 ///
 /// Synchronization between the accesses to random shares or masked inputs and the notification
 /// that all expected input shares have been received is implemented using a `tokio::sync::watch`
