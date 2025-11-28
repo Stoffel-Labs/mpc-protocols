@@ -17,7 +17,7 @@ use stoffelmpc_mpc::{
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{sync::{mpsc, Barrier}, task::JoinSet};
 use tracing::warn;
 
 pub mod utils;
@@ -50,7 +50,7 @@ async fn test_reconstruct_handler_incorrect_share() {
     }
     // create global nodes
     let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n_parties, t, 0, 0, 111, 0, 0, 0, 0,
+        n_parties, t, 0, 0, 111, 0, 0, 0, 0, vec![]
     );
 
     // receiver randousha node
@@ -80,10 +80,12 @@ async fn test_reconstruct_handler_incorrect_share() {
 
     // check all parties received OutputMessage Ok sent by the receiver of the ReconstructionMessage
     let mut set = JoinSet::new();
+    let barrier = Arc::new(Barrier::new(n_parties));
     for i in 0..n_parties {
         let mut receiver = receivers.remove(0);
         let ransha_node = nodes[i].clone();
         let net = Arc::clone(&network);
+        let barrier_i = barrier.clone();
 
         set.spawn(async move {
             while let Some(received) = receiver.recv().await {
@@ -96,6 +98,7 @@ async fn test_reconstruct_handler_incorrect_share() {
                         if msg.msg_type == RanShaMessageType::OutputMessage {
                             assert_eq!(msg.sender_id, receiver_id);
                             assert!(matches!(msg.payload, RanShaPayload::Output(false)));
+                            barrier_i.wait().await;
                             return;
                         }
                     }

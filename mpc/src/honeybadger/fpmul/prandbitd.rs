@@ -60,7 +60,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
 
     pub async fn clear_store(&self) {
         let mut store = self.store.lock().await;
-        self.batch_recon.clear_store().await;
+        self.batch_recon.clear_entire_store().await;
         store.clear();
     }
 

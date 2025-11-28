@@ -74,8 +74,8 @@ use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use stoffelnet::network_utils::{Network, NetworkError, PartyId};
+use std::{fmt, sync::Arc};
+use stoffelnet::network_utils::{Network, NetworkError, ClientId, PartyId};
 use thiserror::Error;
 use tokio::sync::{
     mpsc::{self, Receiver},
@@ -282,7 +282,7 @@ where
     type MPCOpts = HoneyBadgerMPCNodeOpts;
     type Error = HoneyBadgerError;
 
-    fn setup(id: PartyId, params: Self::MPCOpts) -> Result<Self, HoneyBadgerError> {
+    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, HoneyBadgerError> {
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
@@ -327,7 +327,7 @@ where
         let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold, fpmul_sender)?;
         let fpdiv_const_node =
             FPDivConstNode::new(id, params.n_parties, params.threshold, fpdiv_const_sender)?;
-        let input = InputServer::new(id, params.n_parties, params.threshold)?;
+        let input = InputServer::new(id, params.n_parties, params.threshold, input_ids)?;
         let output = OutputServer::new(id, params.n_parties)?;
         Ok(Self {
             id,
@@ -991,11 +991,11 @@ where
                             None,
                             None,
                         );
-                        self.preprocess
+                        assert!(self.preprocess
                             .triple_gen
                             .batch_recon_node
-                            .clear_store()
-                            .await;
+                            .clear_store(sessionid)
+                            .await);
                     }
                 }
             }
@@ -1408,8 +1408,20 @@ impl TryFrom<u16> for ProtocolType {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Hash)]
+#[derive(PartialOrd, Ord, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(u64);
+
+impl fmt::Debug for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        let caller = ((self.0 >> 60) & 0xF) as u16;
+        let sub_id = self.sub_id();
+        let round_id = self.round_id();
+        let instance_id = self.instance_id();
+
+        write!(f, "[caller={},sub_id={},round_id={},instance_id={}]", caller, sub_id, round_id, instance_id)
+    }
+}
+
 
 impl SessionId {
     pub fn new(caller: ProtocolType, sub_id: u8, round_id: u8, instance_id: u64) -> Self {
