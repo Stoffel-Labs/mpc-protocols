@@ -86,7 +86,7 @@ where
         let mut store = self.storage.lock().await;
         store.clear();
         self.mult_node.clear_store().await;
-        self.batch_recon.clear_store().await;
+        self.batch_recon.clear_entire_store().await;
     }
 
     pub async fn get_or_create_storage(
