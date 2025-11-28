@@ -1064,7 +1064,6 @@ async fn preprocessing_e2e_bad_net() {
     }
 }
 
-
 #[tokio::test]
 async fn test_output_protocol_e2e() {
     setup_tracing();
