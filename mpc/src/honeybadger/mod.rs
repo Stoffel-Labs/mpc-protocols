@@ -43,7 +43,7 @@ use crate::{
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
             f256::F2_8,
-            fpmul::{FPMulError, FPMulNode},
+            fpmul::{FPError, FPMulNode},
             prandbitd::PRandBitNode,
             rand_bit::RandBit,
             PRandBitDMessage, PRandError, RandBitError, RandBitMessage, TruncPrError,
@@ -113,7 +113,7 @@ pub enum HoneyBadgerError {
     #[error("error in Prand bit generation: {0:?}")]
     PRandError(#[from] PRandError),
     #[error("error in FPMul: {0:?}")]
-    FPMulError(#[from] FPMulError),
+    FPError(#[from] FPError),
     #[error("error in FPDiv_Const: {0:?}")]
     FPDivConstError(#[from] FPDivConstError),
     #[error("error in Truncation: {0:?}")]
@@ -613,9 +613,7 @@ where
         y: Vec<Self::Sfix>,
     ) -> Result<Vec<Self::Sfix>, Self::Error> {
         if x.len() != y.len() {
-            return Err(HoneyBadgerError::FPMulError(
-                FPMulError::IncompatiblePrecision,
-            ));
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
         Ok(x.into_iter()
             .zip(y)
@@ -630,9 +628,7 @@ where
         y: Vec<Self::Sfix>,
     ) -> Result<Vec<Self::Sfix>, Self::Error> {
         if x.len() != y.len() {
-            return Err(HoneyBadgerError::FPMulError(
-                FPMulError::IncompatiblePrecision,
-            ));
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
 
         Ok(x.into_iter()
@@ -649,9 +645,7 @@ where
         net: Arc<N>,
     ) -> Result<SecretFixedPoint<F, RobustShare<F>>, Self::Error> {
         if x.precision() != y.precision() {
-            return Err(HoneyBadgerError::FPMulError(
-                FPMulError::IncompatiblePrecision,
-            ));
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
         let (_, _, no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;
@@ -704,7 +698,7 @@ where
                     .fpmul
                     .protocol_output
                     .clone()
-                    .ok_or(FPMulError::Failed)?;
+                    .ok_or(FPError::Failed)?;
 
                 return Ok(output);
             }
@@ -792,9 +786,7 @@ where
         y: Vec<Self::Sint>,
     ) -> Result<Vec<Self::Sint>, Self::Error> {
         if x.len() != y.len() {
-            return Err(HoneyBadgerError::FPMulError(
-                FPMulError::IncompatiblePrecision,
-            ));
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
 
         let mut out = Vec::with_capacity(x.len());
@@ -813,9 +805,7 @@ where
         y: Vec<Self::Sint>,
     ) -> Result<Vec<Self::Sint>, Self::Error> {
         if x.len() != y.len() {
-            return Err(HoneyBadgerError::FPMulError(
-                FPMulError::IncompatiblePrecision,
-            ));
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
         let mut out = Vec::with_capacity(x.len());
         for (a, b) in x.into_iter().zip(y.into_iter()) {
@@ -834,36 +824,45 @@ where
         net: Arc<N>,
     ) -> Result<Vec<Self::Sint>, Self::Error> {
         if x.len() != y.len() {
-            return Err(HoneyBadgerError::FPMulError(
-                FPMulError::IncompatiblePrecision,
-            ));
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
 
-        let bitlen = x
+        let bitlen_x = x
             .first()
             .map(|v| v.bit_length())
-            .ok_or(HoneyBadgerError::FPMulError(
-                FPMulError::IncompatiblePrecision,
-            ))?;
+            .ok_or(HoneyBadgerError::FPError(FPError::IncompatiblePrecision))?;
 
-        let all_same_bitlen = x.iter().chain(y.iter()).all(|v| v.bit_length() == bitlen);
-
-        if !all_same_bitlen {
-            return Err(HoneyBadgerError::FPMulError(
-                FPMulError::IncompatiblePrecision,
-            ));
+        let x_ok = x.iter().all(|v| v.bit_length() == bitlen_x);
+        if !x_ok {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
 
-        let a: Vec<ShamirShare<F, 1, Robust>> = x.iter().map(|x| x.share().clone()).collect();
-        let b: Vec<ShamirShare<F, 1, Robust>> = y.iter().map(|y| y.share().clone()).collect();
+        let bitlen_y = y
+            .first()
+            .map(|v| v.bit_length())
+            .ok_or(HoneyBadgerError::FPError(FPError::IncompatiblePrecision))?;
+
+        let y_ok = y.iter().all(|v| v.bit_length() == bitlen_y);
+        if !y_ok {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+        }
+
+        if bitlen_x != bitlen_y {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+        }
+
+        let bitlen = bitlen_x;
+
+        let a: Vec<ShamirShare<F, 1, Robust>> = x.iter().map(|s| s.share().clone()).collect();
+        let b: Vec<ShamirShare<F, 1, Robust>> = y.iter().map(|s| s.share().clone()).collect();
 
         // Perform secure Beaver multiplication
         let result = self.mul(a, b, net).await?;
-        let sresult = result
-            .iter()
-            .map(|a| SecretInt::new(a.clone(), bitlen))
+        let output = result
+            .into_iter()
+            .map(|share| SecretInt::new(share, bitlen))
             .collect();
-        Ok(sresult)
+        Ok(output)
     }
 }
 

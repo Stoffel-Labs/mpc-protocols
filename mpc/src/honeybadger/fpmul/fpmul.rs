@@ -18,7 +18,7 @@ use tokio::sync::{
 };
 
 #[derive(Error, Debug)]
-pub enum FPMulError {
+pub enum FPError {
     #[error("error in the secure multiplication protocol: {0:?}")]
     MulError(#[from] MulError),
     #[error("error in the truncation protocol: {0:?}")]
@@ -58,7 +58,7 @@ where
         n_parties: usize,
         threshold: usize,
         output_channel: Sender<SessionId>,
-    ) -> Result<Self, FPMulError> {
+    ) -> Result<Self, FPError> {
         let (mul_sender, mul_receiver) = mpsc::channel(128);
         let (trunc_sender, trunc_receiver) = mpsc::channel(128);
 
@@ -86,11 +86,11 @@ where
         r_int: RobustShare<F>,
         session_id: SessionId,
         network: Arc<N>,
-    ) -> Result<(), FPMulError> {
+    ) -> Result<(), FPError> {
         let p = if a.precision() == b.precision() {
             a.precision()
         } else {
-            return Err(FPMulError::IncompatiblePrecision);
+            return Err(FPError::IncompatiblePrecision);
         };
 
         self.mult_node
@@ -134,7 +134,7 @@ where
                 let store = trunc_lock.lock().await;
                 self.protocol_output = Some(SecretFixedPoint::new(
                     store.share_d.clone().ok_or_else(|| {
-                        FPMulError::TruncPrError(TruncPrError::NotSet(
+                        FPError::TruncPrError(TruncPrError::NotSet(
                             "Output not set for truncation".to_string(),
                         ))
                     })?,
@@ -144,6 +144,6 @@ where
             }
         }
         self.trunc_node.clear_store().await;
-        Err(FPMulError::Failed)
+        Err(FPError::Failed)
     }
 }

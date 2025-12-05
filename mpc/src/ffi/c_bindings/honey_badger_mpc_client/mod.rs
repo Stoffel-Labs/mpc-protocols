@@ -67,7 +67,7 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::ChannelClosed => Self::HoneyBadgerChannelClosed,
             HoneyBadgerError::RandBitError(_) => Self::HoneyBadgerRandBitError,
             HoneyBadgerError::PRandError(_) => Self::HoneyBadgerPRandError,
-            HoneyBadgerError::FPMulError(_) => Self::HoneyBadgerFPMulError,
+            HoneyBadgerError::FPError(_) => Self::HoneyBadgerFPMulError,
             HoneyBadgerError::TruncPrError(_) => Self::HoneyBadgerTruncPrError,
             HoneyBadgerError::FPDivConstError(_) => Self::HoneyBadgerFPDivConstError,
             HoneyBadgerError::TypeError(_) => Self::HoneyBadgerTypesError,
