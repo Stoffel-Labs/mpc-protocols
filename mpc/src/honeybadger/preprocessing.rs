@@ -575,6 +575,7 @@ mod test {
                 .await
                 .unwrap();
         }
+
         // 3. Verify all reserved
         let reserved_batches = registry.get_reserved_batches(&client).await;
         assert_eq!(reserved_batches.len(), batches.len());
