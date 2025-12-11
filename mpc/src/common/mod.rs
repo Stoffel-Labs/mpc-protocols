@@ -16,7 +16,7 @@ use crate::{
     },
     honeybadger::SessionId,
 };
-
+use ark_ec::CurveGroup;
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -298,6 +298,7 @@ where
     async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
     where
         N: 'async_trait;
+    async fn rand(&mut self, network: Arc<N>) -> Result<S, Self::Error>;
 }
 
 #[async_trait]
@@ -381,4 +382,30 @@ where
         y: Vec<Self::Sint>,
         net: Arc<N>,
     ) -> Result<Vec<Self::Sint>, Self::Error>;
+}
+
+#[async_trait]
+pub trait MPCECProtocol<F, S, N, G>
+where
+    F: FftField,               // scalar field of the EC group
+    S: SecretSharingScheme<F>, // shared-scalar type
+    N: Network, 
+    G: CurveGroup<ScalarField = F>,
+{
+    type Error;
+
+    /// PUBLIC SCALAR MULTIPLICATION PROTOCOL
+    ///
+    /// Computes pk = sk_shared * G  (G is public)
+    async fn scalar_mul_basepoint(
+        &mut self,
+        sk_shared: S,
+    ) -> Result<G, Self::Error>;
+
+    async fn open_point(
+        &self,
+        point: Vec<G>,
+        net: Arc<N>,
+    ) -> Result<G, Self::Error>;
+
 }
