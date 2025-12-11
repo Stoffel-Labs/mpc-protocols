@@ -35,7 +35,7 @@ use crate::{
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ShamirShare, RBC,
+        MPCECProtocol, MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ShamirShare, RBC,
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
@@ -65,6 +65,7 @@ use crate::{
         triple_gen::{TripleGenError, TripleGenMessage},
     },
 };
+use ark_ec::CurveGroup;
 use ark_ff::{FftField, PrimeField};
 use ark_std::rand::rngs::{OsRng, StdRng};
 use ark_std::rand::{Rng, SeedableRng};
@@ -467,6 +468,25 @@ where
         self.operations.mul.wait_for_result(session_id, Duration::MAX).await.map_err(HoneyBadgerError::from)
     }
 
+    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
+        let (_, no_rand, _, _) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        if no_rand == 0 {
+            //Run preprocessing
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(network.clone(), &mut rng).await?;
+        }
+        // Extract the preprocessing triple.
+        let rand_value = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(1)?;
+        Ok(rand_value[0].clone())
+    }
+
     async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
         let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
 
@@ -647,6 +667,26 @@ where
         }
 
         Ok(())
+    }
+}
+#[async_trait]
+impl<F, N, R, G> MPCECProtocol<F, RobustShare<F>, N, G> for HoneyBadgerMPCNode<F, R>
+where
+    F: PrimeField,
+    N: Network + Send + Sync + 'static,
+    R: RBC,
+    G: CurveGroup<ScalarField = F>,
+{
+    type Error = HoneyBadgerError;
+
+    async fn scalar_mul_basepoint(&mut self, local_share: RobustShare<F>) -> Result<G, Self::Error> {
+        let si = local_share.share[0]; // the local scalar s_i
+        let pi = G::generator().mul(si);
+        Ok(pi)
+    }
+
+    async fn open_point(&self, point: Vec<G>, net: Arc<N>) -> Result<G, Self::Error> {
+        todo!()
     }
 }
 #[async_trait]
