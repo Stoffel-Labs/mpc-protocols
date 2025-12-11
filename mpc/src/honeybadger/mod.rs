@@ -35,8 +35,7 @@ use crate::{
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ProtocolSessionId, ProtocolTag,
-        ShamirShare, RBC,
+        MPCECProtocol, MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ShamirShare, RBC,
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
@@ -516,6 +515,25 @@ where
         Ok(rand_value[0].clone())
     }
 
+    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
+        let (_, no_rand, _, _) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        if no_rand == 0 {
+            //Run preprocessing
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(network.clone(), &mut rng).await?;
+        }
+        // Extract the preprocessing triple.
+        let rand_value = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(1)?;
+        Ok(rand_value[0].clone())
+    }
+
     async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
         let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
 
@@ -781,6 +799,7 @@ where
         Ok(shares.into_iter().next().unwrap())
     }
 }
+
 #[async_trait]
 impl<F, N, R, G> MPCECProtocol<F, RobustShare<F>, N, G> for HoneyBadgerMPCNode<F, R>
 where
