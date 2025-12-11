@@ -17,6 +17,7 @@ use crate::common::{
     rbc::{rbc_store::Msg, RbcError},
     share::ShareError,
 };
+use ark_ec::CurveGroup;
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -397,6 +398,32 @@ where
         y: Vec<Self::Sint>,
         net: Arc<N>,
     ) -> Result<Vec<Self::Sint>, Self::Error>;
+}
+
+#[async_trait]
+pub trait MPCECProtocol<F, S, N, G>
+where
+    F: FftField,               // scalar field of the EC group
+    S: SecretSharingScheme<F>, // shared-scalar type
+    N: Network,
+    G: CurveGroup<ScalarField = F>,
+{
+    type Error;
+
+    /// PUBLIC SCALAR MULTIPLICATION PROTOCOL
+    ///
+    /// Computes pk = sk_shared * G  (G is public)
+    async fn scalar_mul_basepoint(
+        &mut self,
+        sk_shared: S,
+    ) -> Result<G, Self::Error>;
+
+    async fn open_point(
+        &self,
+        point: Vec<G>,
+        net: Arc<N>,
+    ) -> Result<G, Self::Error>;
+
 }
 
 /// A protocol identifier that fits into 8 bits.
