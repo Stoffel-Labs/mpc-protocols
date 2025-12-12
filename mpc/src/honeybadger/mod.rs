@@ -19,24 +19,31 @@ pub mod double_share;
 /// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
 pub mod triple_gen;
 
+pub mod fpdiv;
 pub mod fpmul;
 pub mod input;
 pub mod mul;
 pub mod output;
+pub mod preprocessing;
 pub mod share_gen;
 
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
-        types::fixed::SecretFixedPoint,
+        types::{
+            fixed::{ClearFixedPoint, SecretFixedPoint},
+            integer::{ClearInt, SecretInt},
+            TypeError,
+        },
         MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ShamirShare, RBC,
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
+        fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
             f256::F2_8,
-            fpmul::{FPMulError, FPMulNode},
+            fpmul::{FPError, FPMulNode},
             prandbitd::PRandBitNode,
             rand_bit::RandBit,
             PRandBitDMessage, PRandError, RandBitError, RandBitMessage, TruncPrError,
@@ -51,10 +58,11 @@ use crate::{
             output::{OutputClient, OutputServer},
             OutputError, OutputMessage,
         },
+        preprocessing::HoneyBadgerMPCNodePreprocMaterial,
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
-        triple_gen::{ShamirBeaverTriple, TripleGenError, TripleGenMessage},
+        triple_gen::{TripleGenError, TripleGenMessage},
     },
 };
 use ark_ff::{FftField, PrimeField};
@@ -66,8 +74,8 @@ use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use stoffelnet::network_utils::{Network, NetworkError, PartyId};
+use std::{fmt, sync::Arc};
+use stoffelnet::network_utils::{Network, NetworkError, ClientId, PartyId};
 use thiserror::Error;
 use tokio::sync::{
     mpsc::{self, Receiver},
@@ -105,9 +113,15 @@ pub enum HoneyBadgerError {
     #[error("error in Prand bit generation: {0:?}")]
     PRandError(#[from] PRandError),
     #[error("error in FPMul: {0:?}")]
-    FPMulError(#[from] FPMulError),
+    FPError(#[from] FPError),
+    #[error("error in FPDiv_Const: {0:?}")]
+    FPDivConstError(#[from] FPDivConstError),
     #[error("error in Truncation: {0:?}")]
     TruncPrError(#[from] TruncPrError),
+    #[error("error in types: {0:?}")]
+    TypeError(#[from] TypeError),
+    #[error("Already reserved batch")]
+    AlreadyReserved,
     /// Error during the serialization using [`bincode`].
     #[error("error during the serialization using bincode: {0:?}")]
     BincodeSerializationError(#[from] Box<ErrorKind>),
@@ -177,6 +191,7 @@ pub struct Operation<F: FftField, R: RBC> {
 #[derive(Clone, Debug)]
 pub struct TypeOperations<F: PrimeField, R: RBC> {
     pub fpmul: FPMulNode<F, R>,
+    pub fpdiv_const: FPDivConstNode<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -202,109 +217,7 @@ pub struct OutputChannels {
     pub prand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub prand_int_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub fpmul_channel: Arc<Mutex<Receiver<SessionId>>>,
-}
-
-/// Preprocessing material for the HoneyBadgerMPCNode protocol.
-#[derive(Clone, Debug)]
-pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
-    /// A pool of random double shares used for secure multiplication.
-    beaver_triples: Vec<ShamirBeaverTriple<F>>,
-    /// A pool of random shares used for inputing private data for the protocol.
-    random_shares: Vec<RobustShare<F>>,
-    ///A pool of PRandBit outputs for truncation
-    prandbit_shares: Vec<(RobustShare<F>, F2_8)>,
-    ///A pool of PRandInt outputs for truncation
-    prandint_shares: Vec<RobustShare<F>>,
-}
-
-impl<F> HoneyBadgerMPCNodePreprocMaterial<F>
-where
-    F: FftField,
-{
-    /// Generates empty preprocessing material storage.
-    pub fn empty() -> Self {
-        Self {
-            random_shares: Vec::new(),
-            beaver_triples: Vec::new(),
-            prandbit_shares: Vec::new(),
-            prandint_shares: Vec::new(),
-        }
-    }
-
-    /// Adds the provided new preprocessing material to the current pool.
-    pub fn add(
-        &mut self,
-        mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
-        mut random_shares: Option<Vec<RobustShare<F>>>,
-        mut prandbit_shares: Option<Vec<(RobustShare<F>, F2_8)>>,
-        mut prandbit_int: Option<Vec<RobustShare<F>>>,
-    ) {
-        if let Some(pairs) = &mut triples {
-            self.beaver_triples.append(pairs);
-        }
-
-        if let Some(shares) = &mut random_shares {
-            self.random_shares.append(shares);
-        }
-
-        if let Some(shares) = &mut prandbit_shares {
-            self.prandbit_shares.append(shares);
-        }
-        if let Some(shares) = &mut prandbit_int {
-            self.prandint_shares.append(shares);
-        }
-    }
-
-    /// Returns the number of random double share pairs, and the number of random shares
-    /// respectively.
-    pub fn len(&self) -> (usize, usize, usize, usize) {
-        (
-            self.beaver_triples.len(),
-            self.random_shares.len(),
-            self.prandbit_shares.len(),
-            self.prandint_shares.len(),
-        )
-    }
-
-    /// Take n pairs  of random double sharings or none if n not available.
-    pub fn take_beaver_triples(
-        &mut self,
-        n_triples: usize,
-    ) -> Result<Vec<ShamirBeaverTriple<F>>, HoneyBadgerError> {
-        if n_triples > self.beaver_triples.len() {
-            return Err(HoneyBadgerError::NotEnoughPreprocessing);
-        }
-        Ok(self.beaver_triples.drain(0..n_triples).collect())
-    }
-
-    /// Take n random shares or none if n not available
-    pub fn take_random_shares(
-        &mut self,
-        n_shares: usize,
-    ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
-        if n_shares > self.random_shares.len() {
-            return Err(HoneyBadgerError::NotEnoughPreprocessing);
-        }
-        Ok(self.random_shares.drain(0..n_shares).collect())
-    }
-    pub fn take_prandbit_shares(
-        &mut self,
-        n_prandbit: usize,
-    ) -> Result<Vec<(RobustShare<F>, F2_8)>, HoneyBadgerError> {
-        if n_prandbit > self.prandbit_shares.len() {
-            return Err(HoneyBadgerError::NotEnoughPreprocessing);
-        }
-        Ok(self.prandbit_shares.drain(0..n_prandbit).collect())
-    }
-    pub fn take_prandint_shares(
-        &mut self,
-        n_prandint: usize,
-    ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
-        if n_prandint > self.prandint_shares.len() {
-            return Err(HoneyBadgerError::NotEnoughPreprocessing);
-        }
-        Ok(self.prandint_shares.drain(0..n_prandint).collect())
-    }
+    pub fpdiv_const_channel: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -369,7 +282,7 @@ where
     type MPCOpts = HoneyBadgerMPCNodeOpts;
     type Error = HoneyBadgerError;
 
-    fn setup(id: PartyId, params: Self::MPCOpts) -> Result<Self, HoneyBadgerError> {
+    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, HoneyBadgerError> {
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
@@ -380,6 +293,7 @@ where
         let (prand_bit_sender, prand_bit_receiver) = mpsc::channel(128);
         let (prand_int_sender, prand_int_receiver) = mpsc::channel(128);
         let (fpmul_sender, fpmul_receiver) = mpsc::channel(128);
+        let (fpdiv_const_sender, fpdiv_const_receiver) = mpsc::channel(128);
 
         // Create nodes for preprocessing.
         let dousha_node =
@@ -411,7 +325,9 @@ where
             share_gen_sender,
         )?;
         let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold, fpmul_sender)?;
-        let input = InputServer::new(id, params.n_parties, params.threshold)?;
+        let fpdiv_const_node =
+            FPDivConstNode::new(id, params.n_parties, params.threshold, fpdiv_const_sender)?;
+        let input = InputServer::new(id, params.n_parties, params.threshold, input_ids)?;
         let output = OutputServer::new(id, params.n_parties)?;
         Ok(Self {
             id,
@@ -429,7 +345,10 @@ where
                 prand_bit: prand_bit_node,
             },
             operations: Operation { mul: mul_node },
-            type_ops: TypeOperations { fpmul: fpmul_node },
+            type_ops: TypeOperations {
+                fpmul: fpmul_node,
+                fpdiv_const: fpdiv_const_node,
+            },
             output,
             outputchannels: OutputChannels {
                 share_gen_channel: Arc::new(Mutex::new(share_gen_reciever)),
@@ -441,6 +360,7 @@ where
                 prand_bit_channel: Arc::new(Mutex::new(prand_bit_receiver)),
                 prand_int_channel: Arc::new(Mutex::new(prand_int_receiver)),
                 fpmul_channel: Arc::new(Mutex::new(fpmul_receiver)),
+                fpdiv_const_channel: Arc::new(Mutex::new(fpdiv_const_receiver)),
             },
         })
     }
@@ -534,6 +454,14 @@ where
                             .process(rbc_msg, net)
                             .await?
                     }
+                }
+                Some(ProtocolType::FpDivConst) => {
+                    self.type_ops
+                        .fpdiv_const
+                        .trunc_node
+                        .rbc
+                        .process(rbc_msg, net)
+                        .await?
                 }
                 _ => {
                     warn!(
@@ -644,6 +572,13 @@ where
                             .process(trunc_message, net)
                             .await?;
                     }
+                    Some(ProtocolType::FpDivConst) => {
+                        self.type_ops
+                            .fpdiv_const
+                            .trunc_node
+                            .process(trunc_message, net)
+                            .await?;
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} at truncation",
@@ -666,25 +601,40 @@ where
     R: RBC,
 {
     type Error = HoneyBadgerError;
+    type Sfix = SecretFixedPoint<F, RobustShare<F>>;
+    type Sint = SecretInt<F, RobustShare<F>>;
+    type Cfix = ClearFixedPoint<F>;
+    type Cint = ClearInt<F>;
 
     /// Fixed-point addition: x + y
     async fn add_fixed(
         &self,
-        _x: Vec<SecretFixedPoint<F, RobustShare<F>>>,
-        _y: Vec<SecretFixedPoint<F, RobustShare<F>>>,
-        _net: Arc<N>,
-    ) -> Result<Vec<SecretFixedPoint<F, RobustShare<F>>>, Self::Error> {
-        todo!()
+        x: Vec<Self::Sfix>,
+        y: Vec<Self::Sfix>,
+    ) -> Result<Vec<Self::Sfix>, Self::Error> {
+        if x.len() != y.len() {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+        }
+        Ok(x.into_iter()
+            .zip(y)
+            .map(|(a, b)| a + b)
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Fixed-point subtraction: x - y
     async fn sub_fixed(
         &self,
-        _x: Vec<SecretFixedPoint<F, RobustShare<F>>>,
-        _y: Vec<SecretFixedPoint<F, RobustShare<F>>>,
-        _net: Arc<N>,
-    ) -> Result<Vec<SecretFixedPoint<F, RobustShare<F>>>, Self::Error> {
-        todo!()
+        x: Vec<Self::Sfix>,
+        y: Vec<Self::Sfix>,
+    ) -> Result<Vec<Self::Sfix>, Self::Error> {
+        if x.len() != y.len() {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+        }
+
+        Ok(x.into_iter()
+            .zip(y)
+            .map(|(a, b)| a - b)
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Fixed-point multiplication with truncation for fixed precision
@@ -695,9 +645,7 @@ where
         net: Arc<N>,
     ) -> Result<SecretFixedPoint<F, RobustShare<F>>, Self::Error> {
         if x.precision() != y.precision() {
-            return Err(HoneyBadgerError::FPMulError(
-                FPMulError::IncompatiblePrecision,
-            ));
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
         let (_, _, no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;
@@ -750,7 +698,7 @@ where
                     .fpmul
                     .protocol_output
                     .clone()
-                    .ok_or(FPMulError::Failed)?;
+                    .ok_or(FPError::Failed)?;
 
                 return Ok(output);
             }
@@ -758,26 +706,163 @@ where
         Err(HoneyBadgerError::ChannelClosed)
     }
 
+    async fn div_with_const_fixed(
+        &mut self,
+        x: SecretFixedPoint<F, RobustShare<F>>,
+        y: ClearFixedPoint<F>,
+        net: Arc<N>,
+    ) -> Result<SecretFixedPoint<F, RobustShare<F>>, Self::Error> {
+        // 1. Precision check ---------------------------------------------
+        if x.precision() != y.precision() {
+            return Err(HoneyBadgerError::FPDivConstError(
+                FPDivConstError::IncompatiblePrecision,
+            ));
+        }
+
+        // 2. Check preprocessing inventory --------------------------------
+        let (_, _, no_rand_bit, no_rand_int) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+
+        // Need f random bits and 1 random integer for truncation
+        if no_rand_bit < x.precision().f() || no_rand_int == 0 {
+            // Run full preprocessing if insufficient
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        // 3. Pull preprocessing randomness --------------------------------
+        let r_bits_vec = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandbit_shares(x.precision().f())?;
+
+        let r_int = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandint_shares(1)?;
+
+        // Extract just the shares (drop F2_8 auxiliary)
+        let r_bits_only = r_bits_vec
+            .iter()
+            .map(|(a, _)| a.clone())
+            .collect::<Vec<_>>();
+
+        // 4. Prepare SessionId --------------------------------------------
+        let session_id = SessionId::new(ProtocolType::FpDivConst, 0, 0, self.params.instance_id);
+
+        // 5. Call the division node ---------------------------------------
+        self.type_ops
+            .fpdiv_const
+            .init(x, y, r_bits_only, r_int[0].clone(), session_id, net.clone())
+            .await?;
+
+        // 6. Wait for output on the channel --------------------------------
+        let mut rx = self.outputchannels.fpdiv_const_channel.lock().await;
+
+        while let Some(id) = rx.recv().await {
+            if id == session_id {
+                let output = self
+                    .type_ops
+                    .fpdiv_const
+                    .protocol_output
+                    .clone()
+                    .ok_or(HoneyBadgerError::FPDivConstError(FPDivConstError::Failed))?;
+
+                return Ok(output);
+            }
+        }
+
+        Err(HoneyBadgerError::ChannelClosed)
+    }
+
     /// Integer addition (int8/16/32/64)
     async fn add_int(
         &self,
-        _x: Vec<RobustShare<F>>,
-        _y: Vec<RobustShare<F>>,
-        _bit_width: usize,
-        _net: Arc<N>,
-    ) -> Result<Vec<RobustShare<F>>, Self::Error> {
-        todo!()
+        x: Vec<Self::Sint>,
+        y: Vec<Self::Sint>,
+    ) -> Result<Vec<Self::Sint>, Self::Error> {
+        if x.len() != y.len() {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+        }
+
+        let mut out = Vec::with_capacity(x.len());
+        for (a, b) in x.into_iter().zip(y.into_iter()) {
+            // Local addition of shares
+            let sum = (a + b)?;
+            out.push(sum);
+        }
+        Ok(out)
+    }
+
+    /// Integer addition (int8/16/32/64)
+    async fn sub_int(
+        &self,
+        x: Vec<Self::Sint>,
+        y: Vec<Self::Sint>,
+    ) -> Result<Vec<Self::Sint>, Self::Error> {
+        if x.len() != y.len() {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+        }
+        let mut out = Vec::with_capacity(x.len());
+        for (a, b) in x.into_iter().zip(y.into_iter()) {
+            // Local addition of shares
+            let sum = (a - b)?;
+            out.push(sum);
+        }
+        Ok(out)
     }
 
     /// Integer multiplication (int8/16/32/64)
     async fn mul_int(
-        &self,
-        _x: Vec<RobustShare<F>>,
-        _y: Vec<RobustShare<F>>,
-        _bit_width: usize,
-        _net: Arc<N>,
-    ) -> Result<Vec<RobustShare<F>>, Self::Error> {
-        todo!()
+        &mut self,
+        x: Vec<Self::Sint>,
+        y: Vec<Self::Sint>,
+        net: Arc<N>,
+    ) -> Result<Vec<Self::Sint>, Self::Error> {
+        if x.len() != y.len() {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+        }
+
+        let bitlen_x = x
+            .first()
+            .map(|v| v.bit_length())
+            .ok_or(HoneyBadgerError::FPError(FPError::IncompatiblePrecision))?;
+
+        let x_ok = x.iter().all(|v| v.bit_length() == bitlen_x);
+        if !x_ok {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+        }
+
+        let bitlen_y = y
+            .first()
+            .map(|v| v.bit_length())
+            .ok_or(HoneyBadgerError::FPError(FPError::IncompatiblePrecision))?;
+
+        let y_ok = y.iter().all(|v| v.bit_length() == bitlen_y);
+        if !y_ok {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+        }
+
+        if bitlen_x != bitlen_y {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+        }
+
+        let bitlen = bitlen_x;
+
+        let a: Vec<ShamirShare<F, 1, Robust>> = x.iter().map(|s| s.share().clone()).collect();
+        let b: Vec<ShamirShare<F, 1, Robust>> = y.iter().map(|s| s.share().clone()).collect();
+
+        // Perform secure Beaver multiplication
+        let result = self.mul(a, b, net).await?;
+        let output = result
+            .into_iter()
+            .map(|share| SecretInt::new(share, bitlen))
+            .collect();
+        Ok(output)
     }
 }
 
@@ -906,11 +991,11 @@ where
                             None,
                             None,
                         );
-                        self.preprocess
+                        assert!(self.preprocess
                             .triple_gen
                             .batch_recon_node
-                            .clear_store()
-                            .await;
+                            .clear_store(sessionid)
+                            .await);
                     }
                 }
             }
@@ -1295,6 +1380,7 @@ pub enum ProtocolType {
     RandBit = 11,
     FpMul = 12,
     Trunc = 13,
+    FpDivConst = 14,
 }
 
 impl TryFrom<u16> for ProtocolType {
@@ -1316,13 +1402,26 @@ impl TryFrom<u16> for ProtocolType {
             11 => Ok(ProtocolType::RandBit),
             12 => Ok(ProtocolType::FpMul),
             13 => Ok(ProtocolType::Trunc),
+            14 => Ok(ProtocolType::FpDivConst),
             _ => Err(()),
         }
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Hash)]
+#[derive(PartialOrd, Ord, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(u64);
+
+impl fmt::Debug for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        let caller = ((self.0 >> 60) & 0xF) as u16;
+        let sub_id = self.sub_id();
+        let round_id = self.round_id();
+        let instance_id = self.instance_id();
+
+        write!(f, "[caller={},sub_id={},round_id={},instance_id={}]", caller, sub_id, round_id, instance_id)
+    }
+}
+
 
 impl SessionId {
     pub fn new(caller: ProtocolType, sub_id: u8, round_id: u8, instance_id: u64) -> Self {

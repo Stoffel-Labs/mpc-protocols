@@ -12,7 +12,7 @@ pub mod fixed;
 pub mod integer;
 
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum TypeError {
     #[error("error operating incompatible types - self precision: {current:?}, other precision: {other:?}")]
     IncompatibleIntegerPrecision { current: usize, other: usize },
     #[error("error operating incompatible types - self precision: {current:?}, other precision: {other:?}")]
@@ -22,4 +22,6 @@ pub enum Error {
     },
     #[error("error operating with shares: {0:?}")]
     ShareError(#[from] ShareError),
+    #[error("Division by Zero")]
+    DivisionByZero,
 }

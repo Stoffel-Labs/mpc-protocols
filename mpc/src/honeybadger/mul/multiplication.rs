@@ -56,7 +56,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
     pub async fn clear_store(&self) {
         let mut store = self.mult_storage.lock().await;
         store.clear();
-        self.batch_recon.clear_store().await;
+        self.batch_recon.clear_entire_store().await;
         self.rbc.clear_store().await;
     }
 

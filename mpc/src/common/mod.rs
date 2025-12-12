@@ -13,7 +13,6 @@ use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
         share::ShareError,
-        types::fixed::SecretFixedPoint,
     },
     honeybadger::SessionId,
 };
@@ -29,9 +28,9 @@ use std::{
     sync::Arc,
     usize,
 };
-use stoffelnet::network_utils::{Network, PartyId};
+use stoffelnet::network_utils::{Network, ClientId, PartyId};
 
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
     pub share: [F; N],
     ///index of the share(x-values),can be different from the reciever ID
@@ -290,7 +289,7 @@ where
     type MPCOpts;
     type Error: std::fmt::Debug;
 
-    fn setup(id: PartyId, params: Self::MPCOpts) -> Result<Self, Self::Error>
+    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, Self::Error>
     where
         Self: Sized;
 
@@ -326,46 +325,60 @@ where
     S: SecretSharingScheme<F>,
 {
     type Error;
+    type Sfix;
+    type Sint;
+    type Cfix; // clear fixed-point
+    type Cint; // clear integer
 
     /// Fixed-point addition: x + y
     async fn add_fixed(
         &self,
-        x: Vec<SecretFixedPoint<F, S>>,
-        y: Vec<SecretFixedPoint<F, S>>,
-        net: Arc<N>,
-    ) -> Result<Vec<SecretFixedPoint<F, S>>, Self::Error>;
+        x: Vec<Self::Sfix>,
+        y: Vec<Self::Sfix>,
+    ) -> Result<Vec<Self::Sfix>, Self::Error>;
 
     /// Fixed-point subtraction: x - y
     async fn sub_fixed(
         &self,
-        x: Vec<SecretFixedPoint<F, S>>,
-        y: Vec<SecretFixedPoint<F, S>>,
-        net: Arc<N>,
-    ) -> Result<Vec<SecretFixedPoint<F, S>>, Self::Error>;
+        x: Vec<Self::Sfix>,
+        y: Vec<Self::Sfix>,
+    ) -> Result<Vec<Self::Sfix>, Self::Error>;
 
     /// Fixed-point multiplication with truncation for fixed precision
     async fn mul_fixed(
         &mut self,
-        x: SecretFixedPoint<F, S>,
-        y: SecretFixedPoint<F, S>,
+        x: Self::Sfix,
+        y: Self::Sfix,
         net: Arc<N>,
-    ) -> Result<SecretFixedPoint<F, S>, Self::Error>;
+    ) -> Result<Self::Sfix, Self::Error>;
+
+    /// Fixed-point Division with const
+    async fn div_with_const_fixed(
+        &mut self,
+        x: Self::Sfix,
+        y: Self::Cfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error>;
 
     /// Integer addition (int8/16/32/64)
     async fn add_int(
         &self,
-        x: Vec<S>,
-        y: Vec<S>,
-        bit_width: usize,
-        net: Arc<N>,
-    ) -> Result<Vec<S>, Self::Error>;
+        x: Vec<Self::Sint>,
+        y: Vec<Self::Sint>,
+    ) -> Result<Vec<Self::Sint>, Self::Error>;
+
+    /// Integer addition (int8/16/32/64)
+    async fn sub_int(
+        &self,
+        x: Vec<Self::Sint>,
+        y: Vec<Self::Sint>,
+    ) -> Result<Vec<Self::Sint>, Self::Error>;
 
     /// Integer multiplication (int8/16/32/64)
     async fn mul_int(
-        &self,
-        x: Vec<S>,
-        y: Vec<S>,
-        bit_width: usize,
+        &mut self,
+        x: Vec<Self::Sint>,
+        y: Vec<Self::Sint>,
         net: Arc<N>,
-    ) -> Result<Vec<S>, Self::Error>;
+    ) -> Result<Vec<Self::Sint>, Self::Error>;
 }

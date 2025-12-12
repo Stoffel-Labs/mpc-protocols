@@ -322,6 +322,13 @@ static TRACING_INIT: Lazy<()> = Lazy::new(|| {
         .pretty()
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    let old_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        old_hook(info);
+        tracing::error!("{}", info);
+        std::process::exit(1);
+    }));
 });
 
 pub fn setup_tracing() {
@@ -405,6 +412,7 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     n_prandint: usize,
     l: usize,
     k: usize,
+    input_ids: Vec<ClientId>
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
     N: Network + Send + Sync + 'static,
@@ -423,7 +431,7 @@ where
         k,
     );
     (0..n_parties)
-        .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone()).unwrap())
+        .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), input_ids.clone()).unwrap())
         .collect()
 }
 
