@@ -14,6 +14,8 @@ futures.workspace = true
 stoffelnet.workspace = true
 ark-std.workspace = true
 tracing.workspace = true
+once_cell = "1.21.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 ark-bls12-381.workspace = true
