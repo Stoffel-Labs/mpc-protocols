@@ -318,7 +318,7 @@ pub fn spawn_receiver_tasks(
 
 static TRACING_INIT: Lazy<()> = Lazy::new(|| {
     let subscriber = FmtSubscriber::builder()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("trace".parse().unwrap()))
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .pretty()
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -407,7 +407,7 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     t: usize,
     n_triples: usize,
     n_random_shares: usize,
-    instance_id: u64,
+    instance_id: u32,
     n_prandbit: usize,
     n_prandint: usize,
     l: usize,
@@ -589,7 +589,7 @@ pub fn create_clients<F: FftField, R: RBC + 'static>(
     client_ids: Vec<ClientId>,
     n_parties: usize,
     t: usize,
-    instance_id: u64,
+    instance_id: u32,
     inputs: Vec<F>,
     input_len: usize,
 ) -> HashMap<ClientId, Arc<tokio::sync::Mutex<HoneyBadgerMPCClient<F, R>>>> {

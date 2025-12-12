@@ -1,12 +1,16 @@
 use async_trait::async_trait;
 use futures::future::join_all;
-use std::{cmp::{Ord, PartialOrd, PartialEq, Ordering, Reverse}, collections::{HashMap, BinaryHeap}, marker::Send};
-use tokio::{spawn, time::{sleep, Duration, Instant}, sync::mpsc::{self, Receiver, Sender}, task::JoinHandle};
+use std::{cmp::{Ord, PartialOrd, PartialEq, Ordering, Reverse}, collections::{HashMap, BinaryHeap}, marker::Send, sync::Arc};
+use tokio::{spawn, time::{sleep, Duration, Instant}, sync::{Mutex, mpsc::{self, Receiver, Sender}}, task::JoinHandle};
 use ark_std::rand::{
     distributions::Distribution,
     rngs::StdRng,
 };
-use tracing::{info, warn};
+
+use tracing::debug;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::FmtSubscriber;
+use once_cell::sync::Lazy;
 
 /*
  * This is a fake network with delays. Every sent message is assigned a delay sampled from some
@@ -18,40 +22,88 @@ use tracing::{info, warn};
  * checked and delays are updated.
  * Messages are sent if delays have expired in either case, so a burst of arriving messages cannot
  * block sending.
+ *
+ * Only messages to nodes are delayed, messages to clients are sent immediately.
  */
 
-//pub static mut MAX: Duration = Duration::ZERO;
+static TRACING_INIT: Lazy<()> = Lazy::new(|| {
+    let subscriber = FmtSubscriber::builder()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .pretty()
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    let old_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        old_hook(info);
+        tracing::error!("{}", info);
+        std::process::exit(1);
+    }));
+});
+
+pub fn setup_tracing() {
+    Lazy::force(&TRACING_INIT);
+}
+
+#[cfg(debug_assertions)]
+static MAX: Mutex<Duration> = Mutex::const_new(Duration::ZERO);
 
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
 
+/// 1. Check if there are any messages whose delay has not yet expired. If not, go to step 5.
+/// 2. Get the next message with the smallest delay.
+/// 3. If the delay has expired (i.e., elapsed_time >= delay), send the message.
+/// 4. If the delay has not yet expired, update the delay by subtracting the elapsed time.
+/// Go to step 1.
+/// 5. Add a newly received message (if any).
+/// 6. Update the min-heap with the changes.
+/// 7. Set a timer for the next message to expire or set it to Duration::MAX if there are no
+///    messages.
 async fn send_next_msgs(net_msgs: &mut BinaryHeap<KeyedMessage>, node_channels: &mut Vec<Sender<Vec<u8>>>, recvd_msg: Option<KeyedMessage>, elapsed_time: Duration) -> Duration {
     let mut new_net_msgs = BinaryHeap::new();
 
+    // 1.
     while !net_msgs.is_empty() {
+        // 2.
         let mut msg = net_msgs.pop().unwrap();
         if elapsed_time >= msg.0 {
-            //unsafe {
-            //if elapsed_time - msg.0 > MAX {
-            //    MAX = elapsed_time - msg.0;
-            //    warn!("TIME: new MAX={:?}", MAX);
-            //}}
-            //warn!("TIME: sent to {} with elapsed_time={:?} >= delay={:?}", msg.1.0, elapsed_time, msg.0);
+            #[cfg(debug_assertions)]
+            {
+                {
+                    let mut max = MAX.lock().await;
+
+                    if elapsed_time - msg.0 > *max {
+                        *max = elapsed_time - msg.0;
+                        debug!("TIME: new MAX={:?}", *max);
+                    }
+                }
+                debug!("TIME: sent to {} with elapsed_time={:?} >= delay={:?}", msg.1.0, elapsed_time, msg.0);
+            }
+
+            // 3.
             let result = node_channels[msg.1.0].send(msg.1.1.to_vec()).await;
             if result.is_err() {
                 panic!("network thread encountered error {}", result.unwrap_err());
             }
         } else {
-            //warn!("TIME: msg for {} not ready yet: elapsed_time={:?} < delay={:?}", msg.1.0, elapsed_time, msg.0);
+            #[cfg(debug_assertions)]
+            debug!("TIME: msg for {} not ready yet: elapsed_time={:?} < delay={:?}", msg.1.0, elapsed_time, msg.0);
+
+            // 4.
             msg.0 -= elapsed_time;
             new_net_msgs.push(msg);
         }
     }
 
-    if recvd_msg.is_some() {
-        new_net_msgs.push(recvd_msg.unwrap());
+    // 5.
+    if let Some(msg) = recvd_msg {
+        new_net_msgs.push(msg);
     }
 
+    // 6.
     *net_msgs = new_net_msgs;
+
+    // 7.
     let next_msg = net_msgs.peek();
     if next_msg.is_none() { Duration::MAX } else { next_msg.unwrap().0 }
 }
@@ -61,20 +113,20 @@ struct KeyedMessage(Duration, (PartyId, Vec<u8>));
 
 impl PartialEq for KeyedMessage {
     fn eq(&self, other: &Self) -> bool {
-        return self.0 == other.0;
+        self.0 == other.0
     }
 }
 
 impl Eq for KeyedMessage { }
 impl PartialOrd for KeyedMessage {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        return Some(Reverse(self.0).cmp(&Reverse(other.0)));
+        Some(Reverse(self.0).cmp(&Reverse(other.0)))
     }
 }
 
 impl Ord for KeyedMessage {
     fn cmp(&self, other: &Self) -> Ordering {
-        return Reverse(self.0).cmp(&Reverse(other.0));
+        Reverse(self.0).cmp(&Reverse(other.0))
     }
 }
 
@@ -92,7 +144,15 @@ pub struct BadFakeNetwork {
 }
 
 impl BadFakeNetwork {
-    /// Creates a new fake network for testing using the given number of nodes and configuration.
+    /// Creates a new bad fake network for testing using the given number of nodes and configuration.
+    /// Returns
+    ///   1. a receiving endpoint to receive messages sent by nodes at the delaying thread
+    ///   2. sending endpoints to deliver messages to nodes from the delaying thread, connected to
+    ///      those in (1)
+    ///   3. receiving endpoints to receive messages from the network, connected to those in (2)
+    ///   4. a mapping of client IDs to their corresponding receiving endpoints at the client
+    /// The sending endpoints connected to (1) and (4) are managed by the network and exposed via
+    /// the `BadFakeNetwork::send` and `BadFakeNetwork::send_to_client` functions.
     pub fn new(
         n_nodes: usize,
         n_clients: Option<Vec<ClientId>>,
@@ -147,6 +207,17 @@ impl BadFakeNetwork {
     /// Starts the thread, which delays messages and then sends them to the receivers.
     /// Messages can be sent before calling this function, but they will only arrive after starting
     /// this function.
+    ///
+    /// Repeat this forever:
+    /// 1. Wait for either 2. or 3. to happen using `tokio::select!`.
+    /// 2. If a message is received by the delaying thread from a node first,
+    ///    a. a random delay for the message is sampled from the given distribution
+    ///    b. `send_next_msgs` is called to add the new message and send any messages whose
+    ///       delay has expired
+    ///    c. The timer's expiration time is updated for the next iteration.
+    /// 3. If the current timer expires first,
+    ///    a. `send_next_msgs` is called to send any messages whose delay has expired
+    ///    b. The timer's expiration time is updated for the next iteration.
     pub fn start(mut net_rx: Receiver<(PartyId, Vec<u8>)>, mut node_channels: Vec<Sender<Vec<u8>>>, mut rng: StdRng, delay_dist: impl Distribution<u64> + 'static + Send) -> JoinHandle<()> {
         spawn(async move {
             let mut net_msgs = BinaryHeap::new();
@@ -155,10 +226,15 @@ impl BadFakeNetwork {
     
             loop {
                 let timer = sleep(duration);
-                //info!("TIME: new timer started with duration={:?}", duration);
+
+                #[cfg(debug_assertions)]
+                debug!("TIME: new timer started with duration={:?}", duration);
+
                 tokio::pin!(timer);
     
+                // 1.
                 tokio::select! {
+                    // 2.
                     id_msg = net_rx.recv() => {
                         if id_msg.is_none() {
                             panic!("channel closed");
@@ -167,9 +243,13 @@ impl BadFakeNetwork {
                         let now = Instant::now();
     
                         let (id, msg) = id_msg.unwrap();
+                        // a.
                         let delay = Duration::from_millis(delay_dist.sample(&mut rng));
-                        //info!("TIME: recvd msg for {} with delay {:?}", id, delay);
-    
+
+                        #[cfg(debug_assertions)]
+                        debug!("TIME: recvd msg for {} with delay {:?}", id, delay);
+
+                        // b.
                         duration = send_next_msgs(
                             &mut net_msgs, 
                             &mut node_channels, 
@@ -177,13 +257,19 @@ impl BadFakeNetwork {
                             now - timer_start
                         ).await;
 
+                        // c.
                         timer_start = now;
                     }
+                    // 3.
                     _ = &mut timer => {
                         let now = Instant::now();
-                        //info!("TIME: expired, should after {:?}, did after {:?}", duration, now - timer_start);
 
+                        #[cfg(debug_assertions)]
+                        debug!("TIME: expired, should after {:?}, did after {:?}", duration, now - timer_start);
+
+                        // a.
                         duration = send_next_msgs(&mut net_msgs, &mut node_channels, None, now - timer_start).await;
+                        // b.
                         timer_start = now;
                     }
                 }
@@ -198,8 +284,10 @@ impl Network for BadFakeNetwork {
     type NodeType = FakeBadNode;
     type NetworkConfig = BadFakeNetworkConfig;
 
+    // Sends a message from a node to the delaying thread, which later forwards it to the right
+    // node.
     async fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
-        if !self.net_channels.get(recipient).is_none() {
+        if self.net_channels.get(recipient).is_some() {
             self.net_channels[recipient]
                 .send((recipient, message.to_vec()))
                 .await
@@ -250,6 +338,8 @@ impl Network for BadFakeNetwork {
 
     // --- New client communication methods ---
 
+    // Sends a message from a client to the delaying thread, which later forwards it to the right
+    // node.
     async fn send_to_client(
         &self,
         client: ClientId,
@@ -327,6 +417,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_fake_network_new() {
+        setup_tracing();
+
         let n_nodes = 5;
         let config = BadFakeNetworkConfig::new(100);
         let (network, _, _, _, _) = BadFakeNetwork::new(n_nodes, None, config);
@@ -345,6 +437,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_fake_network_send_and_receive() {
+        setup_tracing();
+
         let n_nodes = 3;
         let config = BadFakeNetworkConfig::new(100);
         let (network, net_rx, node_channels, mut receivers, _) = BadFakeNetwork::new(n_nodes, None, config);
@@ -381,6 +475,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_fake_network_broadcast() {
+        setup_tracing();
+
         let n_nodes = 3;
         let config = BadFakeNetworkConfig::new(100);
         let (network, net_rx, node_channels, mut receivers, _) = BadFakeNetwork::new(n_nodes, None, config);
@@ -408,6 +504,8 @@ mod tests {
 
     #[test]
     fn test_fake_node_id_and_scalar_id() {
+        setup_tracing();
+
         use ark_bls12_381::Fr;
 
         //let (sender, receiver) = mpsc::channel(100);
@@ -422,6 +520,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_network_error_on_send_failure() {
+        setup_tracing();
+
         let n_nodes = 2;
         let config = BadFakeNetworkConfig::new(100);
         let (mut network, net_rx, node_channels, _, _) = BadFakeNetwork::new(n_nodes, None, config);
@@ -457,6 +557,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_out_of_order() {
+        setup_tracing();
+
         let n_nodes = 2;
         let config = BadFakeNetworkConfig::new(500);
         let (network, net_rx, node_channels, mut receivers, _) = BadFakeNetwork::new(n_nodes, None, config);
