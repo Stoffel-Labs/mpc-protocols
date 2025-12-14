@@ -7,6 +7,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use bincode;
+use dashmap::DashMap;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use threshold_crypto::{
@@ -36,7 +37,7 @@ pub struct Bracha {
     pub n: usize,  // Total number of parties in the network
     pub t: usize,  // Number of allowed malicious parties
     pub k: usize,  //threshold (Not really used in Bracha)
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
+    pub store: Arc<DashMap<SessionId, Arc<Mutex<BrachaStore>>>>, // Stores the session state
 }
 #[async_trait]
 impl RBC for Bracha {
@@ -51,7 +52,7 @@ impl RBC for Bracha {
             n,
             t,
             k,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(DashMap::new()),
         })
     }
     /// Returns the unique identifier of the current party.
@@ -59,8 +60,7 @@ impl RBC for Bracha {
         self.id
     }
     async fn clear_store(&self) {
-        let mut store = self.store.lock().await;
-        store.clear();
+        self.store.clear();
     }
     /// This initiates the Bracha protocol.
     async fn init<N: Network + Send + Sync>(
@@ -346,9 +346,8 @@ impl Bracha {
         Ok(())
     }
     async fn get_or_create_store(&self, session_id: SessionId) -> Arc<Mutex<BrachaStore>> {
-        let mut store = self.store.lock().await;
-        // Get or create the session state for the current session.
-        store
+        // Get or create the session state for the current session using DashMap entry API
+        self.store
             .entry(session_id)
             .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
             .clone()
@@ -432,7 +431,7 @@ pub struct Avid {
     pub n: usize,                                                     //Network size
     pub t: usize,                                                     //No. of malicious parties
     pub k: usize,                                                     //Threshold
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
+    pub store: Arc<DashMap<SessionId, Arc<Mutex<AvidStore>>>>, // Sessionid => store
 }
 #[async_trait]
 impl RBC for Avid {
@@ -454,15 +453,14 @@ impl RBC for Avid {
             n,
             t,
             k,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(DashMap::new()),
         })
     }
     fn id(&self) -> usize {
         self.id
     }
     async fn clear_store(&self) {
-        let mut store = self.store.lock().await;
-        store.clear();
+        self.store.clear();
     }
     ///This initiates the Avid protocol.
     async fn init<N: Network + Send + Sync>(
@@ -921,9 +919,8 @@ impl Avid {
         Ok(())
     }
     async fn get_or_create_store(&self, session_id: SessionId) -> Arc<Mutex<AvidStore>> {
-        let mut store = self.store.lock().await;
-        // Get or create the session state for the current session.
-        store
+        // Get or create the session state for the current session using DashMap entry API
+        self.store
             .entry(session_id)
             .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
             .clone()
@@ -971,8 +968,8 @@ pub struct ABA {
     pub k: usize,                        //threshold
     pub skshare: Arc<OnceCell<Vec<u8>>>, //Secret key share
     pub pkset: Arc<OnceCell<Vec<u8>>>,   //Public key set
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<AbaStore>>>>>, // Stores the ABA session state
-    pub coin: Arc<Mutex<HashMap<SessionId, Arc<Mutex<CoinStore>>>>>, // Stores the common coin session state
+    pub store: Arc<DashMap<SessionId, Arc<Mutex<AbaStore>>>>, // Stores the ABA session state
+    pub coin: Arc<DashMap<SessionId, Arc<Mutex<CoinStore>>>>, // Stores the common coin session state
 }
 #[async_trait]
 impl RBC for ABA {
@@ -989,19 +986,16 @@ impl RBC for ABA {
             k,
             skshare: Arc::new(OnceCell::new()),
             pkset: Arc::new(OnceCell::new()),
-            store: Arc::new(Mutex::new(HashMap::new())),
-            coin: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(DashMap::new()),
+            coin: Arc::new(DashMap::new()),
         })
     }
     fn id(&self) -> usize {
         self.id
     }
     async fn clear_store(&self) {
-        let mut store = self.store.lock().await;
-        let mut coin_store = self.coin.lock().await;
-
-        store.clear();
-        coin_store.clear();
+        self.store.clear();
+        self.coin.clear();
     }
     /// This initiates the ABA protocol.
     async fn init<N: Network + Send + Sync>(
@@ -1417,18 +1411,16 @@ impl ABA {
     }
 
     async fn get_or_create_store(&self, session_id: SessionId) -> Arc<Mutex<AbaStore>> {
-        let mut store = self.store.lock().await;
-        // Get or create the session state for the current session.
-        store
+        // Get or create the session state for the current session using DashMap entry API
+        self.store
             .entry(session_id)
             .or_insert_with(|| Arc::new(Mutex::new(AbaStore::default())))
             .clone()
     }
 
     async fn get_or_create_coinstore(&self, session_id: SessionId) -> Arc<Mutex<CoinStore>> {
-        let mut store = self.coin.lock().await;
-        // Get or create the session state for the current session.
-        store
+        // Get or create the session state for the current session using DashMap entry API
+        self.coin
             .entry(session_id)
             .or_insert_with(|| Arc::new(Mutex::new(CoinStore::default())))
             .clone()

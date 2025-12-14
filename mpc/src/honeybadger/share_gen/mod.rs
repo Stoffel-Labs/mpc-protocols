@@ -16,6 +16,7 @@ use crate::{
     },
 };
 
+pub mod batched_share_gen;
 pub mod share_gen;
 
 /// Error type for the Random Single Share (RanSha) protocol.
@@ -77,6 +78,43 @@ impl<F: FftField> RanShaStore<F> {
     }
 }
 
+/// Storage for batched random share generation.
+/// Instead of storing 1 share per party, stores K shares per party.
+#[derive(Clone, Debug)]
+pub struct BatchedRanShaStore<F: FftField> {
+    /// K shares received from each party (party_id -> Vec of K shares)
+    pub initial_shares: HashMap<usize, Vec<RobustShare<F>>>,
+    /// Tracks which parties have sent their batched shares
+    pub reception_tracker: Vec<bool>,
+    /// K*n computed r shares after Vandermonde transformation
+    pub computed_r_shares: Vec<RobustShare<F>>,
+    /// Received reconstruction shares (for verification)
+    pub received_r_shares: HashMap<usize, Vec<RobustShare<F>>>,
+    /// Parties who have confirmed successful reconstruction
+    pub received_ok_msg: Vec<usize>,
+    /// Current protocol state
+    pub state: RanShaState,
+    /// Final output: K*(n-2t) random shares
+    pub protocol_output: Vec<RobustShare<F>>,
+    /// Batch size K (number of secrets per party)
+    pub batch_size: usize,
+}
+
+impl<F: FftField> BatchedRanShaStore<F> {
+    pub fn new(n_parties: usize, batch_size: usize) -> Self {
+        Self {
+            initial_shares: HashMap::with_capacity(n_parties),
+            reception_tracker: vec![false; n_parties],
+            computed_r_shares: Vec::with_capacity(batch_size * n_parties),
+            received_r_shares: HashMap::new(),
+            received_ok_msg: Vec::new(),
+            state: RanShaState::Initialized,
+            protocol_output: Vec::new(),
+            batch_size,
+        }
+    }
+}
+
 /// Types for all the possible messages sent during the Random Single Sharing protocol.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub enum RanShaMessageType {
@@ -95,6 +133,10 @@ pub enum RanShaPayload {
     Reconstruct(Vec<u8>),
     /// Output message confirming reconstruction success or failure.
     Output(bool),
+    /// Batched shares: K shares serialized together
+    BatchedShare(Vec<u8>),
+    /// Batched reconstruction: K shares for reconstruction
+    BatchedReconstruct(Vec<u8>),
 }
 
 /// Message sent in the Random Single Sharing protocol.

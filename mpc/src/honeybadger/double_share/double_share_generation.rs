@@ -9,7 +9,9 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use itertools::izip;
-use std::{collections::BTreeMap, sync::Arc};
+use dashmap::DashMap;
+use futures::future::try_join_all;
+use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::{info, warn};
@@ -36,7 +38,7 @@ where
     /// Threshold for the corrupted parties.
     pub threshold: usize,
     /// Storage of the party.
-    pub storage: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<DouShaStorage<F>>>>>>,
+    pub storage: Arc<DashMap<SessionId, Arc<Mutex<DouShaStorage<F>>>>>,
     pub output_sender: Sender<SessionId>,
 }
 
@@ -45,13 +47,12 @@ where
     F: FftField,
 {
     pub async fn pop_finished_protocol_result(&self) -> Option<Vec<DoubleShamirShare<F>>> {
-        let mut storage = self.storage.lock().await;
         let mut finished_sid = None;
         let mut output = Vec::new();
-        for (sid, storage_mutex) in storage.iter() {
-            let storage_bind = storage_mutex.lock().await;
+        for entry in self.storage.iter() {
+            let storage_bind = entry.value().lock().await;
             if storage_bind.state == ProtocolState::Finished {
-                finished_sid = Some(*sid);
+                finished_sid = Some(*entry.key());
                 output = storage_bind.protocol_output.clone();
                 break;
             }
@@ -59,14 +60,14 @@ where
         match finished_sid {
             Some(sid) => {
                 // Remove the entry from the storage
-                storage.remove(&sid);
+                self.storage.remove(&sid);
                 Some(output)
             }
             None => None,
         }
     }
 
-    pub async fn process(&mut self, message: DouShaMessage) -> Result<(), DouShaError> {
+    pub async fn process(&self, message: DouShaMessage) -> Result<(), DouShaError> {
         self.receive_double_shares_handler(message).await?;
         Ok(())
     }
@@ -82,7 +83,7 @@ where
             id,
             n_parties,
             threshold,
-            storage: Arc::new(Mutex::new(BTreeMap::new())),
+            storage: Arc::new(DashMap::new()),
             output_sender,
         }
     }
@@ -90,18 +91,17 @@ where
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
     pub async fn get_or_create_store(
-        &mut self,
+        &self,
         session_id: SessionId,
     ) -> Arc<Mutex<DouShaStorage<F>>> {
-        let mut storage = self.storage.lock().await;
-        storage
+        self.storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))))
+            .or_insert_with(|| Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))))
             .clone()
     }
 
     pub async fn init<N, R>(
-        &mut self,
+        &self,
         session_id: SessionId,
         rng: &mut R,
         network: Arc<N>,
@@ -119,23 +119,40 @@ where
         let shares_deg_2t =
             NonRobustShare::compute_shares(secret, self.n_parties, 2 * self.threshold, None, rng)?;
 
-        for (recipient_id, (share_t, share_2t)) in izip!(shares_deg_t, shares_deg_2t).enumerate() {
-            // Create and serialize the payload.
-            let double_share = DoubleShamirShare::new(share_t, share_2t);
-            let mut payload = Vec::new();
-            double_share.serialize_compressed(&mut payload)?;
+        // Send all double shares concurrently
+        let send_futures: Vec<_> = izip!(shares_deg_t, shares_deg_2t)
+            .enumerate()
+            .map(|(recipient_id, (share_t, share_2t))| {
+                let network = network.clone();
+                let sender_id = self.id;
 
-            // Create and serialize the generic message.
-            let generic_message =
-                WrappedMessage::Dousha(DouShaMessage::new(self.id, session_id, payload));
-            let bytes_generic_msg = bincode::serialize(&generic_message)?;
+                async move {
+                    // Create and serialize the payload.
+                    let double_share = DoubleShamirShare::new(share_t, share_2t);
+                    let mut payload = Vec::new();
+                    double_share
+                        .serialize_compressed(&mut payload)
+                        .map_err(DouShaError::ArkSerializationError)?;
 
-            info!(
-                "sending double shares from {:?} to {:?}",
-                self.id, recipient_id
-            );
-            network.send(recipient_id, &bytes_generic_msg).await?;
-        }
+                    // Create and serialize the generic message.
+                    let generic_message =
+                        WrappedMessage::Dousha(DouShaMessage::new(sender_id, session_id, payload));
+                    let bytes_generic_msg = bincode::serialize(&generic_message)?;
+
+                    info!(
+                        "sending double shares from {:?} to {:?}",
+                        sender_id, recipient_id
+                    );
+                    network
+                        .send(recipient_id, &bytes_generic_msg)
+                        .await
+                        .map_err(DouShaError::NetworkError)?;
+                    Ok::<(), DouShaError>(())
+                }
+            })
+            .collect();
+
+        try_join_all(send_futures).await?;
 
         // Update the state of the protocol to Initialized.
         let storage_access = self.get_or_create_store(session_id).await;
@@ -145,7 +162,7 @@ where
     }
 
     pub async fn receive_double_shares_handler(
-        &mut self,
+        &self,
         recv_message: DouShaMessage,
     ) -> Result<(), DouShaError> {
         let double_share: DoubleShamirShare<F> =
@@ -177,11 +194,10 @@ where
             .iter()
             .all(|&received| received)
         {
-            dousha_storage.protocol_output = dousha_storage
-                .share
-                .iter()
-                .map(|(_, v)| v.clone())
-                .collect();
+            // Sort by sender_id to ensure consistent ordering across parties
+            let mut sorted_shares: Vec<_> = dousha_storage.share.iter().collect();
+            sorted_shares.sort_by_key(|(k, _)| *k);
+            dousha_storage.protocol_output = sorted_shares.into_iter().map(|(_, v)| v.clone()).collect();
             dousha_storage.state = ProtocolState::Finished;
             self.output_sender.send(recv_message.session_id).await?;
         }

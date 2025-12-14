@@ -61,7 +61,10 @@ use crate::{
         preprocessing::HoneyBadgerMPCNodePreprocMaterial,
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
-        share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
+        share_gen::{
+            batched_share_gen::BatchedRanShaNode, share_gen::RanShaNode, RanShaError,
+            RanShaMessage, RanShaPayload,
+        },
         triple_gen::{TripleGenError, TripleGenMessage},
     },
 };
@@ -84,6 +87,7 @@ use tokio::{
     },
     time::Duration
 };
+use futures::future::try_join_all;
 use tracing::{info, warn};
 use triple_gen::triple_generation::TripleGenNode;
 
@@ -218,6 +222,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     // Nodes for subprotocols.
     pub input: InputServer<F, R>,
     pub share_gen: RanShaNode<F, R>,
+    pub batched_share_gen: BatchedRanShaNode<F, R>,
     pub dou_sha: DoubleShareNode<F>,
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
@@ -228,6 +233,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
 #[derive(Clone, Debug)]
 pub struct OutputChannels {
     pub share_gen_channel: Arc<Mutex<Receiver<SessionId>>>,
+    pub batched_share_gen_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub triple_channel: Arc<Mutex<Receiver<SessionId>>>,
@@ -355,6 +361,7 @@ where
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
         let (triple_sender, triple_receiver) = mpsc::channel(128);
         let (share_gen_sender, share_gen_reciever) = mpsc::channel(128);
+        let (batched_share_gen_sender, batched_share_gen_receiver) = mpsc::channel(128);
         let (rand_bit_sender, rand_bit_receiver) = mpsc::channel(128);
         let (prand_bit_sender, prand_bit_receiver) = mpsc::channel(128);
         let (prand_int_sender, prand_int_receiver) = mpsc::channel(128);
@@ -390,6 +397,13 @@ where
             params.threshold + 1,
             share_gen_sender,
         )?;
+        let batched_share_gen = BatchedRanShaNode::new(
+            id,
+            params.n_parties,
+            params.threshold,
+            params.threshold + 1,
+            batched_share_gen_sender,
+        )?;
         let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold, fpmul_sender)?;
         let fpdiv_const_node =
             FPDivConstNode::new(id, params.n_parties, params.threshold, fpdiv_const_sender)?;
@@ -404,6 +418,7 @@ where
             preprocess: PreprocessNodes {
                 input,
                 share_gen,
+                batched_share_gen,
                 dou_sha: dousha_node,
                 ran_dou_sha: ran_dou_sha_node,
                 triple_gen: triple_gen_node,
@@ -418,6 +433,7 @@ where
             output,
             outputchannels: OutputChannels {
                 share_gen_channel: Arc::new(Mutex::new(share_gen_reciever)),
+                batched_share_gen_channel: Arc::new(Mutex::new(batched_share_gen_receiver)),
                 dou_sha_channel: Arc::new(Mutex::new(dou_sha_receiver)),
                 ran_dou_sha_channel: Arc::new(Mutex::new(ran_dou_sha_receiver)),
                 triple_channel: Arc::new(Mutex::new(triple_receiver)),
@@ -482,6 +498,9 @@ where
                 Some(ProtocolType::Ransha) => {
                     self.preprocess.share_gen.rbc.process(rbc_msg, net).await?
                 }
+                Some(ProtocolType::BatchedRansha) => {
+                    self.preprocess.batched_share_gen.rbc.process(rbc_msg, net).await?
+                }
                 Some(ProtocolType::Input) => {
                     self.preprocess.input.rbc.process(rbc_msg, net).await?
                 }
@@ -531,7 +550,22 @@ where
                 self.preprocess.input.process(input).await?;
             }
             WrappedMessage::RanSha(rs_msg) => {
-                self.preprocess.share_gen.process(rs_msg, net).await?;
+                // Route to batched or regular ShareGen based on payload type or session protocol
+                let is_batched = match &rs_msg.payload {
+                    RanShaPayload::BatchedShare(_) | RanShaPayload::BatchedReconstruct(_) => true,
+                    RanShaPayload::Output(_) => {
+                        // For Output messages, check the session's protocol type
+                        rs_msg.session_id.calling_protocol()
+                            == Some(ProtocolType::BatchedRansha)
+                    }
+                    _ => false,
+                };
+
+                if is_batched {
+                    self.preprocess.batched_share_gen.process(rs_msg, net).await?;
+                } else {
+                    self.preprocess.share_gen.process(rs_msg, net).await?;
+                }
             }
             WrappedMessage::Dousha(ds_msg) => {
                 self.preprocess.dou_sha.process(ds_msg).await?;
@@ -1005,7 +1039,7 @@ where
             info!("Randousha pair generation done");
 
             // ------------------------
-            // Step 3. Generate triples
+            // Step 3. Generate triples (parallel)
             // ------------------------
 
             // Take random shares for triples
@@ -1020,62 +1054,79 @@ where
                 .await
                 .take_random_shares(total_triples_to_generate)?;
 
-            //Outputs 2t+1 triples at a time
-            let a_chunks = random_shares_a.chunks_exact(group_size);
-            let b_chunks = random_shares_b.chunks_exact(group_size);
-            let r_chunks = ran_dou_sha_pair[..total_triples_to_generate].chunks_exact(group_size);
-            let mut triple_counter = self.counters.triple_counter.get_next();
-            let mut round_id = 0u8;
+            // Outputs 2t+1 triples at a time
+            let a_chunks: Vec<_> = random_shares_a.chunks_exact(group_size).map(|c| c.to_vec()).collect();
+            let b_chunks: Vec<_> = random_shares_b.chunks_exact(group_size).map(|c| c.to_vec()).collect();
+            let r_chunks: Vec<_> = ran_dou_sha_pair[..total_triples_to_generate]
+                .chunks_exact(group_size)
+                .map(|c| c.to_vec())
+                .collect();
 
-            for ((a, b), r) in a_chunks.zip(b_chunks).zip(r_chunks) {
-                let sessionid = SessionId::new(
-                    ProtocolType::Triple,
-                    triple_counter,
-                    0,
-                    round_id,
-                    self.params.instance_id
-                );
-                self.preprocess
-                    .triple_gen
-                    .init(
-                        a.to_vec(),
-                        b.to_vec(),
-                        r.to_vec(),
-                        sessionid,
-                        network.clone(),
-                    )
-                    .await?;
+            let num_triple_batches = a_chunks.len();
 
-                // ------------------------
-                // Step 4. Collect triples
-                // ------------------------
-                if let Some(sid) = self.outputchannels.triple_channel.lock().await.recv().await {
-                    if sid == sessionid {
-                        let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
-                        let triple_storage_mutex = triple_gen_db.remove(&sid).unwrap();
-                        let triple_storage = triple_storage_mutex.lock().await;
-                        let triples = triple_storage.protocol_output.clone();
+            if num_triple_batches > 0 {
+                info!("Starting parallel triple generation: {} batches", num_triple_batches);
 
-                        self.preprocessing_material.lock().await.add(
-                            Some(triples),
-                            None,
-                            None,
-                            None,
-                        );
-                        assert!(self.preprocess
-                            .triple_gen
-                            .batch_recon_node
-                            .clear_store(sessionid)
-                            .await);
+                // Pre-compute all session IDs
+                let triple_session_ids: Vec<SessionId> = (0..num_triple_batches)
+                    .map(|i| {
+                        let exec_id = self.counters.triple_counter.get_next();
+                        let round_id = (i % 256) as u8;
+                        SessionId::new(ProtocolType::Triple, exec_id, 0, round_id, self.params.instance_id)
+                    })
+                    .collect();
+
+                // Clone shared state for parallel access
+                let triple_gen = self.preprocess.triple_gen.clone();
+
+                // Spawn all triple init tasks in parallel
+                let triple_init_futures: Vec<_> = triple_session_ids
+                    .iter()
+                    .zip(a_chunks.into_iter().zip(b_chunks.into_iter()).zip(r_chunks.into_iter()))
+                    .map(|(&session_id, ((a, b), r))| {
+                        let triple_gen = triple_gen.clone();
+                        let net = network.clone();
+
+                        async move {
+                            triple_gen.init(a, b, r, session_id, net).await
+                        }
+                    })
+                    .collect();
+
+                try_join_all(triple_init_futures).await?;
+
+                // Collect all triple outputs
+                let triple_channel = self.outputchannels.triple_channel.clone();
+                let mut collected = 0;
+
+                while collected < num_triple_batches {
+                    if let Some(sid) = triple_channel.lock().await.recv().await {
+                        if triple_session_ids.contains(&sid) {
+                            let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
+                            if let Some(triple_storage_mutex) = triple_gen_db.remove(&sid) {
+                                let triple_storage = triple_storage_mutex.lock().await;
+                                let triples = triple_storage.protocol_output.clone();
+
+                                self.preprocessing_material.lock().await.add(
+                                    Some(triples),
+                                    None,
+                                    None,
+                                    None,
+                                );
+                                self.preprocess
+                                    .triple_gen
+                                    .batch_recon_node
+                                    .clear_store(sid)
+                                    .await;
+                                collected += 1;
+                            }
+                        }
+                    } else {
+                        break;
                     }
                 }
 
-                if round_id == 255 {
-                    triple_counter = self.counters.triple_counter.get_next();
-                    round_id = 0;
-                } else {
-                    round_id += 1;
-                }
+                info!("Parallel triple generation complete: {} batches", collected);
             }
         }
         // ------------------------
@@ -1097,7 +1148,17 @@ where
     F: PrimeField,
     R: RBC,
 {
-    /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
+    /// Ensure we have enough random shares by running ShareGen.
+    ///
+    /// For small numbers of shares (< 100), uses the regular ShareGen protocol.
+    /// For large numbers, uses the batched ShareGen protocol which produces
+    /// K*(n-2t) shares per run instead of just (n-2t).
+    ///
+    /// This function spawns multiple instances concurrently, each with a unique
+    /// SessionId. The parallelization is safe because:
+    /// - Each session uses a unique SessionId (via round_id and exec_id)
+    /// - Storage is keyed by SessionId (no cross-session interference)
+    /// - The network layer supports concurrent message handling
     async fn ensure_random_shares<G, N>(
         &mut self,
         network: Arc<N>,
@@ -1108,60 +1169,233 @@ where
         N: Network + Send + Sync + 'static,
         G: Rng,
     {
-        // Outputs in batches of (n-2t)
-        let batch = self.params.n_parties - 2 * self.params.threshold;
-        let run = (needed + batch - 1) / batch; // ceil(missing / batch)
-        let mut round_id = 0u8;
-        let mut ran_sha_counter = self.counters.ran_sha_counter.get_next();
+        // Outputs in batches of (n-2t) for regular protocol
+        let output_per_run = self.params.n_parties - 2 * self.params.threshold;
 
-        for i in 0..run {
-            info!("Random share generation run {}", i);
+        // Use batched protocol for larger needs (threshold: 100 shares)
+        // This reduces protocol runs significantly for large share counts
+        const BATCHED_THRESHOLD: usize = 100;
+        const BATCH_SIZE_K: usize = 256; // K secrets per party
 
-            let sessionid =
-                SessionId::new(ProtocolType::Ransha, ran_sha_counter, 0, round_id, self.params.instance_id);
-
-            // Run ShareGen protocol
-            self.preprocess
-                .share_gen
-                .init(sessionid, rng, network.clone())
-                .await?;
-
-            // Collect its output
-            if let Some(id) = self
-                .outputchannels
-                .share_gen_channel
-                .lock()
+        if needed >= BATCHED_THRESHOLD {
+            self.ensure_random_shares_batched(network, rng, needed, BATCH_SIZE_K)
                 .await
-                .recv()
+        } else {
+            self.ensure_random_shares_regular(network, rng, needed, output_per_run)
                 .await
-            {
-                if id == sessionid {
-                    let mut share_store = self.preprocess.share_gen.store.lock().await;
-                    let store_lock = share_store.remove(&id).unwrap();
-                    let store = store_lock.lock().await;
-                    let output = store.protocol_output.clone();
+        }
+    }
 
-                    self.preprocessing_material
-                        .lock()
-                        .await
-                        .add(None, Some(output), None, None);
+    /// Regular (non-batched) random share generation for small batch sizes.
+    async fn ensure_random_shares_regular<G, N>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+        needed: usize,
+        output_per_run: usize,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng,
+    {
+        let run = (needed + output_per_run - 1) / output_per_run; // ceil(needed / output_per_run)
+
+        if run == 0 {
+            return Ok(());
+        }
+
+        info!(
+            "Starting regular random share generation: {} runs needed for {} shares",
+            run, needed
+        );
+
+        // Pre-compute all session IDs upfront to ensure uniqueness
+        let session_ids: Vec<SessionId> = (0..run)
+            .map(|i| {
+                let exec_id = self.counters.ran_sha_counter.get_next();
+                let round_id = (i % 256) as u8;
+                SessionId::new(
+                    ProtocolType::Ransha,
+                    exec_id,
+                    0,
+                    round_id,
+                    self.params.instance_id,
+                )
+            })
+            .collect();
+
+        // Create a base seed from the provided RNG to derive child RNGs
+        let base_seed: [u8; 32] = rng.gen();
+
+        // Clone shared state for parallel access
+        let share_gen = self.preprocess.share_gen.clone();
+
+        // Spawn all init tasks in parallel
+        let init_futures: Vec<_> = session_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &session_id)| {
+                let share_gen = share_gen.clone();
+                let net = network.clone();
+                let mut task_seed = base_seed;
+                task_seed[0] = task_seed[0].wrapping_add(i as u8);
+                task_seed[1] = task_seed[1].wrapping_add((i >> 8) as u8);
+                let mut task_rng = StdRng::from_seed(task_seed);
+
+                async move {
+                    share_gen.init(session_id, &mut task_rng, net).await
                 }
-            }
+            })
+            .collect();
 
-            if round_id == 255 {
-                ran_sha_counter = self.counters.ran_sha_counter.get_next();
-                round_id = 0;
+        // Wait for all init calls to complete
+        try_join_all(init_futures).await?;
+
+        // Collect all outputs (they may arrive in any order)
+        let mut collected = 0;
+        let channel = self.outputchannels.share_gen_channel.clone();
+
+        while collected < run {
+            if let Some(id) = channel.lock().await.recv().await {
+                if session_ids.contains(&id) {
+                    let mut share_store = self.preprocess.share_gen.store.lock().await;
+                    if let Some(store_lock) = share_store.remove(&id) {
+                        let store = store_lock.lock().await;
+                        let output = store.protocol_output.clone();
+
+                        self.preprocessing_material
+                            .lock()
+                            .await
+                            .add(None, Some(output), None, None);
+                        collected += 1;
+                    }
+                }
             } else {
-                round_id += 1;
+                break;
             }
         }
 
-        // Clear RBC store
+        info!(
+            "Regular random share generation complete: {} sessions",
+            collected
+        );
+
         self.preprocess.share_gen.rbc.clear_store().await;
         Ok(())
     }
 
+    /// Batched random share generation for large batch sizes.
+    /// Each party contributes K secrets, producing K*(n-2t) output shares per run.
+    async fn ensure_random_shares_batched<G, N>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+        needed: usize,
+        batch_size_k: usize,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng,
+    {
+        // Batched protocol produces K*(n-2t) shares per run
+        let output_per_run =
+            batch_size_k * (self.params.n_parties - 2 * self.params.threshold);
+        let run = (needed + output_per_run - 1) / output_per_run; // ceil
+
+        if run == 0 {
+            return Ok(());
+        }
+
+        info!(
+            "Starting batched random share generation: {} runs with K={} for {} shares ({} per run)",
+            run, batch_size_k, needed, output_per_run
+        );
+
+        // Pre-compute all session IDs upfront
+        let session_ids: Vec<SessionId> = (0..run)
+            .map(|i| {
+                let exec_id = self.counters.ran_sha_counter.get_next();
+                let round_id = (i % 256) as u8;
+                SessionId::new(
+                    ProtocolType::BatchedRansha,
+                    exec_id,
+                    0,
+                    round_id,
+                    self.params.instance_id,
+                )
+            })
+            .collect();
+
+        // Create a base seed from the provided RNG to derive child RNGs
+        let base_seed: [u8; 32] = rng.gen();
+
+        // Clone shared state for parallel access
+        let batched_share_gen = self.preprocess.batched_share_gen.clone();
+
+        // Spawn all init tasks in parallel
+        let init_futures: Vec<_> = session_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &session_id)| {
+                let batched_share_gen = batched_share_gen.clone();
+                let net = network.clone();
+                let mut task_seed = base_seed;
+                task_seed[0] = task_seed[0].wrapping_add(i as u8);
+                task_seed[1] = task_seed[1].wrapping_add((i >> 8) as u8);
+                let mut task_rng = StdRng::from_seed(task_seed);
+
+                async move {
+                    batched_share_gen
+                        .init(session_id, batch_size_k, &mut task_rng, net)
+                        .await
+                }
+            })
+            .collect();
+
+        // Wait for all init calls to complete
+        try_join_all(init_futures).await?;
+
+        // Collect all outputs (they may arrive in any order)
+        let mut collected = 0;
+        let channel = self.outputchannels.batched_share_gen_channel.clone();
+
+        while collected < run {
+            if let Some(id) = channel.lock().await.recv().await {
+                if session_ids.contains(&id) {
+                    let mut share_store = self.preprocess.batched_share_gen.store.lock().await;
+                    if let Some(store_lock) = share_store.remove(&id) {
+                        let store = store_lock.lock().await;
+                        let output = store.protocol_output.clone();
+
+                        self.preprocessing_material
+                            .lock()
+                            .await
+                            .add(None, Some(output), None, None);
+                        collected += 1;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        info!(
+            "Batched random share generation complete: {} sessions, {} shares total",
+            collected,
+            collected * output_per_run
+        );
+
+        self.preprocess.batched_share_gen.rbc.clear_store().await;
+        Ok(())
+    }
+
     /// Ensure we have a RanDouSha pair available, generating double shares if needed.
+    ///
+    /// This function runs in two parallel phases:
+    /// 1. All DouSha (double share generation) instances run in parallel
+    /// 2. All RanDouSha instances run in parallel with the outputs from phase 1
+    ///
+    /// This reduces round trips from O(run * protocol_depth) to O(2 * protocol_depth).
     async fn ensure_ran_dou_sha_pair<G, N>(
         &mut self,
         network: Arc<N>,
@@ -1172,94 +1406,120 @@ where
         N: Network + Send + Sync + 'static,
         G: Rng + Send,
     {
-        let mut pair = Vec::new();
-
         // How many batches do we need to cover?
         let batch = self.params.threshold + 1;
         let run = (needed + batch - 1) / batch; // ceil(missing / batch)
-        let mut round_id = 0u8;
-        let mut ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next();
 
-        for _ in 0..run {
-            let sessionid =
-                SessionId::new(ProtocolType::Randousha, ran_dou_sha_counter, 0, round_id, self.params.instance_id);
+        if run == 0 {
+            return Ok(Vec::new());
+        }
 
-            let double_shares = self
-                .ensure_double_shares(sessionid, network.clone(), rng)
-                .await?;
+        info!("Starting parallel RanDouSha pair generation: {} runs needed", run);
 
-            let (shares_deg_t, shares_deg_2t) = double_shares
-                .into_iter()
-                .map(|d| (d.degree_t, d.degree_2t))
-                .unzip();
+        // Pre-compute all session IDs for both protocols
+        let session_ids: Vec<SessionId> = (0..run)
+            .map(|i| {
+                let exec_id = self.counters.ran_dou_sha_counter.get_next();
+                let round_id = (i % 256) as u8;
+                SessionId::new(ProtocolType::Randousha, exec_id, 0, round_id, self.params.instance_id)
+            })
+            .collect();
 
-            // Run RanDouSha
-            self.preprocess
-                .ran_dou_sha
-                .init(shares_deg_t, shares_deg_2t, sessionid, network.clone())
-                .await?;
+        // Create a base seed from the provided RNG to derive child RNGs
+        let base_seed: [u8; 32] = rng.gen();
 
-            if let Some(sid) = self
-                .outputchannels
-                .ran_dou_sha_channel
-                .lock()
-                .await
-                .recv()
-                .await
-            {
-                if sid == sessionid {
-                    let mut ran_dou_sha_db = self.preprocess.ran_dou_sha.store.lock().await;
-                    let ran_dou_sha_storage_mutex = ran_dou_sha_db.remove(&sid).unwrap();
-                    let storage = ran_dou_sha_storage_mutex.lock().await;
-                    pair.extend(storage.protocol_output.clone());
+        // --- Phase 1: Parallel double share generation ---
+        info!("Phase 1: Starting parallel double share generation");
+
+        let dou_sha = self.preprocess.dou_sha.clone();
+        let dou_sha_init_futures: Vec<_> = session_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &session_id)| {
+                let dou_sha = dou_sha.clone();
+                let net = network.clone();
+                let mut task_seed = base_seed;
+                task_seed[0] = task_seed[0].wrapping_add(i as u8);
+                task_seed[1] = task_seed[1].wrapping_add((i >> 8) as u8);
+                let mut task_rng = StdRng::from_seed(task_seed);
+
+                async move {
+                    dou_sha.init(session_id, &mut task_rng, net).await
                 }
-            }
+            })
+            .collect();
 
-            if round_id == 255 {
-                ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next();
-                round_id = 0;
+        try_join_all(dou_sha_init_futures).await?;
+
+        // Collect all double share outputs
+        let mut dou_sha_outputs: Vec<(SessionId, Vec<DoubleShamirShare<F>>)> = Vec::with_capacity(run);
+        let dou_sha_channel = self.outputchannels.dou_sha_channel.clone();
+
+        let mut collected = 0;
+        while collected < run {
+            if let Some(sid) = dou_sha_channel.lock().await.recv().await {
+                if session_ids.contains(&sid) {
+                    if let Some((_, dou_sha_storage_mutex)) = self.preprocess.dou_sha.storage.remove(&sid) {
+                        let dou_sha_storage = dou_sha_storage_mutex.lock().await;
+                        dou_sha_outputs.push((sid, dou_sha_storage.protocol_output.clone()));
+                        collected += 1;
+                    }
+                }
             } else {
-                round_id += 1;
+                break;
             }
         }
+
+        info!("Phase 1 complete: collected {} double share outputs", dou_sha_outputs.len());
+
+        // --- Phase 2: Parallel RanDouSha with collected double shares ---
+        info!("Phase 2: Starting parallel RanDouSha");
+
+        let ran_dou_sha = self.preprocess.ran_dou_sha.clone();
+
+        let ran_dou_sha_init_futures: Vec<_> = dou_sha_outputs
+            .iter()
+            .map(|(session_id, double_shares)| {
+                let ran_dou_sha = ran_dou_sha.clone();
+                let net = network.clone();
+                let session_id = *session_id;
+
+                let (shares_deg_t, shares_deg_2t): (Vec<_>, Vec<_>) = double_shares
+                    .iter()
+                    .map(|d| (d.degree_t.clone(), d.degree_2t.clone()))
+                    .unzip();
+
+                async move {
+                    ran_dou_sha.init(shares_deg_t, shares_deg_2t, session_id, net).await
+                }
+            })
+            .collect();
+
+        try_join_all(ran_dou_sha_init_futures).await?;
+
+        // Collect all RanDouSha outputs
+        let mut pair = Vec::new();
+        let ran_dou_sha_channel = self.outputchannels.ran_dou_sha_channel.clone();
+
+        collected = 0;
+        while collected < run {
+            if let Some(sid) = ran_dou_sha_channel.lock().await.recv().await {
+                if session_ids.contains(&sid) {
+                    if let Some((_, ran_dou_sha_storage_mutex)) = self.preprocess.ran_dou_sha.store.remove(&sid) {
+                        let storage = ran_dou_sha_storage_mutex.lock().await;
+                        pair.extend(storage.protocol_output.clone());
+                        collected += 1;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        info!("Phase 2 complete: collected {} RanDouSha outputs, total pairs: {}", collected, pair.len());
+
         self.preprocess.ran_dou_sha.rbc.clear_store().await;
         Ok(pair)
-    }
-
-    /// Ensure we have double shares available.
-    async fn ensure_double_shares<G, N>(
-        &mut self,
-        sessionid: SessionId,
-        network: Arc<N>,
-        rng: &mut G,
-    ) -> Result<Vec<DoubleShamirShare<F>>, HoneyBadgerError>
-    where
-        N: Network + Send + Sync + 'static,
-        G: Rng + Send,
-    {
-        self.preprocess
-            .dou_sha
-            .init(sessionid, rng, network.clone())
-            .await?;
-
-        let mut dou_sha = Vec::new();
-        if let Some(sid) = self
-            .outputchannels
-            .dou_sha_channel
-            .lock()
-            .await
-            .recv()
-            .await
-        {
-            if sid == sessionid {
-                let mut dou_sha_db = self.preprocess.dou_sha.storage.lock().await;
-                let dou_sha_storage_mutex = dou_sha_db.remove(&sid).unwrap();
-                let dou_sha_storage = dou_sha_storage_mutex.lock().await;
-                dou_sha = dou_sha_storage.protocol_output.clone();
-            }
-        }
-
-        Ok(dou_sha)
     }
 
     async fn ensure_prandbit_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
@@ -1495,6 +1755,7 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
+    BatchedRansha = 15,
 }
 
 impl TryFrom<u8> for ProtocolType {
@@ -1517,6 +1778,7 @@ impl TryFrom<u8> for ProtocolType {
             12 => Ok(ProtocolType::FpMul),
             13 => Ok(ProtocolType::Trunc),
             14 => Ok(ProtocolType::FpDivConst),
+            15 => Ok(ProtocolType::BatchedRansha),
             _ => Err(()),
         }
     }

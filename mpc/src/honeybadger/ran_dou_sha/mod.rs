@@ -16,8 +16,9 @@ use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
 use messages::{RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage};
+use dashmap::DashMap;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     sync::Arc,
 };
 use thiserror::Error;
@@ -118,7 +119,7 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     /// Threshold of corrupted parties.
     pub threshold: usize,
     /// Storage of the node.
-    pub store: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
+    pub store: Arc<DashMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>,
     pub output_sender: Sender<SessionId>,
     ///Avid instance for RBC
     pub rbc: R,
@@ -141,20 +142,19 @@ where
             id,
             n_parties,
             threshold,
-            store: Arc::new(Mutex::new(BTreeMap::new())),
+            store: Arc::new(DashMap::new()),
             output_sender,
             rbc,
         })
     }
 
     pub async fn pop_finished_protocol_result(&self) -> Option<Vec<DoubleShamirShare<F>>> {
-        let mut storage = self.store.lock().await;
         let mut finished_sid = None;
         let mut output = Vec::new();
-        for (sid, storage_mutex) in storage.iter() {
-            let storage_bind = storage_mutex.lock().await;
+        for entry in self.store.iter() {
+            let storage_bind = entry.value().lock().await;
             if storage_bind.state == RanDouShaState::Finished {
-                finished_sid = Some(*sid);
+                finished_sid = Some(*entry.key());
                 output = storage_bind.protocol_output.clone();
                 break;
             }
@@ -162,7 +162,7 @@ where
         match finished_sid {
             Some(sid) => {
                 // Remove the entry from the storage
-                storage.remove(&sid);
+                self.store.remove(&sid);
                 Some(output)
             }
             None => None,
@@ -172,13 +172,12 @@ where
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
     pub async fn get_or_create_store(
-        &mut self,
+        &self,
         session_id: SessionId,
     ) -> Arc<Mutex<RanDouShaStore<F>>> {
-        let mut storage = self.store.lock().await;
-        storage
+        self.store
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(RanDouShaStore::empty())))
+            .or_insert_with(|| Arc::new(Mutex::new(RanDouShaStore::empty())))
             .clone()
     }
 
@@ -196,7 +195,7 @@ where
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
     pub async fn init<N>(
-        &mut self,
+        &self,
         shares_deg_t: Vec<NonRobustShare<F>>,
         shares_deg_2t: Vec<NonRobustShare<F>>,
         session_id: SessionId,
@@ -261,7 +260,7 @@ where
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
     pub async fn reconstruction_handler<N>(
-        &mut self,
+        &self,
         msg: RanDouShaMessage,
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
@@ -366,7 +365,7 @@ where
     /// Wait to receive broadcast of output message from other party.
     /// Return [r_1]_t ... [r_t+1]_t & [r_1]_2t ... [r_t+1]_2t only if one receives more than
     /// (n - (t+1)) Ok message.
-    pub async fn output_handler(&mut self, msg: RanDouShaMessage) -> Result<(), RanDouShaError> {
+    pub async fn output_handler(&self, msg: RanDouShaMessage) -> Result<(), RanDouShaError> {
         let output = match msg.payload {
             RanDouShaPayload::Reconstruct(_) => return Err(RanDouShaError::Abort),
             RanDouShaPayload::Output(ok) => ok,
@@ -418,7 +417,7 @@ where
     }
 
     pub async fn process<N>(
-        &mut self,
+        &self,
         msg: RanDouShaMessage,
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>

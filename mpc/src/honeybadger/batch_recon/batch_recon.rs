@@ -14,10 +14,11 @@ use crate::{
 };
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
-use futures::lock::Mutex;
+use futures::{future::try_join_all, lock::Mutex};
 use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
 use stoffelnet::network_utils::Network;
+use tokio::sync::OnceCell;
 use tracing::{debug, error, info, warn};
 /// --------------------------BatchRecPub--------------------------
 ///
@@ -35,19 +36,45 @@ use tracing::{debug, error, info, warn};
 /// 4. Using the reconstructed y-values, parties robustly
 ///    interpolate to recover the original secrets [x₁, ..., x_{t+1}].
 
+/// Cached Vandermonde matrix for batch reconstruction.
+/// This is computed once per (n, t) pair and reused across all sessions.
+#[derive(Clone, Debug)]
+pub struct VandermondeCache<F: FftField> {
+    matrix: Vec<Vec<F>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct BatchReconNode<F: FftField> {
     pub id: usize, // This node's unique identifier
     pub n: usize,  // Total number of nodes/shares
     pub t: usize,
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BatchReconStore<F>>>>>>, // Number of malicious parties
+    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BatchReconStore<F>>>>>>,
+    /// Cached Vandermonde matrix - computed once on first use
+    vandermonde_cache: Arc<OnceCell<VandermondeCache<F>>>,
 }
 
 impl<F: FftField> BatchReconNode<F> {
     /// Creates a new `Node` instance.
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, BatchReconError> {
         let store = Arc::new(Mutex::new(HashMap::new()));
-        Ok(Self { id, n, t, store })
+        Ok(Self {
+            id,
+            n,
+            t,
+            store,
+            vandermonde_cache: Arc::new(OnceCell::new()),
+        })
+    }
+
+    /// Gets or computes the Vandermonde matrix (cached for reuse).
+    async fn get_vandermonde(&self) -> Result<&Vec<Vec<F>>, BatchReconError> {
+        self.vandermonde_cache
+            .get_or_try_init(|| async {
+                let matrix = make_vandermonde::<F>(self.n, self.t)?;
+                Ok(VandermondeCache { matrix })
+            })
+            .await
+            .map(|cache| &cache.matrix)
     }
 
     pub async fn clear_entire_store(&self) {
@@ -58,12 +85,13 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.store.lock().await;
         store.remove(&session_id).is_some()
-     }
+    }
 
     /// Initiates the batch reconstruction protocol for a given node.
     ///
     /// Each party computes its `y_j_share` for all `j` and sends it to party `P_j`.
-    pub async fn init_batch_reconstruct<N: Network>(
+    /// Network sends are performed concurrently for better performance.
+    pub async fn init_batch_reconstruct<N: Network + Send + Sync + 'static>(
         &self,
         shares: &[RobustShare<F>], // this party's shares of x_0 to x_t
         session_id: SessionId,
@@ -74,28 +102,47 @@ impl<F: FftField> BatchReconNode<F> {
                 "too little shares to start batch reconstruct".to_string(),
             ));
         }
-        let vandermonde = make_vandermonde::<F>(self.n, self.t)?;
-        let y_shares = apply_vandermonde(&vandermonde, &shares[..(self.t + 1)])?;
+
+        // Use cached Vandermonde matrix
+        let vandermonde = self.get_vandermonde().await?;
+        let y_shares = apply_vandermonde(vandermonde, &shares[..(self.t + 1)])?;
 
         info!(
             id = self.id,
             "initialized batch reconstruction with Vandermonde transform"
         );
 
-        for (j, y_j_share) in y_shares.into_iter().enumerate() {
-            info!(from = self.id, to = j, "Sending y_j shares ");
+        // Pre-serialize all messages and send concurrently
+        let send_futures: Vec<_> = y_shares
+            .into_iter()
+            .enumerate()
+            .map(|(j, y_j_share)| {
+                let net = net.clone();
+                let sender_id = self.id;
 
-            let mut payload = Vec::new();
-            y_j_share.share[0].serialize_compressed(&mut payload)?;
-            let msg = BatchReconMsg::new(self.id, session_id, BatchReconMsgType::Eval, payload);
-            //Wrap the msg in global enum
-            let wrapped = WrappedMessage::BatchRecon(msg);
-            //Send share y_j to each Party j
-            let encoded_msg =
-                bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
+                async move {
+                    let mut payload = Vec::new();
+                    y_j_share
+                        .share[0]
+                        .serialize_compressed(&mut payload)
+                        .map_err(BatchReconError::ArkSerialization)?;
 
-            let _ = net.send(j, &encoded_msg).await?;
-        }
+                    let msg =
+                        BatchReconMsg::new(sender_id, session_id, BatchReconMsgType::Eval, payload);
+                    let wrapped = WrappedMessage::BatchRecon(msg);
+                    let encoded_msg = bincode::serialize(&wrapped)
+                        .map_err(BatchReconError::SerializationError)?;
+
+                    net.send(j, &encoded_msg)
+                        .await
+                        .map_err(BatchReconError::NetworkError)?;
+                    Ok::<(), BatchReconError>(())
+                }
+            })
+            .collect();
+
+        // Execute all sends concurrently
+        try_join_all(send_futures).await?;
         Ok(())
     }
 
@@ -104,7 +151,7 @@ impl<F: FftField> BatchReconNode<F> {
     /// This function processes `Eval` messages (first round) and `Reveal` messages (second round)
     /// to collectively reconstruct the original secrets.
     pub async fn batch_recon_handler<N: Network>(
-        &mut self,
+        &self,
         msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
@@ -298,7 +345,7 @@ impl<F: FftField> BatchReconNode<F> {
         }
     }
     pub async fn process<N: Network>(
-        &mut self,
+        &self,
         msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
@@ -313,7 +360,7 @@ impl<F: FftField> BatchReconNode<F> {
         let mut storage = self.store.lock().await;
         storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(BatchReconStore::empty())))
+            .or_insert_with(|| Arc::new(Mutex::new(BatchReconStore::with_capacity(self.n))))
             .clone()
     }
 }

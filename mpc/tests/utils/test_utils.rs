@@ -263,8 +263,8 @@ pub fn spawn_receiver_tasks(
                         match result {
                             Ok(()) => {
                                 let node = randousha_node.lock().await;
-                                let storage_db = node.store.lock().await;
-                                let storage = storage_db.get(&rds.session_id).unwrap().lock().await;
+                                let storage_arc = node.store.get(&rds.session_id).map(|r| r.clone()).unwrap();
+                                let storage = storage_arc.lock().await;
                                 if storage.state == RanDouShaState::Finished {
                                     let final_shares = storage.protocol_output.clone();
                                     fin_send.send((node.id, final_shares)).await.unwrap();

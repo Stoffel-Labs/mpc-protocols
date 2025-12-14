@@ -58,6 +58,19 @@ impl<F: FftField> BatchReconStore<F> {
             secrets: None,
         }
     }
+
+    /// Creates a new store with pre-allocated capacity for expected number of shares.
+    /// This avoids reallocations during the protocol execution.
+    pub fn with_capacity(n: usize) -> Self {
+        Self {
+            // We expect up to n evaluation shares (one from each party)
+            evals_received: Vec::with_capacity(n),
+            // We expect up to n revealed values (one from each party)
+            reveals_received: Vec::with_capacity(n),
+            y_j: None,
+            secrets: None,
+        }
+    }
 }
 
 /// Error that occurs during the execution of the Batch reconstruction.
