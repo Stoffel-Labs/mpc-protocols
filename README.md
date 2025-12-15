@@ -1,6 +1,18 @@
-# 🚀 Stoffel MPC Protocols
+# 🚀 mpc-protocols
 
-This repository provides a fully-asynchronous, robust collection of MPC (Multi-Party Computation) sub-protocols designed to run inside the [**StoffelVM**](https://github.com/Stoffel-Labs/StoffelVM) runtime and the[ **StoffelNet**](https://github.com/Stoffel-Labs/Stoffel) networking layer.  
+This repository provides a fully-asynchronous, robust collection of MPC (Multi-Party Computation) protocols designed to run inside the [**StoffelVM**](https://github.com/Stoffel-Labs/StoffelVM) runtime and the[ **StoffelNet**](https://github.com/Stoffel-Labs/Stoffel) networking layer. However, it can also be used independently.
+
+The repository is designed as a **general-purpose foundation for hosting multiple MPC protocol families** that share common networking, preprocessing, and arithmetic components.
+This repository is intended to serve as a **collection of MPC protocols**, not a single fixed construction.
+
+At present, **HoneyBadgerMPC** is the only fully integrated end-to-end MPC protocol. However, the architecture is deliberately modular so that additional MPC protocols can be added over time without rewriting core components.
+
+Key design goals:
+
+- **Protocol-agnostic networking** via the `Network` trait
+- **Reusable common sub-protocols** (rbc,secret sharing,etc)
+- **Shared arithmetic layers** (field, fixed-point, integer)
+- **Explicit protocol routing** via compact `SessionId`s
 
 ## HoneyBadgerMPC 🦡
 It includes implementations for **HoneyBadgerMPC** like random sharing protocols, preprocessing, Beaver triples, fixed-point arithmetic, integer arithmetic, and robust reconstruction procedures.
