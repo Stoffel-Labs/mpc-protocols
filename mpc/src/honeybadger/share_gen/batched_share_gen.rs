@@ -477,6 +477,7 @@ where
             output_per_batch
         );
 
+        drop(store);
         self.output_sender.send(msg.session_id).await?;
         Ok(())
     }
