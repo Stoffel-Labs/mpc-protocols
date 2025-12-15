@@ -68,7 +68,7 @@ Running MPC requires:
 
 ---
 
-### ▶ Minimal Example: Running a 3-Party Secure Multiplication
+### ▶ Minimal Example: Running a 5-Party Secure Multiplication
 
 Replace `FakeNetwork` with any `Network` implementation (FakeNetwork, StoffelNet, etc.):
 
