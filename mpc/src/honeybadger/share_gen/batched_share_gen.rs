@@ -280,7 +280,32 @@ where
         let bind_store = self.get_or_create_store(session_id, batch_size).await;
         let mut store = bind_store.lock().await;
         store.computed_r_shares = all_r_shares.clone();
-        drop(store);
+
+        // Check if we can complete the output phase now
+        // Output messages may have arrived before computed_r_shares was ready
+        let can_complete = store.received_ok_msg.len() >= 2 * self.threshold
+            && !store.computed_r_shares.is_empty()
+            && store.state != RanShaState::Finished;
+
+        if can_complete {
+            // Output: for each batch k, take shares [2t..n], giving (n-2t) shares per batch
+            let output_per_batch = self.n_parties - 2 * self.threshold;
+            let mut output: Vec<RobustShare<F>> = Vec::with_capacity(batch_size * output_per_batch);
+
+            for k in 0..batch_size {
+                let batch_start = k * self.n_parties;
+                let output_start = batch_start + 2 * self.threshold;
+                let output_end = batch_start + self.n_parties;
+                output.extend(store.computed_r_shares[output_start..output_end].iter().cloned());
+            }
+
+            store.state = RanShaState::Finished;
+            store.protocol_output = output;
+            drop(store);
+            self.output_sender.send(session_id).await?;
+        } else {
+            drop(store);
+        }
 
         // For reconstruction verification, we need to check the first 2t shares
         // from each batch. Send batched reconstruction messages to parties 0..2t.
@@ -439,6 +464,12 @@ where
         drop(storage_guard);
 
         let mut store = store_arc.lock().await;
+
+        // If already finished (e.g., completed early in init_ransha), just return Ok
+        if store.state == RanShaState::Finished {
+            return Ok(());
+        }
+
         store.state = RanShaState::Output;
 
         if !store.received_ok_msg.contains(&msg.sender_id) {

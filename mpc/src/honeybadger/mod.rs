@@ -74,7 +74,7 @@ use ark_std::rand::{Rng, SeedableRng};
 use async_trait::async_trait;
 use bincode::ErrorKind;
 use double_share_generation::DoubleShareNode;
-use ran_dou_sha::{RanDouShaError, RanDouShaNode};
+use ran_dou_sha::{RanDouShaError, RanDouShaNode, batched_ran_dou_sha::BatchedRanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt, sync::{Arc, atomic::{Ordering, AtomicU8}}};
@@ -225,6 +225,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub batched_share_gen: BatchedRanShaNode<F, R>,
     pub dou_sha: DoubleShareNode<F>,
     pub ran_dou_sha: RanDouShaNode<F, R>,
+    pub batched_ran_dou_sha: BatchedRanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
     pub rand_bit: RandBit<F, R>,
     pub prand_bit: PRandBitNode<F, F>,
@@ -236,6 +237,7 @@ pub struct OutputChannels {
     pub batched_share_gen_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
+    pub batched_ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub triple_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub rand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub prand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
@@ -359,6 +361,7 @@ where
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
+        let (batched_ran_dou_sha_sender, batched_ran_dou_sha_receiver) = mpsc::channel(128);
         let (triple_sender, triple_receiver) = mpsc::channel(128);
         let (share_gen_sender, share_gen_reciever) = mpsc::channel(128);
         let (batched_share_gen_sender, batched_share_gen_receiver) = mpsc::channel(128);
@@ -382,6 +385,13 @@ where
         let ran_dou_sha_node = RanDouShaNode::new(
             id,
             ran_dou_sha_sender,
+            params.n_parties,
+            params.threshold,
+            params.threshold + 1,
+        )?;
+        let batched_ran_dou_sha_node = BatchedRanDouShaNode::new(
+            id,
+            batched_ran_dou_sha_sender,
             params.n_parties,
             params.threshold,
             params.threshold + 1,
@@ -421,6 +431,7 @@ where
                 batched_share_gen,
                 dou_sha: dousha_node,
                 ran_dou_sha: ran_dou_sha_node,
+                batched_ran_dou_sha: batched_ran_dou_sha_node,
                 triple_gen: triple_gen_node,
                 rand_bit: rand_bit_node,
                 prand_bit: prand_bit_node,
@@ -436,6 +447,7 @@ where
                 batched_share_gen_channel: Arc::new(Mutex::new(batched_share_gen_receiver)),
                 dou_sha_channel: Arc::new(Mutex::new(dou_sha_receiver)),
                 ran_dou_sha_channel: Arc::new(Mutex::new(ran_dou_sha_receiver)),
+                batched_ran_dou_sha_channel: Arc::new(Mutex::new(batched_ran_dou_sha_receiver)),
                 triple_channel: Arc::new(Mutex::new(triple_receiver)),
                 rand_bit_channel: Arc::new(Mutex::new(rand_bit_receiver)),
                 prand_bit_channel: Arc::new(Mutex::new(prand_bit_receiver)),
@@ -500,6 +512,9 @@ where
                 }
                 Some(ProtocolType::BatchedRansha) => {
                     self.preprocess.batched_share_gen.rbc.process(rbc_msg, net).await?
+                }
+                Some(ProtocolType::BatchedRandousha) => {
+                    self.preprocess.batched_ran_dou_sha.rbc.process(rbc_msg, net).await?
                 }
                 Some(ProtocolType::Input) => {
                     self.preprocess.input.rbc.process(rbc_msg, net).await?
@@ -571,7 +586,24 @@ where
                 self.preprocess.dou_sha.process(ds_msg).await?;
             }
             WrappedMessage::RanDouSha(rds_msg) => {
-                self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
+                // Route to batched or regular RanDouSha based on message type or session protocol
+                use ran_dou_sha::messages::RanDouShaMessageType;
+                let is_batched = match rds_msg.msg_type {
+                    RanDouShaMessageType::BatchedShareMessage
+                    | RanDouShaMessageType::BatchedReconstructMessage => true,
+                    RanDouShaMessageType::OutputMessage => {
+                        // For Output messages, check the session's protocol type
+                        rds_msg.session_id.calling_protocol()
+                            == Some(ProtocolType::BatchedRandousha)
+                    }
+                    _ => false,
+                };
+
+                if is_batched {
+                    self.preprocess.batched_ran_dou_sha.process(rds_msg, net).await?;
+                } else {
+                    self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
+                }
             }
             WrappedMessage::Mul(mul_msg) => match mul_msg.session_id.calling_protocol() {
                 Some(ProtocolType::Mul) => self.operations.mul.process(mul_msg).await?,
@@ -1003,20 +1035,33 @@ where
             ((no_of_triples - no_of_triples_avail + group_size - 1) / group_size) * group_size
         };
 
+        // Calculate how many random shares PRandbit will consume
+        let prandbit_batch = self.params.threshold + 1;
+        let (_, _, no_prandbit_avail, _) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        let prandbit_missing = self.params.n_prandbit.saturating_sub(no_prandbit_avail);
+        let total_randbit_to_generate = if prandbit_missing > 0 {
+            ((prandbit_missing + prandbit_batch - 1) / prandbit_batch) * prandbit_batch
+        } else {
+            0
+        };
+
         let total_random_shares_to_generate = if total_triples_to_generate > 0 {
-            // Always add 2× per triple group
+            // Add baseline (user's requested random shares) + 2× per triple + PRandbit consumption
             let baseline = if no_of_random_shares_avail < no_of_random_shares {
                 no_of_random_shares - no_of_random_shares_avail
             } else {
                 no_of_random_shares = 0;
                 0
             };
-            baseline + 2 * total_triples_to_generate
+            baseline + 2 * total_triples_to_generate + total_randbit_to_generate
         } else if no_of_random_shares_avail < no_of_random_shares {
-            no_of_random_shares - no_of_random_shares_avail
+            no_of_random_shares - no_of_random_shares_avail + total_randbit_to_generate
         } else {
             no_of_random_shares = 0;
-            0
+            total_randbit_to_generate
         };
 
         if no_of_triples == 0 && no_of_random_shares == 0 {
@@ -1067,12 +1112,26 @@ where
             if num_triple_batches > 0 {
                 info!("Starting parallel triple generation: {} batches", num_triple_batches);
 
-                // Pre-compute all session IDs
+                // Pre-compute all session IDs using nested counters for 16-bit range
+                // For each exec_id, round_id counts 0-255, then exec_id increments
+                let mut triple_exec_id = self.counters.triple_counter.get_next();
+                let mut triple_round_id: u8 = 0;
                 let triple_session_ids: Vec<SessionId> = (0..num_triple_batches)
-                    .map(|i| {
-                        let exec_id = self.counters.triple_counter.get_next();
-                        let round_id = (i % 256) as u8;
-                        SessionId::new(ProtocolType::Triple, exec_id, 0, round_id, self.params.instance_id)
+                    .map(|_| {
+                        let session_id = SessionId::new(
+                            ProtocolType::Triple,
+                            triple_exec_id,
+                            0,
+                            triple_round_id,
+                            self.params.instance_id,
+                        );
+                        if triple_round_id == 255 {
+                            triple_exec_id = self.counters.triple_counter.get_next();
+                            triple_round_id = 0;
+                        } else {
+                            triple_round_id += 1;
+                        }
+                        session_id
                     })
                     .collect();
 
@@ -1105,19 +1164,35 @@ where
 
                 while collected < num_triple_batches {
                     if let Some(sid) = triple_channel.lock().await.recv().await {
-                        if triple_session_ids.contains(&sid) && !collected_triples.contains_key(&sid) {
-                            let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
-                            if let Some(triple_storage_mutex) = triple_gen_db.remove(&sid) {
-                                let triple_storage = triple_storage_mutex.lock().await;
-                                let triples = triple_storage.protocol_output.clone();
-                                collected_triples.insert(sid, triples);
-                                self.preprocess
-                                    .triple_gen
-                                    .batch_recon_node
-                                    .clear_store(sid)
-                                    .await;
-                                collected += 1;
-                            }
+                        // Check for unknown or duplicate session IDs
+                        if !triple_session_ids.contains(&sid) {
+                            warn!(
+                                "Triple collection received unknown session ID: {:?}. \
+                                This may indicate a bug or too many malicious nodes.",
+                                sid
+                            );
+                            continue;
+                        }
+                        if collected_triples.contains_key(&sid) {
+                            warn!(
+                                "Triple collection received duplicate session ID: {:?}. \
+                                This may indicate a bug or too many malicious nodes.",
+                                sid
+                            );
+                            continue;
+                        }
+
+                        let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
+                        if let Some(triple_storage_mutex) = triple_gen_db.remove(&sid) {
+                            let triple_storage = triple_storage_mutex.lock().await;
+                            let triples = triple_storage.protocol_output.clone();
+                            collected_triples.insert(sid, triples);
+                            self.preprocess
+                                .triple_gen
+                                .batch_recon_node
+                                .clear_store(sid)
+                                .await;
+                            collected += 1;
                         }
                     } else {
                         break;
@@ -1219,18 +1294,26 @@ where
             run, needed
         );
 
-        // Pre-compute all session IDs upfront to ensure uniqueness
+        // Pre-compute all session IDs using nested counters for 16-bit range
+        // For each exec_id, round_id counts 0-255, then exec_id increments
+        let mut ransha_exec_id = self.counters.ran_sha_counter.get_next();
+        let mut ransha_round_id: u8 = 0;
         let session_ids: Vec<SessionId> = (0..run)
-            .map(|i| {
-                let exec_id = self.counters.ran_sha_counter.get_next();
-                let round_id = (i % 256) as u8;
-                SessionId::new(
+            .map(|_| {
+                let session_id = SessionId::new(
                     ProtocolType::Ransha,
-                    exec_id,
+                    ransha_exec_id,
                     0,
-                    round_id,
+                    ransha_round_id,
                     self.params.instance_id,
-                )
+                );
+                if ransha_round_id == 255 {
+                    ransha_exec_id = self.counters.ran_sha_counter.get_next();
+                    ransha_round_id = 0;
+                } else {
+                    ransha_round_id += 1;
+                }
+                session_id
             })
             .collect();
 
@@ -1271,14 +1354,30 @@ where
 
         while collected < run {
             if let Some(id) = channel.lock().await.recv().await {
-                if session_ids.contains(&id) && !collected_outputs.contains_key(&id) {
-                    let mut share_store = self.preprocess.share_gen.store.lock().await;
-                    if let Some(store_lock) = share_store.remove(&id) {
-                        let store = store_lock.lock().await;
-                        let output = store.protocol_output.clone();
-                        collected_outputs.insert(id, output);
-                        collected += 1;
-                    }
+                // Check for unknown or duplicate session IDs
+                if !session_ids.contains(&id) {
+                    warn!(
+                        "RanSha collection received unknown session ID: {:?}. \
+                        This may indicate a bug or too many malicious nodes.",
+                        id
+                    );
+                    continue;
+                }
+                if collected_outputs.contains_key(&id) {
+                    warn!(
+                        "RanSha collection received duplicate session ID: {:?}. \
+                        This may indicate a bug or too many malicious nodes.",
+                        id
+                    );
+                    continue;
+                }
+
+                let mut share_store = self.preprocess.share_gen.store.lock().await;
+                if let Some(store_lock) = share_store.remove(&id) {
+                    let store = store_lock.lock().await;
+                    let output = store.protocol_output.clone();
+                    collected_outputs.insert(id, output);
+                    collected += 1;
                 }
             } else {
                 break;
@@ -1331,18 +1430,26 @@ where
             run, batch_size_k, needed, output_per_run
         );
 
-        // Pre-compute all session IDs upfront
+        // Pre-compute all session IDs using nested counters for 16-bit range
+        // For each exec_id, round_id counts 0-255, then exec_id increments
+        let mut batched_ransha_exec_id = self.counters.ran_sha_counter.get_next();
+        let mut batched_ransha_round_id: u8 = 0;
         let session_ids: Vec<SessionId> = (0..run)
-            .map(|i| {
-                let exec_id = self.counters.ran_sha_counter.get_next();
-                let round_id = (i % 256) as u8;
-                SessionId::new(
+            .map(|_| {
+                let session_id = SessionId::new(
                     ProtocolType::BatchedRansha,
-                    exec_id,
+                    batched_ransha_exec_id,
                     0,
-                    round_id,
+                    batched_ransha_round_id,
                     self.params.instance_id,
-                )
+                );
+                if batched_ransha_round_id == 255 {
+                    batched_ransha_exec_id = self.counters.ran_sha_counter.get_next();
+                    batched_ransha_round_id = 0;
+                } else {
+                    batched_ransha_round_id += 1;
+                }
+                session_id
             })
             .collect();
 
@@ -1385,14 +1492,30 @@ where
 
         while collected < run {
             if let Some(id) = channel.lock().await.recv().await {
-                if session_ids.contains(&id) && !collected_outputs.contains_key(&id) {
-                    let mut share_store = self.preprocess.batched_share_gen.store.lock().await;
-                    if let Some(store_lock) = share_store.remove(&id) {
-                        let store = store_lock.lock().await;
-                        let output = store.protocol_output.clone();
-                        collected_outputs.insert(id, output);
-                        collected += 1;
-                    }
+                // Check for unknown or duplicate session IDs
+                if !session_ids.contains(&id) {
+                    warn!(
+                        "BatchedRanSha collection received unknown session ID: {:?}. \
+                        This may indicate a bug or too many malicious nodes.",
+                        id
+                    );
+                    continue;
+                }
+                if collected_outputs.contains_key(&id) {
+                    warn!(
+                        "BatchedRanSha collection received duplicate session ID: {:?}. \
+                        This may indicate a bug or too many malicious nodes.",
+                        id
+                    );
+                    continue;
+                }
+
+                let mut share_store = self.preprocess.batched_share_gen.store.lock().await;
+                if let Some(store_lock) = share_store.remove(&id) {
+                    let store = store_lock.lock().await;
+                    let output = store.protocol_output.clone();
+                    collected_outputs.insert(id, output);
+                    collected += 1;
                 }
             } else {
                 break;
@@ -1421,12 +1544,40 @@ where
 
     /// Ensure we have a RanDouSha pair available, generating double shares if needed.
     ///
+    /// For small numbers of shares (< 100), uses the regular two-phase protocol.
+    /// For large numbers, uses the batched BatchedRanDouSha protocol which produces
+    /// K*(t+1) shares per run instead of just (t+1).
+    async fn ensure_ran_dou_sha_pair<G, N>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+        needed: usize,
+    ) -> Result<Vec<DoubleShamirShare<F>>, HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng + Send,
+    {
+        // Use batched protocol for larger needs (threshold: 100 shares)
+        const BATCHED_THRESHOLD: usize = 100;
+        const BATCH_SIZE_K: usize = 256; // K secrets per party
+
+        if needed >= BATCHED_THRESHOLD {
+            self.ensure_ran_dou_sha_pair_batched(network, rng, needed, BATCH_SIZE_K)
+                .await
+        } else {
+            self.ensure_ran_dou_sha_pair_regular(network, rng, needed)
+                .await
+        }
+    }
+
+    /// Regular (non-batched) RanDouSha pair generation for small batch sizes.
+    ///
     /// This function runs in two parallel phases:
     /// 1. All DouSha (double share generation) instances run in parallel
     /// 2. All RanDouSha instances run in parallel with the outputs from phase 1
     ///
     /// This reduces round trips from O(run * protocol_depth) to O(2 * protocol_depth).
-    async fn ensure_ran_dou_sha_pair<G, N>(
+    async fn ensure_ran_dou_sha_pair_regular<G, N>(
         &mut self,
         network: Arc<N>,
         rng: &mut G,
@@ -1444,14 +1595,28 @@ where
             return Ok(Vec::new());
         }
 
-        info!("Starting parallel RanDouSha pair generation: {} runs needed", run);
+        info!("Starting regular RanDouSha pair generation: {} runs needed", run);
 
-        // Pre-compute all session IDs for both protocols
+        // Pre-compute all session IDs using nested counters for 16-bit range
+        // For each exec_id, round_id counts 0-255, then exec_id increments
+        let mut randousha_exec_id = self.counters.ran_dou_sha_counter.get_next();
+        let mut randousha_round_id: u8 = 0;
         let session_ids: Vec<SessionId> = (0..run)
-            .map(|i| {
-                let exec_id = self.counters.ran_dou_sha_counter.get_next();
-                let round_id = (i % 256) as u8;
-                SessionId::new(ProtocolType::Randousha, exec_id, 0, round_id, self.params.instance_id)
+            .map(|_| {
+                let session_id = SessionId::new(
+                    ProtocolType::Randousha,
+                    randousha_exec_id,
+                    0,
+                    randousha_round_id,
+                    self.params.instance_id,
+                );
+                if randousha_round_id == 255 {
+                    randousha_exec_id = self.counters.ran_dou_sha_counter.get_next();
+                    randousha_round_id = 0;
+                } else {
+                    randousha_round_id += 1;
+                }
+                session_id
             })
             .collect();
 
@@ -1489,12 +1654,28 @@ where
         let mut collected = 0;
         while collected < run {
             if let Some(sid) = dou_sha_channel.lock().await.recv().await {
-                if session_ids.contains(&sid) && !dou_sha_outputs_map.contains_key(&sid) {
-                    if let Some((_, dou_sha_storage_mutex)) = self.preprocess.dou_sha.storage.remove(&sid) {
-                        let dou_sha_storage = dou_sha_storage_mutex.lock().await;
-                        dou_sha_outputs_map.insert(sid, dou_sha_storage.protocol_output.clone());
-                        collected += 1;
-                    }
+                // Check for unknown or duplicate session IDs
+                if !session_ids.contains(&sid) {
+                    warn!(
+                        "DouSha collection received unknown session ID: {:?}. \
+                        This may indicate a bug or too many malicious nodes.",
+                        sid
+                    );
+                    continue;
+                }
+                if dou_sha_outputs_map.contains_key(&sid) {
+                    warn!(
+                        "DouSha collection received duplicate session ID: {:?}. \
+                        This may indicate a bug or too many malicious nodes.",
+                        sid
+                    );
+                    continue;
+                }
+
+                if let Some((_, dou_sha_storage_mutex)) = self.preprocess.dou_sha.storage.remove(&sid) {
+                    let dou_sha_storage = dou_sha_storage_mutex.lock().await;
+                    dou_sha_outputs_map.insert(sid, dou_sha_storage.protocol_output.clone());
+                    collected += 1;
                 }
             } else {
                 break;
@@ -1542,12 +1723,28 @@ where
         collected = 0;
         while collected < run {
             if let Some(sid) = ran_dou_sha_channel.lock().await.recv().await {
-                if session_ids.contains(&sid) && !ran_dou_sha_outputs_map.contains_key(&sid) {
-                    if let Some((_, ran_dou_sha_storage_mutex)) = self.preprocess.ran_dou_sha.store.remove(&sid) {
-                        let storage = ran_dou_sha_storage_mutex.lock().await;
-                        ran_dou_sha_outputs_map.insert(sid, storage.protocol_output.clone());
-                        collected += 1;
-                    }
+                // Check for unknown or duplicate session IDs
+                if !session_ids.contains(&sid) {
+                    warn!(
+                        "RanDouSha collection received unknown session ID: {:?}. \
+                        This may indicate a bug or too many malicious nodes.",
+                        sid
+                    );
+                    continue;
+                }
+                if ran_dou_sha_outputs_map.contains_key(&sid) {
+                    warn!(
+                        "RanDouSha collection received duplicate session ID: {:?}. \
+                        This may indicate a bug or too many malicious nodes.",
+                        sid
+                    );
+                    continue;
+                }
+
+                if let Some((_, ran_dou_sha_storage_mutex)) = self.preprocess.ran_dou_sha.store.remove(&sid) {
+                    let storage = ran_dou_sha_storage_mutex.lock().await;
+                    ran_dou_sha_outputs_map.insert(sid, storage.protocol_output.clone());
+                    collected += 1;
                 }
             } else {
                 break;
@@ -1565,6 +1762,135 @@ where
         info!("Phase 2 complete: collected {} RanDouSha outputs, total pairs: {}", collected, pair.len());
 
         self.preprocess.ran_dou_sha.rbc.clear_store().await;
+        Ok(pair)
+    }
+
+    /// Batched RanDouSha pair generation for large batch sizes.
+    /// Each party contributes K secrets, producing K*(t+1) output double shares per run.
+    async fn ensure_ran_dou_sha_pair_batched<G, N>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+        needed: usize,
+        batch_size_k: usize,
+    ) -> Result<Vec<DoubleShamirShare<F>>, HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng + Send,
+    {
+        // Batched protocol produces K*(t+1) shares per run
+        let output_per_run = batch_size_k * (self.params.threshold + 1);
+        let run = (needed + output_per_run - 1) / output_per_run; // ceil
+
+        if run == 0 {
+            return Ok(Vec::new());
+        }
+
+        info!(
+            "Starting batched RanDouSha pair generation: {} runs with K={} for {} shares ({} per run)",
+            run, batch_size_k, needed, output_per_run
+        );
+
+        // Pre-compute all session IDs using nested counters for 16-bit range
+        let mut batched_randousha_exec_id = self.counters.ran_dou_sha_counter.get_next();
+        let mut batched_randousha_round_id: u8 = 0;
+        let session_ids: Vec<SessionId> = (0..run)
+            .map(|_| {
+                let session_id = SessionId::new(
+                    ProtocolType::BatchedRandousha,
+                    batched_randousha_exec_id,
+                    0,
+                    batched_randousha_round_id,
+                    self.params.instance_id,
+                );
+                if batched_randousha_round_id == 255 {
+                    batched_randousha_exec_id = self.counters.ran_dou_sha_counter.get_next();
+                    batched_randousha_round_id = 0;
+                } else {
+                    batched_randousha_round_id += 1;
+                }
+                session_id
+            })
+            .collect();
+
+        // Create a base seed from the provided RNG to derive child RNGs
+        let base_seed: [u8; 32] = rng.gen();
+
+        // Clone shared state for parallel access
+        let batched_ran_dou_sha = self.preprocess.batched_ran_dou_sha.clone();
+
+        // Spawn all init tasks in parallel
+        let init_futures: Vec<_> = session_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &session_id)| {
+                let batched_ran_dou_sha = batched_ran_dou_sha.clone();
+                let net = network.clone();
+                let mut task_seed = base_seed;
+                task_seed[0] = task_seed[0].wrapping_add(i as u8);
+                task_seed[1] = task_seed[1].wrapping_add((i >> 8) as u8);
+                let mut task_rng = StdRng::from_seed(task_seed);
+
+                async move {
+                    batched_ran_dou_sha
+                        .init(session_id, batch_size_k, &mut task_rng, net)
+                        .await
+                }
+            })
+            .collect();
+
+        // Wait for all init calls to complete
+        try_join_all(init_futures).await?;
+
+        // Collect all outputs into a map keyed by session ID
+        let mut collected_outputs: HashMap<SessionId, Vec<DoubleShamirShare<F>>> = HashMap::new();
+        let mut collected = 0;
+        let channel = self.outputchannels.batched_ran_dou_sha_channel.clone();
+
+        while collected < run {
+            if let Some(id) = channel.lock().await.recv().await {
+                // Check for unknown or duplicate session IDs
+                if !session_ids.contains(&id) {
+                    warn!(
+                        "BatchedRanDouSha collection received unknown session ID: {:?}. \
+                        This may indicate a bug or too many malicious nodes.",
+                        id
+                    );
+                    continue;
+                }
+                if collected_outputs.contains_key(&id) {
+                    warn!(
+                        "BatchedRanDouSha collection received duplicate session ID: {:?}. \
+                        This may indicate a bug or too many malicious nodes.",
+                        id
+                    );
+                    continue;
+                }
+
+                if let Some((_, storage_mutex)) = self.preprocess.batched_ran_dou_sha.store.remove(&id) {
+                    let storage = storage_mutex.lock().await;
+                    collected_outputs.insert(id, storage.protocol_output.clone());
+                    collected += 1;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Build outputs in deterministic session ID order
+        let mut pair = Vec::new();
+        for session_id in &session_ids {
+            if let Some(output) = collected_outputs.remove(session_id) {
+                pair.extend(output);
+            }
+        }
+
+        info!(
+            "Batched RanDouSha pair generation complete: {} sessions, {} pairs total",
+            collected, pair.len()
+        );
+
+        self.preprocess.batched_ran_dou_sha.rbc.clear_store().await;
         Ok(pair)
     }
 
@@ -1802,6 +2128,7 @@ pub enum ProtocolType {
     Trunc = 13,
     FpDivConst = 14,
     BatchedRansha = 15,
+    BatchedRandousha = 16,
 }
 
 impl TryFrom<u8> for ProtocolType {
@@ -1825,6 +2152,7 @@ impl TryFrom<u8> for ProtocolType {
             13 => Ok(ProtocolType::Trunc),
             14 => Ok(ProtocolType::FpDivConst),
             15 => Ok(ProtocolType::BatchedRansha),
+            16 => Ok(ProtocolType::BatchedRandousha),
             _ => Err(()),
         }
     }

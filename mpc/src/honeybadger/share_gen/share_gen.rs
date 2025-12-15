@@ -196,7 +196,22 @@ where
         let bind_store = self.get_or_create_store(session_id).await;
         let mut store = bind_store.lock().await;
         store.computed_r_shares = r_deg_t.clone();
-        drop(store);
+
+        // Check if we can complete the output phase now
+        // Output messages may have arrived before computed_r_shares was ready
+        let can_complete = store.received_ok_msg.len() >= 2 * self.threshold
+            && store.computed_r_shares.len() >= self.n_parties
+            && store.state != RanShaState::Finished;
+
+        if can_complete {
+            let output = store.computed_r_shares[2 * self.threshold..].to_vec();
+            store.state = RanShaState::Finished;
+            store.protocol_output = output;
+            drop(store);
+            self.output_sender.send(session_id).await?;
+        } else {
+            drop(store);
+        }
 
         // Send reconstruction messages concurrently
         let send_futures: Vec<_> = (0..2 * self.threshold)
@@ -303,6 +318,12 @@ where
 
         let binding = self.get_or_create_store(msg.session_id).await;
         let mut store = binding.lock().await;
+
+        // If already finished (e.g., completed early in init_ransha), just return Ok
+        if store.state == RanShaState::Finished {
+            return Ok(());
+        }
+
         store.state = RanShaState::Output;
 
         if !store.received_ok_msg.contains(&msg.sender_id) {

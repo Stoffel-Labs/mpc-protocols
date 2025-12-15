@@ -1,3 +1,4 @@
+pub mod batched_ran_dou_sha;
 pub mod messages;
 
 use crate::{
@@ -275,7 +276,9 @@ where
         );
         let payload = match msg.payload {
             RanDouShaPayload::Reconstruct(p) => p,
-            RanDouShaPayload::Output(_) => return Err(RanDouShaError::Abort),
+            RanDouShaPayload::Output(_)
+            | RanDouShaPayload::BatchedShare(_)
+            | RanDouShaPayload::BatchedReconstruct(_) => return Err(RanDouShaError::Abort),
         };
         let rec_msg: ReconstructionMessage<F> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
@@ -367,8 +370,10 @@ where
     /// (n - (t+1)) Ok message.
     pub async fn output_handler(&self, msg: RanDouShaMessage) -> Result<(), RanDouShaError> {
         let output = match msg.payload {
-            RanDouShaPayload::Reconstruct(_) => return Err(RanDouShaError::Abort),
             RanDouShaPayload::Output(ok) => ok,
+            RanDouShaPayload::Reconstruct(_)
+            | RanDouShaPayload::BatchedShare(_)
+            | RanDouShaPayload::BatchedReconstruct(_) => return Err(RanDouShaError::Abort),
         };
         info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, msg.session_id.as_u64(), msg.sender_id, output);
         // todo - add randousha status so we can omit output_handler
@@ -432,6 +437,11 @@ where
             messages::RanDouShaMessageType::ReconstructMessage => {
                 self.reconstruction_handler(msg, network).await?;
                 return Ok(());
+            }
+            // Batched messages are handled by BatchedRanDouShaNode
+            messages::RanDouShaMessageType::BatchedShareMessage
+            | messages::RanDouShaMessageType::BatchedReconstructMessage => {
+                return Err(RanDouShaError::Abort);
             }
         }
     }

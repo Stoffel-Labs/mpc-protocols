@@ -200,6 +200,25 @@ impl<F: FftField> SecretSharingScheme<F> for NonRobustShare<F> {
 
         let domain =
             GeneralEvaluationDomain::<F>::new(n).ok_or_else(|| ShareError::NoSuitableDomain(n))?;
+
+        // Fast path: if we have all n shares with contiguous IDs 0..n AND domain.size() == n, use IFFT
+        // This is O(n log n) vs O(n²) for Lagrange interpolation
+        // Note: domain.size() may be larger than n (e.g., rounded to power of 2), so we can only
+        // use IFFT when they match exactly
+        if shares.len() == n && domain.size() == n {
+            // Check if shares cover all indices 0..n (we already checked uniqueness above)
+            let mut sorted_shares = shares.to_vec();
+            sorted_shares.sort_by_key(|s| s.id);
+
+            if sorted_shares.iter().enumerate().all(|(i, s)| s.id == i) {
+                // All shares present with IDs 0..n-1, use IFFT
+                let evals: Vec<F> = sorted_shares.iter().map(|s| s.share[0]).collect();
+                let coeffs = domain.ifft(&evals);
+                return Ok((coeffs.clone(), coeffs[0]));
+            }
+        }
+
+        // Slow path: subset of shares or non-contiguous IDs, use Lagrange
         let (x_vals, y_vals): (Vec<F>, Vec<F>) = shares
             .iter()
             .map(|share| (domain.element(share.id), share.share[0]))

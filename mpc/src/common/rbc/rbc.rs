@@ -1,6 +1,7 @@
 /// This file contains more common reliable broadcast protocols used in MPC.
 /// You can reuse them in your own custom MPC protocol implementations.
 use super::{rbc_store::*, utils::*, RbcError};
+use futures::future::join_all;
 use crate::{
     common::RBC,
     honeybadger::{SessionId, WrappedMessage},
@@ -488,28 +489,36 @@ impl RBC for Avid {
         })?;
 
         // Generating fingerprint for each server and sending it to them along with root and respective shard
-        for i in 0..self.n {
-            let fingerprint = tree.proof(&[i]).to_bytes();
-            let mut fp = Vec::with_capacity(root.len() + fingerprint.len());
-            fp.extend_from_slice(&root);
-            fp.extend_from_slice(&fingerprint);
+        // Send to all parties in parallel to avoid sequential blocking on full channels
+        let send_futures: Vec<_> = (0..self.n)
+            .map(|i| {
+                let fingerprint = tree.proof(&[i]).to_bytes();
+                let mut fp = Vec::with_capacity(root.len() + fingerprint.len());
+                fp.extend_from_slice(&root);
+                fp.extend_from_slice(&fingerprint);
 
-            let shard = shards[i].clone();
-            // Create an SEND message with the given fingerprint,root,shard and session ID.
-            let msg = Msg::new(
-                self.id,
-                session_id,
-                0,
-                shard,
-                fp, // [root||fingerprint]
-                GenericMsgType::Avid(MsgTypeAvid::Send),
-                payload.len(),
-            );
+                let shard = shards[i].clone();
+                // Create a SEND message with the given fingerprint,root,shard and session ID.
+                let msg = Msg::new(
+                    self.id,
+                    session_id,
+                    0,
+                    shard,
+                    fp, // [root||fingerprint]
+                    GenericMsgType::Avid(MsgTypeAvid::Send),
+                    payload.len(),
+                );
 
-            if let Err(e) = self.send(msg, net.clone(), i).await {
-                warn!("Failed to send shard to party {}: {:?}", i, e);
-            }
-        }
+                let net = net.clone();
+                async move {
+                    if let Err(e) = self.send(msg, net, i).await {
+                        warn!("Failed to send shard to party {}: {:?}", i, e);
+                    }
+                }
+            })
+            .collect();
+
+        join_all(send_futures).await;
         Ok(())
     }
 

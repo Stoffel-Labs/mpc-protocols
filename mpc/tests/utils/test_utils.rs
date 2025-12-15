@@ -93,7 +93,19 @@ pub fn test_setup(
     Vec<Receiver<Vec<u8>>>,
     HashMap<usize, Receiver<Vec<u8>>>,
 ) {
-    let config = FakeNetworkConfig::new(500);
+    test_setup_with_buffer(n, clientid, 500)
+}
+
+pub fn test_setup_with_buffer(
+    n: usize,
+    clientid: Vec<ClientId>,
+    buffer_size: usize,
+) -> (
+    Arc<FakeNetwork>,
+    Vec<Receiver<Vec<u8>>>,
+    HashMap<usize, Receiver<Vec<u8>>>,
+) {
+    let config = FakeNetworkConfig::new(buffer_size);
     let (network, receivers, client_recv) = FakeNetwork::new(n, Some(clientid), config);
     let network = Arc::new(network);
     (network, receivers, client_recv)
