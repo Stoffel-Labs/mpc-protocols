@@ -1,4 +1,4 @@
-# 🚀 mpc-protocols
+# 🚀 Stoffel MPC Protocols
 
 This repository provides a fully-asynchronous, robust collection of MPC (Multi-Party Computation) protocols designed to run inside the [**StoffelVM**](https://github.com/Stoffel-Labs/StoffelVM) runtime and the[ **StoffelNet**](https://github.com/Stoffel-Labs/Stoffel) networking layer. However, it can also be used independently.
 
