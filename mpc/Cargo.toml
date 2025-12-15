@@ -35,6 +35,11 @@ crossbeam.workspace = true
 [dev-dependencies]
 once_cell = "1.21.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "lagrange_benchmark"
+harness = false
 
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]

@@ -83,7 +83,8 @@ pub fn lagrange_interpolate<F: FftField>(
     let n = x_vals.len();
 
     // For small inputs, use sequential computation to avoid thread overhead
-    if n <= 4 {
+    // Threshold determined empirically via lagrange_threshold_benchmark test
+    if n <= 5 {
         return lagrange_interpolate_sequential(x_vals, y_vals);
     }
 
@@ -354,6 +355,58 @@ impl<F: FftField, const N: usize, P: Clone> Sub<&F> for &ShamirShare<F, N, P> {
             _sharetype: PhantomData,
         })
     }
+}
+
+/// Force sequential Lagrange interpolation (for benchmarking)
+#[doc(hidden)]
+pub fn lagrange_interpolate_sequential_exposed<F: FftField>(
+    x_vals: &[F],
+    y_vals: &[F],
+) -> Result<DensePolynomial<F>, ShareError> {
+    lagrange_interpolate_sequential(x_vals, y_vals)
+}
+
+/// Force parallel Lagrange interpolation (for benchmarking)
+#[doc(hidden)]
+pub fn lagrange_interpolate_parallel_exposed<F: FftField>(
+    x_vals: &[F],
+    y_vals: &[F],
+) -> Result<DensePolynomial<F>, ShareError> {
+    if x_vals.len() != y_vals.len() {
+        return Err(ShareError::InvalidInput);
+    }
+    let n = x_vals.len();
+
+    let terms: Vec<DensePolynomial<F>> = scope(|s| {
+        let handles: Vec<_> = (0..n)
+            .map(|j| {
+                s.spawn(move |_| {
+                    let mut numerator = DensePolynomial::from_coefficients_slice(&[F::one()]);
+                    let mut denominator = F::one();
+
+                    for m in 0..n {
+                        if m != j {
+                            numerator = &numerator
+                                * &DensePolynomial::from_coefficients_slice(&[-x_vals[m], F::one()]);
+                            denominator *= x_vals[j] - x_vals[m];
+                        }
+                    }
+
+                    numerator * DensePolynomial::from_coefficients_slice(&[y_vals[j] / denominator])
+                })
+            })
+            .collect();
+
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+    .unwrap();
+
+    let mut result = DensePolynomial::zero();
+    for term in terms {
+        result = &result + &term;
+    }
+
+    Ok(result)
 }
 
 impl<F, const N: usize, P> ShamirShare<F, N, P>
