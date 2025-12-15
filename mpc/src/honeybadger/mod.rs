@@ -65,7 +65,7 @@ use crate::{
             batched_share_gen::BatchedRanShaNode, share_gen::RanShaNode, RanShaError,
             RanShaMessage, RanShaPayload,
         },
-        triple_gen::{TripleGenError, TripleGenMessage},
+        triple_gen::{ShamirBeaverTriple, TripleGenError, TripleGenMessage},
     },
 };
 use ark_ff::{FftField, PrimeField};
@@ -77,7 +77,7 @@ use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
-use std::{fmt, sync::{Arc, atomic::{Ordering, AtomicU8}}};
+use std::{collections::HashMap, fmt, sync::{Arc, atomic::{Ordering, AtomicU8}}};
 use stoffelnet::network_utils::{Network, NetworkError, ClientId, PartyId};
 use thiserror::Error;
 use tokio::{
@@ -1095,24 +1095,22 @@ where
 
                 try_join_all(triple_init_futures).await?;
 
-                // Collect all triple outputs
+                // Collect all triple outputs into a map keyed by session ID
+                // IMPORTANT: We must add outputs in deterministic session ID order, not arrival order.
+                // With network delays, different parties may receive outputs in different orders.
+                // If we add in arrival order, parties get mismatched triples causing interpolation failures.
                 let triple_channel = self.outputchannels.triple_channel.clone();
+                let mut collected_triples: HashMap<SessionId, Vec<ShamirBeaverTriple<F>>> = HashMap::new();
                 let mut collected = 0;
 
                 while collected < num_triple_batches {
                     if let Some(sid) = triple_channel.lock().await.recv().await {
-                        if triple_session_ids.contains(&sid) {
+                        if triple_session_ids.contains(&sid) && !collected_triples.contains_key(&sid) {
                             let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
                             if let Some(triple_storage_mutex) = triple_gen_db.remove(&sid) {
                                 let triple_storage = triple_storage_mutex.lock().await;
                                 let triples = triple_storage.protocol_output.clone();
-
-                                self.preprocessing_material.lock().await.add(
-                                    Some(triples),
-                                    None,
-                                    None,
-                                    None,
-                                );
+                                collected_triples.insert(sid, triples);
                                 self.preprocess
                                     .triple_gen
                                     .batch_recon_node
@@ -1123,6 +1121,18 @@ where
                         }
                     } else {
                         break;
+                    }
+                }
+
+                // Add triples in deterministic session ID order
+                for session_id in &triple_session_ids {
+                    if let Some(triples) = collected_triples.remove(session_id) {
+                        self.preprocessing_material.lock().await.add(
+                            Some(triples),
+                            None,
+                            None,
+                            None,
+                        );
                     }
                 }
 
@@ -1251,27 +1261,37 @@ where
         // Wait for all init calls to complete
         try_join_all(init_futures).await?;
 
-        // Collect all outputs (they may arrive in any order)
+        // Collect all outputs into a map keyed by session ID
+        // IMPORTANT: We must add outputs in deterministic session ID order, not arrival order.
+        // With network delays, different parties may receive outputs in different orders.
+        // If we add in arrival order, parties get mismatched shares causing interpolation failures.
+        let mut collected_outputs: HashMap<SessionId, Vec<RobustShare<F>>> = HashMap::new();
         let mut collected = 0;
         let channel = self.outputchannels.share_gen_channel.clone();
 
         while collected < run {
             if let Some(id) = channel.lock().await.recv().await {
-                if session_ids.contains(&id) {
+                if session_ids.contains(&id) && !collected_outputs.contains_key(&id) {
                     let mut share_store = self.preprocess.share_gen.store.lock().await;
                     if let Some(store_lock) = share_store.remove(&id) {
                         let store = store_lock.lock().await;
                         let output = store.protocol_output.clone();
-
-                        self.preprocessing_material
-                            .lock()
-                            .await
-                            .add(None, Some(output), None, None);
+                        collected_outputs.insert(id, output);
                         collected += 1;
                     }
                 }
             } else {
                 break;
+            }
+        }
+
+        // Add outputs in deterministic session ID order (sorted by the pre-computed order)
+        for session_id in &session_ids {
+            if let Some(output) = collected_outputs.remove(session_id) {
+                self.preprocessing_material
+                    .lock()
+                    .await
+                    .add(None, Some(output), None, None);
             }
         }
 
@@ -1355,27 +1375,37 @@ where
         // Wait for all init calls to complete
         try_join_all(init_futures).await?;
 
-        // Collect all outputs (they may arrive in any order)
+        // Collect all outputs into a map keyed by session ID
+        // IMPORTANT: We must add outputs in deterministic session ID order, not arrival order.
+        // With network delays, different parties may receive outputs in different orders.
+        // If we add in arrival order, parties get mismatched shares causing interpolation failures.
+        let mut collected_outputs: HashMap<SessionId, Vec<RobustShare<F>>> = HashMap::new();
         let mut collected = 0;
         let channel = self.outputchannels.batched_share_gen_channel.clone();
 
         while collected < run {
             if let Some(id) = channel.lock().await.recv().await {
-                if session_ids.contains(&id) {
+                if session_ids.contains(&id) && !collected_outputs.contains_key(&id) {
                     let mut share_store = self.preprocess.batched_share_gen.store.lock().await;
                     if let Some(store_lock) = share_store.remove(&id) {
                         let store = store_lock.lock().await;
                         let output = store.protocol_output.clone();
-
-                        self.preprocessing_material
-                            .lock()
-                            .await
-                            .add(None, Some(output), None, None);
+                        collected_outputs.insert(id, output);
                         collected += 1;
                     }
                 }
             } else {
                 break;
+            }
+        }
+
+        // Add outputs in deterministic session ID order (sorted by the pre-computed order)
+        for session_id in &session_ids {
+            if let Some(output) = collected_outputs.remove(session_id) {
+                self.preprocessing_material
+                    .lock()
+                    .await
+                    .add(None, Some(output), None, None);
             }
         }
 
@@ -1451,17 +1481,18 @@ where
 
         try_join_all(dou_sha_init_futures).await?;
 
-        // Collect all double share outputs
-        let mut dou_sha_outputs: Vec<(SessionId, Vec<DoubleShamirShare<F>>)> = Vec::with_capacity(run);
+        // Collect all double share outputs into a map keyed by session ID
+        // IMPORTANT: We must process outputs in deterministic session ID order, not arrival order.
+        let mut dou_sha_outputs_map: HashMap<SessionId, Vec<DoubleShamirShare<F>>> = HashMap::new();
         let dou_sha_channel = self.outputchannels.dou_sha_channel.clone();
 
         let mut collected = 0;
         while collected < run {
             if let Some(sid) = dou_sha_channel.lock().await.recv().await {
-                if session_ids.contains(&sid) {
+                if session_ids.contains(&sid) && !dou_sha_outputs_map.contains_key(&sid) {
                     if let Some((_, dou_sha_storage_mutex)) = self.preprocess.dou_sha.storage.remove(&sid) {
                         let dou_sha_storage = dou_sha_storage_mutex.lock().await;
-                        dou_sha_outputs.push((sid, dou_sha_storage.protocol_output.clone()));
+                        dou_sha_outputs_map.insert(sid, dou_sha_storage.protocol_output.clone());
                         collected += 1;
                     }
                 }
@@ -1469,6 +1500,12 @@ where
                 break;
             }
         }
+
+        // Build outputs in deterministic session ID order
+        let dou_sha_outputs: Vec<(SessionId, Vec<DoubleShamirShare<F>>)> = session_ids
+            .iter()
+            .filter_map(|sid| dou_sha_outputs_map.remove(sid).map(|output| (*sid, output)))
+            .collect();
 
         info!("Phase 1 complete: collected {} double share outputs", dou_sha_outputs.len());
 
@@ -1497,22 +1534,31 @@ where
 
         try_join_all(ran_dou_sha_init_futures).await?;
 
-        // Collect all RanDouSha outputs
-        let mut pair = Vec::new();
+        // Collect all RanDouSha outputs into a map keyed by session ID
+        // IMPORTANT: We must collect outputs in deterministic session ID order, not arrival order.
+        let mut ran_dou_sha_outputs_map: HashMap<SessionId, Vec<DoubleShamirShare<F>>> = HashMap::new();
         let ran_dou_sha_channel = self.outputchannels.ran_dou_sha_channel.clone();
 
         collected = 0;
         while collected < run {
             if let Some(sid) = ran_dou_sha_channel.lock().await.recv().await {
-                if session_ids.contains(&sid) {
+                if session_ids.contains(&sid) && !ran_dou_sha_outputs_map.contains_key(&sid) {
                     if let Some((_, ran_dou_sha_storage_mutex)) = self.preprocess.ran_dou_sha.store.remove(&sid) {
                         let storage = ran_dou_sha_storage_mutex.lock().await;
-                        pair.extend(storage.protocol_output.clone());
+                        ran_dou_sha_outputs_map.insert(sid, storage.protocol_output.clone());
                         collected += 1;
                     }
                 }
             } else {
                 break;
+            }
+        }
+
+        // Build pair in deterministic session ID order
+        let mut pair = Vec::new();
+        for session_id in &session_ids {
+            if let Some(output) = ran_dou_sha_outputs_map.remove(session_id) {
+                pair.extend(output);
             }
         }
 

@@ -179,9 +179,18 @@ impl<F: FftField> BatchReconNode<F> {
                 }
                 // Check if we have enough evaluation shares and haven't already computed our `y_j`.
                 if store.evals_received.len() >= 2 * self.t + 1 && store.y_j.is_none() {
+                    // Diagnostic: log the shares we're about to interpolate
+                    let share_ids: Vec<usize> = store.evals_received.iter().map(|s| s.id).collect();
+                    let share_degrees: Vec<usize> = store.evals_received.iter().map(|s| s.degree).collect();
                     info!(
                         self_id = self.id,
-                        "Enough Evals collected, interpolating y_j"
+                        n = self.n,
+                        t = self.t,
+                        num_shares = store.evals_received.len(),
+                        ?share_ids,
+                        ?share_degrees,
+                        session = ?msg.session_id,
+                        "Enough Evals collected, attempting interpolation"
                     );
 
                     // Attempt to interpolate the polynomial and get our specific `y_j` value.

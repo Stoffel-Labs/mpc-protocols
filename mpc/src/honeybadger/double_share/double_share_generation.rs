@@ -8,9 +8,9 @@ use crate::{
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
-use itertools::izip;
 use dashmap::DashMap;
 use futures::future::try_join_all;
+use itertools::izip;
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};

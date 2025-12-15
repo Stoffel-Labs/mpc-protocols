@@ -113,9 +113,26 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShare<F> {
         let mut sorted_shares = shares.to_vec();
         sorted_shares.sort_by_key(|i| i.id);
 
+        // Diagnostic logging
+        let sorted_ids: Vec<usize> = sorted_shares.iter().map(|s| s.id).collect();
+        tracing::debug!(
+            num_shares = sorted_shares.len(),
+            t = t,
+            n = n,
+            required = 2 * t + 1,
+            ?sorted_ids,
+            "Starting robust interpolation"
+        );
+
         // === Step 1: Optimistic decoding attempt ===
-        if let Ok(poly) = robust_interpolate_fnt(t, n, &sorted_shares[..2 * t + 1]) {
-            return Ok((poly.coeffs.clone(), poly.evaluate(&F::zero())));
+        match robust_interpolate_fnt(t, n, &sorted_shares[..2 * t + 1]) {
+            Ok(poly) => {
+                tracing::debug!("Optimistic decoding succeeded");
+                return Ok((poly.coeffs.clone(), poly.evaluate(&F::zero())));
+            }
+            Err(e) => {
+                tracing::debug!(error = ?e, "Optimistic decoding failed, trying OEC");
+            }
         }
         // === Step 2: Fall back to online error correction ===
         let poly = oec_decode(n, t, sorted_shares.to_vec());
