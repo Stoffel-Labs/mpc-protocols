@@ -10,17 +10,17 @@ use ark_poly::{
 use ark_std::rand::Rng;
 use std::{collections::HashSet, marker::PhantomData};
 
-
 #[derive(Clone, Debug)]
 pub struct Shamir;
 pub type Shamirshare<T> = ShamirShare<T, 1, Shamir>;
 
 impl<F: FftField> Shamirshare<F> {
-    pub fn new(share: F, id: usize, degree: usize) -> Self {
+    pub fn new(share: F, id: usize, degree: usize, commitments: Option<Vec<u8>>) -> Self {
         ShamirShare {
             share: [share],
             id,
             degree,
+            commitments,
             _sharetype: PhantomData,
         }
     }
@@ -32,6 +32,7 @@ impl<F: FftField> Default for Shamirshare<F> {
             share: [F::ZERO],
             id: 0,
             degree: 0,
+            commitments: None,
             _sharetype: PhantomData,
         }
     }
@@ -80,7 +81,7 @@ impl<F: FftField> SecretSharingScheme<F> for Shamirshare<F> {
             .map(|id| {
                 let x = F::from(*id as u64);
                 let y = poly.evaluate(&x);
-                Shamirshare::new(y, *id, degree)
+                Shamirshare::new(y, *id, degree, None)
             })
             .collect();
 
@@ -128,6 +129,7 @@ impl<F: FftField> NonRobustShare<F> {
             share: [share],
             id,
             degree,
+            commitments: None,
             _sharetype: PhantomData,
         }
     }
@@ -139,6 +141,7 @@ impl<F: FftField> Default for NonRobustShare<F> {
             share: [F::ZERO],
             id: 0,
             degree: 0,
+            commitments: None,
             _sharetype: PhantomData,
         }
     }
@@ -400,8 +403,12 @@ mod test {
         let secret2 = Fr::from(20);
         let mut ids2 = vec![7, 8, 9, 4, 5, 6];
         let mut rng = test_rng();
-        let shares_1 = Shamirshare::compute_shares(secret1, 6, 5, Some(&[1, 2, 3, 4, 5, 6]), &mut rng).unwrap();
-        let mut shares_2 = Shamirshare::compute_shares(secret2, 6, 5, Some(&[1, 2, 3, 4, 5, 6]), &mut rng).unwrap();
+        let shares_1 =
+            Shamirshare::compute_shares(secret1, 6, 5, Some(&[1, 2, 3, 4, 5, 6]), &mut rng)
+                .unwrap();
+        let mut shares_2 =
+            Shamirshare::compute_shares(secret2, 6, 5, Some(&[1, 2, 3, 4, 5, 6]), &mut rng)
+                .unwrap();
         shares_2
             .iter_mut()
             .for_each(|share| share.id = ids2.pop().unwrap());

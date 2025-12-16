@@ -58,7 +58,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.store.lock().await;
         store.remove(&session_id).is_some()
-     }
+    }
 
     /// Initiates the batch reconstruction protocol for a given node.
     ///
@@ -144,6 +144,7 @@ impl<F: FftField> BatchReconNode<F> {
                                 share: [value],
                                 id: self.id,
                                 degree: self.t,
+                                commitments: None,
                                 _sharetype: PhantomData,
                             });
                             drop(store);

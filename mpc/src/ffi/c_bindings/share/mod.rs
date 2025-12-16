@@ -147,7 +147,7 @@ impl From<ShamirShare> for Shamirshare<Fr> {
         let share_value = match share_field {
             GenericField::Bls12_381Fr(f) => *f,
         };
-        Shamirshare::<Fr>::new(share_value, value.id, value.degree)
+        Shamirshare::<Fr>::new(share_value, value.id, value.degree, None)
     }
 }
 
@@ -242,7 +242,7 @@ pub extern "C" fn shamir_share_new(
 ) -> ShamirShare {
     match field_kind {
         FieldKind::Bls12_381Fr => {
-            let share = Shamirshare::<Fr>::new(secret.into(), id, degree).into();
+            let share = Shamirshare::<Fr>::new(secret.into(), id, degree, None).into();
             return share;
         }
     };

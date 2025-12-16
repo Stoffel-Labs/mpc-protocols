@@ -28,7 +28,7 @@ use std::{
     sync::Arc,
     usize,
 };
-use stoffelnet::network_utils::{Network, ClientId, PartyId};
+use stoffelnet::network_utils::{ClientId, Network, PartyId};
 
 #[derive(Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
@@ -36,6 +36,7 @@ pub struct ShamirShare<F: FftField, const N: usize, P> {
     ///index of the share(x-values),can be different from the reciever ID
     pub id: usize,
     pub degree: usize,
+    pub commitments: Option<Vec<u8>>,
     pub _sharetype: PhantomData<fn() -> P>,
 }
 
@@ -118,6 +119,7 @@ impl<F: FftField, const N: usize, P> Add for ShamirShare<F, N, P> {
             share: new_share,
             id: self.id,
             degree: self.degree,
+            commitments: self.commitments,
             _sharetype: PhantomData,
         })
     }
@@ -133,6 +135,7 @@ impl<F: FftField, const N: usize, P> Add<&F> for ShamirShare<F, N, P> {
             share: new_share,
             id: self.id,
             degree: self.degree,
+            commitments: self.commitments,
             _sharetype: PhantomData,
         })
     }
@@ -148,6 +151,7 @@ impl<F: FftField, const N: usize, P> Add<F> for ShamirShare<F, N, P> {
             share: new_share,
             id: self.id,
             degree: self.degree,
+            commitments: self.commitments,
             _sharetype: PhantomData,
         })
     }
@@ -170,6 +174,7 @@ impl<F: FftField, const N: usize, P> Sub for ShamirShare<F, N, P> {
             share: new_share,
             id: self.id,
             degree: self.degree,
+            commitments: self.commitments,
             _sharetype: PhantomData,
         })
     }
@@ -184,6 +189,7 @@ impl<F: FftField, const N: usize, P> Sub<F> for ShamirShare<F, N, P> {
             share: new_share,
             id: self.id,
             degree: self.degree,
+            commitments: self.commitments,
             _sharetype: PhantomData,
         })
     }
@@ -195,6 +201,7 @@ impl<F: FftField, const N: usize, P> ShamirShare<F, N, P> {
             share: new_share,
             id: other.id,
             degree: other.degree,
+            commitments: other.commitments.clone(),
             _sharetype: PhantomData,
         }
     }
@@ -210,6 +217,7 @@ impl<F: FftField, const N: usize, P> Mul<F> for ShamirShare<F, N, P> {
             share: new_share,
             id: self.id,
             degree: self.degree,
+            commitments: self.commitments,
             _sharetype: PhantomData,
         })
     }
@@ -230,6 +238,7 @@ where
             share: new_share,
             id: self.id,
             degree: self.degree + other.degree,
+            commitments: self.commitments.clone(),
             _sharetype: PhantomData,
         })
     }
@@ -289,7 +298,11 @@ where
     type MPCOpts;
     type Error: std::fmt::Debug;
 
-    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, Self::Error>
+    fn setup(
+        id: PartyId,
+        params: Self::MPCOpts,
+        input_ids: Vec<ClientId>,
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized;
 
@@ -389,7 +402,7 @@ pub trait MPCECProtocol<F, S, N, G>
 where
     F: FftField,               // scalar field of the EC group
     S: SecretSharingScheme<F>, // shared-scalar type
-    N: Network, 
+    N: Network,
     G: CurveGroup<ScalarField = F>,
 {
     type Error;
@@ -397,15 +410,7 @@ where
     /// PUBLIC SCALAR MULTIPLICATION PROTOCOL
     ///
     /// Computes pk = sk_shared * G  (G is public)
-    async fn scalar_mul_basepoint(
-        &mut self,
-        sk_shared: S,
-    ) -> Result<G, Self::Error>;
+    async fn scalar_mul_basepoint(&mut self, sk_shared: S) -> Result<G, Self::Error>;
 
-    async fn open_point(
-        &self,
-        point: Vec<G>,
-        net: Arc<N>,
-    ) -> Result<G, Self::Error>;
-
+    async fn open_point(&self, point: Vec<G>, net: Arc<N>) -> Result<G, Self::Error>;
 }

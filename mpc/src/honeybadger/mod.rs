@@ -30,6 +30,7 @@ pub mod share_gen;
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
+        share::avss::AvssMessage,
         types::{
             fixed::{ClearFixedPoint, SecretFixedPoint},
             integer::{ClearInt, SecretInt},
@@ -75,15 +76,21 @@ use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
-use std::{fmt, sync::{Arc, atomic::{Ordering, AtomicU8}}};
-use stoffelnet::network_utils::{Network, NetworkError, ClientId, PartyId};
+use std::{
+    fmt,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+};
+use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use thiserror::Error;
 use tokio::{
     sync::{
         mpsc::{self, Receiver},
         Mutex,
     },
-    time::Duration
+    time::Duration,
 };
 use tracing::{info, warn};
 use triple_gen::triple_generation::TripleGenNode;
@@ -200,7 +207,7 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     pub type_ops: TypeOperations<F, R>,
     pub output: OutputServer,
     pub outputchannels: OutputChannels,
-    pub counters: SubProtocolCounters
+    pub counters: SubProtocolCounters,
 }
 
 #[derive(Clone, Debug)]
@@ -283,7 +290,7 @@ impl SubProtocolCounters {
             prand_bit_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
             prand_int_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
             fpmul_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            fpdiv_const_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0)))
+            fpdiv_const_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
         }
     }
 }
@@ -310,7 +317,7 @@ pub struct HoneyBadgerMPCNodeOpts {
     ///Security parameter
     pub k: usize,
     ///Bit size for fixed point
-    pub l: usize
+    pub l: usize,
 }
 
 impl HoneyBadgerMPCNodeOpts {
@@ -350,7 +357,11 @@ where
     type MPCOpts = HoneyBadgerMPCNodeOpts;
     type Error = HoneyBadgerError;
 
-    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, HoneyBadgerError> {
+    fn setup(
+        id: PartyId,
+        params: Self::MPCOpts,
+        input_ids: Vec<ClientId>,
+    ) -> Result<Self, HoneyBadgerError> {
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
@@ -428,7 +439,7 @@ where
                 fpmul_channel: Arc::new(Mutex::new(fpmul_receiver)),
                 fpdiv_const_channel: Arc::new(Mutex::new(fpdiv_const_receiver)),
             },
-            counters: SubProtocolCounters::new()
+            counters: SubProtocolCounters::new(),
         })
     }
 
@@ -457,7 +468,13 @@ where
             .await
             .take_beaver_triples(x.len())?;
 
-        let session_id = SessionId::new(ProtocolType::Mul, self.counters.mul_counter.get_next(), 0, 0, self.params.instance_id);
+        let session_id = SessionId::new(
+            ProtocolType::Mul,
+            self.counters.mul_counter.get_next(),
+            0,
+            0,
+            self.params.instance_id,
+        );
 
         // Call the mul function
         self.operations
@@ -465,7 +482,11 @@ where
             .init(session_id, x, y, beaver_triples, network)
             .await?;
 
-        self.operations.mul.wait_for_result(session_id, Duration::MAX).await.map_err(HoneyBadgerError::from)
+        self.operations
+            .mul
+            .wait_for_result(session_id, Duration::MAX)
+            .await
+            .map_err(HoneyBadgerError::from)
     }
 
     async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
@@ -664,6 +685,7 @@ where
                 }
             }
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
+            WrappedMessage::Avss(_) => todo!(),
         }
 
         Ok(())
@@ -679,7 +701,10 @@ where
 {
     type Error = HoneyBadgerError;
 
-    async fn scalar_mul_basepoint(&mut self, local_share: RobustShare<F>) -> Result<G, Self::Error> {
+    async fn scalar_mul_basepoint(
+        &mut self,
+        local_share: RobustShare<F>,
+    ) -> Result<G, Self::Error> {
         let si = local_share.share[0]; // the local scalar s_i
         let pi = G::generator().mul(si);
         Ok(pi)
@@ -769,7 +794,13 @@ where
             .await
             .take_prandint_shares(1)?;
 
-        let session_id = SessionId::new(ProtocolType::FpMul, self.counters.fpmul_counter.get_next(), 0, 0, self.params.instance_id);
+        let session_id = SessionId::new(
+            ProtocolType::FpMul,
+            self.counters.fpmul_counter.get_next(),
+            0,
+            0,
+            self.params.instance_id,
+        );
         let r_bits = r_bits_vec.iter().map(|(a, _)| a.clone()).collect();
 
         // Call the fpmul function
@@ -853,9 +884,8 @@ where
             self.counters.fpdiv_const_counter.get_next(),
             0,
             0,
-            self.params.instance_id
+            self.params.instance_id,
         );
-                    
 
         // 5. Call the division node ---------------------------------------
         self.type_ops
@@ -1073,7 +1103,7 @@ where
                     triple_counter,
                     0,
                     round_id,
-                    self.params.instance_id
+                    self.params.instance_id,
                 );
                 self.preprocess
                     .triple_gen
@@ -1102,11 +1132,13 @@ where
                             None,
                             None,
                         );
-                        assert!(self.preprocess
-                            .triple_gen
-                            .batch_recon_node
-                            .clear_store(sessionid)
-                            .await);
+                        assert!(
+                            self.preprocess
+                                .triple_gen
+                                .batch_recon_node
+                                .clear_store(sessionid)
+                                .await
+                        );
                     }
                 }
 
@@ -1157,8 +1189,13 @@ where
         for i in 0..run {
             info!("Random share generation run {}", i);
 
-            let sessionid =
-                SessionId::new(ProtocolType::Ransha, ran_sha_counter, 0, round_id, self.params.instance_id);
+            let sessionid = SessionId::new(
+                ProtocolType::Ransha,
+                ran_sha_counter,
+                0,
+                round_id,
+                self.params.instance_id,
+            );
 
             // Run ShareGen protocol
             self.preprocess
@@ -1221,8 +1258,13 @@ where
         let mut ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next();
 
         for _ in 0..run {
-            let sessionid =
-                SessionId::new(ProtocolType::Randousha, ran_dou_sha_counter, 0, round_id, self.params.instance_id);
+            let sessionid = SessionId::new(
+                ProtocolType::Randousha,
+                ran_dou_sha_counter,
+                0,
+                round_id,
+                self.params.instance_id,
+            );
 
             let double_shares = self
                 .ensure_double_shares(sessionid, network.clone(), rng)
@@ -1332,7 +1374,7 @@ where
             self.counters.rand_bit_counter.get_next(),
             0,
             0,
-            self.params.instance_id
+            self.params.instance_id,
         );
 
         let random_shares_a = self
@@ -1383,7 +1425,7 @@ where
             self.counters.prand_bit_counter.get_next(),
             0,
             0,
-            self.params.instance_id
+            self.params.instance_id,
         );
 
         // Run PRandBit protocol
@@ -1455,7 +1497,7 @@ where
             self.counters.prand_int_counter.get_next(),
             0,
             0,
-            self.params.instance_id
+            self.params.instance_id,
         );
 
         // Run PRandBit protocol
@@ -1513,6 +1555,7 @@ pub enum WrappedMessage {
     RandBit(RandBitMessage),
     Trunc(TruncPrMessage),
     PRandBit(PRandBitDMessage),
+    Avss(AvssMessage),
 }
 
 //-----------------Session-ID-----------------
@@ -1535,6 +1578,7 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
+    Avss = 15,
 }
 
 impl TryFrom<u8> for ProtocolType {
@@ -1557,6 +1601,7 @@ impl TryFrom<u8> for ProtocolType {
             12 => Ok(ProtocolType::FpMul),
             13 => Ok(ProtocolType::Trunc),
             14 => Ok(ProtocolType::FpDivConst),
+            15 => Ok(ProtocolType::Avss),
             _ => Err(()),
         }
     }
@@ -1565,12 +1610,12 @@ impl TryFrom<u8> for ProtocolType {
 /// A session denotes the execution of a subprotocol in an instance.
 /// The session ID uniquely identifies a given session.
 /// As such, it consists of
-/// 
+///
 /// - instance ID: binds the session to the instance
 /// - protocol/caller ID: denotes the subprotocol that is being executed; if a subprotocol calls
 ///   another, then this will usually contain the calling subprotocols ID, hence also caller ID
 /// - execution ID: differentiates between multiple execution of the same subprotocol
-/// 
+///
 /// A message has either been sent over the wire between nodes (e.g., SEND messages in the AVID
 /// protocol) or is only used locally (e.g., a MultMessage reconstructed via batch reconstruction
 /// and passed to some handler).
@@ -1587,43 +1632,43 @@ impl TryFrom<u8> for ProtocolType {
 /// If a subprotocol does call another subprotocol, which has its own messages, the caller needs
 /// to distinguish between such subprotocols (if different ones are called) and between different
 /// executions of the same subprotocol (if the same is executed multiple times).
-/// 
+///
 /// Hence, for a message that is sent in a subprotocol with `n` nested subprotocol calls, each of
 /// which has their own messages, in general, the unique ID of that message is
-/// 
+///
 /// instance ID/
 /// protocol ID 0/execution ID 0/
 /// protocol ID 1/execution ID 1/
 /// ...
 /// protocol ID n/execution ID n/
 /// sender ID/message type/message ID
-/// 
+///
 /// However, in the particular case of HoneyBadgerMPC, `n` is at most 2.
 /// Protocol ID 0 is the caller ID.
 /// Execution ID 0 is simply the execution ID.
-/// 
+///
 /// instance ID/
 /// caller ID/execution ID/
 /// protocol ID 1/execution ID 1/
 /// protocol ID 2/execution ID 2/
 /// sender ID/message type/message ID
-/// 
+///
 /// If n=1, then protocol and execution IDs 2 vanish.
 /// This is still quit generic and we use a more specific layout instead:
-/// 
+///
 /// protocol ID n/
 /// instance ID/
 /// caller ID/execution ID/
 /// sub ID/round ID/
 /// sender ID/message type
-/// 
+///
 /// Instance, caller, execution, and sender IDs and message types map one-to-one between the two.
 /// Some subprotocols do not have a message type.
 /// Execution ID 1 for n=1 and protocol ID 1 and execution ID 1 and 2 for n=2 and sometimes the
 /// message type map to the sub ID and round ID.
 /// The message ID is not used, since we do not have any subprotocols, where a node sends multiple
 /// messages of the same type to one other node.
-/// 
+///
 /// The session ID itself consists of
 ///   - instance ID
 ///   - caller ID
@@ -1633,10 +1678,10 @@ impl TryFrom<u8> for ProtocolType {
 /// The sender ID is a separate field within a message.
 /// Protocol ID n is sent as a tag to process a message directly from the network (see
 /// `WrappedMessage`).
-/// 
+///
 /// In the following, we show the mapping from protocol and execution IDs to the sub ID, round ID,
 /// and the message type.
-/// 
+///
 /// Random Double Sharing (n=2):
 ///   - round ID = execution ID 1
 ///   - sub ID = execution ID 2
@@ -1682,12 +1727,22 @@ impl fmt::Debug for SessionId {
         let round_id = self.round_id();
         let instance_id = self.instance_id();
 
-        write!(f, "[caller={},exec_id={},sub_id={},round_id={},instance_id={}]", caller, exec_id, sub_id, round_id, instance_id)
+        write!(
+            f,
+            "[caller={},exec_id={},sub_id={},round_id={},instance_id={}]",
+            caller, exec_id, sub_id, round_id, instance_id
+        )
     }
 }
 
 impl SessionId {
-    pub fn new(caller: ProtocolType, exec_id: u8, sub_id: u8, round_id: u8, instance_id: u32) -> Self {
+    pub fn new(
+        caller: ProtocolType,
+        exec_id: u8,
+        sub_id: u8,
+        round_id: u8,
+        instance_id: u32,
+    ) -> Self {
         let value = ((caller as u64 & 0xFF) << 56)
             | ((exec_id as u64 & 0xFF) << 48)
             | ((sub_id as u64 & 0xFF) << 40)
@@ -1744,10 +1799,10 @@ mod tests {
         let sub_id = 7u8;
         let round_id = 3u8;
         let instance_id = 0xDEADBEEF;
-    
+
         let session_id = SessionId::new(caller, exec_id, sub_id, round_id, instance_id);
         let debug_str = format!("{:?}", session_id);
-    
+
         assert_eq!(
             debug_str,
             "[caller=5,exec_id=42,sub_id=7,round_id=3,instance_id=3735928559]"

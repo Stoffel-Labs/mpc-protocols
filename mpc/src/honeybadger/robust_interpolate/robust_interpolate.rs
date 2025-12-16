@@ -23,6 +23,7 @@ impl<F: FftField> RobustShare<F> {
             share: [share],
             id,
             degree,
+            commitments: None,
             _sharetype: PhantomData,
         }
     }
@@ -33,6 +34,7 @@ impl<F: FftField> From<NonRobustShare<F>> for RobustShare<F> {
             share: non_robust.share,
             id: non_robust.id,
             degree: non_robust.degree,
+            commitments: None,
             _sharetype: PhantomData,
         }
     }
@@ -590,6 +592,7 @@ mod tests {
                     share: [Fr::from(7u64)],
                     id: i,
                     degree: t,
+                    commitments: None,
                     _sharetype: PhantomData,
                 })
             .unwrap();
