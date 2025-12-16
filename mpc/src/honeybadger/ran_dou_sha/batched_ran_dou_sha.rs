@@ -402,6 +402,12 @@ where
 
             all_r_shares_t.extend(r_shares_t_k);
             all_r_shares_2t.extend(r_shares_2t_k);
+
+            // Yield periodically to allow other tasks (especially message receivers) to run.
+            // This prevents CPU-bound computation from starving the async executor.
+            if k % 32 == 31 {
+                tokio::task::yield_now().await;
+            }
         }
 
         let bind_store = self.get_or_create_store(session_id, batch_size).await;

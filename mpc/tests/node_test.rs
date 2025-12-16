@@ -932,14 +932,14 @@ async fn preprocessing_e2e() {
     let t = 1;
     let l = 8;
     let k = 4;
-    let no_of_triples = 7;
-    let no_of_randomshares = 4;
+    let no_of_triples = 20000;
+    let no_of_randomshares = 20000;
     let instance_id = 111;
     let n_prandbit = 4;
     let n_prandint = 4;
 
     // Use standard buffer size - race condition fix allows smaller buffers
-    let (network, receivers, _) = test_setup_with_buffer(n_parties, vec![], 500);
+    let (network, receivers, _) = test_setup_with_buffer(n_parties, vec![], 50000);
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
