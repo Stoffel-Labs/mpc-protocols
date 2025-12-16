@@ -220,7 +220,6 @@ async fn test_reconstruct_handler() {
     assert!(store.received_r_shares_degree_t.len() == 2 * threshold + 1);
     assert!(store.received_r_shares_degree_2t.len() == 2 * threshold + 1);
     assert!(store.received_ok_msg.len() == 0);
-    assert!(store.state == RanDouShaState::Reconstruction);
 }
 
 #[tokio::test]
@@ -331,7 +330,6 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     assert_eq!(store.received_r_shares_degree_t.len(), n_parties);
     assert_eq!(store.received_r_shares_degree_2t.len(), n_parties);
     assert_eq!(store.received_ok_msg.len(), 0);
-    assert_eq!(store.state, RanDouShaState::Reconstruction);
 }
 
 #[tokio::test]

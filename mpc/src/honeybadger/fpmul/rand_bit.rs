@@ -110,6 +110,9 @@ where
         if a.len() % (self.threshold + 1) != 0 {
             return Err(RandBitError::Incompatible);
         }
+
+        assert!(session_id.calling_protocol().is_some());
+
         // Mark the protocol as initialized.
         {
             let storage_bind = self.get_or_create_storage(session_id).await;
@@ -152,8 +155,16 @@ where
             "Rand_bit reconstruction msg received from node: {0:?}",
             message.sender
         );
+
+        let calling_proto = match message.session_id.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(RandBitError::SessionIdError(message.session_id));
+            }
+        };
+
         let session_id = SessionId::new(
-            message.session_id.calling_protocol().unwrap(),
+            calling_proto,
             message.session_id.exec_id(),
             0,
             0,

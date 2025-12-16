@@ -138,6 +138,13 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     ) -> Result<(), PRandError> {
         info!(node_id = self.id, sender = msg.sender_id, "At RISS handler");
 
+        let calling_proto = match msg.session_id.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(PRandError::SessionIdError(msg.session_id));
+            }
+        };
+
         let binding = self.get_or_create_store(msg.session_id).await;
         let mut store = binding.lock().await;
 
@@ -183,7 +190,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         let total_tsets = store.no_of_tsets.ok_or_else(|| {
             PRandError::NotSet(format!(
                 "No of tsets not set {:?}",
-                msg.session_id.calling_protocol().unwrap()
+                calling_proto
             ))
         })?;
         if store.r_t.len() == total_tsets {
@@ -269,7 +276,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             // Batch reconstruct r+b
             for (i, chunk) in share_rplusb.chunks(self.t + 1).enumerate() {
                 let session_id_batch = SessionId::new(
-                    msg.session_id.calling_protocol().unwrap(),
+                    calling_proto,
                     msg.session_id.exec_id(),
                     0,
                     i as u8,
@@ -287,8 +294,15 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     pub async fn output_handler(&mut self, msg: PRandBitDMessage) -> Result<(), PRandError> {
         info!(node_id = self.id, "At output handler");
 
+        let calling_proto = match msg.session_id.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(PRandError::SessionIdError(msg.session_id));
+            }
+        };
+
         let session_id = SessionId::new(
-            msg.session_id.calling_protocol().unwrap(),
+            calling_proto,
             msg.session_id.exec_id(),
             0,
             0,

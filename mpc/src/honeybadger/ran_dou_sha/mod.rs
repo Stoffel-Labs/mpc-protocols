@@ -82,10 +82,6 @@ pub struct RanDouShaStore<F: FftField> {
 pub enum RanDouShaState {
     /// The protocol has been initialized.
     Initialized,
-    /// The protocol is in the reconstruction phase.
-    Reconstruction,
-    /// The protocol is in the output phase.
-    Output,
     /// The protocol has been finished.
     Finished,
 }
@@ -289,8 +285,6 @@ where
         let binding = self.get_or_create_store(msg.session_id).await;
         let mut store = binding.lock().await;
 
-        store.state = RanDouShaState::Reconstruction;
-
         let sender_id = msg.sender_id;
         store
             .received_r_shares_degree_t
@@ -379,8 +373,6 @@ where
         }
         let binding = self.get_or_create_store(msg.session_id).await;
         let mut store = binding.lock().await;
-
-        store.state = RanDouShaState::Output;
 
         // push to received_ok_msg if sender doesn't exist
         if !store.received_ok_msg.contains(&msg.sender_id) {

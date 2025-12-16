@@ -52,6 +52,8 @@ pub enum RandBitError {
     ShareError(#[from] ShareError),
     #[error("error sending the finished session ID to the caller: {0:?}")]
     SenderError(#[from] SendError<SessionId>),
+    #[error("unknown calling protocol in session ID {0:?}")]
+    SessionIdError(SessionId),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -130,6 +132,8 @@ pub enum PRandError {
     NotSet(String),
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
+    #[error("unknown calling protocol in session ID {0:?}")]
+    SessionIdError(SessionId),
     #[error("error sending the finished session ID to the caller: {0:?}")]
     SenderError(#[from] SendError<SessionId>),
     #[error("F2_8 Error: {0}")]
@@ -264,6 +268,8 @@ pub enum TruncPrError {
     SendError(#[from] SendError<SessionId>),
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
+    #[error("unknown calling protocol in session ID {0:?}")]
+    SessionIdError(SessionId)
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

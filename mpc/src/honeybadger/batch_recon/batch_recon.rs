@@ -108,6 +108,15 @@ impl<F: FftField> BatchReconNode<F> {
         msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
+        let calling_proto = match msg.session_id.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(BatchReconError::InvalidInput(
+                    "Unknown calling protocol".to_string(),
+                ));
+            }
+        };
+
         match msg.msg_type {
             BatchReconMsgType::Eval => {
                 debug!(
@@ -138,7 +147,7 @@ impl<F: FftField> BatchReconNode<F> {
                     );
 
                     // Attempt to interpolate the polynomial and get our specific `y_j` value.
-                    match RobustShare::recover_secret(&store.evals_received.clone(), self.n) {
+                    match RobustShare::recover_secret(&store.evals_received, self.n) {
                         Ok((_, value)) => {
                             store.y_j = Some(RobustShare {
                                 share: [value],
@@ -206,7 +215,7 @@ impl<F: FftField> BatchReconNode<F> {
                         "Enough Reveals collected, interpolating secrets"
                     );
                     // Attempt to interpolate the polynomial whose coefficients are the original secrets.
-                    match RobustShare::recover_secret(&store.reveals_received.clone(), self.n) {
+                    match RobustShare::recover_secret(&store.reveals_received, self.n) {
                         Ok((poly, _)) => {
                             let mut result = poly;
                             // Resize the coefficient vector to `t + 1` to get all secrets.
@@ -216,7 +225,7 @@ impl<F: FftField> BatchReconNode<F> {
 
                             // Send the finalization message back to the triple generation or the
                             // multiplication protocol.
-                            match msg.session_id.calling_protocol().unwrap() {
+                            match calling_proto {
                                 ProtocolType::Triple => {
                                     let mut bytes_message = Vec::new();
                                     result.serialize_compressed(&mut bytes_message)?;

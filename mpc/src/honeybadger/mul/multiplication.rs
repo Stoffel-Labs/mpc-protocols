@@ -179,6 +179,8 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             return Err(MulError::InvalidInput("Length of x and y vectors and Beaver triples must match".to_string()));
         }
 
+        assert!(session_id.calling_protocol().is_some());
+
         let no_of_mul = x.len();
         let no_of_batch = no_of_mul / (self.t + 1);
         let share_len = x.len() % (self.t + 1);
@@ -331,8 +333,17 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         &self,
         msg: MultMessage,
     ) -> Result<(), MulError> {
+        let calling_proto = match msg.session_id.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(MulError::InvalidInput(
+                    format!("Unknown calling protocol in session ID {:?}", msg.session_id)
+                ));
+            }
+        };
+
         let session_id = SessionId::new(
-            msg.session_id.calling_protocol().unwrap(),
+            calling_proto,
             msg.session_id.exec_id(),
             0,
             0,

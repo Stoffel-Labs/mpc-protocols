@@ -121,13 +121,9 @@ impl Hasher for Sha256Algorithm {
     }
 }
 
-/// Hash a single shard using SHA-256.
-pub fn hash(shard: Vec<u8>) -> [u8; 32] {
-    Sha256Algorithm::hash(&shard)
-}
 /// Generate a Merkle tree from a list of shards.
 pub fn gen_merkletree(shards: Vec<Vec<u8>>) -> MerkleTree<Sha256Algorithm> {
-    let leaves: Vec<[u8; 32]> = shards.iter().map(|x| hash(x.clone())).collect();
+    let leaves: Vec<[u8; 32]> = shards.iter().map(|x| Sha256Algorithm::hash(&x)).collect();
     MerkleTree::<Sha256Algorithm>::from_leaves(&leaves)
 }
 /// Deserialize a Merkle proof from raw bytes (excluding the root).
@@ -153,7 +149,7 @@ pub fn verify_merkle(
         .try_into()
         .map_err(|_| ShardError::Merkle("Failed to extract Merkle root".to_string()))?;
     let proof = get_merkle_proof(proof)?;
-    let leaf_hash = hash(shard.clone());
+    let leaf_hash = Sha256Algorithm::hash(&shard);
 
     Ok(proof.verify(root, &vec![id], &[leaf_hash], n))
 }
