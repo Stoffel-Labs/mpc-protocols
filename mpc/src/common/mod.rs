@@ -9,6 +9,11 @@ pub mod share;
 
 pub mod types;
 
+/// Batch operations for accelerating MPC field computations.
+/// Provides algorithmic optimizations (Montgomery's batch inversion) and
+/// parallelism via crossbeam for improved performance.
+pub mod batch_ops;
+
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
@@ -21,6 +26,7 @@ use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 use crossbeam::scope;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use batch_ops::{batch_invert, poly_sum};
 use ark_std::rand::Rng;
 use async_trait::async_trait;
 use std::{
@@ -70,6 +76,7 @@ pub trait SecretSharingScheme<F: FftField>:
 
 /// Interpolates a polynomial from `(x, y)` pairs using Lagrange interpolation.
 /// Uses parallel computation via crossbeam for improved performance on large inputs.
+/// Optimized with batch inversion (Montgomery's trick) to minimize field inversions.
 ///
 /// # Errors
 /// - `ShareError::InsufficientShares` if `x_vals` and `y_vals` have mismatched lengths.
@@ -88,23 +95,39 @@ pub fn lagrange_interpolate<F: FftField>(
         return lagrange_interpolate_sequential(x_vals, y_vals);
     }
 
+    // Pre-compute all denominators and batch-invert them (Montgomery's trick)
+    // This reduces n field inversions to just 1, with O(3n) multiplications
+    let denominators: Vec<F> = (0..n)
+        .map(|j| {
+            let mut denom = F::one();
+            for m in 0..n {
+                if m != j {
+                    denom *= x_vals[j] - x_vals[m];
+                }
+            }
+            denom
+        })
+        .collect();
+
+    let inv_denominators = batch_invert(&denominators);
+
     // Compute each Lagrange basis polynomial term in parallel
     let terms: Vec<DensePolynomial<F>> = scope(|s| {
         let handles: Vec<_> = (0..n)
             .map(|j| {
+                let inv_denom = inv_denominators[j];
                 s.spawn(move |_| {
                     let mut numerator = DensePolynomial::from_coefficients_slice(&[F::one()]);
-                    let mut denominator = F::one();
 
                     for m in 0..n {
                         if m != j {
                             numerator = &numerator
                                 * &DensePolynomial::from_coefficients_slice(&[-x_vals[m], F::one()]);
-                            denominator *= x_vals[j] - x_vals[m];
                         }
                     }
 
-                    numerator * DensePolynomial::from_coefficients_slice(&[y_vals[j] / denominator])
+                    // Multiply by y_j * (1/denominator) - no division needed!
+                    numerator * DensePolynomial::from_coefficients_slice(&[y_vals[j] * inv_denom])
                 })
             })
             .collect();
@@ -113,13 +136,7 @@ pub fn lagrange_interpolate<F: FftField>(
     })
     .unwrap();
 
-    // Sum all terms to get the final polynomial
-    let mut result = DensePolynomial::zero();
-    for term in terms {
-        result = &result + &term;
-    }
-
-    Ok(result)
+    Ok(poly_sum(&terms))
 }
 
 /// Sequential version of Lagrange interpolation for small inputs

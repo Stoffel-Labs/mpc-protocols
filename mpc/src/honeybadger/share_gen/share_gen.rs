@@ -6,7 +6,7 @@ use futures::future::try_join_all;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
-use tracing::info;
+use tracing::{info, trace};
 
 use crate::{
     common::{
@@ -307,7 +307,7 @@ where
     }
 
     pub async fn output_handler(&self, msg: RanShaMessage) -> Result<(), RanShaError> {
-        info!("party {:?} received shares for Output", self.id);
+        trace!("party {:?} received shares for Output", self.id);
         let ok = match msg.payload {
             RanShaPayload::Output(o) => o,
             _ => return Err(RanShaError::Abort),

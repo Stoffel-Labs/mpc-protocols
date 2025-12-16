@@ -408,7 +408,36 @@ where
         let mut store = bind_store.lock().await;
         store.computed_r_shares_degree_t = all_r_shares_t.clone();
         store.computed_r_shares_degree_2t = all_r_shares_2t.clone();
-        drop(store);
+
+        // Check if we can complete the output phase now
+        // Output messages may have arrived before computed shares were ready
+        let can_complete = store.received_ok_msg.len() >= self.n_parties - (self.threshold + 1)
+            && !store.computed_r_shares_degree_t.is_empty()
+            && !store.computed_r_shares_degree_2t.is_empty()
+            && store.state != RanDouShaState::Finished;
+
+        if can_complete {
+            // Output: for each batch k, take the first (t+1) double shares
+            let output_per_batch = self.threshold + 1;
+            let mut output: Vec<DoubleShamirShare<F>> =
+                Vec::with_capacity(batch_size * output_per_batch);
+
+            for k in 0..batch_size {
+                let batch_start = k * self.n_parties;
+                for i in 0..output_per_batch {
+                    let share_t = store.computed_r_shares_degree_t[batch_start + i].clone();
+                    let share_2t = store.computed_r_shares_degree_2t[batch_start + i].clone();
+                    output.push(DoubleShamirShare::new(share_t, share_2t));
+                }
+            }
+
+            store.state = RanDouShaState::Finished;
+            store.protocol_output = output;
+            drop(store);
+            self.output_sender.send(session_id).await?;
+        } else {
+            drop(store);
+        }
 
         // For reconstruction verification, send to parties t+1..n
         // Each party i receives shares at position i from each batch
@@ -614,6 +643,12 @@ where
         };
 
         let mut store = store_arc.lock().await;
+
+        // If already finished (e.g., completed early in apply_vandermonde), just return Ok
+        if store.state == RanDouShaState::Finished {
+            return Ok(());
+        }
+
         store.state = RanDouShaState::Output;
 
         if !store.received_ok_msg.contains(&msg.sender_id) {

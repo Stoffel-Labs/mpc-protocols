@@ -29,7 +29,7 @@ use tokio::sync::{
 };
 
 use stoffelnet::network_utils::{Network, NetworkError, PartyId};
-use tracing::info;
+use tracing::{info, trace};
 
 /// Error that occurs during the execution of the Random Double Share Error.
 #[derive(Debug, Error)]
@@ -223,7 +223,33 @@ where
         let mut store = bind_store.lock().await;
         store.computed_r_shares_degree_t = r_deg_t.clone();
         store.computed_r_shares_degree_2t = r_deg_2t.clone();
-        drop(store);
+
+        // Check if we can complete the output phase now
+        // Output messages may have arrived before computed shares were ready
+        let can_complete = store.received_ok_msg.len() >= self.n_parties - (self.threshold + 1)
+            && store.computed_r_shares_degree_t.len() >= self.threshold + 1
+            && store.computed_r_shares_degree_2t.len() >= self.threshold + 1
+            && store.state != RanDouShaState::Finished;
+
+        if can_complete {
+            // create vector for share [r_1]_t ... [r_t+1]_t
+            let output_r_t = store.computed_r_shares_degree_t[0..self.threshold + 1].to_vec();
+            // create vector for share [r_1]_2t ... [r_t+1]_2t
+            let output_r_2t = store.computed_r_shares_degree_2t[0..self.threshold + 1].to_vec();
+
+            let output_double_share = output_r_t
+                .into_iter()
+                .zip(output_r_2t)
+                .map(|(share_deg_t, share_deg_2t)| DoubleShamirShare::new(share_deg_t, share_deg_2t))
+                .collect();
+
+            store.state = RanDouShaState::Finished;
+            store.protocol_output = output_double_share;
+            drop(store);
+            self.output_sender.send(session_id).await?;
+        } else {
+            drop(store);
+        }
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
         for i in 0..self.n_parties {
@@ -375,14 +401,18 @@ where
             | RanDouShaPayload::BatchedShare(_)
             | RanDouShaPayload::BatchedReconstruct(_) => return Err(RanDouShaError::Abort),
         };
-        info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, msg.session_id.as_u64(), msg.sender_id, output);
-        // todo - add randousha status so we can omit output_handler
+        trace!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, msg.session_id.as_u64(), msg.sender_id, output);
         // abort randousha once received the abort message
         if !output {
             return Err(RanDouShaError::Abort);
         }
         let binding = self.get_or_create_store(msg.session_id).await;
         let mut store = binding.lock().await;
+
+        // If already finished (e.g., completed early in init), just return Ok
+        if store.state == RanDouShaState::Finished {
+            return Ok(());
+        }
 
         store.state = RanDouShaState::Output;
 
@@ -395,10 +425,10 @@ where
             return Err(RanDouShaError::WaitForOk);
         }
 
+        // waiting for init to compute shares (use || not && - wait if EITHER is not ready)
         if store.computed_r_shares_degree_t.len() < self.threshold + 1
-            && store.computed_r_shares_degree_2t.len() < self.threshold + 1
+            || store.computed_r_shares_degree_2t.len() < self.threshold + 1
         {
-            // waiting for self.init
             return Err(RanDouShaError::WaitForOk);
         }
 

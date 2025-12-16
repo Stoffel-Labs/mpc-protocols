@@ -2,6 +2,7 @@
 /// You can reuse them for the MPC protocols that you aim to implement.
 ///
 use crate::common::{lagrange_interpolate, share::ShareError, SecretSharingScheme, ShamirShare};
+use crate::common::batch_ops::batch_horner_eval;
 use ark_ff::FftField;
 use ark_poly::{
     univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain,
@@ -74,14 +75,14 @@ impl<F: FftField> SecretSharingScheme<F> for Shamirshare<F> {
         let mut poly = DensePolynomial::rand(degree, rng);
         poly[0] = secret;
 
-        // Evaluate the polynomial at each `id`
+        // Evaluate the polynomial at each `id` using batch Horner evaluation
+        let x_vals: Vec<F> = id_list.iter().map(|id| F::from(*id as u64)).collect();
+        let y_vals = batch_horner_eval(&poly.coeffs, &x_vals);
+
         let shares = id_list
             .iter()
-            .map(|id| {
-                let x = F::from(*id as u64);
-                let y = poly.evaluate(&x);
-                Shamirshare::new(y, *id, degree)
-            })
+            .zip(y_vals.iter())
+            .map(|(id, y)| Shamirshare::new(*y, *id, degree))
             .collect();
 
         Ok(shares)
