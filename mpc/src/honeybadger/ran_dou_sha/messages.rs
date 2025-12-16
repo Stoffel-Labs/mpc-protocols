@@ -12,12 +12,20 @@ pub enum RanDouShaMessageType {
     ReconstructMessage,
     /// Tag for the message received by the output handler.
     OutputMessage,
+    /// Tag for batched share messages (init phase).
+    BatchedShareMessage,
+    /// Tag for batched reconstruction messages.
+    BatchedReconstructMessage,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum RanDouShaPayload {
     Reconstruct(Vec<u8>),
     Output(bool),
+    /// Batched shares: K pairs of (degree_t, degree_2t) shares serialized together
+    BatchedShare(Vec<u8>),
+    /// Batched reconstruction: K pairs of shares for reconstruction
+    BatchedReconstruct(Vec<u8>),
 }
 
 /// Message sent in the Random Double Sharing protocol.

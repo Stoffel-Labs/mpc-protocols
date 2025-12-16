@@ -67,12 +67,8 @@ pub fn spawn_receiver_tasks(
                 match result {
                     Ok(_) => {
                         let dousha_node_lock = dousha_node.lock().await;
-                        let storage_lock = dousha_node_lock.storage.lock().await;
-                        let node_storage = storage_lock
-                            .get(&dousha_msg.session_id)
-                            .unwrap()
-                            .lock()
-                            .await;
+                        let storage_arc = dousha_node_lock.storage.get(&dousha_msg.session_id).map(|r| r.clone()).unwrap();
+                        let node_storage = storage_arc.lock().await;
                         if node_storage.state == ProtocolState::Finished {
                             let resulting_double_shares = node_storage.protocol_output.clone();
                             final_result_data_chan

@@ -93,7 +93,19 @@ pub fn test_setup(
     Vec<Receiver<Vec<u8>>>,
     HashMap<usize, Receiver<Vec<u8>>>,
 ) {
-    let config = FakeNetworkConfig::new(500);
+    test_setup_with_buffer(n, clientid, 500)
+}
+
+pub fn test_setup_with_buffer(
+    n: usize,
+    clientid: Vec<ClientId>,
+    buffer_size: usize,
+) -> (
+    Arc<FakeNetwork>,
+    Vec<Receiver<Vec<u8>>>,
+    HashMap<usize, Receiver<Vec<u8>>>,
+) {
+    let config = FakeNetworkConfig::new(buffer_size);
     let (network, receivers, client_recv) = FakeNetwork::new(n, Some(clientid), config);
     let network = Arc::new(network);
     (network, receivers, client_recv)
@@ -263,8 +275,8 @@ pub fn spawn_receiver_tasks(
                         match result {
                             Ok(()) => {
                                 let node = randousha_node.lock().await;
-                                let storage_db = node.store.lock().await;
-                                let storage = storage_db.get(&rds.session_id).unwrap().lock().await;
+                                let storage_arc = node.store.get(&rds.session_id).map(|r| r.clone()).unwrap();
+                                let storage = storage_arc.lock().await;
                                 if storage.state == RanDouShaState::Finished {
                                     let final_shares = storage.protocol_output.clone();
                                     fin_send.send((node.id, final_shares)).await.unwrap();

@@ -1,3 +1,4 @@
+pub mod batched_ran_dou_sha;
 pub mod messages;
 
 use crate::{
@@ -16,8 +17,9 @@ use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
 use messages::{RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage};
+use dashmap::DashMap;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     sync::Arc,
 };
 use thiserror::Error;
@@ -27,7 +29,7 @@ use tokio::sync::{
 };
 
 use stoffelnet::network_utils::{Network, NetworkError, PartyId};
-use tracing::info;
+use tracing::{info, trace};
 
 /// Error that occurs during the execution of the Random Double Share Error.
 #[derive(Debug, Error)]
@@ -118,7 +120,7 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     /// Threshold of corrupted parties.
     pub threshold: usize,
     /// Storage of the node.
-    pub store: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
+    pub store: Arc<DashMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>,
     pub output_sender: Sender<SessionId>,
     ///Avid instance for RBC
     pub rbc: R,
@@ -141,20 +143,19 @@ where
             id,
             n_parties,
             threshold,
-            store: Arc::new(Mutex::new(BTreeMap::new())),
+            store: Arc::new(DashMap::new()),
             output_sender,
             rbc,
         })
     }
 
     pub async fn pop_finished_protocol_result(&self) -> Option<Vec<DoubleShamirShare<F>>> {
-        let mut storage = self.store.lock().await;
         let mut finished_sid = None;
         let mut output = Vec::new();
-        for (sid, storage_mutex) in storage.iter() {
-            let storage_bind = storage_mutex.lock().await;
+        for entry in self.store.iter() {
+            let storage_bind = entry.value().lock().await;
             if storage_bind.state == RanDouShaState::Finished {
-                finished_sid = Some(*sid);
+                finished_sid = Some(*entry.key());
                 output = storage_bind.protocol_output.clone();
                 break;
             }
@@ -162,7 +163,7 @@ where
         match finished_sid {
             Some(sid) => {
                 // Remove the entry from the storage
-                storage.remove(&sid);
+                self.store.remove(&sid);
                 Some(output)
             }
             None => None,
@@ -172,13 +173,12 @@ where
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
     pub async fn get_or_create_store(
-        &mut self,
+        &self,
         session_id: SessionId,
     ) -> Arc<Mutex<RanDouShaStore<F>>> {
-        let mut storage = self.store.lock().await;
-        storage
+        self.store
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(RanDouShaStore::empty())))
+            .or_insert_with(|| Arc::new(Mutex::new(RanDouShaStore::empty())))
             .clone()
     }
 
@@ -196,7 +196,7 @@ where
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
     pub async fn init<N>(
-        &mut self,
+        &self,
         shares_deg_t: Vec<NonRobustShare<F>>,
         shares_deg_2t: Vec<NonRobustShare<F>>,
         session_id: SessionId,
@@ -223,7 +223,33 @@ where
         let mut store = bind_store.lock().await;
         store.computed_r_shares_degree_t = r_deg_t.clone();
         store.computed_r_shares_degree_2t = r_deg_2t.clone();
-        drop(store);
+
+        // Check if we can complete the output phase now
+        // Output messages may have arrived before computed shares were ready
+        let can_complete = store.received_ok_msg.len() >= self.n_parties - (self.threshold + 1)
+            && store.computed_r_shares_degree_t.len() >= self.threshold + 1
+            && store.computed_r_shares_degree_2t.len() >= self.threshold + 1
+            && store.state != RanDouShaState::Finished;
+
+        if can_complete {
+            // create vector for share [r_1]_t ... [r_t+1]_t
+            let output_r_t = store.computed_r_shares_degree_t[0..self.threshold + 1].to_vec();
+            // create vector for share [r_1]_2t ... [r_t+1]_2t
+            let output_r_2t = store.computed_r_shares_degree_2t[0..self.threshold + 1].to_vec();
+
+            let output_double_share = output_r_t
+                .into_iter()
+                .zip(output_r_2t)
+                .map(|(share_deg_t, share_deg_2t)| DoubleShamirShare::new(share_deg_t, share_deg_2t))
+                .collect();
+
+            store.state = RanDouShaState::Finished;
+            store.protocol_output = output_double_share;
+            drop(store);
+            self.output_sender.send(session_id).await?;
+        } else {
+            drop(store);
+        }
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
         for i in 0..self.n_parties {
@@ -261,7 +287,7 @@ where
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
     pub async fn reconstruction_handler<N>(
-        &mut self,
+        &self,
         msg: RanDouShaMessage,
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
@@ -276,7 +302,9 @@ where
         );
         let payload = match msg.payload {
             RanDouShaPayload::Reconstruct(p) => p,
-            RanDouShaPayload::Output(_) => return Err(RanDouShaError::Abort),
+            RanDouShaPayload::Output(_)
+            | RanDouShaPayload::BatchedShare(_)
+            | RanDouShaPayload::BatchedReconstruct(_) => return Err(RanDouShaError::Abort),
         };
         let rec_msg: ReconstructionMessage<F> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
@@ -366,19 +394,25 @@ where
     /// Wait to receive broadcast of output message from other party.
     /// Return [r_1]_t ... [r_t+1]_t & [r_1]_2t ... [r_t+1]_2t only if one receives more than
     /// (n - (t+1)) Ok message.
-    pub async fn output_handler(&mut self, msg: RanDouShaMessage) -> Result<(), RanDouShaError> {
+    pub async fn output_handler(&self, msg: RanDouShaMessage) -> Result<(), RanDouShaError> {
         let output = match msg.payload {
-            RanDouShaPayload::Reconstruct(_) => return Err(RanDouShaError::Abort),
             RanDouShaPayload::Output(ok) => ok,
+            RanDouShaPayload::Reconstruct(_)
+            | RanDouShaPayload::BatchedShare(_)
+            | RanDouShaPayload::BatchedReconstruct(_) => return Err(RanDouShaError::Abort),
         };
-        info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, msg.session_id.as_u64(), msg.sender_id, output);
-        // todo - add randousha status so we can omit output_handler
+        trace!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, msg.session_id.as_u64(), msg.sender_id, output);
         // abort randousha once received the abort message
         if !output {
             return Err(RanDouShaError::Abort);
         }
         let binding = self.get_or_create_store(msg.session_id).await;
         let mut store = binding.lock().await;
+
+        // If already finished (e.g., completed early in init), just return Ok
+        if store.state == RanDouShaState::Finished {
+            return Ok(());
+        }
 
         store.state = RanDouShaState::Output;
 
@@ -391,10 +425,10 @@ where
             return Err(RanDouShaError::WaitForOk);
         }
 
+        // waiting for init to compute shares (use || not && - wait if EITHER is not ready)
         if store.computed_r_shares_degree_t.len() < self.threshold + 1
-            && store.computed_r_shares_degree_2t.len() < self.threshold + 1
+            || store.computed_r_shares_degree_2t.len() < self.threshold + 1
         {
-            // waiting for self.init
             return Err(RanDouShaError::WaitForOk);
         }
 
@@ -418,7 +452,7 @@ where
     }
 
     pub async fn process<N>(
-        &mut self,
+        &self,
         msg: RanDouShaMessage,
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
@@ -433,6 +467,11 @@ where
             messages::RanDouShaMessageType::ReconstructMessage => {
                 self.reconstruction_handler(msg, network).await?;
                 return Ok(());
+            }
+            // Batched messages are handled by BatchedRanDouShaNode
+            messages::RanDouShaMessageType::BatchedShareMessage
+            | messages::RanDouShaMessageType::BatchedReconstructMessage => {
+                return Err(RanDouShaError::Abort);
             }
         }
     }

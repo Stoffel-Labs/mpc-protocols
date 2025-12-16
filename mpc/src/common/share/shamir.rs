@@ -2,6 +2,7 @@
 /// You can reuse them for the MPC protocols that you aim to implement.
 ///
 use crate::common::{lagrange_interpolate, share::ShareError, SecretSharingScheme, ShamirShare};
+use crate::common::batch_ops::batch_horner_eval;
 use ark_ff::FftField;
 use ark_poly::{
     univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain,
@@ -74,14 +75,14 @@ impl<F: FftField> SecretSharingScheme<F> for Shamirshare<F> {
         let mut poly = DensePolynomial::rand(degree, rng);
         poly[0] = secret;
 
-        // Evaluate the polynomial at each `id`
+        // Evaluate the polynomial at each `id` using batch Horner evaluation
+        let x_vals: Vec<F> = id_list.iter().map(|id| F::from(*id as u64)).collect();
+        let y_vals = batch_horner_eval(&poly.coeffs, &x_vals);
+
         let shares = id_list
             .iter()
-            .map(|id| {
-                let x = F::from(*id as u64);
-                let y = poly.evaluate(&x);
-                Shamirshare::new(y, *id, degree)
-            })
+            .zip(y_vals.iter())
+            .map(|(id, y)| Shamirshare::new(*y, *id, degree))
             .collect();
 
         Ok(shares)
@@ -200,6 +201,25 @@ impl<F: FftField> SecretSharingScheme<F> for NonRobustShare<F> {
 
         let domain =
             GeneralEvaluationDomain::<F>::new(n).ok_or_else(|| ShareError::NoSuitableDomain(n))?;
+
+        // Fast path: if we have all n shares with contiguous IDs 0..n AND domain.size() == n, use IFFT
+        // This is O(n log n) vs O(n²) for Lagrange interpolation
+        // Note: domain.size() may be larger than n (e.g., rounded to power of 2), so we can only
+        // use IFFT when they match exactly
+        if shares.len() == n && domain.size() == n {
+            // Check if shares cover all indices 0..n (we already checked uniqueness above)
+            let mut sorted_shares = shares.to_vec();
+            sorted_shares.sort_by_key(|s| s.id);
+
+            if sorted_shares.iter().enumerate().all(|(i, s)| s.id == i) {
+                // All shares present with IDs 0..n-1, use IFFT
+                let evals: Vec<F> = sorted_shares.iter().map(|s| s.share[0]).collect();
+                let coeffs = domain.ifft(&evals);
+                return Ok((coeffs.clone(), coeffs[0]));
+            }
+        }
+
+        // Slow path: subset of shares or non-contiguous IDs, use Lagrange
         let (x_vals, y_vals): (Vec<F>, Vec<F>) = shares
             .iter()
             .map(|share| (domain.element(share.id), share.share[0]))

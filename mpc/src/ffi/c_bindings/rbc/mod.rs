@@ -297,15 +297,9 @@ pub extern "C" fn has_bracha_session_ended(
 ) -> RbcErrorCode {
     let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
-    let session_store = {
-        let store_map = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(bracha.store.lock());
-        let result = store_map.get(&session_id);
-        match result {
-            Some(s) => s.clone(),
-            None => return RbcErrorCode::RbcSessionNotFound,
-        }
+    let session_store = match bracha.store.get(&session_id) {
+        Some(s) => s.clone(),
+        None => return RbcErrorCode::RbcSessionNotFound,
     };
     let s = tokio::runtime::Runtime::new()
         .unwrap()
@@ -324,15 +318,9 @@ pub extern "C" fn get_bracha_output(
 ) -> RbcErrorCode {
     let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
-    let session_store = {
-        let store_map = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(bracha.store.lock());
-        let result = store_map.get(&session_id);
-        match result {
-            Some(s) => s.clone(),
-            None => return RbcErrorCode::RbcSessionNotFound,
-        }
+    let session_store = match bracha.store.get(&session_id) {
+        Some(s) => s.clone(),
+        None => return RbcErrorCode::RbcSessionNotFound,
     };
     let s = tokio::runtime::Runtime::new()
         .unwrap()
@@ -559,15 +547,9 @@ pub extern "C" fn has_avid_session_ended(
 ) -> RbcErrorCode {
     let avid = unsafe { &mut *(avid_pointer as *mut Avid) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
-    let session_store = {
-        let store_map = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(avid.store.lock());
-        let result = store_map.get(&session_id);
-        match result {
-            Some(s) => s.clone(),
-            None => return RbcErrorCode::RbcSessionNotFound,
-        }
+    let session_store = match avid.store.get(&session_id) {
+        Some(s) => s.clone(),
+        None => return RbcErrorCode::RbcSessionNotFound,
     };
     let s = tokio::runtime::Runtime::new()
         .unwrap()
@@ -586,15 +568,9 @@ pub extern "C" fn get_avid_output(
 ) -> RbcErrorCode {
     let avid = unsafe { &mut *(avid_pointer as *mut Avid) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
-    let session_store = {
-        let store_map = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(avid.store.lock());
-        let result = store_map.get(&session_id);
-        match result {
-            Some(s) => s.clone(),
-            None => return RbcErrorCode::RbcSessionNotFound,
-        }
+    let session_store = match avid.store.get(&session_id) {
+        Some(s) => s.clone(),
+        None => return RbcErrorCode::RbcSessionNotFound,
     };
     let s = tokio::runtime::Runtime::new()
         .unwrap()
@@ -817,15 +793,9 @@ pub extern "C" fn has_aba_session_ended(
 ) -> RbcErrorCode {
     let aba = unsafe { &mut *(aba_pointer as *mut ABA) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
-    let session_store = {
-        let store_map = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(aba.store.lock());
-        let result = store_map.get(&session_id);
-        match result {
-            Some(s) => s.clone(),
-            None => return RbcErrorCode::RbcSessionNotFound,
-        }
+    let session_store = match aba.store.get(&session_id) {
+        Some(s) => s.clone(),
+        None => return RbcErrorCode::RbcSessionNotFound,
     };
     let s = tokio::runtime::Runtime::new()
         .unwrap()
@@ -844,15 +814,9 @@ pub extern "C" fn get_aba_output(
 ) -> RbcErrorCode {
     let aba = unsafe { &mut *(aba_pointer as *mut ABA) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
-    let session_store = {
-        let store_map = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(aba.store.lock());
-        let result = store_map.get(&session_id);
-        match result {
-            Some(s) => s.clone(),
-            None => return RbcErrorCode::RbcSessionNotFound,
-        }
+    let session_store = match aba.store.get(&session_id) {
+        Some(s) => s.clone(),
+        None => return RbcErrorCode::RbcSessionNotFound,
     };
     let s = tokio::runtime::Runtime::new()
         .unwrap()

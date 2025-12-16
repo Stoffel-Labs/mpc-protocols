@@ -1,19 +1,14 @@
 use std::{
-    alloc::GlobalAlloc,
     collections::HashMap,
     ffi::{c_char, CStr, CString},
-    mem::{self, ManuallyDrop},
+    mem::ManuallyDrop,
     net::SocketAddr,
     slice,
     str::FromStr,
     sync::{Arc, LazyLock},
 };
 
-use rustls::crypto::hash::Hash;
-use stoffelnet::{
-    network_utils::{ClientId, PartyId},
-    transports::quic::{NetworkManager, PeerConnection, QuicNetworkManager},
-};
+use stoffelnet::transports::quic::{NetworkManager, PeerConnection, QuicNetworkManager};
 
 use crate::ffi::c_bindings::{
     network::{GenericNetwork, NetworkErrorCode, NetworkOpaque},
@@ -118,10 +113,10 @@ pub extern "C" fn quic_connect(
             peer_connections
                 .connections
                 .insert(connection.remote_address(), connection);
-            return NetworkErrorCode::NetworkSuccess;
+            NetworkErrorCode::NetworkSuccess
         }
         Err(_) => {
-            return NetworkErrorCode::ConnectError;
+            NetworkErrorCode::ConnectError
         }
     }
 }
@@ -146,16 +141,16 @@ pub extern "C" fn quic_accept(
     match r {
         Ok(connection) => {
             let addr = connection.remote_address().to_string();
-            let addr = CString::from_str(&addr).unwrap();
-            unsafe { *connected_addr = addr.into_raw() };
+            let addr_cstr = CString::from_str(&addr).unwrap();
+            unsafe { *connected_addr = addr_cstr.into_raw() };
 
             peer_connections
                 .connections
                 .insert(connection.remote_address(), connection);
-            return NetworkErrorCode::NetworkSuccess;
+            NetworkErrorCode::NetworkSuccess
         }
         Err(_) => {
-            return NetworkErrorCode::ConnectError;
+            NetworkErrorCode::ConnectError
         }
     }
 }
@@ -221,7 +216,7 @@ pub extern "C" fn quic_receive_from_sync(
         Err(_) => return NetworkErrorCode::IncorrectSockAddr,
     };
     let connection = match peer_connections.connections.get(&addr) {
-        Some(c) => c,
+        Some(c) => c.clone(),
         None => return NetworkErrorCode::IncorrectSockAddr,
     };
     let f = connection.receive();
@@ -234,7 +229,7 @@ pub extern "C" fn quic_receive_from_sync(
                     len: m.len(),
                 }
             }
-            return NetworkErrorCode::NetworkSuccess;
+            NetworkErrorCode::NetworkSuccess
         }
         Err(_) => {
             unsafe {
@@ -243,9 +238,9 @@ pub extern "C" fn quic_receive_from_sync(
                     len: 0,
                 };
             }
-            return NetworkErrorCode::RecvError;
+            NetworkErrorCode::RecvError
         }
-    };
+    }
 }
 
 #[no_mangle]
@@ -265,12 +260,12 @@ pub extern "C" fn quic_send(
         Ok(a) => a,
         Err(_) => return NetworkErrorCode::IncorrectSockAddr,
     };
-    let connection = match peer_connections.connections.get_mut(&addr) {
-        Some(c) => c,
+    let connection = match peer_connections.connections.get(&addr) {
+        Some(c) => c.clone(),
         None => return NetworkErrorCode::IncorrectSockAddr,
     };
-    let r = GLOBAL_RUNTIME.block_on(connection.send(msg));
-    match r {
+    let f = connection.send(msg);
+    match GLOBAL_RUNTIME.block_on(f) {
         Ok(_) => NetworkErrorCode::NetworkSuccess,
         Err(_) => NetworkErrorCode::SendError,
     }

@@ -1,6 +1,7 @@
 use crate::common::{
     lagrange_interpolate,
     share::{shamir::NonRobustShare, ShareError},
+    batch_ops::{batch_horner_eval, batch_invert},
     SecretSharingScheme, ShamirShare,
 };
 use ark_ff::{FftField, Zero};
@@ -113,9 +114,26 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShare<F> {
         let mut sorted_shares = shares.to_vec();
         sorted_shares.sort_by_key(|i| i.id);
 
+        // Diagnostic logging
+        let sorted_ids: Vec<usize> = sorted_shares.iter().map(|s| s.id).collect();
+        tracing::debug!(
+            num_shares = sorted_shares.len(),
+            t = t,
+            n = n,
+            required = 2 * t + 1,
+            ?sorted_ids,
+            "Starting robust interpolation"
+        );
+
         // === Step 1: Optimistic decoding attempt ===
-        if let Ok(poly) = robust_interpolate_fnt(t, n, &sorted_shares[..2 * t + 1]) {
-            return Ok((poly.coeffs.clone(), poly.evaluate(&F::zero())));
+        match robust_interpolate_fnt(t, n, &sorted_shares[..2 * t + 1]) {
+            Ok(poly) => {
+                tracing::debug!("Optimistic decoding succeeded");
+                return Ok((poly.coeffs.clone(), poly.evaluate(&F::zero())));
+            }
+            Err(e) => {
+                tracing::debug!(error = ?e, "Optimistic decoding failed, trying OEC");
+            }
         }
         // === Step 2: Fall back to online error correction ===
         let poly = oec_decode(n, t, sorted_shares.to_vec());
@@ -194,16 +212,21 @@ fn robust_interpolate_fnt<F: FftField>(
     let a_derivative = poly_derivative(&a_poly);
 
     // Step 3: Build P(x) = sum_i y_i * A(x) / (A'(x_i) * (x - x_i))
+    // Use batch inversion for all denominators (Montgomery's trick)
+    let denoms: Vec<F> = xs.iter().map(|&x_i| a_derivative.evaluate(&x_i)).collect();
+
+    // Check for zero denominators before batch inversion
+    if denoms.iter().any(|d| d.is_zero()) {
+        return Err(InterpolateError::PolynomialOperationError(
+            "Denominator evaluated to zero during interpolation basis calculation".into(),
+        ));
+    }
+
+    let inv_denoms = batch_invert(&denoms);
+
     let mut interpolated = DensePolynomial::from_coefficients_slice(&[F::zero()]);
     for (i, &x_i) in xs.iter().enumerate() {
-        let denom = a_derivative.evaluate(&x_i);
-        if denom.is_zero() {
-            return Err(InterpolateError::PolynomialOperationError(
-                "Denominator evaluated to zero during interpolation basis calculation".into(),
-            ));
-        }
-
-        let scalar = ys[i] / denom;
+        let scalar = ys[i] * inv_denoms[i];
 
         // A(x) / (x - x_i)
         let term_divisor = DensePolynomial::from_coefficients_slice(&[-x_i, F::one()]);
@@ -217,11 +240,14 @@ fn robust_interpolate_fnt<F: FftField>(
         interpolated = &interpolated + &(&basis_poly * scalar);
     }
 
-    // Step 4: Verify agreement
+    // Step 4: Verify agreement using batch evaluation
+    let verification_points: Vec<F> = shares.iter().map(|s| domain.element(s.id)).collect();
+    let verification_evals = batch_horner_eval(&interpolated.coeffs, &verification_points);
+
     let valid_count = shares
         .iter()
-        .map(|s| (domain.element(s.id), s.share))
-        .filter(|(x, y)| interpolated.evaluate(x) == y[0])
+        .zip(verification_evals.iter())
+        .filter(|(s, eval)| **eval == s.share[0])
         .count();
 
     if valid_count >= 2 * t + 1 {

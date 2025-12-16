@@ -7,7 +7,7 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use thiserror::Error;
 
 use crate::honeybadger::robust_interpolate::InterpolateError;
-
+use super::batch_ops::compute_vandermonde_rows;
 use super::ShamirShare;
 
 #[derive(Debug, Error)]
@@ -29,20 +29,14 @@ pub enum ShareError {
 
 /// Creates a Vandermonde matrix `V` of size `n x (t+1)`.
 /// Each row `j` contains powers of `domain.element(j)`: `[1, alpha_j, alpha_j^2, ..., alpha_j^t]`.
-pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Result<Vec<Vec<F>>, InterpolateError> {
+pub fn make_vandermonde<F: FftField + Send + Sync>(n: usize, t: usize) -> Result<Vec<Vec<F>>, InterpolateError> {
     let domain =
         GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
-    let mut matrix = vec![vec![F::zero(); t + 1]; n];
-    for j in 0..n {
-        let alpha_j = domain.element(j);
-        let mut pow = F::one();
-        for k in 0..=t {
-            matrix[j][k] = pow;
-            pow *= alpha_j;
-        }
-    }
 
-    Ok(matrix)
+    // Collect all domain elements
+    let alphas: Vec<F> = (0..n).map(|j| domain.element(j)).collect();
+
+    Ok(compute_vandermonde_rows(&alphas, t))
 }
 
 /// Computes the matrix-vector product: `V * shares`.

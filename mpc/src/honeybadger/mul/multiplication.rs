@@ -166,8 +166,8 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
     // or other synchronicity issues. While this enables a possible race condition where batches or
     // the RBC broadcast are received right after releasing the lock and therefore batch
     // reconstruction or RBC are initiated unnecessarily, this does no harm.
-    pub async fn init<N: Network + Send + Sync>(
-        &mut self,
+    pub async fn init<N: Network + Send + Sync + 'static>(
+        &self,
         session_id: SessionId,
         x: Vec<RobustShare<F>>,
         y: Vec<RobustShare<F>>,
@@ -434,7 +434,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         Ok(())
     }
 
-    pub async fn process(&mut self, message: MultMessage) -> Result<(), MulError> {
+    pub async fn process(&self, message: MultMessage) -> Result<(), MulError> {
         self.open_mult_handler(message).await?;
         Ok(())
     }

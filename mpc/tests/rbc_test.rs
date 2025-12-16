@@ -46,13 +46,11 @@ mod tests {
 
         // Check that all parties completed broadcast and agreed on output
         for bracha in &parties {
-            let session_store = {
-                let store_map = bracha.store.lock().await;
-                store_map
-                    .get(&session_id)
-                    .cloned()
-                    .expect(&format!("Party {} did not create session store", bracha.id))
-            };
+            let session_store = bracha
+                .store
+                .get(&session_id)
+                .map(|r| r.clone())
+                .expect(&format!("Party {} did not create session store", bracha.id));
 
             // Lock the specific store for this session
             let s = session_store.lock().await;
@@ -98,9 +96,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         for bracha in &parties {
-            let store = bracha.store.lock().await;
             for (i, sid) in session_ids.iter().enumerate() {
-                let store_arc = store.get(sid).expect("Missing session");
+                let store_arc = bracha.store.get(sid).map(|r| r.clone()).expect("Missing session");
                 let s = store_arc.lock().await;
 
                 assert!(
@@ -153,9 +150,8 @@ mod tests {
 
         // Validate all sessions completed successfully and consistently
         for bracha in &parties {
-            let store = bracha.store.lock().await;
             for (i, session_id) in session_ids.iter().enumerate() {
-                let store_arc = store.get(session_id).expect("Missing session");
+                let store_arc = bracha.store.get(session_id).map(|r| r.clone()).expect("Missing session");
                 let s = store_arc.lock().await;
                 assert!(
                     s.ended,
@@ -230,8 +226,7 @@ mod tests {
 
         // Check if parties reached consensus
         for bracha in &parties {
-            let store = bracha.store.lock().await;
-            if let Some(state) = store.get(&session_id) {
+            if let Some(state) = bracha.store.get(&session_id).map(|r| r.clone()) {
                 let s = state.lock().await;
 
                 if s.ended {
@@ -268,13 +263,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         for avid in &parties {
-            let session_store = {
-                let store_map = avid.store.lock().await;
-                store_map
-                    .get(&session_id)
-                    .cloned()
-                    .expect(&format!("Party {} did not create session store", avid.id))
-            };
+            let session_store = avid
+                .store
+                .get(&session_id)
+                .map(|r| r.clone())
+                .expect(&format!("Party {} did not create session store", avid.id));
 
             let s = session_store.lock().await;
 
@@ -354,9 +347,8 @@ mod tests {
 
         // Validate all sessions completed successfully and consistently
         for avid in &parties {
-            let store = avid.store.lock().await;
             for (i, session_id) in session_ids.iter().enumerate() {
-                let store_arc = store.get(session_id).expect("Missing session");
+                let store_arc = avid.store.get(session_id).map(|r| r.clone()).expect("Missing session");
                 let s = store_arc.lock().await;
                 assert!(
                     s.ended,
@@ -432,8 +424,7 @@ mod tests {
 
         // Check if parties reached consensus
         for avid in &parties {
-            let store = avid.store.lock().await;
-            if let Some(state) = store.get(&session_id) {
+            if let Some(state) = avid.store.get(&session_id).map(|r| r.clone()) {
                 let s = state.lock().await;
 
                 assert!(s.ended, "Party {} has not yet ended", avid.id);
@@ -476,13 +467,11 @@ mod tests {
 
         // Check agreement and completion among honest nodes
         for rbc in honest_parties {
-            let session_store = {
-                let store_map = rbc.store.lock().await;
-                store_map
-                    .get(&session_id)
-                    .cloned()
-                    .expect(&format!("Party {} did not create session store", rbc.id))
-            };
+            let session_store = rbc
+                .store
+                .get(&session_id)
+                .map(|r| r.clone())
+                .expect(&format!("Party {} did not create session store", rbc.id));
 
             let s = session_store.lock().await;
 
@@ -525,13 +514,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         for avid in honest_parties {
-            let session_store = {
-                let store_map = avid.store.lock().await;
-                store_map
-                    .get(&session_id)
-                    .cloned()
-                    .expect(&format!("Party {} did not create session store", avid.id))
-            };
+            let session_store = avid
+                .store
+                .get(&session_id)
+                .map(|r| r.clone())
+                .expect(&format!("Party {} did not create session store", avid.id));
 
             let s = session_store.lock().await;
 
@@ -622,11 +609,7 @@ mod tests {
         // Verify that each party has the coin
         let mut coin_value: Option<bool> = None;
         for aba in &parties {
-            let coin_store_map = aba.coin.lock().await;
-            let coin_store = coin_store_map
-                .get(&session_id)
-                .expect("Missing coin store")
-                .clone();
+            let coin_store = aba.coin.get(&session_id).map(|r| r.clone()).expect("Missing coin store");
             let store = coin_store.lock().await;
 
             let coin = store
@@ -707,10 +690,7 @@ mod tests {
                         continue;
                     }
 
-                    let store_opt = {
-                        let map = aba.store.lock().await;
-                        map.get(&session_id).cloned()
-                    };
+                    let store_opt = aba.store.get(&session_id).map(|r| r.clone());
 
                     if let Some(store) = store_opt {
                         let session = store.lock().await;
@@ -821,10 +801,7 @@ mod tests {
                             continue;
                         }
 
-                        let store_opt = {
-                            let map = aba.store.lock().await;
-                            map.get(&session_id).cloned()
-                        };
+                        let store_opt = aba.store.get(&session_id).map(|r| r.clone());
 
                         if let Some(store) = store_opt {
                             let session = store.lock().await;

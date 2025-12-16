@@ -9,7 +9,7 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
@@ -94,7 +94,7 @@ where
 {
     /// Double shares resulting from the execution of the protocol.
     pub protocol_output: Vec<DoubleShamirShare<F>>,
-    pub share: BTreeMap<usize, DoubleShamirShare<F>>,
+    pub share: HashMap<usize, DoubleShamirShare<F>>,
 
     /// Current state of the protocol.
     pub state: ProtocolState,
@@ -114,7 +114,7 @@ where
     pub fn empty(n_parties: usize) -> Self {
         Self {
             protocol_output: Vec::new(),
-            share: BTreeMap::new(),
+            share: HashMap::new(),
             reception_tracker: vec![false; n_parties],
             state: ProtocolState::NotInitialized,
         }

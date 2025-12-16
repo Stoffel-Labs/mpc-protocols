@@ -131,8 +131,8 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         Ok(())
     }
 
-    pub async fn riss_handler<N: Network + Send + Sync>(
-        &mut self,
+    pub async fn riss_handler<N: Network + Send + Sync + 'static>(
+        &self,
         msg: PRandBitDMessage,
         network: Arc<N>,
     ) -> Result<(), PRandError> {
@@ -284,7 +284,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         Ok(())
     }
 
-    pub async fn output_handler(&mut self, msg: PRandBitDMessage) -> Result<(), PRandError> {
+    pub async fn output_handler(&self, msg: PRandBitDMessage) -> Result<(), PRandError> {
         info!(node_id = self.id, "At output handler");
 
         let session_id = SessionId::new(
@@ -364,8 +364,8 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
 
         Ok(())
     }
-    pub async fn process<N: Network + Send + Sync>(
-        &mut self,
+    pub async fn process<N: Network + Send + Sync + 'static>(
+        &self,
         msg: PRandBitDMessage,
         network: Arc<N>,
     ) -> Result<(), PRandError> {
@@ -377,7 +377,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     }
 
     pub async fn get_or_create_store(
-        &mut self,
+        &self,
         session_id: SessionId,
     ) -> Arc<Mutex<PRandBitDStore<F, G>>> {
         let mut storage = self.store.lock().await;
