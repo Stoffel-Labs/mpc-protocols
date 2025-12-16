@@ -27,7 +27,7 @@ async fn test_prandbitd_end_to_end() {
     let l = 8;
     let k = 4;
     let batch_size = 2;
-    let session_id = SessionId::new(ProtocolType::PRandBit, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::PRandBit, 123, 0, 0, 111);
     let mut rng = test_rng();
     // Build fake network
     let (network, mut recv, _) = test_setup(n, vec![]);
@@ -165,7 +165,7 @@ async fn test_prandbitd_r_reconstruction() {
     let l = 8;
     let k = 4;
     let batch_size = 2;
-    let session_id = SessionId::new(ProtocolType::PRandBit, 0, 0, 222);
+    let session_id = SessionId::new(ProtocolType::PRandBit, 123, 0, 0, 222);
     let mut rng = test_rng();
     // Build fake network
     let (network, mut recv, _) = test_setup(n, vec![]);
@@ -362,7 +362,7 @@ async fn test_truncpr_end_to_end() {
     let t = 1;
     let k = 16; // total bitlength (example)
     let m = 4; // fractional bits to truncate
-    let session_id = SessionId::new(ProtocolType::Trunc, 0, 0, 999);
+    let session_id = SessionId::new(ProtocolType::Trunc, 123, 0, 0, 999);
 
     // === Build fake network ===
     let (network, mut recv, _) = test_setup(n, vec![]);

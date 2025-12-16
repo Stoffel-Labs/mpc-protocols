@@ -99,6 +99,7 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
 
         let sessionid = SessionId::new(
             session.calling_protocol().unwrap(),
+            session.exec_id(),
             0,
             self.id as u8,
             session.instance_id(),

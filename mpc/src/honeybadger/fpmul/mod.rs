@@ -28,10 +28,8 @@ pub mod truncpr;
 pub enum RandBitError {
     #[error("incompatible treshold ({0:}) and number of parties {1:}")]
     IncompatibleNumberOfParties(usize, usize),
-    #[error("error in the secure multiplication protocol: {0:?}")]
-    MulError(#[from] MulError),
     #[error("the square multiplication was not completed successfuly")]
-    SquareMult,
+    SquareMult(#[from] MulError),
     #[error("the square is zero")]
     ZeroSquare,
     #[error("the square root does not exist")]

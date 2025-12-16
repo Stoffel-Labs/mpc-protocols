@@ -318,7 +318,7 @@ pub fn spawn_receiver_tasks(
 
 static TRACING_INIT: Lazy<()> = Lazy::new(|| {
     let subscriber = FmtSubscriber::builder()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("trace".parse().unwrap()))
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .pretty()
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -407,7 +407,7 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     t: usize,
     n_triples: usize,
     n_random_shares: usize,
-    instance_id: u64,
+    instance_id: u32,
     n_prandbit: usize,
     n_prandint: usize,
     l: usize,
@@ -545,7 +545,7 @@ pub async fn construct_e2e_input_mul(
     n_parties: usize,
     n_triples: usize,
     threshold: usize,
-) -> Vec<Vec<ShamirBeaverTriple<Fr>>> {
+) -> ((Vec<Fr>, Vec<Fr>, Vec<Fr>), Vec<Vec<ShamirBeaverTriple<Fr>>>) {
     let mut rng = test_rng();
     let mut secrets_a = Vec::new();
     let mut secrets_b = Vec::new();
@@ -581,7 +581,7 @@ pub async fn construct_e2e_input_mul(
             per_party_triples[pid].push(triple);
         }
     }
-    per_party_triples
+    ((secrets_a, secrets_b, secrets_c), per_party_triples)
 }
 
 //--------------------------CLIENT--------------------------
@@ -589,24 +589,24 @@ pub fn create_clients<F: FftField, R: RBC + 'static>(
     client_ids: Vec<ClientId>,
     n_parties: usize,
     t: usize,
-    instance_id: u64,
+    instance_id: u32,
     inputs: Vec<F>,
     input_len: usize,
-) -> HashMap<ClientId, Arc<tokio::sync::Mutex<HoneyBadgerMPCClient<F, R>>>> {
+) -> HashMap<ClientId, HoneyBadgerMPCClient<F, R>> {
     client_ids
         .into_iter()
         .map(|id| {
             let client =
                 HoneyBadgerMPCClient::new(id, n_parties, t, instance_id, inputs.clone(), input_len)
                     .unwrap();
-            (id, Arc::new(tokio::sync::Mutex::new(client)))
+            (id, client)
         })
         .collect()
 }
 
 pub fn receive_client<F, R, N>(
     mut receivers: HashMap<ClientId, Receiver<Vec<u8>>>,
-    clients: HashMap<ClientId, Arc<Mutex<HoneyBadgerMPCClient<F, R>>>>,
+    clients: HashMap<ClientId, HoneyBadgerMPCClient<F, R>>,
     net: Arc<N>,
 ) where
     F: FftField + 'static,
@@ -620,13 +620,12 @@ pub fn receive_client<F, R, N>(
     );
 
     for (clientid, mut recv) in receivers.drain() {
-        let client = clients[&clientid].clone(); // Arc clone
+        let mut client = clients[&clientid].clone();
         let net_clone = net.clone();
 
         tokio::spawn(async move {
             while let Some(received) = recv.recv().await {
-                let mut guard = client.lock().await;
-                if let Err(e) = guard.process(received, net_clone.clone()).await {
+                if let Err(e) = client.process(received, net_clone.clone()).await {
                     tracing::error!("Client {clientid} failed to process message: {e:?}");
                 }
             }

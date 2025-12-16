@@ -163,7 +163,7 @@ fn div_with_remainder<F: FftField>(
 
 ///Optimistically interpolates a polynomial from an arbitrary subset of t + 1 shares and checks on all
 /// 2t+1 shares given
-/// Based on https://core.ac.uk/download/pdf/12041389.pdf
+/// Based on https://pagespro.isae-supaero.fr/IMG/pdf/FNT_submitted.pdf
 /// # Arguments
 /// * n - total number of shares
 /// * t - number of malicious parties

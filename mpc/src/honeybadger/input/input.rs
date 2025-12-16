@@ -52,7 +52,8 @@ use tracing::info;
 ///
 /// The sending of random shares to clients does not use session IDs, since it only occurs once
 /// before the computation has started. The RBC call to send masked inputs uses the session ID
-///   `[caller=Input, sub=client ID, round=0, instance=instance ID]`
+///   `[caller=Input, exec=0, sub=client ID, round=0, instance=instance ID]`
+/// The exec ID can be a constant `0`, since RBC for the input subprotocol is only called once.
 
 #[derive(PartialEq, Clone, Debug)]
 enum InputType {
@@ -283,8 +284,22 @@ pub struct InputClient<F: FftField, R: RBC> {
     pub client_id: usize,
     pub n: usize,
     pub t: usize,
-    pub instance_id: u64,
+    pub instance_id: u32,
     client_data: Arc<Mutex<InputClientData<F, R>>>
+}
+
+// implement manually because derive(Clone) requires R: Clone, which is not needed at all
+impl<F: FftField, R: RBC> Clone for InputClient<F, R> 
+{
+    fn clone(&self) -> Self {
+        Self {
+            client_id: self.client_id,
+            n: self.n,
+            t: self.t,
+            instance_id: self.instance_id,
+            client_data: Arc::clone(&self.client_data),
+        }
+    }
 }
 
 impl<F: FftField, R: RBC> InputClient<F, R> {
@@ -292,7 +307,7 @@ impl<F: FftField, R: RBC> InputClient<F, R> {
         id: usize,
         n: usize,
         t: usize,
-        instance_id: u64,
+        instance_id: u32,
         inputs: Vec<F>,
     ) -> Result<Self, InputError> {
         let rbc = R::new(id, n, t, t + 1)?;
@@ -375,6 +390,7 @@ impl<F: FftField, R: RBC> InputClient<F, R> {
             //Broadcast to servers
             let sessionid = SessionId::new(
                 ProtocolType::Input,
+                0,      // subprotocol ID not needed because only called once
                 self.client_id as u8,
                 0,
                 self.instance_id,

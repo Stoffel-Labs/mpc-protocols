@@ -316,4 +316,103 @@ mod test {
             ShareError::NoSuitableDomain(_) => panic!("incorrect error type"),
         }
     }
+    #[test]
+    fn shamir_should_recover_secret() {
+        let secret = Fr::from(918520);
+        let ids = &[1, 2, 3, 4, 5, 6];
+        let mut rng = test_rng();
+        let shares = Shamirshare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
+        let (_, recovered_secret) = Shamirshare::recover_secret(&shares, 6).unwrap();
+        assert!(recovered_secret == secret);
+    }
+
+    #[test]
+    fn shamir_should_add_shares() {
+        let secret1 = Fr::from(10);
+        let secret2 = Fr::from(20);
+        let ids = &[1, 2, 3, 4, 5, 6];
+        let mut rng = test_rng();
+        let shares_1 = Shamirshare::compute_shares(secret1, 6, 5, Some(ids), &mut rng).unwrap();
+        let shares_2 = Shamirshare::compute_shares(secret2, 6, 5, Some(ids), &mut rng).unwrap();
+
+        let added_shares: Vec<_> = zip(shares_1, shares_2)
+            .map(|(a, b)| a + b)
+            .collect::<Result<_, _>>() // Handles errors cleanly
+            .unwrap();
+        let (_, recovered_secret) = Shamirshare::recover_secret(&added_shares, 6).unwrap();
+        assert!(recovered_secret == secret1 + secret2);
+    }
+
+    #[test]
+    fn shamir_should_multiply_scalar() {
+        let secret = Fr::from(55);
+        let ids = &[1, 2, 3, 4, 5, 6, 7, 20];
+        let mut rng = test_rng();
+        let shares = Shamirshare::compute_shares(secret, 8, 5, Some(ids), &mut rng).unwrap();
+        let tripled_shares = shares
+            .iter()
+            .map(|share| share.clone() * Fr::from(3))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let (_, recovered_secret) = Shamirshare::recover_secret(&tripled_shares, 8).unwrap();
+        assert!(recovered_secret == secret * Fr::from(3));
+    }
+
+    #[test]
+    fn shamir_test_degree_mismatch() {
+        let secret = Fr::from(918520);
+        let ids = &[1, 2, 3, 4, 5, 6];
+        let mut rng = test_rng();
+        let mut shares = Shamirshare::compute_shares(secret, 6, 5, Some(ids), &mut rng).unwrap();
+
+        shares[2].degree = 4;
+        let recovered_secret = Shamirshare::recover_secret(&shares, 6).unwrap_err();
+        match recovered_secret {
+            ShareError::InsufficientShares => panic!("incorrect error type"),
+            ShareError::DegreeMismatch => (),
+            ShareError::IdMismatch => panic!("incorrect error type"),
+            ShareError::InvalidInput => panic!("incorrect error type"),
+            ShareError::TypeMismatch => panic!("incorrect error type"),
+            ShareError::NoSuitableDomain(_) => panic!("incorrect error type"),
+        }
+    }
+
+    #[test]
+    fn shamir_test_insufficient_shares() {
+        let secret = Fr::from(918520);
+        let ids = &[1, 2, 3];
+        let mut rng = test_rng();
+        let shares = Shamirshare::compute_shares(secret, 3, 2, Some(ids), &mut rng).unwrap();
+        let recovered_secret = Shamirshare::recover_secret(&shares[1..], 3).unwrap_err();
+        match recovered_secret {
+            ShareError::InsufficientShares => (),
+            ShareError::DegreeMismatch => panic!("incorrect error type"),
+            ShareError::IdMismatch => panic!("incorrect error type"),
+            ShareError::InvalidInput => panic!("incorrect error type"),
+            ShareError::TypeMismatch => panic!("incorrect error type"),
+            ShareError::NoSuitableDomain(_) => panic!("incorrect error type"),
+        }
+    }
+
+    #[test]
+    fn shamir_test_id_mis_match() {
+        let secret1 = Fr::from(10);
+        let secret2 = Fr::from(20);
+        let mut ids2 = vec![7, 8, 9, 4, 5, 6];
+        let mut rng = test_rng();
+        let shares_1 = Shamirshare::compute_shares(secret1, 6, 5, Some(&[1, 2, 3, 4, 5, 6]), &mut rng).unwrap();
+        let mut shares_2 = Shamirshare::compute_shares(secret2, 6, 5, Some(&[1, 2, 3, 4, 5, 6]), &mut rng).unwrap();
+        shares_2
+            .iter_mut()
+            .for_each(|share| share.id = ids2.pop().unwrap());
+        let err = (shares_1[0].clone() + shares_2[0].clone()).unwrap_err();
+        match err {
+            ShareError::InsufficientShares => panic!("incorrect error type"),
+            ShareError::DegreeMismatch => panic!("incorrect error type"),
+            ShareError::IdMismatch => (),
+            ShareError::InvalidInput => panic!("incorrect error type"),
+            ShareError::TypeMismatch => panic!("incorrect error type"),
+            ShareError::NoSuitableDomain(_) => panic!("incorrect error type"),
+        }
+    }
 }
