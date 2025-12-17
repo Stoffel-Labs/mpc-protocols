@@ -1,4 +1,5 @@
 pub mod rbc;
+
 /// In MPC, the most fundamental underlying type is called a share.
 /// Think of a share as a piece of a secret that has been split among a set of parties.
 /// As such, on its own, you don't derive any information. But when combined with other parties,
@@ -6,6 +7,9 @@ pub mod rbc;
 /// When wanting to implement your own custom MPC protocols that can plug
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
+
+/// Implementation of the hbACSS protocol from https://eprint.iacr.org/2021/159.
+pub mod acss;
 
 pub mod types;
 
@@ -28,7 +32,7 @@ use std::{
     sync::Arc,
     usize,
 };
-use stoffelnet::network_utils::{Network, ClientId, PartyId};
+use stoffelnet::network_utils::{ClientId, Network, PartyId};
 
 #[derive(Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
@@ -289,7 +293,11 @@ where
     type MPCOpts;
     type Error: std::fmt::Debug;
 
-    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, Self::Error>
+    fn setup(
+        id: PartyId,
+        params: Self::MPCOpts,
+        input_ids: Vec<ClientId>,
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized;
 
@@ -389,7 +397,7 @@ pub trait MPCECProtocol<F, S, N, G>
 where
     F: FftField,               // scalar field of the EC group
     S: SecretSharingScheme<F>, // shared-scalar type
-    N: Network, 
+    N: Network,
     G: CurveGroup<ScalarField = F>,
 {
     type Error;
@@ -397,15 +405,7 @@ where
     /// PUBLIC SCALAR MULTIPLICATION PROTOCOL
     ///
     /// Computes pk = sk_shared * G  (G is public)
-    async fn scalar_mul_basepoint(
-        &mut self,
-        sk_shared: S,
-    ) -> Result<G, Self::Error>;
+    async fn scalar_mul_basepoint(&mut self, sk_shared: S) -> Result<G, Self::Error>;
 
-    async fn open_point(
-        &self,
-        point: Vec<G>,
-        net: Arc<N>,
-    ) -> Result<G, Self::Error>;
-
+    async fn open_point(&self, point: Vec<G>, net: Arc<N>) -> Result<G, Self::Error>;
 }
