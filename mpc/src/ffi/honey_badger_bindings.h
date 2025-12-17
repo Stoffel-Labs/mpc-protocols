@@ -5,6 +5,26 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define F2_8_MODULUS 283
+
+typedef enum ProtocolType {
+  None = 0,
+  Randousha = 1,
+  Ransha = 2,
+  Input = 3,
+  Rbc = 4,
+  Triple = 5,
+  BatchRecon = 6,
+  Dousha = 7,
+  Mul = 8,
+  PRandInt = 9,
+  PRandBit = 10,
+  RandBit = 11,
+  FpMul = 12,
+  Trunc = 13,
+  FpDivConst = 14,
+} ProtocolType;
+
 typedef enum FieldKind {
   Bls12_381Fr,
 } FieldKind;
@@ -26,6 +46,13 @@ typedef enum HoneyBadgerErrorCode {
   HoneyBadgerJoinError,
   HoneyBadgerChannelClosed,
   HoneyBadgerOutputNotReady,
+  HoneyBadgerRandBitError,
+  HoneyBadgerPRandError,
+  HoneyBadgerFPMulError,
+  HoneyBadgerTruncPrError,
+  HoneyBadgerFPDivConstError,
+  HoneyBadgerTypesError,
+  HoneyBadgerAlreadyReservedError,
 } HoneyBadgerErrorCode;
 
 typedef enum NetworkErrorCode {
@@ -40,34 +67,6 @@ typedef enum NetworkErrorCode {
   PartyNotFound,
   ClientNotFound,
 } NetworkErrorCode;
-
-typedef enum ProtocolType {
-  None = 0,
-  Randousha = 1,
-  Ransha = 2,
-  Input = 3,
-  Rbc = 4,
-  Triple = 5,
-  BatchRecon = 6,
-  Dousha = 7,
-  Mul = 8,
-} ProtocolType;
-
-typedef enum RbcErrorCode {
-  RbcSuccess,
-  RbcInvalidThreshold,
-  RbcSessionEnded,
-  RbcUnknownMsgType,
-  RbcSendFailed,
-  RbcInternal,
-  RbcNetworkSendError,
-  RbcNetworkTimeout,
-  RbcNetworkPartyNotFound,
-  RbcNetworkClientNotFound,
-  RbcSerializationError,
-  RbcShardError,
-  RbcSessionNotFound,
-} RbcErrorCode;
 
 typedef enum RbcMessageType {
   BrachaInit,
@@ -87,6 +86,22 @@ typedef enum RbcMessageType {
   AcsUnknown,
 } RbcMessageType;
 
+typedef enum RbcErrorCode {
+  RbcSuccess,
+  RbcInvalidThreshold,
+  RbcSessionEnded,
+  RbcUnknownMsgType,
+  RbcSendFailed,
+  RbcInternal,
+  RbcNetworkSendError,
+  RbcNetworkTimeout,
+  RbcNetworkPartyNotFound,
+  RbcNetworkClientNotFound,
+  RbcSerializationError,
+  RbcShardError,
+  RbcSessionNotFound,
+} RbcErrorCode;
+
 typedef enum ShareErrorCode {
   ShareSuccess,
   InsufficientShares,
@@ -98,6 +113,11 @@ typedef enum ShareErrorCode {
   PolynomialOperationError,
   DecodingError,
 } ShareErrorCode;
+
+/**
+ * Finite field GF(2^8) with AES modulus x^8 + x^4 + x^3 + x + 1 (0x11B)
+ */
+typedef struct F2_8 F2_8;
 
 typedef struct U256 {
   uint64_t data[4];
@@ -170,21 +190,11 @@ typedef struct ShamirShare {
   uintptr_t degree;
 } ShamirShare;
 
-typedef struct ShamirShareSlice {
-  struct ShamirShare *pointer;
-  uintptr_t len;
-} ShamirShareSlice;
-
 typedef struct RobustShare {
   struct FieldOpaque *share;
   uintptr_t id;
   uintptr_t degree;
 } RobustShare;
-
-typedef struct RobustShareSlice {
-  struct RobustShare *pointer;
-  uintptr_t len;
-} RobustShareSlice;
 
 typedef struct NonRobustShare {
   struct FieldOpaque *share;
@@ -192,10 +202,22 @@ typedef struct NonRobustShare {
   uintptr_t degree;
 } NonRobustShare;
 
+typedef struct ShamirShareSlice {
+  struct ShamirShare *pointer;
+  uintptr_t len;
+} ShamirShareSlice;
+
+typedef struct RobustShareSlice {
+  struct RobustShare *pointer;
+  uintptr_t len;
+} RobustShareSlice;
+
 typedef struct NonRobustShareSlice {
   struct NonRobustShare *pointer;
   uintptr_t len;
 } NonRobustShareSlice;
+
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -216,22 +238,25 @@ struct ByteSlice u256_to_be_bytes(struct U256 num);
 struct ByteSlice u256_to_le_bytes(struct U256 num);
 
 uint64_t new_session_id(enum ProtocolType caller,
+                        uint8_t exec_id,
                         uint8_t sub_id,
                         uint8_t round_id,
-                        uint64_t instance_id);
+                        uint32_t instance_id);
 
 enum ProtocolType calling_protocol(uint64_t session_id);
+
+uint8_t exec_id(uint64_t session_id);
 
 uint8_t sub_id(uint64_t session_id);
 
 uint8_t round_id(uint64_t session_id);
 
-uint64_t instance_id(uint64_t session_id);
+uint32_t instance_id(uint64_t session_id);
 
 struct HoneyBadgerMPCClientOpaque *new_honey_badger_mpc_client(uintptr_t id,
                                                                uintptr_t n,
                                                                uintptr_t t,
-                                                               uint64_t instance_id,
+                                                               uint32_t instance_id,
                                                                struct U256Slice inputs,
                                                                uintptr_t input_len,
                                                                enum FieldKind field_kind);
@@ -262,6 +287,8 @@ struct NetworkOpaque *new_fake_network(uintptr_t n_nodes,
 
 struct ByteSlice node_receiver_recv_sync(struct FakeNetworkReceiversOpaque *receivers,
                                          uintptr_t node_index);
+
+void free_fake_network_receivers(struct FakeNetworkReceiversOpaque *receivers);
 
 /**
  * Select crypto provider for rustls
@@ -480,6 +507,12 @@ enum RbcErrorCode sync_aba_send(struct AbaOpaque *aba_pointer,
                                 uintptr_t recv);
 
 struct ByteSlice field_ptr_to_bytes(struct FieldOpaque *field, bool be);
+
+void free_shamir_share(struct ShamirShare share);
+
+void free_robust_share(struct RobustShare share);
+
+void free_non_robust_share(struct NonRobustShare share);
 
 void free_shamir_share_slice(struct ShamirShareSlice slice);
 

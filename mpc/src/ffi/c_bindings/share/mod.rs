@@ -112,10 +112,47 @@ pub struct NonRobustShareSlice {
     pub len: usize,
 }
 
+// free the memory of a Shamirshare
+#[no_mangle]
+pub extern "C" fn free_shamir_share(share: ShamirShare) {
+    if !share.share.is_null() {
+        unsafe {
+            let _ = Box::from_raw(share.share as *mut GenericField);
+        }
+    }
+}
+
+// free the memory of a RobustShare
+#[no_mangle]
+pub extern "C" fn free_robust_share(share: RobustShare) {
+    if !share.share.is_null() {
+        unsafe {
+            let _ = Box::from_raw(share.share as *mut GenericField);
+        }
+    }
+}
+
+// free the memory of a NonRobustShare
+#[no_mangle]
+pub extern "C" fn free_non_robust_share(share: NonRobustShare) {
+    if !share.share.is_null() {
+        unsafe {
+            let _ = Box::from_raw(share.share as *mut GenericField);
+        }
+    }
+}
+
 // free the memory of a ShamirshareSlice
 #[no_mangle]
 pub extern "C" fn free_shamir_share_slice(slice: ShamirShareSlice) {
     if !slice.pointer.is_null() {
+        for i in 0..slice.len {
+            let share = unsafe { &*(slice.pointer.add(i)) };
+            assert!(!share.share.is_null());
+            unsafe {
+                let _ = Box::from_raw(share.share as *mut GenericField);
+            }
+        }
         unsafe {
             let _ = Vec::from_raw_parts(slice.pointer, slice.len, slice.len);
         }
@@ -126,6 +163,13 @@ pub extern "C" fn free_shamir_share_slice(slice: ShamirShareSlice) {
 #[no_mangle]
 pub extern "C" fn free_robust_share_slice(slice: RobustShareSlice) {
     if !slice.pointer.is_null() {
+        for i in 0..slice.len {
+            let share = unsafe { &*(slice.pointer.add(i)) };
+            assert!(!share.share.is_null());
+            unsafe {
+                let _ = Box::from_raw(share.share as *mut GenericField);
+            }
+        }
         unsafe {
             let _ = Vec::from_raw_parts(slice.pointer, slice.len, slice.len);
         }
@@ -136,6 +180,13 @@ pub extern "C" fn free_robust_share_slice(slice: RobustShareSlice) {
 #[no_mangle]
 pub extern "C" fn free_non_robust_share_slice(slice: NonRobustShareSlice) {
     if !slice.pointer.is_null() {
+        for i in 0..slice.len {
+            let share = unsafe { &*(slice.pointer.add(i)) };
+            assert!(!share.share.is_null());
+            unsafe {
+                let _ = Box::from_raw(share.share as *mut GenericField);
+            }
+        }
         unsafe {
             let _ = Vec::from_raw_parts(slice.pointer, slice.len, slice.len);
         }
