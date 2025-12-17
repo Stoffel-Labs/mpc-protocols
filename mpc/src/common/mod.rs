@@ -413,17 +413,9 @@ where
     /// PUBLIC SCALAR MULTIPLICATION PROTOCOL
     ///
     /// Computes pk = sk_shared * G  (G is public)
-    async fn scalar_mul_basepoint(
-        &mut self,
-        sk_shared: S,
-    ) -> Result<G, Self::Error>;
+    async fn scalar_mul_basepoint(&mut self, sk_shared: S) -> Result<G, Self::Error>;
 
-    async fn open_point(
-        &self,
-        point: Vec<G>,
-        net: Arc<N>,
-    ) -> Result<G, Self::Error>;
-
+    async fn open_point(&self, point: Vec<G>, net: Arc<N>) -> Result<G, Self::Error>;
 }
 
 #[async_trait]
