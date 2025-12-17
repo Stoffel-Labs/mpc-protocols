@@ -13,6 +13,7 @@ ShareErrorCode test_create_and_recover_shamir_shares()
     struct UsizeSlice ids = {id, 6};
     // create a single shamir share
     ShamirShare _s = shamir_share_new(secret_fr, 9, 10, Bls12_381Fr);
+    free_shamir_share(_s);
     // create an array of shamir shares with provided ids
     ShareErrorCode e = shamir_share_compute_shares(secret_fr, 4, &ids, Bls12_381Fr, &output_shares);
     if (e != ShareSuccess)
@@ -25,6 +26,8 @@ ShareErrorCode test_create_and_recover_shamir_shares()
         ShamirShare share = output_shares.pointer[i];
         ByteSlice bytes = field_ptr_to_bytes(share.share, true);
         U256 u256_share = be_bytes_to_u256(bytes);
+
+	free_bytes_slice(bytes);
         printf("share_id_%zu = [ %llu, %llu, %llu, %llu ]\n",
                share.id,
                u256_share.data[0], u256_share.data[1],
@@ -66,6 +69,7 @@ ShareErrorCode test_create_and_recover_robust_shares()
     uintptr_t n = 6;
     // create a single robust share
     RobustShare _s = robust_share_new(secret_fr, 9, 10, Bls12_381Fr);
+    free_robust_share(_s);
     // create an array of shamir shares with provided ids
     ShareErrorCode e = robust_share_compute_shares(secret_fr, 2, n, &output_shares, Bls12_381Fr);
     if (e != ShareSuccess)
@@ -78,6 +82,8 @@ ShareErrorCode test_create_and_recover_robust_shares()
         RobustShare share = output_shares.pointer[i];
         ByteSlice bytes = field_ptr_to_bytes(share.share, false);
         U256 u256_share = le_bytes_to_u256(bytes);
+
+	free_bytes_slice(bytes);
         printf("share_id_%zu = [ %llu, %llu, %llu, %llu ]\n",
                share.id,
                u256_share.data[0], u256_share.data[1],
@@ -119,6 +125,7 @@ ShareErrorCode test_create_and_recover_non_robust_shares()
     uintptr_t n = 6;
     // create a single robust share
     NonRobustShare _s = non_robust_share_new(secret_fr, 9, 10, Bls12_381Fr);
+    free_non_robust_share(_s);
     // create an array of shamir shares with provided ids
     ShareErrorCode e = non_robust_share_compute_shares(secret_fr, 5, n, &output_shares, Bls12_381Fr);
     if (e != ShareSuccess)
@@ -131,6 +138,8 @@ ShareErrorCode test_create_and_recover_non_robust_shares()
         NonRobustShare share = output_shares.pointer[i];
         ByteSlice bytes = field_ptr_to_bytes(share.share, false);
         U256 u256_share = le_bytes_to_u256(bytes);
+
+	free_bytes_slice(bytes);
         printf("share_id_%zu = [ %llu, %llu, %llu, %llu ]\n",
                share.id,
                u256_share.data[0], u256_share.data[1],
