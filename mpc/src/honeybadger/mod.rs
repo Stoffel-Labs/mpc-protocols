@@ -36,7 +36,8 @@ use crate::{
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        MPCECProtocol, MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ShamirShare, RBC,
+        MPCECProtocol, MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, RandomSharingProtocol,
+        ShamirShare, RBC,
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
@@ -1178,7 +1179,7 @@ where
     ) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
-        G: Rng,
+        G: Rng + Send,
     {
         // Outputs in batches of (n-2t)
         let batch = self.params.n_parties - 2 * self.params.threshold;
