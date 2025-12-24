@@ -1,15 +1,16 @@
 use ark_bls12_381::Fr;
 use ark_ff::{FftField, PrimeField, UniformRand};
+use ark_std::rand::rngs::{OsRng, StdRng};
+use ark_std::rand::SeedableRng;
 use ark_std::test_rng;
 use once_cell::sync::Lazy;
-use stoffelmpc_network::bad_fake_network::{BadFakeNetwork, BadFakeNetworkConfig};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::rbc::RbcError;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
-use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme, RBC};
+use stoffelmpc_mpc::common::{MPCProtocol, RandomSharingProtocol, SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::double_share::DoubleShamirShare;
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -18,6 +19,7 @@ use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{
     HoneyBadgerMPCClient, HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
+use stoffelmpc_network::bad_fake_network::{BadFakeNetwork, BadFakeNetworkConfig};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -110,7 +112,8 @@ pub fn test_setup_bad(
     HashMap<ClientId, Receiver<Vec<u8>>>,
 ) {
     let config = BadFakeNetworkConfig::new(500);
-    let (network, net_rx, node_channels, receivers, client_recv) = BadFakeNetwork::new(n, Some(clientid), config);
+    let (network, net_rx, node_channels, receivers, client_recv) =
+        BadFakeNetwork::new(n, Some(clientid), config);
     let network = Arc::new(network);
     (network, net_rx, node_channels, receivers, client_recv)
 }
@@ -412,7 +415,7 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     n_prandint: usize,
     l: usize,
     k: usize,
-    input_ids: Vec<ClientId>
+    input_ids: Vec<ClientId>,
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
     N: Network + Send + Sync + 'static,
@@ -511,7 +514,7 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
     R: RBC + 'static,
     N: Network + Send + Sync + 'static,
 {
-    let mut rng = test_rng();
+    let mut rng = StdRng::from_rng(OsRng).unwrap();
 
     for node in nodes {
         let mut node_rds = node.preprocess.share_gen;
@@ -545,7 +548,10 @@ pub async fn construct_e2e_input_mul(
     n_parties: usize,
     n_triples: usize,
     threshold: usize,
-) -> ((Vec<Fr>, Vec<Fr>, Vec<Fr>), Vec<Vec<ShamirBeaverTriple<Fr>>>) {
+) -> (
+    (Vec<Fr>, Vec<Fr>, Vec<Fr>),
+    Vec<Vec<ShamirBeaverTriple<Fr>>>,
+) {
     let mut rng = test_rng();
     let mut secrets_a = Vec::new();
     let mut secrets_b = Vec::new();

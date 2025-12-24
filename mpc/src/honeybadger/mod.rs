@@ -30,12 +30,14 @@ pub mod share_gen;
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
+        share::avss::AvssMessage,
         types::{
             fixed::{ClearFixedPoint, SecretFixedPoint},
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        MPCECProtocol, MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ShamirShare, RBC,
+        MPCECProtocol, MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, RandomSharingProtocol,
+        ShamirShare, RBC,
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
@@ -75,8 +77,14 @@ use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
-use std::{fmt, sync::{Arc, atomic::{Ordering, AtomicU8}}};
-use stoffelnet::network_utils::{Network, NetworkError, ClientId, PartyId};
+use std::{
+    fmt,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+};
+use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use thiserror::Error;
 use tokio::{
     sync::{
@@ -350,7 +358,11 @@ where
     type MPCOpts = HoneyBadgerMPCNodeOpts;
     type Error = HoneyBadgerError;
 
-    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, HoneyBadgerError> {
+    fn setup(
+        id: PartyId,
+        params: Self::MPCOpts,
+        input_ids: Vec<ClientId>,
+    ) -> Result<Self, HoneyBadgerError> {
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
@@ -457,7 +469,13 @@ where
             .await
             .take_beaver_triples(x.len())?;
 
-        let session_id = SessionId::new(ProtocolType::Mul, self.counters.mul_counter.get_next(), 0, 0, self.params.instance_id);
+        let session_id = SessionId::new(
+            ProtocolType::Mul,
+            self.counters.mul_counter.get_next(),
+            0,
+            0,
+            self.params.instance_id,
+        );
 
         // Call the mul function
         self.operations
@@ -465,7 +483,11 @@ where
             .init(session_id, x, y, beaver_triples, network)
             .await?;
 
-        self.operations.mul.wait_for_result(session_id, Duration::MAX).await.map_err(HoneyBadgerError::from)
+        self.operations
+            .mul
+            .wait_for_result(session_id, Duration::MAX)
+            .await
+            .map_err(HoneyBadgerError::from)
     }
 
     async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
@@ -664,6 +686,7 @@ where
                 }
             }
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
+            WrappedMessage::Avss(_) => todo!(),
         }
 
         Ok(())
@@ -679,7 +702,10 @@ where
 {
     type Error = HoneyBadgerError;
 
-    async fn scalar_mul_basepoint(&mut self, local_share: RobustShare<F>) -> Result<G, Self::Error> {
+    async fn scalar_mul_basepoint(
+        &mut self,
+        local_share: RobustShare<F>,
+    ) -> Result<G, Self::Error> {
         let si = local_share.share[0]; // the local scalar s_i
         let pi = G::generator().mul(si);
         Ok(pi)
@@ -769,7 +795,13 @@ where
             .await
             .take_prandint_shares(1)?;
 
-        let session_id = SessionId::new(ProtocolType::FpMul, self.counters.fpmul_counter.get_next(), 0, 0, self.params.instance_id);
+        let session_id = SessionId::new(
+            ProtocolType::FpMul,
+            self.counters.fpmul_counter.get_next(),
+            0,
+            0,
+            self.params.instance_id,
+        );
         let r_bits = r_bits_vec.iter().map(|(a, _)| a.clone()).collect();
 
         // Call the fpmul function
@@ -1102,11 +1134,13 @@ where
                             None,
                             None,
                         );
-                        assert!(self.preprocess
-                            .triple_gen
-                            .batch_recon_node
-                            .clear_store(sessionid)
-                            .await);
+                        assert!(
+                            self.preprocess
+                                .triple_gen
+                                .batch_recon_node
+                                .clear_store(sessionid)
+                                .await
+                        );
                     }
                 }
 
@@ -1146,7 +1180,7 @@ where
     ) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
-        G: Rng,
+        G: Rng + Send,
     {
         // Outputs in batches of (n-2t)
         let batch = self.params.n_parties - 2 * self.params.threshold;
@@ -1157,8 +1191,13 @@ where
         for i in 0..run {
             info!("Random share generation run {}", i);
 
-            let sessionid =
-                SessionId::new(ProtocolType::Ransha, ran_sha_counter, 0, round_id, self.params.instance_id);
+            let sessionid = SessionId::new(
+                ProtocolType::Ransha,
+                ran_sha_counter,
+                0,
+                round_id,
+                self.params.instance_id,
+            );
 
             // Run ShareGen protocol
             self.preprocess
@@ -1176,11 +1215,7 @@ where
                 .await
             {
                 if id == sessionid {
-                    let mut share_store = self.preprocess.share_gen.store.lock().await;
-                    let store_lock = share_store.remove(&id).unwrap();
-                    let store = store_lock.lock().await;
-                    let output = store.protocol_output.clone();
-
+                    let output = self.preprocess.share_gen.output(id).await;
                     self.preprocessing_material
                         .lock()
                         .await
@@ -1221,8 +1256,13 @@ where
         let mut ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next();
 
         for _ in 0..run {
-            let sessionid =
-                SessionId::new(ProtocolType::Randousha, ran_dou_sha_counter, 0, round_id, self.params.instance_id);
+            let sessionid = SessionId::new(
+                ProtocolType::Randousha,
+                ran_dou_sha_counter,
+                0,
+                round_id,
+                self.params.instance_id,
+            );
 
             let double_shares = self
                 .ensure_double_shares(sessionid, network.clone(), rng)
@@ -1513,6 +1553,7 @@ pub enum WrappedMessage {
     RandBit(RandBitMessage),
     Trunc(TruncPrMessage),
     PRandBit(PRandBitDMessage),
+    Avss(AvssMessage),
 }
 
 //-----------------Session-ID-----------------
@@ -1535,6 +1576,7 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
+    Avss = 15,
 }
 
 impl TryFrom<u8> for ProtocolType {
@@ -1557,6 +1599,7 @@ impl TryFrom<u8> for ProtocolType {
             12 => Ok(ProtocolType::FpMul),
             13 => Ok(ProtocolType::Trunc),
             14 => Ok(ProtocolType::FpDivConst),
+            15 => Ok(ProtocolType::Avss),
             _ => Err(()),
         }
     }
@@ -1682,12 +1725,22 @@ impl fmt::Debug for SessionId {
         let round_id = self.round_id();
         let instance_id = self.instance_id();
 
-        write!(f, "[caller={},exec_id={},sub_id={},round_id={},instance_id={}]", caller, exec_id, sub_id, round_id, instance_id)
+        write!(
+            f,
+            "[caller={},exec_id={},sub_id={},round_id={},instance_id={}]",
+            caller, exec_id, sub_id, round_id, instance_id
+        )
     }
 }
 
 impl SessionId {
-    pub fn new(caller: ProtocolType, exec_id: u8, sub_id: u8, round_id: u8, instance_id: u32) -> Self {
+    pub fn new(
+        caller: ProtocolType,
+        exec_id: u8,
+        sub_id: u8,
+        round_id: u8,
+        instance_id: u32,
+    ) -> Self {
         let value = ((caller as u64 & 0xFF) << 56)
             | ((exec_id as u64 & 0xFF) << 48)
             | ((sub_id as u64 & 0xFF) << 40)
