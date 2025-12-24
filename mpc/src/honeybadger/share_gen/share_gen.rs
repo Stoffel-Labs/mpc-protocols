@@ -2,6 +2,7 @@ use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
+use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
@@ -85,8 +86,8 @@ where
         network: Arc<N>,
     ) -> Result<(), RanShaError>
     where
-        N: Network,
-        G: Rng,
+        N: Network + Send + Sync,
+        G: Rng + Send,
     {
         info!("Receiving init for share from {0:?}", self.id);
 
@@ -148,6 +149,7 @@ where
         let store = store_lock.lock().await;
         store.protocol_output.clone()
     }
+
     pub async fn receive_shares_handler<N>(
         &mut self,
         msg: RanShaMessage,

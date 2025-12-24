@@ -30,12 +30,14 @@ pub mod share_gen;
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
+        share::avss::AvssMessage,
         types::{
             fixed::{ClearFixedPoint, SecretFixedPoint},
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        MPCECProtocol, MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ShamirShare, RBC,
+        MPCECProtocol, MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, RandomSharingProtocol,
+        ShamirShare, RBC,
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
@@ -75,7 +77,13 @@ use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use thiserror::Error;
 use tokio::{
@@ -771,6 +779,7 @@ where
                 }
             }
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
+            WrappedMessage::Avss(_) => todo!(),
         }
 
         Ok(())
@@ -810,7 +819,10 @@ where
 {
     type Error = HoneyBadgerError;
 
-    async fn scalar_mul_basepoint(&mut self, local_share: RobustShare<F>) -> Result<G, Self::Error> {
+    async fn scalar_mul_basepoint(
+        &mut self,
+        local_share: RobustShare<F>,
+    ) -> Result<G, Self::Error> {
         let si = local_share.share[0]; // the local scalar s_i
         let pi = G::generator().mul(si);
         Ok(pi)
@@ -1663,6 +1675,7 @@ pub enum WrappedMessage {
     RandBit(RandBitMessage),
     Trunc(TruncPrMessage),
     PRandBit(PRandBitDMessage),
+    Avss(AvssMessage),
 }
 
 impl WrappedMessage {
@@ -1692,6 +1705,7 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
+    Avss = 15,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -1718,6 +1732,7 @@ impl ProtocolTag for ProtocolType {
             12 => Some(Self::FpMul),
             13 => Some(Self::Trunc),
             14 => Some(Self::FpDivConst),
+            15 => Some(Self::Avss),
             _ => None,
         }
     }

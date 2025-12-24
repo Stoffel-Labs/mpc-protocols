@@ -1,10 +1,10 @@
-use crate::common::{
-    rbc::RbcError,
-    share::{feldman::FeldmanShamirShare, ShareError},
-    ProtocolSessionId, RbcWrapFn, SecretSharingScheme, RBC,
+use crate::{
+    common::{rbc::RbcError, share::shamir::Shamirshare, RBC},
+    honeybadger::{SessionId, WrappedMessage},
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
+use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use bincode::ErrorKind;
@@ -42,7 +42,23 @@ pub enum AvssError {
     #[error("share error")]
     ShareError(#[from] crate::common::share::ShareError),
     #[error("send error")]
-    SendError,
+    SendError(#[from] tokio::sync::mpsc::error::SendError<SessionId>),
+}
+
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct FeldmanShamirShare<F: FftField, G: CurveGroup<ScalarField = F>> {
+    pub feldmanshare: Shamirshare<F>,
+    pub commitments: Vec<G>,
+}
+
+impl<F: FftField, G: CurveGroup<ScalarField = F>> FeldmanShamirShare<F, G> {
+    pub fn new(share: F, id: usize, degree: usize, commitments: Vec<G>) -> Self {
+        let shamirshare = Shamirshare::new(share, id, degree);
+        FeldmanShamirShare {
+            feldmanshare: shamirshare,
+            commitments: commitments,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,6 +82,7 @@ where
         Self {
             sender_id: sender,
             session_id,
+            shares,
             dealer_pk,
             encrypted_shares,
         }
@@ -86,6 +103,7 @@ pub fn verify_feldman<F: FftField, G: CurveGroup<ScalarField = F>>(
 
     G::generator().mul(share.feldmanshare.share[0]) == rhs
 }
+
 fn kdf_from_point<G: CanonicalSerialize>(p: &G) -> [u8; 32] {
     let mut buf = Vec::new();
     p.serialize_compressed(&mut buf).unwrap();
@@ -127,9 +145,6 @@ fn decrypt(key32: [u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>, AvssError> {
         .map_err(|_| AvssError::InvalidShare)
 }
 
-pub type AvssWrapFn<Id> =
-    Arc<dyn Fn(AvssMessage<Id>) -> Result<Vec<u8>, RbcError> + Send + Sync + 'static>;
-
 #[derive(Clone)]
 pub struct AvssNode<F, R, G, Id>
 where
@@ -148,6 +163,7 @@ where
     pub output_sender: Sender<Id>,
     pub wrapper: AvssWrapFn<Id>,
 }
+
 impl<F, R, G, Id> std::fmt::Debug for AvssNode<F, R, G, Id>
 where
     F: FftField,
