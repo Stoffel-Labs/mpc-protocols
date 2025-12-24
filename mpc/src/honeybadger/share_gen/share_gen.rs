@@ -2,6 +2,7 @@ use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
+use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
@@ -10,7 +11,7 @@ use tracing::info;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde, ShareError},
-        SecretSharingScheme, ShamirShare, RBC,
+        RandomSharingProtocol, SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -116,6 +117,28 @@ where
         Ok(())
     }
 
+    pub async fn process<N>(&mut self, msg: RanShaMessage, network: Arc<N>) -> Result<(), RanShaError>
+    where
+        N: Network + Send + Sync,
+    {
+        match msg.msg_type {
+            RanShaMessageType::ShareMessage => {
+                self.receive_shares_handler(msg, network).await?;
+                Ok(())
+            }
+            RanShaMessageType::OutputMessage => Ok(self.output_handler(msg).await?),
+            RanShaMessageType::ReconstructMessage => {
+                self.reconstruction_handler(msg, network).await?;
+                Ok(())
+            }
+        }
+    }
+    pub async fn output(&mut self, session_id: SessionId) -> Vec<RobustShare<F>> {
+        let mut share_store = self.store.lock().await;
+        let store_lock = share_store.remove(&session_id).unwrap();
+        let store = store_lock.lock().await;
+        store.protocol_output.clone()
+    }
     pub async fn receive_shares_handler<N>(
         &mut self,
         msg: RanShaMessage,
@@ -311,41 +334,20 @@ where
         self.output_sender.send(msg.session_id).await?;
         Ok(())
     }
-
-    pub async fn process<N>(
-        &mut self,
-        msg: RanShaMessage,
-        network: Arc<N>,
-    ) -> Result<(), RanShaError>
-    where
-        N: Network + Send + Sync,
-    {
-        match msg.msg_type {
-            RanShaMessageType::ShareMessage => {
-                self.receive_shares_handler(msg, network).await?;
-                Ok(())
-            }
-            RanShaMessageType::OutputMessage => Ok(self.output_handler(msg).await?),
-            RanShaMessageType::ReconstructMessage => {
-                self.reconstruction_handler(msg, network).await?;
-                Ok(())
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::rbc::rbc::Avid;
+    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use crate::honeybadger::share_gen::{RanShaMessage, RanShaMessageType, RanShaPayload};
     use crate::honeybadger::SessionId;
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
-    use tokio::sync::mpsc;
     use std::sync::Arc;
     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_receive_shares_handler() {
@@ -357,13 +359,7 @@ mod tests {
         let mut exec = 0u8;
         let mut round = 0u8;
         for _ in 0..super::MAX_SHARE_GEN_SESSIONS {
-            let sid = SessionId::new(
-                ProtocolType::Ransha,
-                exec,
-                0,
-                round,
-                0,
-            );
+            let sid = SessionId::new(ProtocolType::Ransha, exec, 0, round, 0);
             let share = RobustShare::new(Fr::from(1u8), 0, 1);
             let mut payload = Vec::new();
             share.serialize_compressed(&mut payload).unwrap();
@@ -386,13 +382,7 @@ mod tests {
         }
 
         // Now try to process a message that would require a new session (should hit the limit)
-        let over_sid = SessionId::new(
-            ProtocolType::Ransha,
-            255,
-            0,
-            255,
-            0,
-        );
+        let over_sid = SessionId::new(ProtocolType::Ransha, 255, 0, 255, 0);
         let share = RobustShare::new(Fr::from(1u8), 0, 1);
         let mut payload = Vec::new();
         share.serialize_compressed(&mut payload).unwrap();
@@ -404,7 +394,10 @@ mod tests {
         );
 
         let result = node.receive_shares_handler(msg, net).await;
-        assert!(matches!(result, Err(RanShaError::LimitError)), "Should error on exceeding storage limit");
+        assert!(
+            matches!(result, Err(RanShaError::LimitError)),
+            "Should error on exceeding storage limit"
+        );
     }
 
     #[tokio::test]
@@ -417,13 +410,7 @@ mod tests {
         let mut exec = 0u8;
         let mut round = 0u8;
         for _ in 0..super::MAX_SHARE_GEN_SESSIONS {
-            let sid = SessionId::new(
-                ProtocolType::Ransha,
-                exec,
-                0,
-                round,
-                0,
-            );
+            let sid = SessionId::new(ProtocolType::Ransha, exec, 0, round, 0);
             let share = RobustShare::new(Fr::from(1u8), 0, 1);
             let mut payload = Vec::new();
             share.serialize_compressed(&mut payload).unwrap();
@@ -446,13 +433,7 @@ mod tests {
         }
 
         // Now try to process a message that would require a new session (should hit the limit)
-        let over_sid = SessionId::new(
-            ProtocolType::Ransha,
-            255,
-            0,
-            255,
-            0,
-        );
+        let over_sid = SessionId::new(ProtocolType::Ransha, 255, 0, 255, 0);
         let share = RobustShare::new(Fr::from(1u8), 0, 1);
         let mut payload = Vec::new();
         share.serialize_compressed(&mut payload).unwrap();
@@ -464,7 +445,10 @@ mod tests {
         );
 
         let result = node.reconstruction_handler(msg, net).await;
-        assert!(matches!(result, Err(RanShaError::LimitError)), "Should error on exceeding storage limit");
+        assert!(
+            matches!(result, Err(RanShaError::LimitError)),
+            "Should error on exceeding storage limit"
+        );
     }
 
     #[tokio::test]
@@ -476,13 +460,7 @@ mod tests {
         let mut exec = 0u8;
         let mut round = 0u8;
         for _ in 0..super::MAX_SHARE_GEN_SESSIONS {
-            let sid = SessionId::new(
-                ProtocolType::Ransha,
-                exec,
-                0,
-                round,
-                0,
-            );
+            let sid = SessionId::new(ProtocolType::Ransha, exec, 0, round, 0);
             let msg = RanShaMessage::new(
                 0,
                 RanShaMessageType::OutputMessage,
@@ -502,13 +480,7 @@ mod tests {
         }
 
         // Now try to process a message that would require a new session (should hit the limit)
-        let over_sid = SessionId::new(
-            ProtocolType::Ransha,
-            255,
-            0,
-            255,
-            0,
-        );
+        let over_sid = SessionId::new(ProtocolType::Ransha, 255, 0, 255, 0);
         let msg = RanShaMessage::new(
             0,
             RanShaMessageType::OutputMessage,
@@ -517,7 +489,10 @@ mod tests {
         );
 
         let result = node.output_handler(msg).await;
-        assert!(matches!(result, Err(RanShaError::LimitError)), "Should error on exceeding storage limit");
+        assert!(
+            matches!(result, Err(RanShaError::LimitError)),
+            "Should error on exceeding storage limit"
+        );
     }
 
     #[tokio::test]
@@ -527,13 +502,7 @@ mod tests {
         let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
 
         // Create a session id with sub_id != 0
-        let session_id = SessionId::new(
-            ProtocolType::Ransha,
-            0,
-            1,
-            0,
-            0,
-        );
+        let session_id = SessionId::new(ProtocolType::Ransha, 0, 1, 0, 0);
         let share = RobustShare::new(Fr::from(1u8), 0, 1);
         let mut payload = Vec::new();
         share.serialize_compressed(&mut payload).unwrap();
@@ -558,13 +527,7 @@ mod tests {
         let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
 
         // Create a session id with sub_id != 0
-        let session_id = SessionId::new(
-            ProtocolType::Ransha,
-            0,
-            1,
-            0,
-            0,
-        );
+        let session_id = SessionId::new(ProtocolType::Ransha, 0, 1, 0, 0);
         let share = RobustShare::new(Fr::from(1u8), 0, 1);
         let mut payload = Vec::new();
         share.serialize_compressed(&mut payload).unwrap();
@@ -588,13 +551,7 @@ mod tests {
         let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
 
         // Create a session id with sub_id != 0
-        let session_id = SessionId::new(
-            ProtocolType::Ransha,
-            0,
-            1,
-            0,
-            0,
-        );
+        let session_id = SessionId::new(ProtocolType::Ransha, 0, 1, 0, 0);
         let msg = RanShaMessage::new(
             0,
             RanShaMessageType::OutputMessage,
