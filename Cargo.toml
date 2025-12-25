@@ -34,3 +34,4 @@ rustls = "0.23"
 num-bigint = "0.4"
 uuid = { version = "1.18.1", features = ["v4", "v5", "serde"] }
 ark-ec = "0.5.0"
+chacha20poly1305 = "0.10.1"
