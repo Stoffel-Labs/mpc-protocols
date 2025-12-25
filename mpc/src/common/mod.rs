@@ -1,4 +1,5 @@
 pub mod rbc;
+
 /// In MPC, the most fundamental underlying type is called a share.
 /// Think of a share as a piece of a secret that has been split among a set of parties.
 /// As such, on its own, you don't derive any information. But when combined with other parties,
@@ -7,6 +8,9 @@ pub mod rbc;
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
 
+/// Implementation of the hbACSS protocol from https://eprint.iacr.org/2021/159.
+pub mod acss;
+
 pub mod types;
 
 use crate::{
@@ -14,9 +18,9 @@ use crate::{
         rbc::{rbc_store::Msg, RbcError},
         share::ShareError,
     },
-    honeybadger::SessionId,
+    honeybadger::{share_gen::RanShaMessage, SessionId},
 };
-
+use ark_ec::CurveGroup;
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -28,7 +32,7 @@ use std::{
     sync::Arc,
     usize,
 };
-use stoffelnet::network_utils::{Network, ClientId, PartyId};
+use stoffelnet::network_utils::{ClientId, Network, PartyId};
 
 #[derive(Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
@@ -289,7 +293,11 @@ where
     type MPCOpts;
     type Error: std::fmt::Debug;
 
-    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, Self::Error>
+    fn setup(
+        id: PartyId,
+        params: Self::MPCOpts,
+        input_ids: Vec<ClientId>,
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized;
 
@@ -298,6 +306,7 @@ where
     async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
     where
         N: 'async_trait;
+    async fn rand(&mut self, network: Arc<N>) -> Result<S, Self::Error>;
 }
 
 #[async_trait]
@@ -381,4 +390,54 @@ where
         y: Vec<Self::Sint>,
         net: Arc<N>,
     ) -> Result<Vec<Self::Sint>, Self::Error>;
+}
+
+#[async_trait]
+pub trait MPCECProtocol<F, S, N, G>
+where
+    F: FftField,               // scalar field of the EC group
+    S: SecretSharingScheme<F>, // shared-scalar type
+    N: Network,
+    G: CurveGroup<ScalarField = F>,
+{
+    type Error;
+
+    /// PUBLIC SCALAR MULTIPLICATION PROTOCOL
+    ///
+    /// Computes pk = sk_shared * G  (G is public)
+    async fn scalar_mul_basepoint(&mut self, sk_shared: S) -> Result<G, Self::Error>;
+
+    async fn open_point(&self, point: Vec<G>, net: Arc<N>) -> Result<G, Self::Error>;
+}
+
+#[async_trait]
+pub trait RandomSharingProtocol<F, S>
+where
+    F: FftField,
+    S: SecretSharingScheme<F>,
+{
+    type Error;
+    type Group;
+    /// Initialize the protocol for a given session
+    async fn init<N, G>(
+        &mut self,
+        session_id: SessionId,
+        rng: &mut G,
+        network: std::sync::Arc<N>,
+    ) -> Result<(), Self::Error>
+    where
+        N: Network + Send + Sync,
+        G: Rng + Send;
+
+    /// Access or create per-session state
+    async fn output(&mut self, session_id: SessionId) -> Vec<S>;
+
+    /// Process an incoming protocol-specific message
+    async fn process<N>(
+        &mut self,
+        msg: RanShaMessage,
+        network: std::sync::Arc<N>,
+    ) -> Result<(), Self::Error>
+    where
+        N: Network + Send + Sync;
 }

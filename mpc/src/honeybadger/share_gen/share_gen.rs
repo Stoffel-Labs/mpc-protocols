@@ -2,6 +2,7 @@ use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
+use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
@@ -10,7 +11,7 @@ use tracing::info;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde, ShareError},
-        SecretSharingScheme, ShamirShare, RBC,
+        RandomSharingProtocol, SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -31,6 +32,79 @@ pub struct RanShaNode<F: FftField, R: RBC> {
     pub output_sender: Sender<SessionId>,
 }
 
+#[async_trait]
+impl<F, R> RandomSharingProtocol<F, RobustShare<F>> for RanShaNode<F, R>
+where
+    F: FftField,
+    R: RBC,
+{
+    type Error = RanShaError;
+    type Group = ();
+    async fn init<N, G>(
+        &mut self,
+        session_id: SessionId,
+        rng: &mut G,
+        network: Arc<N>,
+    ) -> Result<(), RanShaError>
+    where
+        N: Network + Send + Sync,
+        G: Rng + Send,
+    {
+        info!("Receiving init for share from {0:?}", self.id);
+
+        let secret = F::rand(rng);
+
+        let shares_deg_t =
+            RobustShare::compute_shares(secret, self.n_parties, self.threshold, None, rng)?;
+
+        for (recipient_id, share_t) in shares_deg_t.into_iter().enumerate() {
+            // Create and serialize the payload.
+            let mut payload = Vec::new();
+            share_t.serialize_compressed(&mut payload)?;
+
+            // Create and serialize the generic message.
+            let generic_message = WrappedMessage::RanSha(RanShaMessage::new(
+                self.id,
+                RanShaMessageType::ShareMessage,
+                session_id,
+                RanShaPayload::Share(payload),
+            ));
+            let bytes_generic_msg = bincode::serialize(&generic_message)?;
+
+            info!("sending shares from {:?} to {:?}", self.id, recipient_id);
+            network.send(recipient_id, &bytes_generic_msg).await?;
+        }
+
+        // Update the state of the protocol to Initialized.
+        let storage_access = self.get_or_create_store(session_id).await;
+        let mut storage = storage_access.lock().await;
+        storage.state = RanShaState::Initialized;
+        Ok(())
+    }
+
+    async fn process<N>(&mut self, msg: RanShaMessage, network: Arc<N>) -> Result<(), RanShaError>
+    where
+        N: Network + Send + Sync,
+    {
+        match msg.msg_type {
+            RanShaMessageType::ShareMessage => {
+                self.receive_shares_handler(msg, network).await?;
+                Ok(())
+            }
+            RanShaMessageType::OutputMessage => Ok(self.output_handler(msg).await?),
+            RanShaMessageType::ReconstructMessage => {
+                self.reconstruction_handler(msg, network).await?;
+                Ok(())
+            }
+        }
+    }
+    async fn output(&mut self, session_id: SessionId) -> Vec<RobustShare<F>> {
+        let mut share_store = self.store.lock().await;
+        let store_lock = share_store.remove(&session_id).unwrap();
+        let store = store_lock.lock().await;
+        store.protocol_output.clone()
+    }
+}
 impl<F, R> RanShaNode<F, R>
 where
     F: FftField,
@@ -63,48 +137,6 @@ where
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(RanShaStore::empty(self.n_parties))))
             .clone()
-    }
-
-    pub async fn init<N, G>(
-        &mut self,
-        session_id: SessionId,
-        rng: &mut G,
-        network: Arc<N>,
-    ) -> Result<(), RanShaError>
-    where
-        N: Network,
-        G: Rng,
-    {
-        info!("Receiving init for share from {0:?}", self.id);
-
-        let secret = F::rand(rng);
-
-        let shares_deg_t =
-            RobustShare::compute_shares(secret, self.n_parties, self.threshold, None, rng)?;
-
-        for (recipient_id, share_t) in shares_deg_t.into_iter().enumerate() {
-            // Create and serialize the payload.
-            let mut payload = Vec::new();
-            share_t.serialize_compressed(&mut payload)?;
-
-            // Create and serialize the generic message.
-            let generic_message = WrappedMessage::RanSha(RanShaMessage::new(
-                self.id,
-                RanShaMessageType::ShareMessage,
-                session_id,
-                RanShaPayload::Share(payload),
-            ));
-            let bytes_generic_msg = bincode::serialize(&generic_message)?;
-
-            info!("sending shares from {:?} to {:?}", self.id, recipient_id);
-            network.send(recipient_id, &bytes_generic_msg).await?;
-        }
-
-        // Update the state of the protocol to Initialized.
-        let storage_access = self.get_or_create_store(session_id).await;
-        let mut storage = storage_access.lock().await;
-        storage.state = RanShaState::Initialized;
-        Ok(())
     }
 
     pub async fn receive_shares_handler<N>(
@@ -288,26 +320,5 @@ where
         store.protocol_output = output;
         self.output_sender.send(msg.session_id).await?;
         Ok(())
-    }
-
-    pub async fn process<N>(
-        &mut self,
-        msg: RanShaMessage,
-        network: Arc<N>,
-    ) -> Result<(), RanShaError>
-    where
-        N: Network + Send + Sync,
-    {
-        match msg.msg_type {
-            RanShaMessageType::ShareMessage => {
-                self.receive_shares_handler(msg, network).await?;
-                Ok(())
-            }
-            RanShaMessageType::OutputMessage => Ok(self.output_handler(msg).await?),
-            RanShaMessageType::ReconstructMessage => {
-                self.reconstruction_handler(msg, network).await?;
-                Ok(())
-            }
-        }
     }
 }
