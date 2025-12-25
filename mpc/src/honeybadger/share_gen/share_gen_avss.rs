@@ -67,11 +67,13 @@ where
         n_parties: usize,
         threshold: usize,
         k: usize,
+        sk_i: F,
+        pk_map: Arc<Vec<C>>,
         output_sender: Sender<SessionId>,
     ) -> Result<Self, RanShaError> {
         let rbc = R::new(id, n_parties, threshold, k)?;
         let (avss_sender, avss_receiver) = mpsc::channel(128);
-        let avss = AvssNode::new(id, n_parties, threshold, avss_sender)?;
+        let avss = AvssNode::new(id, n_parties, threshold, sk_i, pk_map, avss_sender)?;
         Ok(Self {
             id,
             n_parties,
@@ -114,7 +116,10 @@ where
             0,
             session_id.instance_id(),
         );
-        self.avss.init(avss_sessionid, rng, network.clone()).await?;
+        let secret = F::rand(rng);
+        self.avss
+            .init(secret, avss_sessionid, rng, network.clone())
+            .await?;
 
         let maybe_id = {
             let mut rx = self.avss_output.lock().await;
