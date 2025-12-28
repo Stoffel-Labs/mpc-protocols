@@ -30,7 +30,7 @@ pub mod share_gen;
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
-        share::avss::AvssMessage,
+        share::avss::{AvssError, AvssMessage},
         types::{
             fixed::{ClearFixedPoint, SecretFixedPoint},
             integer::{ClearInt, SecretInt},
@@ -63,7 +63,9 @@ use crate::{
         preprocessing::HoneyBadgerMPCNodePreprocMaterial,
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
-        share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
+        share_gen::{
+            share_gen::RanShaNode, share_gen_avss::RanShaAvssNode, RanShaError, RanShaMessage,
+        },
         triple_gen::{TripleGenError, TripleGenMessage},
     },
 };
@@ -102,6 +104,8 @@ pub enum HoneyBadgerError {
     NetworkError(#[from] NetworkError),
     #[error("error in share generation: {0:?}")]
     RanShaError(#[from] RanShaError),
+    #[error("error in avss generation: {0:?}")]
+    AvssError(#[from] AvssError),
     #[error("error in Input share generation: {0:?}")]
     InputError(#[from] InputError),
     #[error("error in faulty double share generation: {0:?}")]
@@ -200,14 +204,14 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
 }
 /// Information pertaining a HoneyBadgerMPCNode protocol participant.
 #[derive(Clone, Debug)]
-pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
+pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
     /// ID of the current execution node.
     pub id: PartyId,
     /// Preprocessing material used in the protocol execution.
-    pub preprocessing_material: Arc<Mutex<HoneyBadgerMPCNodePreprocMaterial<F>>>,
+    pub preprocessing_material: Arc<Mutex<HoneyBadgerMPCNodePreprocMaterial<F, G>>>,
     // Preprocessing parameters.
     pub params: HoneyBadgerMPCNodeOpts,
-    pub preprocess: PreprocessNodes<F, R>,
+    pub preprocess: PreprocessNodes<F, R, G>,
     pub operations: Operation<F, R>,
     pub type_ops: TypeOperations<F, R>,
     pub output: OutputServer,
@@ -227,10 +231,11 @@ pub struct TypeOperations<F: PrimeField, R: RBC> {
 }
 
 #[derive(Clone, Debug)]
-pub struct PreprocessNodes<F: PrimeField, R: RBC> {
+pub struct PreprocessNodes<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
     // Nodes for subprotocols.
     pub input: InputServer<F, R>,
     pub share_gen: RanShaNode<F, R>,
+    pub share_gen_avss: RanShaAvssNode<F, R, G>,
     pub dou_sha: DoubleShareNode<F>,
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
@@ -241,6 +246,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
 #[derive(Clone, Debug)]
 pub struct OutputChannels {
     pub share_gen_channel: Arc<Mutex<Receiver<SessionId>>>,
+    pub share_gen_avss_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub triple_channel: Arc<Mutex<Receiver<SessionId>>>,
@@ -283,6 +289,7 @@ impl GetNext<u8> for SubProtocolCounter {
 pub struct SubProtocolCounters {
     pub ran_dou_sha_counter: SubProtocolCounter,
     pub ran_sha_counter: SubProtocolCounter,
+    pub ran_sha_avss_counter: SubProtocolCounter,
     pub triple_counter: SubProtocolCounter,
     pub batch_recon_counter: SubProtocolCounter,
     pub dou_sha_counter: SubProtocolCounter,
@@ -325,6 +332,7 @@ pub struct HoneyBadgerMPCNodeOpts {
     /// Number of random shares needed.
     /// This is usually = No of inputs + 2 * no of triples
     pub n_random_shares: usize,
+    pub n_v_random_shares: usize,
     /// Instance ID
     pub instance_id: u32,
     ///Number of Prandbit shares
@@ -344,6 +352,7 @@ impl HoneyBadgerMPCNodeOpts {
         threshold: usize,
         n_triples: usize,
         n_random_shares: usize,
+        n_v_random_shares: usize,
         instance_id: u32,
         n_prandbit: usize,
         n_prandint: usize,
@@ -355,6 +364,7 @@ impl HoneyBadgerMPCNodeOpts {
             threshold,
             n_triples,
             n_random_shares,
+            n_v_random_shares,
             instance_id,
             n_prandbit,
             n_prandint,
@@ -365,11 +375,12 @@ impl HoneyBadgerMPCNodeOpts {
 }
 
 #[async_trait]
-impl<F, R, N> MPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
+impl<F, R, N, G> MPCProtocol<F, RobustShare<F>, N, G> for HoneyBadgerMPCNode<F, R, G>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    G: CurveGroup<ScalarField = F>,
 {
     type MPCOpts = HoneyBadgerMPCNodeOpts;
     type Error = HoneyBadgerError;
@@ -378,12 +389,15 @@ where
         id: PartyId,
         params: Self::MPCOpts,
         input_ids: Vec<ClientId>,
+        sk_i: F,
+        pk_map: Arc<Vec<G>>,
     ) -> Result<Self, HoneyBadgerError> {
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
         let (triple_sender, triple_receiver) = mpsc::channel(128);
         let (share_gen_sender, share_gen_reciever) = mpsc::channel(128);
+        let (share_gen_avss_sender, share_gen_avss_reciever) = mpsc::channel(128);
         let (rand_bit_sender, rand_bit_receiver) = mpsc::channel(128);
         let (prand_bit_sender, prand_bit_receiver) = mpsc::channel(128);
         let (prand_int_sender, prand_int_receiver) = mpsc::channel(128);
@@ -419,6 +433,15 @@ where
             params.threshold + 1,
             share_gen_sender,
         )?;
+        let share_gen_avss = RanShaAvssNode::new(
+            id,
+            params.n_parties,
+            params.threshold,
+            params.threshold + 1,
+            sk_i,
+            pk_map,
+            share_gen_avss_sender,
+        )?;
         let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold, fpmul_sender)?;
         let fpdiv_const_node =
             FPDivConstNode::new(id, params.n_parties, params.threshold, fpdiv_const_sender)?;
@@ -433,6 +456,7 @@ where
             preprocess: PreprocessNodes {
                 input,
                 share_gen,
+                share_gen_avss,
                 dou_sha: dousha_node,
                 ran_dou_sha: ran_dou_sha_node,
                 triple_gen: triple_gen_node,
@@ -447,6 +471,7 @@ where
             output,
             outputchannels: OutputChannels {
                 share_gen_channel: Arc::new(Mutex::new(share_gen_reciever)),
+                share_gen_avss_channel: Arc::new(Mutex::new(share_gen_avss_reciever)),
                 dou_sha_channel: Arc::new(Mutex::new(dou_sha_receiver)),
                 ran_dou_sha_channel: Arc::new(Mutex::new(ran_dou_sha_receiver)),
                 triple_channel: Arc::new(Mutex::new(triple_receiver)),
@@ -469,7 +494,7 @@ where
         // Both lists must have the same length.
         assert_eq!(x.len(), y.len());
 
-        let (no_triples, _, _, _) = {
+        let (no_triples, _, _, _, _) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
@@ -524,7 +549,7 @@ where
     }
 
     async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
-        let (_, no_rand, _, _) = {
+        let (_, no_rand, _, _, _) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
@@ -599,6 +624,14 @@ where
                         self.type_ops
                             .fpdiv_const
                             .trunc_node
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?
+                    }
+                    Some(ProtocolType::Avss) => {
+                        self.preprocess
+                            .share_gen_avss
+                            .avss
                             .rbc
                             .process(rbc_msg, net)
                             .await?
@@ -779,7 +812,13 @@ where
                 }
             }
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
-            WrappedMessage::Avss(_) => todo!(),
+            WrappedMessage::Avss(avss_message) => {
+                self.preprocess
+                    .share_gen_avss
+                    .avss
+                    .process(avss_message)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -810,7 +849,7 @@ where
 }
 
 #[async_trait]
-impl<F, N, R, G> MPCECProtocol<F, RobustShare<F>, N, G> for HoneyBadgerMPCNode<F, R>
+impl<F, N, R, G> MPCECProtocol<F, RobustShare<F>, N, G> for HoneyBadgerMPCNode<F, R, G>
 where
     F: PrimeField,
     N: Network + Send + Sync + 'static,
@@ -834,11 +873,12 @@ where
 }
 
 #[async_trait]
-impl<F, N, R> MPCTypeOps<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
+impl<F, N, R, G> MPCTypeOps<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R, G>
 where
     F: PrimeField,
     N: Network + Send + Sync + 'static,
     R: RBC<Id = SessionId>,
+    G: CurveGroup<ScalarField = F>,
 {
     type Error = HoneyBadgerError;
     type Sfix = SecretFixedPoint<F, RobustShare<F>>;
@@ -887,7 +927,7 @@ where
         if x.precision() != y.precision() {
             return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
-        let (_, _, no_rand_bit, no_rand_int) = {
+        let (_, _, _, no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
@@ -964,7 +1004,7 @@ where
         }
 
         // 2. Check preprocessing inventory --------------------------------
-        let (_, _, no_rand_bit, no_rand_int) = {
+        let (_, _, _, no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
@@ -1115,11 +1155,12 @@ where
 }
 
 #[async_trait]
-impl<F, R, N> PreprocessingMPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
+impl<F, R, N, C> PreprocessingMPCProtocol<F, RobustShare<F>, N, C> for HoneyBadgerMPCNode<F, R, C>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    C: CurveGroup<ScalarField = F>,
 {
     /// Runs preprocessing to produce Random shares and Beaver triples
     /// Steps:
@@ -1137,7 +1178,7 @@ where
         G: Rng + Send,
     {
         // Get how many triples and random shares are already available
-        let (no_of_triples_avail, no_of_random_shares_avail, _, _) = {
+        let (no_of_triples_avail, no_of_random_shares_avail, _, _, _) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
@@ -1248,6 +1289,7 @@ where
                             None,
                             None,
                             None,
+                            None,
                         );
                         assert!(
                             self.preprocess
@@ -1279,10 +1321,15 @@ where
         self.ensure_prandint_shares(network.clone()).await?;
         info!("PrandInt share generation done");
 
+        // ------------------------
+        // Step 7. Generate Verifiable Random share
+        // ------------------------
+        self.ensure_v_random_shares(network.clone(), rng).await?;
+        info!("Verifiable random share generation done");
         Ok(())
     }
 }
-impl<F, R> HoneyBadgerMPCNode<F, R>
+impl<F, R, C> HoneyBadgerMPCNode<F, R, C>
 where
     F: PrimeField,
     R: RBC<Id = SessionId>,
@@ -1334,10 +1381,13 @@ where
             {
                 if id == sessionid {
                     let output = self.preprocess.share_gen.output(id).await;
-                    self.preprocessing_material
-                        .lock()
-                        .await
-                        .add(None, Some(output), None, None);
+                    self.preprocessing_material.lock().await.add(
+                        None,
+                        Some(output),
+                        None,
+                        None,
+                        None,
+                    );
                 }
             }
 
@@ -1467,7 +1517,7 @@ where
         N: Network + Send + Sync + 'static,
     {
         // How many shares are already present?
-        let (_, _, no_shares, _) = {
+        let (_, _, _, no_shares, _) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
@@ -1586,7 +1636,7 @@ where
                 self.preprocessing_material
                     .lock()
                     .await
-                    .add(None, None, Some(output), None);
+                    .add(None, None, None, Some(output), None);
             }
         }
 
@@ -1599,7 +1649,7 @@ where
         N: Network + Send + Sync + 'static,
     {
         // How many shares are already present?
-        let (_, _, _, no_shares) = {
+        let (_, _, _, _, no_shares) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
@@ -1651,11 +1701,87 @@ where
                 self.preprocessing_material
                     .lock()
                     .await
-                    .add(None, None, None, Some(output));
+                    .add(None, None, None, None, Some(output));
             }
         }
         // Clear store
         self.preprocess.prand_bit.clear_store().await;
+        Ok(())
+    }
+
+    async fn ensure_v_random_shares<G, N>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng + Send,
+    {
+        let (_, _, no_shares, _, _) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        if no_shares >= self.params.n_v_random_shares {
+            info!("There are enough verifiable random shares");
+            return Ok(());
+        }
+        // How many more do we need?
+        let missing = self.params.n_v_random_shares.saturating_sub(no_shares);
+
+        // Outputs in batches of (n-2t)
+        let batch = self.params.n_parties - 2 * self.params.threshold;
+        let run = (missing + batch - 1) / batch; // ceil(missing / batch)
+        let mut round_id = 0u8;
+        let mut v_ran_sha_counter = self.counters.ran_sha_avss_counter.get_next();
+
+        for i in 0..run {
+            info!("Verifiable random share generation run {}", i);
+            let sessionid = SessionId::new(
+                ProtocolType::Avss,
+                v_ran_sha_counter,
+                0,
+                round_id,
+                self.params.instance_id,
+            );
+
+            // Run ShareGen protocol
+            self.preprocess
+                .share_gen_avss
+                .init(sessionid, rng, network.clone())
+                .await?;
+
+            // Collect its output
+            if let Some(id) = self
+                .outputchannels
+                .share_gen_avss_channel
+                .lock()
+                .await
+                .recv()
+                .await
+            {
+                if id == sessionid {
+                    let output = self.preprocess.share_gen_avss.output(id).await;
+                    self.preprocessing_material.lock().await.add(
+                        None,
+                        None,
+                        Some(output),
+                        None,
+                        None,
+                    );
+                }
+            }
+
+            if round_id == 255 {
+                v_ran_sha_counter = self.counters.ran_sha_avss_counter.get_next();
+                round_id = 0;
+            } else {
+                round_id += 1;
+            }
+        }
+
+        // Clear RBC store
+        self.preprocess.share_gen_avss.rbc.clear_store().await;
         Ok(())
     }
 }

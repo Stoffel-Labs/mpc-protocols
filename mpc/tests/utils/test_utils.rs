@@ -1,4 +1,5 @@
 use ark_bls12_381::Fr;
+use ark_ec::CurveGroup;
 use ark_ff::{FftField, PrimeField, UniformRand};
 use ark_std::rand::rngs::{OsRng, StdRng};
 use ark_std::rand::SeedableRng;
@@ -372,16 +373,17 @@ pub fn generate_independent_shares<F: FftField>(
 
 //--------------------------NODE--------------------------
 
-pub fn receive<F, R, S, N>(
+pub fn receive<F, R, S, N, G>(
     mut receivers: Vec<Receiver<Vec<u8>>>,
-    mut nodes: Vec<HoneyBadgerMPCNode<F, R>>,
+    mut nodes: Vec<HoneyBadgerMPCNode<F, R, G>>,
     net: Arc<N>,
 ) where
     F: PrimeField,
     R: RBC + 'static,
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
-    HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N>,
+    HoneyBadgerMPCNode<F, R, G>: MPCProtocol<F, S, N, G>,
+    G: CurveGroup<ScalarField = F>,
 {
     assert_eq!(
         receivers.len(),
@@ -405,42 +407,66 @@ pub fn receive<F, R, S, N>(
     }
 }
 
-pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
+pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N, G>(
     n_parties: usize,
     t: usize,
     n_triples: usize,
     n_random_shares: usize,
+    n_v_random_shares: usize,
     instance_id: u32,
     n_prandbit: usize,
     n_prandint: usize,
     l: usize,
     k: usize,
     input_ids: Vec<ClientId>,
-) -> Vec<HoneyBadgerMPCNode<F, R>>
+) -> Vec<HoneyBadgerMPCNode<F, R, G>>
 where
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
-    HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts>,
+    HoneyBadgerMPCNode<F, R, G>: MPCProtocol<F, S, N, G, MPCOpts = HoneyBadgerMPCNodeOpts>,
+    G: CurveGroup<ScalarField = F>,
 {
+    let mut rng = test_rng();
+
     let parameters = HoneyBadgerMPCNodeOpts::new(
         n_parties,
         t,
         n_triples,
         n_random_shares,
+        n_v_random_shares,
         instance_id,
         n_prandbit,
         n_prandint,
         l,
         k,
     );
+    let mut sks = Vec::new();
+    let mut pks = Vec::new();
+    for _ in 0..n_parties {
+        let sk = F::rand(&mut rng);
+        let pk = G::generator() * sk;
+        sks.push(sk);
+        pks.push(pk);
+    }
+    let pk_map = Arc::new(pks);
+
     (0..n_parties)
-        .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), input_ids.clone()).unwrap())
+        .map(|id| {
+            HoneyBadgerMPCNode::setup(
+                id,
+                parameters.clone(),
+                input_ids.clone(),
+                sks[id],
+                pk_map.clone(),
+            )
+            .unwrap()
+        })
         .collect()
 }
 
 /// Initializes all global nodes with their respective shares for randousha.
-pub async fn initialize_global_nodes_randousha<F, R, N>(
-    nodes: Vec<HoneyBadgerMPCNode<F, R>>,
+pub async fn initialize_global_nodes_randousha<F, R, N, G>(
+    nodes: Vec<HoneyBadgerMPCNode<F, R, G>>,
     n_shares_t: &[Vec<NonRobustShare<F>>],
     n_shares_2t: &[Vec<NonRobustShare<F>>],
     session_id: SessionId,
@@ -449,6 +475,7 @@ pub async fn initialize_global_nodes_randousha<F, R, N>(
     F: PrimeField,
     R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
+    G: CurveGroup<ScalarField = F>,
 {
     assert!(nodes.len() == n_shares_t.len());
     assert!(nodes.len() == n_shares_2t.len());
@@ -505,14 +532,15 @@ pub fn construct_e2e_input_ransha(
     return (secrets, n_shares_t);
 }
 /// Initializes all global nodes with their respective shares for ransha.
-pub async fn initialize_global_nodes_ransha<F, R, N>(
-    nodes: Vec<HoneyBadgerMPCNode<F, R>>,
+pub async fn initialize_global_nodes_ransha<F, R, N, G>(
+    nodes: Vec<HoneyBadgerMPCNode<F, R, G>>,
     session_id: SessionId,
     network: Arc<N>,
 ) where
     F: PrimeField,
     R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
+    G: CurveGroup<ScalarField = F>,
 {
     let mut rng = StdRng::from_rng(OsRng).unwrap();
 

@@ -97,6 +97,13 @@ where
             .clone()
     }
 
+    pub async fn output(&mut self, session_id: SessionId) -> Vec<FeldmanShamirShare<F, C>> {
+        let mut share_store = self.store.lock().await;
+        let store_lock = share_store.remove(&session_id).unwrap();
+        let store = store_lock.lock().await;
+        store.protocol_output.clone()
+    }
+
     pub async fn init<N, G>(
         &mut self,
         session_id: SessionId,
@@ -108,25 +115,26 @@ where
         G: Rng + Send,
     {
         info!("Receiving init for share from {0:?}", self.id);
+        let secret = F::rand(rng);
 
         let avss_sessionid = SessionId::new(
             session_id.calling_protocol().unwrap(),
-            0,
+            session_id.exec_id(),
             self.id as u8,
-            0,
+            session_id.round_id(),
             session_id.instance_id(),
         );
-        let secret = F::rand(rng);
         self.avss
             .init(secret, avss_sessionid, rng, network.clone())
             .await?;
 
-        let maybe_id = {
+        while let Some(id) = {
             let mut rx = self.avss_output.lock().await;
             rx.recv().await
-        };
-        if let Some(id) = maybe_id {
+        } {
             if id.calling_protocol().unwrap() == session_id.calling_protocol().unwrap()
+                && id.exec_id() == session_id.exec_id()
+                && id.round_id() == session_id.round_id()
                 && id.instance_id() == session_id.instance_id()
             {
                 let mut store = self.avss.shares.lock().await;
@@ -140,7 +148,6 @@ where
                     .insert(sender_id.into(), avss_share);
 
                 ransha_storage.reception_tracker[sender_id as usize] = true;
-
                 // Check if the protocol has reached an end
                 if ransha_storage
                     .reception_tracker
@@ -160,7 +167,8 @@ where
                     // drop the ids, keep only shares
                     let shares_deg_t: Vec<FeldmanShamirShare<F, C>> =
                         shares_deg_t.into_iter().map(|(_, s)| s).collect();
-                    self.ransha_gen(shares_deg_t, session_id).await?
+                    self.ransha_gen(shares_deg_t, session_id).await?;
+                    break;
                 }
             }
         }
