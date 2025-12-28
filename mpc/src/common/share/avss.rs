@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
+use tracing::info;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AvssError {
@@ -195,6 +196,7 @@ where
         N: Network + Sync + Send,
         Rnd: Rng,
     {
+        info!("Receiving init for avss from {0:?}", self.id);
         // Generate the random polynomial of degree `degree` with `secret` as constant term
         let mut poly = DensePolynomial::rand(self.t, rng);
         poly[0] = secret;
@@ -237,22 +239,20 @@ where
             encrypted_shares: encrypted,
         };
 
-        let sessionid = SessionId::new(
-            session_id.calling_protocol().unwrap(),
-            0,
-            0,
-            self.id as u8,
-            session_id.instance_id(),
-        );
         let wrapped = WrappedMessage::Avss(msg);
         let bytes = bincode::serialize(&wrapped)?;
 
-        self.rbc.init(bytes, sessionid, net).await?;
+        self.rbc.init(bytes, session_id, net).await?;
 
         Ok(())
     }
 
     pub async fn process(&mut self, msg: AvssMessage) -> Result<(), AvssError> {
+        info!(
+            party_id = ?self.id,
+            session_id = msg.session_id.as_u64(),
+            "Processing AVSS share"
+        );
         let mut map = self.shares.lock().await;
         if map.contains_key(&msg.session_id) {
             return Ok(()); // ignore duplicates

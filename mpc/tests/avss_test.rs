@@ -4,10 +4,7 @@ use crate::utils::test_utils::{setup_tracing, test_setup};
 use ark_bls12_381::{Fr, G1Projective as G};
 use ark_ec::PrimeGroup;
 use ark_ff::UniformRand;
-use ark_std::rand::{
-    rngs::{OsRng, StdRng},
-    SeedableRng,
-};
+use ark_std::test_rng;
 use std::sync::Arc;
 use stoffelmpc_mpc::common::{share::avss::verify_feldman, SecretSharingScheme};
 use stoffelmpc_mpc::common::{share::avss::AvssNode, RBC};
@@ -28,7 +25,7 @@ async fn test_avss_end_to_end() {
     let n = 4;
     let t = 1;
     let session_id = SessionId::new(ProtocolType::Avss, 0, 0, 0, 111);
-    let mut rng = StdRng::from_rng(OsRng).unwrap();
+    let mut rng = test_rng();
 
     // --- Fake network ---
     let (network, mut recv, _) = test_setup(n, vec![]);
