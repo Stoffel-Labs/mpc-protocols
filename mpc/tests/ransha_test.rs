@@ -1,7 +1,7 @@
 use crate::utils::test_utils::{
     construct_e2e_input_ransha, create_global_nodes, setup_tracing, test_setup,
 };
-use ark_bls12_381::Fr;
+use ark_bls12_381::{Fr, G1Projective as G};
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use std::sync::Arc;
@@ -17,7 +17,10 @@ use stoffelmpc_mpc::{
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
-use tokio::{sync::{mpsc, Barrier}, task::JoinSet};
+use tokio::{
+    sync::{mpsc, Barrier},
+    task::JoinSet,
+};
 use tracing::warn;
 
 pub mod utils;
@@ -49,8 +52,18 @@ async fn test_reconstruct_handler_incorrect_share() {
         shares_ri_t[i].share[0] += Fr::from(7u64);
     }
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n_parties, t, 0, 0, 111, 0, 0, 0, 0, vec![]
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+        n_parties,
+        t,
+        0,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![],
     );
 
     // receiver randousha node

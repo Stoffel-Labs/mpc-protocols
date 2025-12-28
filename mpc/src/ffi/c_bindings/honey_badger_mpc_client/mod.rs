@@ -44,6 +44,7 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerFPDivConstError,
     HoneyBadgerTypesError,
     HoneyBadgerAlreadyReservedError,
+    HoneyBadgerAvssError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -72,6 +73,7 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::FPDivConstError(_) => Self::HoneyBadgerFPDivConstError,
             HoneyBadgerError::TypeError(_) => Self::HoneyBadgerTypesError,
             HoneyBadgerError::AlreadyReserved => Self::HoneyBadgerAlreadyReservedError,
+            HoneyBadgerError::AvssError(_) => Self::HoneyBadgerAvssError,
         }
     }
 }

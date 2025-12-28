@@ -1,7 +1,11 @@
-use crate::honeybadger::{
-    fpmul::f256::F2_8, robust_interpolate::robust_interpolate::RobustShare,
-    triple_gen::ShamirBeaverTriple, HoneyBadgerError,
+use crate::{
+    common::share::avss::FeldmanShamirShare,
+    honeybadger::{
+        fpmul::f256::F2_8, robust_interpolate::robust_interpolate::RobustShare,
+        triple_gen::ShamirBeaverTriple, HoneyBadgerError,
+    },
 };
+use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -11,25 +15,29 @@ use uuid::Uuid;
 
 /// Preprocessing material for the HoneyBadgerMPCNode protocol.
 #[derive(Clone, Debug)]
-pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
+pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField, G: CurveGroup<ScalarField = F>> {
     /// A pool of random double shares used for secure multiplication.
     beaver_triples: Vec<ShamirBeaverTriple<F>>,
     /// A pool of random shares used for inputing private data for the protocol.
     random_shares: Vec<RobustShare<F>>,
+    /// A pool of verifiable random shares
+    v_random_shares: Vec<FeldmanShamirShare<F, G>>,
     ///A pool of PRandBit outputs for truncation
     prandbit_shares: Vec<(RobustShare<F>, F2_8)>,
     ///A pool of PRandInt outputs for truncation
     prandint_shares: Vec<RobustShare<F>>,
 }
 
-impl<F> HoneyBadgerMPCNodePreprocMaterial<F>
+impl<F, G> HoneyBadgerMPCNodePreprocMaterial<F, G>
 where
     F: FftField,
+    G: CurveGroup<ScalarField = F>,
 {
     /// Generates empty preprocessing material storage.
     pub fn empty() -> Self {
         Self {
             random_shares: Vec::new(),
+            v_random_shares: Vec::new(),
             beaver_triples: Vec::new(),
             prandbit_shares: Vec::new(),
             prandint_shares: Vec::new(),
@@ -41,6 +49,7 @@ where
         &mut self,
         mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
         mut random_shares: Option<Vec<RobustShare<F>>>,
+        mut v_random_shares: Option<Vec<FeldmanShamirShare<F, G>>>,
         mut prandbit_shares: Option<Vec<(RobustShare<F>, F2_8)>>,
         mut prandbit_int: Option<Vec<RobustShare<F>>>,
     ) {
@@ -50,6 +59,9 @@ where
 
         if let Some(shares) = &mut random_shares {
             self.random_shares.append(shares);
+        }
+        if let Some(shares) = &mut v_random_shares {
+            self.v_random_shares.append(shares);
         }
 
         if let Some(shares) = &mut prandbit_shares {
@@ -62,10 +74,11 @@ where
 
     /// Returns the number of random double share pairs, and the number of random shares
     /// respectively.
-    pub fn len(&self) -> (usize, usize, usize, usize) {
+    pub fn len(&self) -> (usize, usize, usize, usize, usize) {
         (
             self.beaver_triples.len(),
             self.random_shares.len(),
+            self.v_random_shares.len(),
             self.prandbit_shares.len(),
             self.prandint_shares.len(),
         )
@@ -91,6 +104,15 @@ where
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
         Ok(self.random_shares.drain(0..n_shares).collect())
+    }
+    pub fn take_v_random_shares(
+        &mut self,
+        n_shares: usize,
+    ) -> Result<Vec<FeldmanShamirShare<F, G>>, HoneyBadgerError> {
+        if n_shares > self.v_random_shares.len() {
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self.v_random_shares.drain(0..n_shares).collect())
     }
     pub fn take_prandbit_shares(
         &mut self,
@@ -155,11 +177,11 @@ pub enum PreprocContents<F: FftField> {
 }
 
 #[async_trait]
-pub trait PreprocBatchOps<F: FftField>: Send + Sync {
+pub trait PreprocBatchOps<F: FftField, G: CurveGroup<ScalarField = F>>: Send + Sync {
     /// Create a new batch from the current preprocessing cache.
     /// This drains relevant materials from the cache and returns a `PreprocBatch`.
     async fn from_cache(
-        cache: &mut HoneyBadgerMPCNodePreprocMaterial<F>,
+        cache: &mut HoneyBadgerMPCNodePreprocMaterial<F, G>,
         field_name: &str,
         n: usize,
         t: usize,
@@ -169,7 +191,7 @@ pub trait PreprocBatchOps<F: FftField>: Send + Sync {
     /// Load this batch's materials back into the given cache.
     async fn load_into_cache(
         &self,
-        cache: &mut HoneyBadgerMPCNodePreprocMaterial<F>,
+        cache: &mut HoneyBadgerMPCNodePreprocMaterial<F, G>,
     ) -> Result<(), HoneyBadgerError>;
 
     /// Reserve this batch for a specific client UUID.
@@ -184,9 +206,9 @@ pub trait PreprocBatchOps<F: FftField>: Send + Sync {
 }
 
 #[async_trait]
-impl<F: FftField> PreprocBatchOps<F> for PreprocBatch<F> {
+impl<F: FftField, G: CurveGroup<ScalarField = F>> PreprocBatchOps<F, G> for PreprocBatch<F> {
     async fn from_cache(
-        cache: &mut HoneyBadgerMPCNodePreprocMaterial<F>,
+        cache: &mut HoneyBadgerMPCNodePreprocMaterial<F, G>,
         field_name: &str,
         n: usize,
         t: usize,
@@ -299,7 +321,7 @@ impl<F: FftField> PreprocBatchOps<F> for PreprocBatch<F> {
 
     async fn load_into_cache(
         &self,
-        cache: &mut HoneyBadgerMPCNodePreprocMaterial<F>,
+        cache: &mut HoneyBadgerMPCNodePreprocMaterial<F, G>,
     ) -> Result<(), HoneyBadgerError> {
         match &self.contents {
             PreprocContents::BeaverTriples(v) => {
@@ -408,11 +430,11 @@ mod test {
     use crate::honeybadger::{
         robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple,
     };
-    use ark_bn254::Fr;
+    use ark_bn254::{Fr, G1Projective as G};
 
     #[tokio::test]
     async fn test_preproc_material_add_and_take() {
-        let mut cache = HoneyBadgerMPCNodePreprocMaterial::<Fr>::empty();
+        let mut cache = HoneyBadgerMPCNodePreprocMaterial::<Fr, G>::empty();
 
         // Create dummy data
         let triple = ShamirBeaverTriple::<Fr>::new(
@@ -427,14 +449,15 @@ mod test {
             Some(vec![share.clone()]),
             None,
             None,
+            None,
         );
 
-        assert_eq!(cache.len(), (2, 1, 0, 0));
+        assert_eq!(cache.len(), (2, 1, 0, 0, 0));
 
         // Take Beaver triples
         let triples = cache.take_beaver_triples(1).unwrap();
         assert_eq!(triples.len(), 1);
-        assert_eq!(cache.len(), (1, 1, 0, 0));
+        assert_eq!(cache.len(), (1, 1, 0, 0, 0));
 
         // Take too many → error
         let err = cache.take_beaver_triples(10).unwrap_err();
@@ -443,7 +466,7 @@ mod test {
 
     #[tokio::test]
     async fn test_from_cache_and_load_into_cache_symmetry() {
-        let mut cache = HoneyBadgerMPCNodePreprocMaterial::<Fr>::empty();
+        let mut cache = HoneyBadgerMPCNodePreprocMaterial::<Fr, G>::empty();
         let triple = ShamirBeaverTriple::<Fr>::new(
             RobustShare::new(Fr::from(0), 1, 1),
             RobustShare::new(Fr::from(0), 1, 1),
@@ -457,6 +480,7 @@ mod test {
             Some(vec![share.clone()]),
             None,
             None,
+            None,
         );
 
         // Create batches
@@ -467,15 +491,15 @@ mod test {
                 .unwrap();
 
         // Verify cache drained
-        assert_eq!(cache.len(), (0, 0, 0, 0));
+        assert_eq!(cache.len(), (0, 0, 0, 0, 0));
         assert_eq!(batches.len(), 2);
 
         // Load one batch back into cache
         batches[0].load_into_cache(&mut cache).await.unwrap();
 
         // Ensure materials restored
-        let (bt, rs, pb, pi) = cache.len();
-        assert!(bt + rs + pb + pi > 0);
+        let (bt, rs, vrs, pb, pi) = cache.len();
+        assert!(bt + rs + vrs + pb + pi > 0);
     }
 
     #[tokio::test]
@@ -527,10 +551,11 @@ mod test {
         };
 
         // Reserve it
-        let bid = batch
-            .reserve_with_registry(client_id, &registry)
-            .await
-            .unwrap();
+        let bid = <PreprocBatch<Fr> as PreprocBatchOps<Fr, G>>::reserve_with_registry(
+            &mut batch, client_id, &registry,
+        )
+        .await
+        .unwrap();
         assert_eq!(bid, batch.meta.id);
         assert_eq!(batch.meta.reserved, Some(client_id));
 
@@ -539,16 +564,17 @@ mod test {
         assert_eq!(reserved, vec![bid]);
 
         // Double-reserve should error
-        let err = batch
-            .reserve_with_registry(client_id, &registry)
-            .await
-            .unwrap_err();
+        let err = <PreprocBatch<Fr> as PreprocBatchOps<Fr, G>>::reserve_with_registry(
+            &mut batch, client_id, &registry,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, HoneyBadgerError::AlreadyReserved));
     }
 
     #[tokio::test]
     async fn test_full_preprocessing_flow() {
-        let mut cache = HoneyBadgerMPCNodePreprocMaterial::<Fr>::empty();
+        let mut cache = HoneyBadgerMPCNodePreprocMaterial::<Fr, G>::empty();
         let registry = PreprocReservationRegistry::new();
 
         let triple = ShamirBeaverTriple::<Fr>::new(
@@ -557,7 +583,7 @@ mod test {
             RobustShare::new(Fr::from(0), 1, 1),
         );
         let share = RobustShare::new(Fr::from(0), 1, 1);
-        cache.add(Some(vec![triple]), Some(vec![share]), None, None);
+        cache.add(Some(vec![triple]), Some(vec![share]), None, None, None);
 
         // 1. Drain cache into batches
         let instance_id: Vec<u8> = b"session_001".to_vec();
@@ -569,35 +595,40 @@ mod test {
         // 2. Reserve all for a client
         let client = Uuid::new_v4();
         for b in &mut batches {
-            b.reserve_with_registry(client, &registry).await.unwrap();
+            <PreprocBatch<Fr> as PreprocBatchOps<Fr, G>>::reserve_with_registry(
+                b, client, &registry,
+            )
+            .await
+            .unwrap();
         }
-
         // 3. Verify all reserved
         let reserved_batches = registry.get_reserved_batches(&client).await;
         assert_eq!(reserved_batches.len(), batches.len());
 
         // 4. Reload one batch back to cache
         batches[0].load_into_cache(&mut cache).await.unwrap();
-        let (bt, rs, _, _) = cache.len();
+        let (bt, rs, _, _, _) = cache.len();
         assert!(bt + rs > 0);
 
         // 5. Release one
-        registry.release_batch(&client, &batches[0].id()).await;
+        let batch_id = <PreprocBatch<Fr> as PreprocBatchOps<Fr, G>>::id(&batches[0]);
+        registry.release_batch(&client, &batch_id).await;
+        
         let remaining = registry.get_reserved_batches(&client).await;
         assert_eq!(remaining.len(), batches.len() - 1);
     }
     #[tokio::test]
     async fn test_deterministic_batch_ids() {
-        let mut c1 = HoneyBadgerMPCNodePreprocMaterial::<Fr>::empty();
-        let mut c2 = HoneyBadgerMPCNodePreprocMaterial::<Fr>::empty();
+        let mut c1 = HoneyBadgerMPCNodePreprocMaterial::<Fr, G>::empty();
+        let mut c2 = HoneyBadgerMPCNodePreprocMaterial::<Fr, G>::empty();
 
         let triple = ShamirBeaverTriple::<Fr>::new(
             RobustShare::new(Fr::from(0), 1, 1),
             RobustShare::new(Fr::from(0), 1, 1),
             RobustShare::new(Fr::from(0), 1, 1),
         );
-        c1.add(Some(vec![triple.clone()]), None, None, None);
-        c2.add(Some(vec![triple.clone()]), None, None, None);
+        c1.add(Some(vec![triple.clone()]), None, None, None, None);
+        c2.add(Some(vec![triple.clone()]), None, None, None, None);
         let instance_id: Vec<u8> = b"session_001".to_vec();
 
         let b1 = PreprocBatch::<Fr>::from_cache(&mut c1, "Fr", 4, 1, instance_id.clone())
