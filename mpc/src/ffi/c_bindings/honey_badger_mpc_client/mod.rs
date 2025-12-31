@@ -47,6 +47,8 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerInvalidThesholdError,
     HoneyBadgerInvalidPartySizeError,
     HoneyBadgerInvalidPartyIdError,
+    HoneyBadgerLimitError,
+    HoneyBadgerInstanceIdError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -74,6 +76,8 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::TruncPrError(_) => Self::HoneyBadgerTruncPrError,
             HoneyBadgerError::FPDivConstError(_) => Self::HoneyBadgerFPDivConstError,
             HoneyBadgerError::TypeError(_) => Self::HoneyBadgerTypesError,
+            HoneyBadgerError::LimitError => Self::HoneyBadgerLimitError,
+            HoneyBadgerError::InstanceIdError(_) => Self::HoneyBadgerInstanceIdError,
             HoneyBadgerError::AlreadyReserved => Self::HoneyBadgerAlreadyReservedError,
             HoneyBadgerError::InvalidThreshold(_, _) => Self::HoneyBadgerInvalidThesholdError,
             HoneyBadgerError::InvalidPartySize => Self::HoneyBadgerInvalidPartySizeError,

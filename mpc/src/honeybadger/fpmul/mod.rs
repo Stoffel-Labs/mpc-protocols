@@ -54,6 +54,8 @@ pub enum RandBitError {
     SenderError(#[from] SendError<SessionId>),
     #[error("unknown calling protocol in session ID {0:?}")]
     SessionIdError(SessionId),
+    #[error("cannot create {0:?} random bits at once")]
+    LimitError(usize)
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -268,7 +270,7 @@ pub enum TruncPrError {
     SendError(#[from] SendError<SessionId>),
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
-    #[error("unknown calling protocol in session ID {0:?}")]
+    #[error("malformed session ID {0:?}")]
     SessionIdError(SessionId)
 }
 

@@ -68,7 +68,6 @@ async fn test_triple_gen_e2e() {
         let (_, b) = RobustShare::recover_secret(&b_shares[i], n_parties, threshold).unwrap();
         let (_, ab) = RobustShare::recover_secret(&ab_shares[i], n_parties, threshold).unwrap();
         assert!(a * b == ab);
-        info!("Here: {a}");
         assert!(a == a_values[i]);
         assert!(b == b_values[i]);
     }

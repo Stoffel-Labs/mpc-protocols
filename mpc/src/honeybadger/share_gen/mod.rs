@@ -43,6 +43,10 @@ pub enum RanShaError {
     WaitForOk,
     #[error("Party Id is out of bounds")]
     InvalidPartyId,
+    #[error("session ID {0:?} malformed")]
+    SessionIdError(SessionId),
+    #[error("limit reached")]
+    LimitError
 }
 
 #[derive(Clone, Debug)]

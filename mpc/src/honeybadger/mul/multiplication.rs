@@ -224,6 +224,8 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         }
 
         assert!(session_id.calling_protocol().is_some());
+        assert_eq!(session_id.sub_id(), 0);
+        assert_eq!(session_id.round_id(), 0);
 
         let no_of_mul = x.len();
         let no_of_batch = no_of_mul / (self.t + 1);
@@ -507,6 +509,10 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         session_id: SessionId,
     ) -> Arc<Mutex<MultStorage<F>>> {
         let mut storage = self.mult_storage.lock().await;
+
+        // should never occur, since only exec ID changes for different runs
+        assert!(storage.len() <= 256);
+
         storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(MultStorage::empty())))

@@ -76,6 +76,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         network: Arc<N>,
     ) -> Result<(), PRandError> {
         info!(node_id = self.id, "RISS started");
+
+        assert_eq!(session_id.sub_id(), 0);
+        assert_eq!(session_id.round_id(), 0);
+
         if batch_size % (self.t + 1) != 0
             && session_id.calling_protocol() == Some(ProtocolType::PRandBit)
         {
@@ -392,6 +396,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         session_id: SessionId,
     ) -> Arc<Mutex<PRandBitDStore<F, G>>> {
         let mut storage = self.store.lock().await;
+
+        // should never happen, since only exec ID changes for different runs
+        assert!(storage.len() <= 256);
         storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(PRandBitDStore::empty())))

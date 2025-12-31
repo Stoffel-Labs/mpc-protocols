@@ -73,6 +73,10 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
     }
     pub async fn get_or_create_store(&mut self, session: SessionId) -> Arc<Mutex<TruncPrStore<F>>> {
         let mut map = self.store.lock().await;
+
+        // should always hold, since only exec ID changes between different sessions
+        assert!(map.len() <= 256);
+
         map.entry(session)
             .or_insert((|| Arc::new(Mutex::new(TruncPrStore::empty())))())
             .clone()
@@ -157,6 +161,11 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
             sender = msg.sender_id,
             "TruncPr open handler"
         );
+
+        if msg.session_id.sub_id() != 0 || msg.session_id.round_id() != 0 {
+            return Err(TruncPrError::SessionIdError(msg.session_id));
+        }
+
         let store = self.get_or_create_store(msg.session_id).await;
         let mut s = store.lock().await;
 
@@ -200,5 +209,40 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+    use crate::common::rbc::rbc::Avid;
+    use crate::honeybadger::SessionId;
+    use crate::honeybadger::fpmul::{TruncPrMessage, TruncPrError};
+    use ark_bls12_381::Fr;
+    use ark_serialize::CanonicalSerialize;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn test_truncpr_handle_open_invalid_sub_id() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut node = TruncPrNode::<Fr, Avid>::new(0, 5, 1, tx).unwrap();
+
+        // Create a session id with sub_id != 0
+        let session_id = SessionId::new(crate::honeybadger::ProtocolType::Trunc, 0, 1, 0, 111);
+
+        // Create a dummy payload
+        let dummy_share = RobustShare::new(Fr::from(1u8), 0, 1);
+        let mut payload = Vec::new();
+        dummy_share.serialize_compressed(&mut payload).unwrap();
+
+        let msg = TruncPrMessage::new(0, session_id, payload);
+
+        // Should return a SessionIdError due to sub_id != 0
+        let result = node.handle_open(msg).await;
+        match result {
+            Err(TruncPrError::SessionIdError(sid)) => assert_eq!(sid, session_id),
+            _ => panic!("Expected SessionIdError for invalid sub_id"),
+        }
     }
 }

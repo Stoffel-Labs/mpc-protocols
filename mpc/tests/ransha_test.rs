@@ -147,6 +147,7 @@ async fn test_reconstruct_handler_incorrect_share() {
         .share_gen
         .get_or_create_store(session_id)
         .await
+        .unwrap()
         .lock()
         .await
         .clone();
@@ -181,7 +182,7 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
-    let node_store = ransha_node.get_or_create_store(session_id).await;
+    let node_store = ransha_node.get_or_create_store(session_id).await.unwrap();
 
     // first 2t-1 message should return error
     for i in 0..(2 * threshold - 1) {

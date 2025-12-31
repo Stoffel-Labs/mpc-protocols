@@ -53,10 +53,14 @@ pub enum RanDouShaError {
     WaitForOk,
     #[error("error sending information to other async tasks: {0:?}")]
     SendError(#[from] SendError<SessionId>),
-    #[error("ShareError: {0}")]
-    ShareError(#[from] ShareError),
     #[error("Share ID and Sender ID doesn't match")]
     IncorrectID,
+    #[error("ShareError: {0}")]
+    ShareError(#[from] ShareError),
+    #[error("session ID {0:?} malformed")]
+    SessionIdError(SessionId),
+    #[error("limit reached")]
+    LimitError,
 }
 
 /// Storage for the Random Double Sharing protocol.
@@ -123,6 +127,8 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
+pub static MAX_RAN_DOU_SHA_SESSIONS: usize = 1024;
+
 impl<F, R> RanDouShaNode<F, R>
 where
     F: FftField,
@@ -175,12 +181,17 @@ where
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
-    ) -> Arc<Mutex<RanDouShaStore<F>>> {
+    ) -> Result<Arc<Mutex<RanDouShaStore<F>>>, RanDouShaError> {
         let mut storage = self.store.lock().await;
-        storage
+
+        if storage.len() == MAX_RAN_DOU_SHA_SESSIONS {
+            return Err(RanDouShaError::LimitError);
+        }
+
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(RanDouShaStore::empty())))
-            .clone()
+            .clone())
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), RanDouShaError> {
@@ -239,6 +250,9 @@ where
             self.id,
             session_id.as_u64()
         );
+
+        assert_eq!(session_id.sub_id(), 0);
+
         // todo - should check sender.id == self?
         let vandermonde_matrix = make_vandermonde(self.n_parties, self.n_parties - 1)?;
         // Implementation of Step 1.
@@ -248,7 +262,7 @@ where
         let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &shares_deg_2t)?;
 
         // Save the shares of r of degree t and 2t into the storage.
-        let bind_store = self.get_or_create_store(session_id).await;
+        let bind_store = self.get_or_create_store(session_id).await?;
         let mut store = bind_store.lock().await;
         store.computed_r_shares_degree_t = r_deg_t.clone();
         store.computed_r_shares_degree_2t = r_deg_2t.clone();
@@ -302,6 +316,11 @@ where
             msg.session_id.as_u64(),
             msg.sender_id
         );
+
+        if msg.session_id.sub_id() != 0 {
+            return Err(RanDouShaError::SessionIdError(msg.session_id));
+        }
+
         let payload = match msg.payload {
             RanDouShaPayload::Reconstruct(p) => p,
             RanDouShaPayload::Output(_) => return Err(RanDouShaError::Abort),
@@ -318,7 +337,7 @@ where
         if rec_msg.r_share_deg_t.id != sender_id || rec_msg.r_share_deg_2t.id != sender_id {
             return Err(RanDouShaError::IncorrectID);
         }
-        let binding = self.get_or_create_store(msg.session_id).await;
+        let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
         store
@@ -408,7 +427,7 @@ where
         if !output {
             return Err(RanDouShaError::Abort);
         }
-        let binding = self.get_or_create_store(msg.session_id).await;
+        let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
         // push to received_ok_msg if sender doesn't exist
@@ -456,5 +475,86 @@ where
         N: Network + Send + Sync,
     {
         self.reconstruction_handler(msg, network).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::rbc::rbc::Avid;
+    use crate::honeybadger::ran_dou_sha::messages::{
+        RanDouShaMessage, RanDouShaPayload, ReconstructionMessage,
+    };
+    use crate::honeybadger::SessionId;
+    use ark_bls12_381::Fr;
+    use ark_serialize::CanonicalSerialize;
+    use std::sync::Arc;
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn test_randousha_storage_limit_in_reconstruction_handler() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut node = RanDouShaNode::<Fr, Avid>::new(0, tx, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
+
+        // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
+        let mut exec = 0u8;
+        let mut round = 0u8;
+        for _ in 0..super::MAX_RAN_DOU_SHA_SESSIONS {
+            let sid = SessionId::new(ProtocolType::Randousha, exec, 0, round, 111);
+            let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
+            let mut payload = Vec::new();
+            rec_msg.serialize_compressed(&mut payload).unwrap();
+            let msg = RanDouShaMessage::new(0, sid, RanDouShaPayload::Reconstruct(payload));
+            // Ignore the result, just fill up storage
+            let _ = node.reconstruction_handler(msg, net.clone()).await;
+
+            // Increment exec and round to ensure unique session IDs
+            if round == u8::MAX {
+                round = 0;
+                exec = exec.wrapping_add(1);
+            } else {
+                round = round.wrapping_add(1);
+            }
+        }
+
+        // Now try to process a message that would require a new session (should hit the limit)
+        let over_sid = SessionId::new(ProtocolType::Randousha, 255, 0, 255, 0);
+        let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
+        let mut payload = Vec::new();
+        rec_msg.serialize_compressed(&mut payload).unwrap();
+        let msg = RanDouShaMessage::new(0, over_sid, RanDouShaPayload::Reconstruct(payload));
+
+        let result = node.reconstruction_handler(msg, net).await;
+        assert!(
+            matches!(result, Err(RanDouShaError::LimitError)),
+            "Should error on exceeding storage limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_randousha_handle_invalid_sub_id() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut node = RanDouShaNode::<Fr, Avid>::new(0, tx, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
+
+        // Create a session id with sub_id != 0
+        let session_id = SessionId::new(crate::honeybadger::ProtocolType::Randousha, 0, 1, 0, 0);
+
+        // Create a dummy payload
+        let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
+        let mut payload = Vec::new();
+        rec_msg.serialize_compressed(&mut payload).unwrap();
+        let msg = RanDouShaMessage::new(0, session_id, RanDouShaPayload::Reconstruct(payload));
+
+        // Should return a SessionIdError due to sub_id != 0
+        let result = node.reconstruction_handler(msg, net).await;
+        match result {
+            Err(RanDouShaError::SessionIdError(sid)) => assert_eq!(sid, session_id),
+            _ => panic!("Expected SessionIdError for invalid sub_id"),
+        }
     }
 }

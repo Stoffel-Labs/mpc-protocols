@@ -94,7 +94,8 @@ async fn randousha_e2e() {
                 .preprocess
                 .ran_dou_sha
                 .get_or_create_store(session_id)
-                .await;
+                .await
+                .unwrap();
 
             loop {
                 let store = store.lock().await;
@@ -164,7 +165,8 @@ async fn ransha_e2e() {
                 .preprocess
                 .share_gen
                 .get_or_create_store(session_id)
-                .await;
+                .await
+                .unwrap();
 
             loop {
                 let store = store.lock().await;
@@ -345,7 +347,8 @@ async fn gen_masks_for_input_e2e() {
                 .preprocess
                 .share_gen
                 .get_or_create_store(session_id)
-                .await;
+                .await
+                .unwrap();
 
             loop {
                 let store = store.lock().await;
@@ -366,7 +369,8 @@ async fn gen_masks_for_input_e2e() {
             .preprocess
             .share_gen
             .get_or_create_store(session_id)
-            .await;
+            .await
+            .unwrap();
         let local_shares = local_store.lock().await.protocol_output.clone();
         match node
             .preprocess
@@ -1131,6 +1135,85 @@ async fn preprocessing_e2e() {
         assert_eq!(n_shares, 0); //>no_of_randomshares
         assert_eq!(n_prandbit, 4);
         assert_eq!(n_prandint, 4);
+    }
+}
+
+#[tokio::test]
+#[ignore] // ignored since it takes a long time
+async fn preprocessing_e2e_big() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 5;
+    let t = 1;
+    let l = 8;
+    let k = 4;
+    let no_of_triples = 20000;
+    let no_of_randomshares = 20000;
+    let instance_id = 111;
+    let n_prandbit = 0;
+    let n_prandint = 0;
+
+    //Setup
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    // create global nodes
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        no_of_triples,
+        no_of_randomshares,
+        instance_id,
+        n_prandbit,
+        n_prandint,
+        l,
+        k,
+        vec![],
+    );
+
+    //----------------------------------------RECIEVE----------------------------------------
+    // spawn tasks to process received messages
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        Some(vec![]),
+    );
+
+    //----------------------------------------RUN PROTOCOL----------------------------------------
+
+    // init all nodes
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network[pid].clone();
+        let mut rng = StdRng::from_rng(OsRng).unwrap();
+
+        let handle = tokio::spawn(async move {
+            {
+                node.run_preprocessing(net, &mut rng)
+                    .await
+                    .expect("Preprocessing failed");
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all mul tasks to finish
+    futures::future::join_all(handles).await;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        let (n_triples, n_shares, n_prandbit, n_prandint) =
+            node.preprocessing_material.lock().await.len();
+        info!("{}: {} {}", pid, n_triples, n_shares);
+        assert_eq!(n_triples, 20000); //>no_of_triples
+        assert_eq!(n_shares, 20000); //>no_of_randomshares
+        assert_eq!(n_prandbit, 0);
+        assert_eq!(n_prandint, 0);
     }
 }
 
