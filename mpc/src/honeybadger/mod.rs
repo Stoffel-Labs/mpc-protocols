@@ -1324,6 +1324,7 @@ where
             self.params.instance_id,
         );
 
+
         let random_shares_a = self
             .preprocessing_material
             .lock()
