@@ -130,8 +130,12 @@ pub enum HoneyBadgerError {
     BincodeSerializationError(#[from] Box<ErrorKind>),
     #[error("failed to join spawned task")]
     JoinError,
+    #[error("instance ID {0:?} is incorrect")]
+    InstanceIdError(u32),
     #[error("output channel closed before result was received")]
     ChannelClosed,
+    #[error("the protocol cannot be executed any more")]
+    LimitError
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -239,21 +243,33 @@ pub struct OutputChannels {
 }
 
 #[derive(Clone, Debug)]
-pub struct SubProtocolCounter(Arc<AtomicU8>);
+pub struct SubProtocolCounter(Arc<Mutex<Option<u8>>>);
 
 trait GetNext<T> {
-    fn get_next(&self) -> T;
+    async fn get_next(&self) -> Result<T, HoneyBadgerError>;
 }
 
 impl GetNext<u8> for SubProtocolCounter {
-    fn get_next(&self) -> u8 {
-        self.0.fetch_add(1, Ordering::SeqCst)
+    async fn get_next(&self) -> Result<u8, HoneyBadgerError> {
+        let mut counter = self.0.lock().await;
+
+        match &mut *counter {
+            None => Err(HoneyBadgerError::LimitError),
+            Some(value) => {
+                let current = *value;
+                if *value == 255 {
+                    *counter = None;
+                } else {
+                    *value += 1;
+                }
+                Ok(current)
+            }
+        }
     }
 }
 
 /// Per sub-protocol there is a counter to increment the exec ID within the
 /// session ID and distinguish different executions of the same sub-protocol.
-/// Since the exec ID is a `u8`, the counter is an `AtomicU8`.
 #[derive(Clone, Debug)]
 pub struct SubProtocolCounters {
     pub ran_dou_sha_counter: SubProtocolCounter,
@@ -272,17 +288,17 @@ pub struct SubProtocolCounters {
 impl SubProtocolCounters {
     pub fn new() -> Self {
         Self {
-            ran_dou_sha_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            ran_sha_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            triple_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            batch_recon_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            dou_sha_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            mul_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            rand_bit_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            prand_bit_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            prand_int_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            fpmul_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            fpdiv_const_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0)))
+            ran_dou_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            ran_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            triple_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            batch_recon_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            dou_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            mul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            rand_bit_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            prand_bit_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            prand_int_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            fpmul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            fpdiv_const_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0))))
         }
     }
 }
@@ -456,7 +472,7 @@ where
             .await
             .take_beaver_triples(x.len())?;
 
-        let session_id = SessionId::new(ProtocolType::Mul, self.counters.mul_counter.get_next(), 0, 0, self.params.instance_id);
+        let session_id = SessionId::new(ProtocolType::Mul, self.counters.mul_counter.get_next().await?, 0, 0, self.params.instance_id);
 
         // Call the mul function
         self.operations
@@ -471,59 +487,66 @@ where
         let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
 
         match wrapped {
-            WrappedMessage::Rbc(rbc_msg) => match rbc_msg.session_id.calling_protocol() {
-                Some(ProtocolType::Randousha) => {
-                    self.preprocess
-                        .ran_dou_sha
-                        .rbc
-                        .process(rbc_msg, net)
-                        .await?
+            WrappedMessage::Rbc(rbc_msg) => {
+                if rbc_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(rbc_msg.session_id.instance_id()));
                 }
-                Some(ProtocolType::Ransha) => {
-                    self.preprocess.share_gen.rbc.process(rbc_msg, net).await?
-                }
-                Some(ProtocolType::Input) => {
-                    self.preprocess.input.rbc.process(rbc_msg, net).await?
-                }
-                Some(ProtocolType::Mul) => self.operations.mul.rbc.process(rbc_msg, net).await?,
-                Some(ProtocolType::RandBit) => {
-                    self.preprocess
-                        .rand_bit
-                        .mult_node
-                        .rbc
-                        .process(rbc_msg, net)
-                        .await?
-                }
-                Some(ProtocolType::FpMul) => {
-                    if rbc_msg.session_id.sub_id() == 0 {
-                        self.type_ops
-                            .fpmul
-                            .trunc_node
+
+                match rbc_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::Randousha) => {
+
+                        self.preprocess
+                            .ran_dou_sha
                             .rbc
                             .process(rbc_msg, net)
                             .await?
-                    } else {
-                        self.type_ops
-                            .fpmul
+                    }
+                    Some(ProtocolType::Ransha) => {
+                        self.preprocess.share_gen.rbc.process(rbc_msg, net).await?
+                    }
+                    Some(ProtocolType::Input) => {
+                        self.preprocess.input.rbc.process(rbc_msg, net).await?
+                    }
+                    Some(ProtocolType::Mul) => self.operations.mul.rbc.process(rbc_msg, net).await?,
+                    Some(ProtocolType::RandBit) => {
+                        self.preprocess
+                            .rand_bit
                             .mult_node
                             .rbc
                             .process(rbc_msg, net)
                             .await?
                     }
-                }
-                Some(ProtocolType::FpDivConst) => {
-                    self.type_ops
-                        .fpdiv_const
-                        .trunc_node
-                        .rbc
-                        .process(rbc_msg, net)
-                        .await?
-                }
-                _ => {
-                    warn!(
-                        "Unknown protocol ID in session ID: {:?} in RBC",
-                        rbc_msg.session_id
-                    );
+                    Some(ProtocolType::FpMul) => {
+                        if rbc_msg.session_id.sub_id() == 0 {
+                            self.type_ops
+                                .fpmul
+                                .trunc_node
+                                .rbc
+                                .process(rbc_msg, net)
+                                .await?
+                        } else {
+                            self.type_ops
+                                .fpmul
+                                .mult_node
+                                .rbc
+                                .process(rbc_msg, net)
+                                .await?
+                        }
+                    }
+                    Some(ProtocolType::FpDivConst) => {
+                        self.type_ops
+                            .fpdiv_const
+                            .trunc_node
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in RBC",
+                            rbc_msg.session_id
+                        );
+                    }
                 }
             },
 
@@ -531,31 +554,52 @@ where
                 self.preprocess.input.process(input).await?;
             }
             WrappedMessage::RanSha(rs_msg) => {
+                if rs_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(rs_msg.session_id.instance_id()));
+                }
                 self.preprocess.share_gen.process(rs_msg, net).await?;
             }
             WrappedMessage::Dousha(ds_msg) => {
+                if ds_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(ds_msg.session_id.instance_id()));
+                }
                 self.preprocess.dou_sha.process(ds_msg).await?;
             }
             WrappedMessage::RanDouSha(rds_msg) => {
+                if rds_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(rds_msg.session_id.instance_id()));
+                }
                 self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
             }
-            WrappedMessage::Mul(mul_msg) => match mul_msg.session_id.calling_protocol() {
-                Some(ProtocolType::Mul) => self.operations.mul.process(mul_msg).await?,
-                Some(ProtocolType::RandBit) => {
-                    self.preprocess.rand_bit.mult_node.process(mul_msg).await?
+            WrappedMessage::Mul(mul_msg) => {
+                if mul_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(mul_msg.session_id.instance_id()));
                 }
-                Some(ProtocolType::FpMul) => self.type_ops.fpmul.mult_node.process(mul_msg).await?,
-                _ => {
-                    warn!(
-                        "Unknown protocol ID in session ID: {:?} in MUL",
-                        mul_msg.session_id
-                    );
+
+                match mul_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::Mul) => self.operations.mul.process(mul_msg).await?,
+                    Some(ProtocolType::RandBit) => {
+                        self.preprocess.rand_bit.mult_node.process(mul_msg).await?
+                    }
+                    Some(ProtocolType::FpMul) => self.type_ops.fpmul.mult_node.process(mul_msg).await?,
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in MUL",
+                            mul_msg.session_id
+                        );
+                    }
                 }
             },
             WrappedMessage::Triple(triple_msg) => {
+                if triple_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(triple_msg.session_id.instance_id()));
+                }
                 self.preprocess.triple_gen.process(triple_msg).await?;
             }
             WrappedMessage::BatchRecon(batch_msg) => {
+                if batch_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(batch_msg.session_id.instance_id()));
+                }
                 match batch_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Mul) => {
                         self.operations
@@ -611,15 +655,24 @@ where
                 }
             }
             WrappedMessage::RandBit(rand_bit_message) => {
+                if rand_bit_message.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(rand_bit_message.session_id.instance_id()));
+                }
                 self.preprocess.rand_bit.process(rand_bit_message).await?;
             }
             WrappedMessage::PRandBit(prand_message) => {
+                if prand_message.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(prand_message.session_id.instance_id()));
+                }
                 self.preprocess
                     .prand_bit
                     .process(prand_message, net)
                     .await?;
             }
             WrappedMessage::Trunc(trunc_message) => {
+                if trunc_message.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(trunc_message.session_id.instance_id()));
+                }
                 match trunc_message.session_id.calling_protocol() {
                     Some(ProtocolType::FpMul) => {
                         self.type_ops
@@ -729,7 +782,7 @@ where
             .await
             .take_prandint_shares(1)?;
 
-        let session_id = SessionId::new(ProtocolType::FpMul, self.counters.fpmul_counter.get_next(), 0, 0, self.params.instance_id);
+        let session_id = SessionId::new(ProtocolType::FpMul, self.counters.fpmul_counter.get_next().await?, 0, 0, self.params.instance_id);
         let r_bits = r_bits_vec.iter().map(|(a, _)| a.clone()).collect();
 
         // Call the fpmul function
@@ -810,7 +863,7 @@ where
         // 4. Prepare SessionId --------------------------------------------
         let session_id = SessionId::new(
             ProtocolType::FpDivConst,
-            self.counters.fpdiv_const_counter.get_next(),
+            self.counters.fpdiv_const_counter.get_next().await?,
             0,
             0,
             self.params.instance_id
@@ -989,6 +1042,11 @@ where
             info!("There are enough Random shares and Beaver triples");
             // return Ok(());
         } else {
+            let mut triple_counter = self.counters.triple_counter.get_next().await?;
+            if (256 - triple_counter as usize) * 255 < total_triples_to_generate / group_size {
+                return Err(HoneyBadgerError::LimitError);
+            }
+
             // ------------------------
             // Step 1. Ensure random shares
             // ------------------------
@@ -1024,7 +1082,6 @@ where
             let a_chunks = random_shares_a.chunks_exact(group_size);
             let b_chunks = random_shares_b.chunks_exact(group_size);
             let r_chunks = ran_dou_sha_pair[..total_triples_to_generate].chunks_exact(group_size);
-            let mut triple_counter = self.counters.triple_counter.get_next();
             let mut round_id = 0u8;
 
             for ((a, b), r) in a_chunks.zip(b_chunks).zip(r_chunks) {
@@ -1071,7 +1128,7 @@ where
                 }
 
                 if round_id == 255 {
-                    triple_counter = self.counters.triple_counter.get_next();
+                    triple_counter = self.counters.triple_counter.get_next().await.unwrap();
                     round_id = 0;
                 } else {
                     round_id += 1;
@@ -1112,7 +1169,11 @@ where
         let batch = self.params.n_parties - 2 * self.params.threshold;
         let run = (needed + batch - 1) / batch; // ceil(missing / batch)
         let mut round_id = 0u8;
-        let mut ran_sha_counter = self.counters.ran_sha_counter.get_next();
+        let mut ran_sha_counter = self.counters.ran_sha_counter.get_next().await?;
+
+        if (256 - ran_sha_counter as usize) * 255 < run {
+            return Err(HoneyBadgerError::LimitError);
+        }
 
         for i in 0..run {
             info!("Random share generation run {}", i);
@@ -1149,7 +1210,7 @@ where
             }
 
             if round_id == 255 {
-                ran_sha_counter = self.counters.ran_sha_counter.get_next();
+                ran_sha_counter = self.counters.ran_sha_counter.get_next().await.unwrap();
                 round_id = 0;
             } else {
                 round_id += 1;
@@ -1178,7 +1239,11 @@ where
         let batch = self.params.threshold + 1;
         let run = (needed + batch - 1) / batch; // ceil(missing / batch)
         let mut round_id = 0u8;
-        let mut ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next();
+        let mut ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await?;
+
+        if (256 - ran_dou_sha_counter as usize) * 255 < run {
+            return Err(HoneyBadgerError::LimitError);
+        }
 
         for _ in 0..run {
             let sessionid =
@@ -1216,7 +1281,7 @@ where
             }
 
             if round_id == 255 {
-                ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next();
+                ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await.unwrap();
                 round_id = 0;
             } else {
                 round_id += 1;
@@ -1287,13 +1352,24 @@ where
         // Randbit share generation
         info!("Randbit share generation run");
 
-        let sessionid = SessionId::new(
+        let randbit_sessionid = SessionId::new(
             ProtocolType::RandBit,
-            self.counters.rand_bit_counter.get_next(),
+            self.counters.rand_bit_counter.get_next().await?,
             0,
             0,
             self.params.instance_id
         );
+
+        //Prandbit share generation
+        info!("PRandbit share generation");
+        let prandbit_sessionid = SessionId::new(
+            ProtocolType::PRandBit,
+            self.counters.prand_bit_counter.get_next().await?,
+            0,
+            0,
+            self.params.instance_id
+        );
+
 
         let random_shares_a = self
             .preprocessing_material
@@ -1310,7 +1386,7 @@ where
         // Run Randbit share protocol
         self.preprocess
             .rand_bit
-            .init(random_shares_a, beaver_triples, sessionid, network.clone())
+            .init(random_shares_a, beaver_triples, randbit_sessionid, network.clone())
             .await?;
 
         // Collect its output
@@ -1322,7 +1398,7 @@ where
             .recv()
             .await
         {
-            if id == sessionid {
+            if id == randbit_sessionid {
                 let mut share_store = self.preprocess.rand_bit.storage.lock().await;
                 let store_lock = share_store.remove(&id).unwrap();
                 let store = store_lock.lock().await;
@@ -1336,21 +1412,11 @@ where
         // Clear stores
         self.preprocess.rand_bit.clear_store().await;
 
-        //Prandbit share generation
-        info!("PRandbit share generation");
-        let sessionid = SessionId::new(
-            ProtocolType::PRandBit,
-            self.counters.prand_bit_counter.get_next(),
-            0,
-            0,
-            self.params.instance_id
-        );
-
         // Run PRandBit protocol
         self.preprocess
             .prand_bit
             .generate_riss(
-                sessionid,
+                prandbit_sessionid,
                 randbit_output,
                 self.params.l,
                 self.params.k,
@@ -1368,7 +1434,7 @@ where
             .recv()
             .await
         {
-            if id == sessionid {
+            if id == prandbit_sessionid {
                 let mut share_store = self.preprocess.prand_bit.store.lock().await;
                 let store_lock = share_store.remove(&id).unwrap();
                 let store = store_lock.lock().await;
@@ -1412,7 +1478,7 @@ where
         info!("PRandInt share generation");
         let sessionid = SessionId::new(
             ProtocolType::PRandInt,
-            self.counters.prand_int_counter.get_next(),
+            self.counters.prand_int_counter.get_next().await?,
             0,
             0,
             self.params.instance_id
@@ -1696,6 +1762,8 @@ impl SessionId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Mutex;
+    use std::sync::Arc;
 
     #[test]
     fn test_session_id_debug_format() {
@@ -1739,5 +1807,17 @@ mod tests {
         );
 
         assert_eq!(session_id, session_id2);
+    }
+
+    #[tokio::test]
+    async fn test_subprotocol_counter_limit_error() {
+        let counter = SubProtocolCounter(Arc::new(Mutex::new(Some(255))));
+        // First call should return 255
+        let val = counter.get_next().await;
+        assert_eq!(val.unwrap(), 255);
+
+        // Second call should return error (None)
+        let err = counter.get_next().await;
+        assert!(matches!(err, Err(HoneyBadgerError::LimitError)));
     }
 }
