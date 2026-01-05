@@ -277,6 +277,15 @@ pub extern "C" fn quic_send(
 }
 
 #[no_mangle]
+pub extern "C" fn free_quic_addr(addr: *mut c_char) {
+    if !addr.is_null() {
+        unsafe {
+            let _ = CString::from_raw(addr);
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn free_quic_network(quic_network_ptr: *mut QuicNetworkOpaque) {
     if !quic_network_ptr.is_null() {
         unsafe {
