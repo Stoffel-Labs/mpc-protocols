@@ -361,6 +361,8 @@ enum NetworkErrorCode quic_send(struct QuicPeerConnectionsOpaque *peer_connectio
                                 const char *recp,
                                 struct ByteSlice msg);
 
+void free_quic_addr(char *addr);
+
 void free_quic_network(struct QuicNetworkOpaque *quic_network_ptr);
 
 void free_quic_peer_connections(struct QuicPeerConnectionsOpaque *peer_connections);

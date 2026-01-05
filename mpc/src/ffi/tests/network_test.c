@@ -16,20 +16,20 @@ void *quic_accept_process(void *arg)
         size_t node_index;
     } *params = arg;
 
-    while (true)
+    char *returned_addr;
+    NetworkErrorCode e = quic_accept(params->net, params->peer_connections, &returned_addr);
+    if (e != NetworkSuccess)
     {
-        char *returned_addr;
-        NetworkErrorCode e = quic_accept(params->net, params->peer_connections, &returned_addr);
-        if (e != NetworkSuccess)
-        {
-            printf("Error accepting connection for addr1, error code: %d\n", e);
-            pthread_exit(NULL);
-        }
-        else
-        {
-            printf("Node%zu accepted connection from %s\n", params->node_index, returned_addr);
-        }
+        printf("Error accepting connection for node %zu, error code: %d\n", params->node_index, e);
+        pthread_exit(NULL);
     }
+    else
+    {
+        printf("Node %zu accepted connection from %s\n", params->node_index, returned_addr);
+        free_quic_addr(returned_addr);
+    }
+
+    return NULL;
 }
 
 void *quic_recv_process(void *arg)
@@ -40,17 +40,18 @@ void *quic_recv_process(void *arg)
         char *addr;
         size_t node_index;
     } *params = arg;
-    while (true)
+
+    struct ByteSlice msg;
+    NetworkErrorCode e = quic_receive_from_sync(params->peer_connections, params->addr, &msg);
+    if (e != NetworkSuccess)
     {
-        struct ByteSlice msg;
-        NetworkErrorCode e = quic_receive_from_sync(params->peer_connections, params->addr, &msg);
-        if (e != NetworkSuccess)
-        {
-            printf("Error recv from %s, error code: %d\n", params->addr, e);
-            pthread_exit(NULL);
-        }
-        printf("Node %zu Received from %s: %s\n", params->node_index, params->addr, msg.pointer);
+        printf("Error recv from %s, error code: %d\n", params->addr, e);
+        pthread_exit(NULL);
     }
+    printf("Node %zu Received from %s: %s\n", params->node_index, params->addr, msg.pointer);
+    free_bytes_slice(msg);
+
+    return NULL;
 }
 
 void quic_test()
@@ -126,22 +127,19 @@ void quic_test()
         exit(1);
     }
     printf("Node1 connected to addr: %s\n", addr3);
-    // wait for connections
-    usleep(100000);
+
+    pthread_join(acc_thread2, NULL);
+    pthread_join(acc_thread3, NULL);
 
     // start the recv process for
     // node2 -> node1, node3 -> node1, node1 -> node2, node1 -> node3
-    pthread_t recv_thread1, recv_thread2, recv_thread3, recv_thread4;
+    pthread_t recv_thread2, recv_thread3;
     struct QuicRecvArgs
     {
         struct QuicPeerConnectionsOpaque *peer_connections;
         char *addr;
         size_t node_index;
     };
-    struct QuicRecvArgs recv_args1 = {
-        .peer_connections = peer_connection1,
-        .addr = addr2,
-        .node_index = 1};
     struct QuicRecvArgs recv_args2 = {
         .peer_connections = peer_connection1,
         .addr = addr3,
@@ -150,14 +148,9 @@ void quic_test()
         .peer_connections = peer_connection2,
         .addr = addr1,
         .node_index = 2};
-    struct QuicRecvArgs recv_args4 = {
-        .peer_connections = peer_connection3,
-        .addr = addr1,
-        .node_index = 3};
-    pthread_create(&recv_thread1, NULL, quic_recv_process, (void *)&recv_args1);
+
     pthread_create(&recv_thread2, NULL, quic_recv_process, (void *)&recv_args2);
     pthread_create(&recv_thread3, NULL, quic_recv_process, (void *)&recv_args3);
-    pthread_create(&recv_thread4, NULL, quic_recv_process, (void *)&recv_args4);
 
     // send message
     // node1 -> node2
@@ -174,12 +167,12 @@ void quic_test()
     msg2.len = strlen(myString2) + 1;
     quic_send(peer_connection3, addr1, msg2);
 
-    // must stop accepting connections before calling quic_into_hb_network
-    // since quic_node will be consumed
-    pthread_cancel(acc_thread2);
-    pthread_cancel(acc_thread3);
-    pthread_join(acc_thread2, NULL);
-    pthread_join(acc_thread3, NULL);
+    pthread_join(recv_thread2, NULL);
+    pthread_join(recv_thread3, NULL);
+
+    free_quic_peer_connections(peer_connection1);
+    free_quic_peer_connections(peer_connection2);
+    free_quic_peer_connections(peer_connection3);
 
     // cast quic network to HoneyBadgerMPC network
     // Note - this function will consume the quic node
@@ -191,12 +184,9 @@ void quic_test()
     assert(quic_node2 == NULL);
     assert(quic_node3 == NULL);
 
-    sleep(1);
-    // stop recv threads
-    pthread_cancel(recv_thread1);
-    pthread_cancel(recv_thread2);
-    pthread_cancel(recv_thread3);
-    pthread_cancel(recv_thread4);
+    free_network(hb_net1);
+    free_network(hb_net2);
+    free_network(hb_net3);
 }
 
 int main()
