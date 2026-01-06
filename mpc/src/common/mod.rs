@@ -396,22 +396,33 @@ where
     ) -> Result<Vec<Self::Sint>, Self::Error>;
 }
 
-#[async_trait]
-pub trait MPCECProtocol<F, S, N, G>
+pub trait SecretKey<F, S, G>
 where
-    F: FftField,               // scalar field of the EC group
-    S: SecretSharingScheme<F>, // shared-scalar type
+    F: FftField,
+    S: SecretSharingScheme<F>,
+    G: CurveGroup<ScalarField = F>,
+{
+    fn get_share(&self) -> &S;
+    fn get_commitment(&self) -> &Vec<G>;
+}
+
+#[async_trait]
+pub trait ADKG<F, K, S, N, G>
+where
+    F: FftField,
+    S: SecretSharingScheme<F>,
     N: Network,
     G: CurveGroup<ScalarField = F>,
+    K: SecretKey<F, S, G>,
 {
     type Error;
 
-    /// PUBLIC SCALAR MULTIPLICATION PROTOCOL
-    ///
-    /// Computes pk = sk_shared * G  (G is public)
-    async fn scalar_mul_basepoint(&mut self, sk_shared: S) -> Result<G, Self::Error>;
-
-    async fn open_point(&self, point: Vec<G>, net: Arc<N>) -> Result<G, Self::Error>;
+    async fn secret_key(
+        &mut self,
+        no_of_keys: usize,
+        network: Arc<N>,
+    ) -> Result<Vec<K>, Self::Error>;
+    async fn public_key(&self, secret_key: Vec<K>, net: Arc<N>) -> Result<Vec<G>, Self::Error>;
 }
 
 #[async_trait]

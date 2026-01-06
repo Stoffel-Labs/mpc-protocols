@@ -1,5 +1,5 @@
 use crate::{
-    common::{rbc::RbcError, share::shamir::Shamirshare, RBC},
+    common::{rbc::RbcError, share::shamir::Shamirshare, SecretKey, RBC},
     honeybadger::{SessionId, WrappedMessage},
 };
 use ark_ec::CurveGroup;
@@ -59,6 +59,18 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> FeldmanShamirShare<F, G> {
             feldmanshare: shamirshare,
             commitments: commitments,
         })
+    }
+}
+impl<F, G> SecretKey<F,Shamirshare<F>,G> for FeldmanShamirShare<F, G>
+where
+    F: FftField,
+    G: CurveGroup<ScalarField = F>,
+{
+    fn get_share(&self) -> &Shamirshare<F> {
+        &self.feldmanshare
+    }
+    fn get_commitment(&self) -> &Vec<G> {
+        &self.commitments
     }
 }
 

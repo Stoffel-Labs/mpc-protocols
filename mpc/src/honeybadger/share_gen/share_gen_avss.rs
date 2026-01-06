@@ -189,26 +189,46 @@ where
             "party {:?} received shares for Random sharing generation",
             self.id
         );
-        let c = shares_deg_t[0].commitments.clone();
+
+        let n = self.n_parties;
+        let t = self.threshold;
+
         let shares: Vec<ShamirShare<_, 1, _>> = shares_deg_t
             .iter()
             .map(|s| s.feldmanshare.clone())
             .collect();
-        let vandermonde_matrix = make_vandermonde(self.n_parties, self.n_parties - 1)?;
+        let vandermonde_matrix = make_vandermonde(n, n - 1)?;
         let r_deg_t = apply_vandermonde(&vandermonde_matrix, &shares)?;
 
+        let mut r_commitments: Vec<Vec<C>> = Vec::with_capacity(n);
+        for k in 0..n {
+            // commitments for output share k
+            let mut ck = vec![C::zero(); t + 1];
+
+            for i in 0..n {
+                let a_ki = vandermonde_matrix[k][i]; // field element
+                let ci = &shares_deg_t[i].commitments;
+
+                for j in 0..=t {
+                    ck[j] += ci[j].mul(a_ki);
+                }
+            }
+
+            r_commitments.push(ck);
+        }
+
+        // Store results
         let bind_store = self.get_or_create_store(session_id).await;
         let mut store = bind_store.lock().await;
 
-        store.computed_r_shares = r_deg_t
-            .iter()
-            .map(|s| FeldmanShamirShare {
-                feldmanshare: s.clone(),
-                commitments: c.clone(),
+        store.computed_r_shares = (0..n)
+            .map(|k| FeldmanShamirShare {
+                feldmanshare: r_deg_t[k].clone(),
+                commitments: r_commitments[k].clone(),
             })
             .collect();
 
-        let output = store.computed_r_shares[2 * self.threshold..].to_vec();
+        let output = store.computed_r_shares[2 * t..].to_vec();
         store.state = RanShaState::Finished;
         store.protocol_output = output;
         self.output_sender.send(session_id).await?;
