@@ -30,14 +30,17 @@ pub mod share_gen;
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
-        share::avss::{AvssError, AvssMessage},
+        share::{
+            avss::{AvssError, AvssMessage, FeldmanShamirShare},
+            shamir::Shamirshare,
+        },
         types::{
             fixed::{ClearFixedPoint, SecretFixedPoint},
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        MPCECProtocol, MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, RandomSharingProtocol,
-        ShamirShare, RBC,
+        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, RandomSharingProtocol, SecretKey,
+        ShamirShare, ADKG, RBC,
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
@@ -801,7 +804,8 @@ where
     }
 }
 #[async_trait]
-impl<F, N, R, G> MPCECProtocol<F, RobustShare<F>, N, G> for HoneyBadgerMPCNode<F, R, G>
+impl<F, N, R, G> ADKG<F, FeldmanShamirShare<F, G>, Shamirshare<F>, N, G>
+    for HoneyBadgerMPCNode<F, R, G>
 where
     F: PrimeField,
     N: Network + Send + Sync + 'static,
@@ -809,18 +813,36 @@ where
     G: CurveGroup<ScalarField = F>,
 {
     type Error = HoneyBadgerError;
-
-    async fn scalar_mul_basepoint(
+    async fn secret_key(
         &mut self,
-        local_share: RobustShare<F>,
-    ) -> Result<G, Self::Error> {
-        let si = local_share.share[0]; // the local scalar s_i
-        let pi = G::generator().mul(si);
-        Ok(pi)
-    }
+        no_of_keys: usize,
+        network: Arc<N>,
+    ) -> Result<Vec<FeldmanShamirShare<F, G>>, Self::Error> {
+        let (_, _, no_vrand, _, _) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        if no_vrand == 0 {
+            //Run preprocessing
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(network.clone(), &mut rng).await?;
+        }
 
-    async fn open_point(&self, point: Vec<G>, net: Arc<N>) -> Result<G, Self::Error> {
-        todo!()
+        let vrand_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_v_random_shares(no_of_keys)?;
+
+        Ok(vrand_shares.clone())
+    }
+    async fn public_key(
+        &self,
+        secret_keys: Vec<FeldmanShamirShare<F, G>>,
+        _net: Arc<N>,
+    ) -> Result<Vec<G>, Self::Error> {
+        let commitments: Vec<_> = secret_keys.iter().map(|k| k.get_commitment()[0]).collect();
+        Ok(commitments)
     }
 }
 #[async_trait]
