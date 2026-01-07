@@ -2,7 +2,6 @@ use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
-use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
@@ -11,7 +10,7 @@ use tracing::info;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde, ShareError},
-        RandomSharingProtocol, SecretSharingScheme, ShamirShare, RBC,
+        SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -32,15 +31,41 @@ pub struct RanShaNode<F: FftField, R: RBC> {
     pub output_sender: Sender<SessionId>,
 }
 
-#[async_trait]
-impl<F, R> RandomSharingProtocol<F, RobustShare<F>> for RanShaNode<F, R>
+impl<F, R> RanShaNode<F, R>
 where
     F: FftField,
     R: RBC,
 {
-    type Error = RanShaError;
-    type Group = ();
-    async fn init<N, G>(
+    pub fn new(
+        id: PartyId,
+        n_parties: usize,
+        threshold: usize,
+        k: usize,
+        output_sender: Sender<SessionId>,
+    ) -> Result<Self, RanShaError> {
+        let rbc = R::new(id, n_parties, threshold, k)?;
+        Ok(Self {
+            id,
+            n_parties,
+            threshold,
+            store: Arc::new(Mutex::new(HashMap::new())),
+            rbc,
+            output_sender,
+        })
+    }
+
+    pub async fn get_or_create_store(
+        &mut self,
+        session_id: SessionId,
+    ) -> Arc<Mutex<RanShaStore<F>>> {
+        let mut storage = self.store.lock().await;
+        storage
+            .entry(session_id)
+            .or_insert(Arc::new(Mutex::new(RanShaStore::empty(self.n_parties))))
+            .clone()
+    }
+
+    pub async fn init<N, G>(
         &mut self,
         session_id: SessionId,
         rng: &mut G,
@@ -82,7 +107,7 @@ where
         Ok(())
     }
 
-    async fn process<N>(&mut self, msg: RanShaMessage, network: Arc<N>) -> Result<(), RanShaError>
+    pub async fn process<N>(&mut self, msg: RanShaMessage, network: Arc<N>) -> Result<(), RanShaError>
     where
         N: Network + Send + Sync,
     {
@@ -98,45 +123,11 @@ where
             }
         }
     }
-    async fn output(&mut self, session_id: SessionId) -> Vec<RobustShare<F>> {
+    pub async fn output(&mut self, session_id: SessionId) -> Vec<RobustShare<F>> {
         let mut share_store = self.store.lock().await;
         let store_lock = share_store.remove(&session_id).unwrap();
         let store = store_lock.lock().await;
         store.protocol_output.clone()
-    }
-}
-impl<F, R> RanShaNode<F, R>
-where
-    F: FftField,
-    R: RBC,
-{
-    pub fn new(
-        id: PartyId,
-        n_parties: usize,
-        threshold: usize,
-        k: usize,
-        output_sender: Sender<SessionId>,
-    ) -> Result<Self, RanShaError> {
-        let rbc = R::new(id, n_parties, threshold, k)?;
-        Ok(Self {
-            id,
-            n_parties,
-            threshold,
-            store: Arc::new(Mutex::new(HashMap::new())),
-            rbc,
-            output_sender,
-        })
-    }
-
-    pub async fn get_or_create_store(
-        &mut self,
-        session_id: SessionId,
-    ) -> Arc<Mutex<RanShaStore<F>>> {
-        let mut storage = self.store.lock().await;
-        storage
-            .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(RanShaStore::empty(self.n_parties))))
-            .clone()
     }
 
     pub async fn receive_shares_handler<N>(
