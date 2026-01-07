@@ -39,7 +39,7 @@ use crate::{
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, RandomSharingProtocol, SecretKey,
+        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, SecretKey,
         ShamirShare, ADKG, RBC,
     },
     honeybadger::{
@@ -213,7 +213,7 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField =
     /// Preprocessing material used in the protocol execution.
     pub preprocessing_material: Arc<Mutex<HoneyBadgerMPCNodePreprocMaterial<F, G>>>,
     // Preprocessing parameters.
-    pub params: HoneyBadgerMPCNodeOpts,
+    pub params: HoneyBadgerMPCNodeOpts<F, G>,
     pub preprocess: PreprocessNodes<F, R, G>,
     pub operations: Operation<F, R>,
     pub type_ops: TypeOperations<F, R>,
@@ -324,7 +324,11 @@ impl SubProtocolCounters {
 
 #[derive(Clone, Debug)]
 /// Configuration options for the HoneyBadgerMPCNode protocol.
-pub struct HoneyBadgerMPCNodeOpts {
+pub struct HoneyBadgerMPCNodeOpts<F, G>
+where
+    F: FftField,
+    G: CurveGroup<ScalarField = F>,
+{
     /// Number of parties in the protocol.
     /// Minimum 5 for hbmpc
     pub n_parties: usize,
@@ -336,6 +340,8 @@ pub struct HoneyBadgerMPCNodeOpts {
     /// This is usually = No of inputs + 2 * no of triples
     pub n_random_shares: usize,
     pub n_v_random_shares: usize,
+    pub sk_i: F,
+    pub pk_map: Arc<Vec<G>>,
     /// Instance ID
     pub instance_id: u32,
     ///Number of Prandbit shares
@@ -348,7 +354,11 @@ pub struct HoneyBadgerMPCNodeOpts {
     pub l: usize,
 }
 
-impl HoneyBadgerMPCNodeOpts {
+impl<F, G> HoneyBadgerMPCNodeOpts<F, G>
+where
+    F: FftField,
+    G: CurveGroup<ScalarField = F>,
+{
     /// Creates a new struct of initialization options for the HoneyBadgerMPCNode protocol.
     pub fn new(
         n_parties: usize,
@@ -356,6 +366,8 @@ impl HoneyBadgerMPCNodeOpts {
         n_triples: usize,
         n_random_shares: usize,
         n_v_random_shares: usize,
+        sk_i: F,
+        pk_map: Arc<Vec<G>>,
         instance_id: u32,
         n_prandbit: usize,
         n_prandint: usize,
@@ -368,6 +380,8 @@ impl HoneyBadgerMPCNodeOpts {
             n_triples,
             n_random_shares,
             n_v_random_shares,
+            sk_i,
+            pk_map,
             instance_id,
             n_prandbit,
             n_prandint,
@@ -378,22 +392,20 @@ impl HoneyBadgerMPCNodeOpts {
 }
 
 #[async_trait]
-impl<F, R, N, G> MPCProtocol<F, RobustShare<F>, N, G> for HoneyBadgerMPCNode<F, R, G>
+impl<F, R, N, G> MPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R, G>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
     R: RBC<Id = SessionId>,
     G: CurveGroup<ScalarField = F>,
 {
-    type MPCOpts = HoneyBadgerMPCNodeOpts;
+    type MPCOpts = HoneyBadgerMPCNodeOpts<F, G>;
     type Error = HoneyBadgerError;
 
     fn setup(
         id: PartyId,
         params: Self::MPCOpts,
         input_ids: Vec<ClientId>,
-        sk_i: F,
-        pk_map: Arc<Vec<G>>,
     ) -> Result<Self, HoneyBadgerError> {
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
@@ -441,8 +453,8 @@ where
             params.n_parties,
             params.threshold,
             params.threshold + 1,
-            sk_i,
-            pk_map,
+            params.sk_i,
+            params.pk_map.clone(),
             share_gen_avss_sender,
         )?;
         let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold, fpmul_sender)?;
@@ -1177,7 +1189,7 @@ where
 }
 
 #[async_trait]
-impl<F, R, N, C> PreprocessingMPCProtocol<F, RobustShare<F>, N, C> for HoneyBadgerMPCNode<F, R, C>
+impl<F, R, N, C> PreprocessingMPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R, C>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,

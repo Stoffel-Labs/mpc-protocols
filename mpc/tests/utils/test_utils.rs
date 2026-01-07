@@ -11,7 +11,7 @@ use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::rbc::RbcError;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
-use stoffelmpc_mpc::common::{MPCProtocol, RandomSharingProtocol, SecretSharingScheme, RBC};
+use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::double_share::DoubleShamirShare;
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -382,7 +382,7 @@ pub fn receive<F, R, S, N, G>(
     R: RBC + 'static,
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
-    HoneyBadgerMPCNode<F, R, G>: MPCProtocol<F, S, N, G>,
+    HoneyBadgerMPCNode<F, R, G>: MPCProtocol<F, S, N>,
     G: CurveGroup<ScalarField = F>,
 {
     assert_eq!(
@@ -423,23 +423,11 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N, G>(
 where
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
-    HoneyBadgerMPCNode<F, R, G>: MPCProtocol<F, S, N, G, MPCOpts = HoneyBadgerMPCNodeOpts>,
+    HoneyBadgerMPCNode<F, R, G>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts<F, G>>,
     G: CurveGroup<ScalarField = F>,
 {
     let mut rng = test_rng();
 
-    let parameters = HoneyBadgerMPCNodeOpts::new(
-        n_parties,
-        t,
-        n_triples,
-        n_random_shares,
-        n_v_random_shares,
-        instance_id,
-        n_prandbit,
-        n_prandint,
-        l,
-        k,
-    );
     let mut sks = Vec::new();
     let mut pks = Vec::new();
     for _ in 0..n_parties {
@@ -450,17 +438,27 @@ where
     }
     let pk_map = Arc::new(pks);
 
-    (0..n_parties)
-        .map(|id| {
-            HoneyBadgerMPCNode::setup(
-                id,
-                parameters.clone(),
-                input_ids.clone(),
-                sks[id],
+    let parameters: Vec<_> = (0..n_parties)
+        .map(|i| {
+            HoneyBadgerMPCNodeOpts::new(
+                n_parties,
+                t,
+                n_triples,
+                n_random_shares,
+                n_v_random_shares,
+                sks[i],
                 pk_map.clone(),
+                instance_id,
+                n_prandbit,
+                n_prandint,
+                l,
+                k,
             )
-            .unwrap()
         })
+        .collect();
+
+    (0..n_parties)
+        .map(|id| HoneyBadgerMPCNode::setup(id, parameters[id].clone(), input_ids.clone()).unwrap())
         .collect()
 }
 

@@ -13,9 +13,12 @@ pub mod acss;
 
 pub mod types;
 
-use crate::common::{
-    rbc::{rbc_store::Msg, RbcError},
-    share::ShareError,
+use crate::{
+    common::{
+        rbc::{rbc_store::Msg, RbcError},
+        share::ShareError,
+    },
+    honeybadger::SessionId,
 };
 use ark_ec::CurveGroup;
 use ark_ff::{FftField, Zero};
@@ -292,7 +295,7 @@ pub trait RBC: Send + Sync {
 /// Given an underlying secret sharing protocol and a reliable broadcast protocol,
 /// you can define an MPC protocol.
 #[async_trait]
-pub trait MPCProtocol<F, S, N, G>
+pub trait MPCProtocol<F, S, N>
 where
     F: FftField,
     S: SecretSharingScheme<F>,
