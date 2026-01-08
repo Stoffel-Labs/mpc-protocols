@@ -280,6 +280,19 @@ void init_tls(void);
 struct QuicNetworkOpaque *new_quic_network(struct QuicPeerConnectionsOpaque **returned_connections);
 
 /**
+ * Creates a new QUIC network instance with a specific party ID
+ *
+ * This is essential for MPC operations where parties need consistent IDs.
+ * The party_id will be used in handshakes and for connection lookups.
+ *
+ * # Arguments
+ * * `party_id` - The party ID for this network node (e.g., 0, 1, 2, etc.)
+ * * `returned_connections` - Output parameter for peer connections map
+ */
+struct QuicNetworkOpaque *new_quic_network_with_party_id(uintptr_t party_id,
+                                                          struct QuicPeerConnectionsOpaque **returned_connections);
+
+/**
  * Establishes a connection to a new peer
  *
  * This method initiates an outgoing connection to a peer at the specified address.
