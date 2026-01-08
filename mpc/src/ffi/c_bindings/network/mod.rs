@@ -1,5 +1,6 @@
 pub mod fake_network;
 pub mod quic;
+use std::ffi::c_void;
 use std::slice;
 use std::sync::Arc;
 
@@ -92,5 +93,56 @@ pub extern "C" fn network_send(
             return NetworkErrorCode::NetworkSuccess;
         }
         Err(e) => return e.into(),
+    }
+}
+
+/// Extract raw QuicNetworkManager pointer for use with external libraries.
+///
+/// This function extracts the inner `Arc<QuicNetworkManager>` from a `NetworkOpaque`
+/// pointer and returns it as a boxed Arc suitable for passing to libraries like StoffelVM
+/// that expect a raw `Arc<QuicNetworkManager>` pointer.
+///
+/// # Arguments
+/// * `network` - A pointer to NetworkOpaque (must wrap GenericNetwork::QuicNetworkManager)
+///
+/// # Returns
+/// * A pointer to a boxed `Arc<QuicNetworkManager>`, or null if:
+///   - The input pointer is null
+///   - The network is not a QuicNetworkManager variant
+///
+/// # Safety
+/// * The caller must ensure `network` is a valid NetworkOpaque pointer
+/// * The returned pointer must be freed with `free_raw_quic_network()` when no longer needed
+/// * The original NetworkOpaque remains valid and must be freed separately
+#[no_mangle]
+pub extern "C" fn extract_quic_network(network: *mut NetworkOpaque) -> *mut c_void {
+    if network.is_null() {
+        return std::ptr::null_mut();
+    }
+    let net = unsafe { &*(network as *mut GenericNetwork) };
+    match net {
+        GenericNetwork::QuicNetworkManager(arc) => {
+            // Box the Arc for stable FFI pointer (matches StoffelVM expectation)
+            Box::into_raw(Box::new(Arc::clone(arc))) as *mut c_void
+        }
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// Free a raw QuicNetworkManager pointer obtained from `extract_quic_network()`.
+///
+/// # Arguments
+/// * `ptr` - A pointer obtained from `extract_quic_network()`
+///
+/// # Safety
+/// * The pointer must have been obtained from `extract_quic_network()`
+/// * The pointer must not have been freed already
+/// * The pointer must not be used after this call
+#[no_mangle]
+pub extern "C" fn free_raw_quic_network(ptr: *mut c_void) {
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Box::from_raw(ptr as *mut Arc<QuicNetworkManager>);
+        }
     }
 }
