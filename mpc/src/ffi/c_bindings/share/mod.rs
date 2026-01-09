@@ -348,6 +348,39 @@ pub extern "C" fn robust_share_new(
     };
 }
 
+/// Create a RobustShare from raw little-endian field element bytes.
+///
+/// This safely handles arbitrary byte input by using `from_le_bytes_mod_order`,
+/// which reduces the value modulo the field prime if necessary.
+///
+/// # Arguments
+/// * `bytes` - Pointer to the field element bytes (little-endian)
+/// * `bytes_len` - Length of the byte array (should be <= 32 for BLS12-381)
+/// * `id` - Share ID (party index)
+/// * `degree` - Polynomial degree
+/// * `field_kind` - Field type
+///
+/// # Returns
+/// A RobustShare containing the field element
+#[no_mangle]
+pub extern "C" fn robust_share_from_bytes(
+    bytes: *const u8,
+    bytes_len: usize,
+    id: usize,
+    degree: usize,
+    field_kind: FieldKind,
+) -> RobustShare {
+    let bytes_slice = unsafe { slice::from_raw_parts(bytes, bytes_len) };
+    match field_kind {
+        FieldKind::Bls12_381Fr => {
+            // Use from_le_bytes_mod_order to safely convert arbitrary bytes to field element
+            // This automatically reduces values >= field modulus
+            let fr = Fr::from_le_bytes_mod_order(bytes_slice);
+            robust_interpolate::RobustShare::<Fr>::new(fr, id, degree).into()
+        }
+    }
+}
+
 /// Generates `n` secret shares for a `value` using a degree `t` polynomial,
 /// such that `f(0) = value`. Any `t + 1` shares can reconstruct the secret.
 ///
