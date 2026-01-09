@@ -33,7 +33,6 @@ use std::{
     marker::PhantomData,
     ops::{Add, Mul, Sub},
     sync::Arc,
-    usize,
 };
 use stoffelnet::network_utils::{ClientId, Network, PartyId};
 

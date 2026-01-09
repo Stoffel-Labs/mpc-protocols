@@ -27,6 +27,7 @@ pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
 
+use crate::common::math::goldilocks::GoldilocksField;
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
@@ -39,8 +40,7 @@ use crate::{
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, SecretKey,
-        ShamirShare, ADKG, RBC,
+        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, SecretKey, ShamirShare, ADKG, RBC,
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
@@ -234,6 +234,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>
     // Nodes for subprotocols.
     pub input: InputServer<F, R>,
     pub share_gen: RanShaNode<F, R>,
+    pub small_field_share_gen: RanShaNode<GoldilocksField, R>,
     pub share_gen_avss: RanShaAvssNode<F, R, G>,
     pub dou_sha: DoubleShareNode<F>,
     pub ran_dou_sha: RanDouShaNode<F, R>,
@@ -245,6 +246,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>
 #[derive(Clone, Debug)]
 pub struct OutputChannels {
     pub share_gen_channel: Arc<Mutex<Receiver<SessionId>>>,
+    pub share_gen_small_field_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub share_gen_avss_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
@@ -276,6 +278,7 @@ impl GetNext<u8> for SubProtocolCounter {
 pub struct SubProtocolCounters {
     pub ran_dou_sha_counter: SubProtocolCounter,
     pub ran_sha_counter: SubProtocolCounter,
+    pub ran_sha_small_field_counter: SubProtocolCounter,
     pub ran_sha_avss_counter: SubProtocolCounter,
     pub triple_counter: SubProtocolCounter,
     pub batch_recon_counter: SubProtocolCounter,
@@ -293,6 +296,7 @@ impl SubProtocolCounters {
         Self {
             ran_dou_sha_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
             ran_sha_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
+            ran_sha_small_field_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
             ran_sha_avss_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
             triple_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
             batch_recon_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
@@ -397,6 +401,7 @@ where
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
         let (triple_sender, triple_receiver) = mpsc::channel(128);
         let (share_gen_sender, share_gen_reciever) = mpsc::channel(128);
+        let (share_gen_small_field_sender, share_gen_small_field_reciever) = mpsc::channel(128);
         let (share_gen_avss_sender, share_gen_avss_reciever) = mpsc::channel(128);
         let (rand_bit_sender, rand_bit_receiver) = mpsc::channel(128);
         let (prand_bit_sender, prand_bit_receiver) = mpsc::channel(128);
@@ -433,6 +438,13 @@ where
             params.threshold + 1,
             share_gen_sender,
         )?;
+        let small_field_share_gen = RanShaNode::new(
+            id,
+            params.n_parties,
+            params.threshold,
+            params.threshold + 1,
+            share_gen_small_field_sender,
+        )?;
         let share_gen_avss = RanShaAvssNode::new(
             id,
             params.n_parties,
@@ -456,6 +468,7 @@ where
             preprocess: PreprocessNodes {
                 input,
                 share_gen,
+                small_field_share_gen,
                 share_gen_avss,
                 dou_sha: dousha_node,
                 ran_dou_sha: ran_dou_sha_node,
@@ -471,6 +484,7 @@ where
             output,
             outputchannels: OutputChannels {
                 share_gen_channel: Arc::new(Mutex::new(share_gen_reciever)),
+                share_gen_small_field_channel: Arc::new(Mutex::new(share_gen_small_field_reciever)),
                 share_gen_avss_channel: Arc::new(Mutex::new(share_gen_avss_reciever)),
                 dou_sha_channel: Arc::new(Mutex::new(dou_sha_receiver)),
                 ran_dou_sha_channel: Arc::new(Mutex::new(ran_dou_sha_receiver)),
@@ -565,6 +579,13 @@ where
                 Some(ProtocolType::Ransha) => {
                     self.preprocess.share_gen.rbc.process(rbc_msg, net).await?
                 }
+                Some(ProtocolType::RanShaSmallField) => {
+                    self.preprocess
+                        .small_field_share_gen
+                        .rbc
+                        .process(rbc_msg, net)
+                        .await?
+                }
                 Some(ProtocolType::Input) => {
                     self.preprocess.input.rbc.process(rbc_msg, net).await?
                 }
@@ -621,9 +642,23 @@ where
             WrappedMessage::Input(input) => {
                 self.preprocess.input.process(input).await?;
             }
-            WrappedMessage::RanSha(rs_msg) => {
-                self.preprocess.share_gen.process(rs_msg, net).await?;
-            }
+            WrappedMessage::RanSha(rs_msg) => match rs_msg.session_id.calling_protocol() {
+                Some(ProtocolType::Ransha) => {
+                    self.preprocess.share_gen.process(rs_msg, net).await?
+                }
+                Some(ProtocolType::RanShaSmallField) => {
+                    self.preprocess
+                        .small_field_share_gen
+                        .process(rs_msg, net)
+                        .await?
+                }
+                _ => {
+                    warn!(
+                        "Unknown protocol ID in session ID: {:?} in RANSHA",
+                        rs_msg.session_id
+                    );
+                }
+            },
             WrappedMessage::Dousha(ds_msg) => {
                 self.preprocess.dou_sha.process(ds_msg).await?;
             }
@@ -1209,6 +1244,7 @@ where
                             None,
                             None,
                             None,
+                            None,
                         );
                         assert!(
                             self.preprocess
@@ -1254,6 +1290,79 @@ where
     R: RBC,
     C: CurveGroup<ScalarField = F>,
 {
+    /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
+    async fn ensure_random_shares_small_field<G, N>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+        needed: usize,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng + Send,
+    {
+        // Outputs in batches of (n-2t)
+        let batch = self.params.n_parties - 2 * self.params.threshold;
+        let run = (needed + batch - 1) / batch; // ceil(missing / batch)
+        let mut round_id = 0u8;
+        let mut ran_sha_counter = self.counters.ran_sha_small_field_counter.get_next();
+
+        for i in 0..run {
+            info!("Random share generation run {}", i);
+
+            let sessionid = SessionId::new(
+                ProtocolType::RanShaSmallField,
+                ran_sha_counter,
+                0,
+                round_id,
+                self.params.instance_id,
+            );
+
+            // Run ShareGen protocol
+            self.preprocess
+                .small_field_share_gen
+                .init(sessionid, rng, network.clone())
+                .await?;
+
+            // Collect its output
+            if let Some(id) = self
+                .outputchannels
+                .share_gen_small_field_channel
+                .lock()
+                .await
+                .recv()
+                .await
+            {
+                if id == sessionid {
+                    let output = self.preprocess.small_field_share_gen.output(id).await;
+                    self.preprocessing_material.lock().await.add(
+                        None,
+                        None,
+                        Some(output),
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            }
+
+            if round_id == 255 {
+                ran_sha_counter = self.counters.ran_sha_small_field_counter.get_next();
+                round_id = 0;
+            } else {
+                round_id += 1;
+            }
+        }
+
+        // Clear RBC store
+        self.preprocess
+            .small_field_share_gen
+            .rbc
+            .clear_store()
+            .await;
+        Ok(())
+    }
+
     /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
     async fn ensure_random_shares<G, N>(
         &mut self,
@@ -1302,6 +1411,7 @@ where
                     self.preprocessing_material.lock().await.add(
                         None,
                         Some(output),
+                        None,
                         None,
                         None,
                         None,
@@ -1545,10 +1655,14 @@ where
                     .zip(smallbit)
                     .map(|(a, b)| (a.clone(), b))
                     .collect();
-                self.preprocessing_material
-                    .lock()
-                    .await
-                    .add(None, None, None, Some(output), None);
+                self.preprocessing_material.lock().await.add(
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(output),
+                    None,
+                );
             }
         }
 
@@ -1612,10 +1726,14 @@ where
                 let store = store_lock.lock().await;
                 let output = store.share_r_p.clone().unwrap();
 
-                self.preprocessing_material
-                    .lock()
-                    .await
-                    .add(None, None, None, None, Some(output));
+                self.preprocessing_material.lock().await.add(
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(output),
+                );
             }
         }
         // Clear store
@@ -1678,6 +1796,7 @@ where
                     self.preprocessing_material.lock().await.add(
                         None,
                         None,
+                        None,
                         Some(output),
                         None,
                         None,
@@ -1738,6 +1857,7 @@ pub enum ProtocolType {
     Trunc = 13,
     FpDivConst = 14,
     Avss = 15,
+    RanShaSmallField = 16,
 }
 
 impl TryFrom<u8> for ProtocolType {
@@ -1761,6 +1881,7 @@ impl TryFrom<u8> for ProtocolType {
             13 => Ok(ProtocolType::Trunc),
             14 => Ok(ProtocolType::FpDivConst),
             15 => Ok(ProtocolType::Avss),
+            16 => Ok(ProtocolType::RanShaSmallField),
             _ => Err(()),
         }
     }

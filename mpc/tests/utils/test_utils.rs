@@ -510,16 +510,19 @@ pub async fn initialize_global_nodes_randousha<F, R, N, G>(
 }
 
 // Return a vector that contains a vector of inputs for each node
-pub fn construct_e2e_input_ransha(
+pub fn construct_e2e_input_ransha<F>(
     n: usize,
     degree_t: usize,
-) -> (Vec<Fr>, Vec<Vec<RobustShare<Fr>>>) {
+) -> (Vec<F>, Vec<Vec<RobustShare<F>>>)
+where
+    F: FftField,
+{
     let mut n_shares_t = vec![vec![]; n];
     let mut secrets = Vec::new();
     let mut rng = test_rng();
 
     for _ in 0..n {
-        let secret = Fr::rand(&mut rng);
+        let secret = F::rand(&mut rng);
         secrets.push(secret);
         let shares_si_t = RobustShare::compute_shares(secret, n, degree_t, None, &mut rng).unwrap();
         for j in 0..n {
@@ -529,6 +532,46 @@ pub fn construct_e2e_input_ransha(
 
     return (secrets, n_shares_t);
 }
+
+/// Initializes all global nodes with their respective shares for ransha.
+pub async fn initialize_global_nodes_ransha_small_field<F, R, N, G>(
+    nodes: Vec<HoneyBadgerMPCNode<F, R, G>>,
+    session_id: SessionId,
+    network: Arc<N>,
+) where
+    F: PrimeField,
+    R: RBC + 'static,
+    N: Network + Send + Sync + 'static,
+    G: CurveGroup<ScalarField = F>,
+{
+    let mut rng = StdRng::from_rng(OsRng).unwrap();
+
+    for node in nodes {
+        let mut node_rds = node.preprocess.small_field_share_gen;
+        let node_id = node_rds.id;
+        match node_rds
+            .init(session_id, &mut rng, Arc::clone(&network))
+            .await
+        {
+            Ok(()) => (),
+            Err(e) => {
+                if let RanShaError::NetworkError(NetworkError::SendError) = e {
+                    // allow for SendError because of Abort
+                    eprintln!(
+                        "Test: Init handler for node {} got expected SendError: {:?}",
+                        node_id, e
+                    );
+                } else {
+                    panic!(
+                        "Test: Unexpected error during init_handler for node {}: {:?}",
+                        node_id, e
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Initializes all global nodes with their respective shares for ransha.
 pub async fn initialize_global_nodes_ransha<F, R, N, G>(
     nodes: Vec<HoneyBadgerMPCNode<F, R, G>>,

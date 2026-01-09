@@ -5,6 +5,7 @@ use ark_bls12_381::{Fr, G1Projective as G};
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use std::sync::Arc;
+use stoffelmpc_mpc::common::math::goldilocks::GoldilocksField;
 use stoffelmpc_mpc::{
     common::{rbc::rbc::Avid, SecretSharingScheme, RBC},
     honeybadger::{
@@ -74,7 +75,10 @@ async fn test_reconstruct_handler_incorrect_share() {
         shares_ri_t[i]
             .clone()
             .serialize_compressed(&mut bytes_rec_message)
-            .map_err(RanShaError::ArkSerialization)
+            .map_err(|e| RanShaError::ArkSerialization {
+                source: e,
+                location: "test",
+            })
             .unwrap();
         let message = RanShaMessage::new(
             i,
@@ -191,7 +195,10 @@ async fn test_output_handler() {
         assert_eq!(e.to_string(), RanShaError::WaitForOk.to_string());
     }
     // check the store 2t-1 shares)
-    assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold - 1));
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        (2 * threshold - 1)
+    );
 
     // existed id should not be counted
     let output_message = RanShaMessage::new(
@@ -205,7 +212,10 @@ async fn test_output_handler() {
         .await
         .expect_err("should return waitForOk");
     assert_eq!(e.to_string(), RanShaError::WaitForOk.to_string());
-    assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold - 1));
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        (2 * threshold - 1)
+    );
 
     // should return abort once received false outputMessage
     let output_message = RanShaMessage::new(
@@ -219,7 +229,10 @@ async fn test_output_handler() {
         .await
         .expect_err("should return abort");
     assert_eq!(e.to_string(), RanShaError::Abort.to_string());
-    assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold - 1));
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        (2 * threshold - 1)
+    );
 
     let output_message = RanShaMessage::new(
         n_parties,
@@ -233,10 +246,116 @@ async fn test_output_handler() {
         .expect("output handler should not fail");
 
     let v = node_store.lock().await.protocol_output.clone();
-    assert!(v.len() == n_parties - 2 * threshold);
+    assert_eq!(v.len(), n_parties - 2 * threshold);
     for share_t1 in v {
-        assert!(share_t1.degree == threshold);
+        assert_eq!(share_t1.degree, threshold);
     }
-    assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold));
-    assert!(node_store.lock().await.state == RanShaState::Finished);
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        (2 * threshold)
+    );
+    assert_eq!(node_store.lock().await.state, RanShaState::Finished);
+}
+
+#[tokio::test]
+async fn test_output_handler_goldilocks_field() {
+    setup_tracing();
+    let n_parties = 10;
+    let threshold = 3;
+    let session_id = SessionId::new(ProtocolType::Ransha, 123, 0, 0, 111);
+    let degree_t = 3;
+
+    let (network, _receivers, _) = test_setup(n_parties, vec![]);
+    let (_, shares_si_t) = construct_e2e_input_ransha(n_parties, degree_t);
+    let receiver_id = 1;
+    let (sender, _receiver_ch) = mpsc::channel(128);
+
+    // create receiver randousha node
+    let mut ransha_node: RanShaNode<GoldilocksField, Avid> =
+        RanShaNode::new(receiver_id, n_parties, threshold, threshold + 1, sender).unwrap();
+    // call init_handler to create random share
+    ransha_node
+        .init_ransha(
+            shares_si_t[receiver_id].clone(),
+            session_id,
+            Arc::clone(&network),
+        )
+        .await
+        .unwrap();
+
+    let node_store = ransha_node.get_or_create_store(session_id).await;
+
+    // first 2t-1 message should return error
+    for i in 0..(2 * threshold - 1) {
+        let output_message = RanShaMessage::new(
+            i,
+            RanShaMessageType::OutputMessage,
+            session_id,
+            RanShaPayload::Output(true),
+        );
+        let result = ransha_node.output_handler(output_message).await;
+        let e = result.expect_err("should return waitForOk");
+        assert_eq!(e.to_string(), RanShaError::WaitForOk.to_string());
+    }
+    // check the store 2t-1 shares)
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        (2 * threshold - 1)
+    );
+
+    // existed id should not be counted
+    let output_message = RanShaMessage::new(
+        1,
+        RanShaMessageType::OutputMessage,
+        session_id,
+        RanShaPayload::Output(true),
+    );
+    let e = ransha_node
+        .output_handler(output_message)
+        .await
+        .expect_err("should return waitForOk");
+    assert_eq!(e.to_string(), RanShaError::WaitForOk.to_string());
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        (2 * threshold - 1)
+    );
+
+    // should return abort once received false outputMessage
+    let output_message = RanShaMessage::new(
+        1,
+        RanShaMessageType::OutputMessage,
+        session_id,
+        RanShaPayload::Output(false),
+    );
+    let e = ransha_node
+        .output_handler(output_message)
+        .await
+        .expect_err("should return abort");
+    assert_eq!(e.to_string(), RanShaError::Abort.to_string());
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        (2 * threshold - 1)
+    );
+
+    let output_message = RanShaMessage::new(
+        n_parties,
+        RanShaMessageType::OutputMessage,
+        session_id,
+        RanShaPayload::Output(true),
+    );
+    ransha_node
+        .output_handler(output_message)
+        .await
+        .expect("output handler should not fail");
+
+    let v = node_store.lock().await.protocol_output.clone();
+    assert_eq!(v.len(), n_parties - 2 * threshold);
+    for share_t1 in v {
+        assert_eq!(share_t1.degree, threshold);
+    }
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        (2 * threshold)
+    );
+    assert_eq!(node_store.lock().await.state, RanShaState::Finished);
 }
