@@ -27,8 +27,11 @@ pub mod share_gen_avss;
 pub enum RanShaError {
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
-    #[error("error while serializing an arkworks object: {0:?}")]
-    ArkSerialization(#[from] SerializationError),
+    #[error("error while serializing an arkworks object in {location}: {source:?}")]
+    ArkSerialization {
+        source: SerializationError,
+        location: &'static str,
+    },
     #[error("error while serializing an arkworks object: {0:?}")]
     ArkDeserialization(SerializationError),
     #[error("error while serializing the object into bytes: {0:?}")]

@@ -1,7 +1,8 @@
 use crate::utils::test_utils::{
     construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
     generate_independent_shares, initialize_global_nodes_randousha, initialize_global_nodes_ransha,
-    receive, receive_client, setup_tracing, test_setup, test_setup_bad,
+    initialize_global_nodes_ransha_small_field, receive, receive_client, setup_tracing, test_setup,
+    test_setup_bad,
 };
 use ark_bls12_381::{Fr, G1Projective as G};
 use ark_ec::PrimeGroup;
@@ -16,6 +17,7 @@ use ark_std::{
 };
 use futures::future::join_all;
 use std::{collections::HashMap, sync::Arc};
+use stoffelmpc_mpc::common::math::goldilocks::GoldilocksField;
 use stoffelmpc_mpc::{
     common::{
         rbc::rbc::Avid,
@@ -168,6 +170,66 @@ async fn ransha_e2e() {
                 .get_or_create_store(session_id)
                 .await
                 .unwrap();
+
+            loop {
+                let store = store.lock().await;
+                if store.state == RanShaState::Finished {
+                    break;
+                }
+                store.computed_r_shares.iter().for_each(|s_t| {
+                    assert_eq!(s_t.degree, t);
+                    assert_eq!(s_t.id, node.id);
+                });
+                assert_eq!(store.computed_r_shares.len(), n_parties);
+                sleep(Duration::from_millis(10)).await;
+            }
+        })),
+    )
+    .await;
+
+    assert!(result.is_ok(), "RanSha did not complete within the timeout");
+}
+
+#[tokio::test]
+async fn ransha_e2e_small_field() {
+    setup_tracing();
+    let n_parties = 5;
+    let t = 1;
+    let session_id = SessionId::new(ProtocolType::RanShaSmallField, 123, 0, 0, 111);
+
+    //Setup
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    // create global nodes
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+        n_parties,
+        t,
+        0,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![],
+    );
+
+    // spawn tasks to process received messages
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+
+    // init all ransha nodes
+    initialize_global_nodes_ransha_small_field(nodes.clone(), session_id, Arc::clone(&network))
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = timeout(
+        Duration::from_secs(5),
+        join_all(nodes.iter_mut().map(|node| async move {
+            let store = node
+                .preprocess
+                .small_field_share_gen
+                .get_or_create_store(session_id)
+                .await;
 
             loop {
                 let store = store.lock().await;
@@ -485,6 +547,7 @@ async fn mul_e2e_bad_net() {
             None,
             None,
             None,
+            None,
         );
     }
 
@@ -612,6 +675,7 @@ async fn mul_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             Some(triple[pid].clone()),
+            None,
             None,
             None,
             None,
@@ -1552,6 +1616,7 @@ async fn fpmul_e2e() {
             Some(triple[pid].clone()),
             None,
             None,
+            None,
             Some(r_bits[pid].clone()),
             Some(vec![r_int[pid].clone()]),
         );
@@ -2115,6 +2180,7 @@ async fn fpdiv_const_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             None, // No Beaver triple needed
+            None,
             None,
             None,
             Some(r_bits[pid].clone()),      // PRandBit[]

@@ -1,3 +1,4 @@
+use crate::common::math::goldilocks::GoldilocksField;
 use crate::{
     common::share::avss::FeldmanShamirShare,
     honeybadger::{
@@ -20,6 +21,8 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField, G: CurveGroup<ScalarFi
     beaver_triples: Vec<ShamirBeaverTriple<F>>,
     /// A pool of random shares used for inputing private data for the protocol.
     random_shares: Vec<RobustShare<F>>,
+    /// A pool of random shares used for inputing private data for the protocol.
+    random_shares_small_field: Vec<RobustShare<GoldilocksField>>,
     /// A pool of verifiable random shares
     v_random_shares: Vec<FeldmanShamirShare<F, G>>,
     ///A pool of PRandBit outputs for truncation
@@ -37,6 +40,7 @@ where
     pub fn empty() -> Self {
         Self {
             random_shares: Vec::new(),
+            random_shares_small_field: Vec::new(),
             v_random_shares: Vec::new(),
             beaver_triples: Vec::new(),
             prandbit_shares: Vec::new(),
@@ -49,6 +53,7 @@ where
         &mut self,
         mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
         mut random_shares: Option<Vec<RobustShare<F>>>,
+        mut random_shares_small_field: Option<Vec<RobustShare<GoldilocksField>>>,
         mut v_random_shares: Option<Vec<FeldmanShamirShare<F, G>>>,
         mut prandbit_shares: Option<Vec<(RobustShare<F>, F2_8)>>,
         mut prandbit_int: Option<Vec<RobustShare<F>>>,
@@ -56,19 +61,20 @@ where
         if let Some(pairs) = &mut triples {
             self.beaver_triples.append(pairs);
         }
-
         if let Some(shares) = &mut random_shares {
             self.random_shares.append(shares);
         }
         if let Some(shares) = &mut v_random_shares {
             self.v_random_shares.append(shares);
         }
-
         if let Some(shares) = &mut prandbit_shares {
             self.prandbit_shares.append(shares);
         }
         if let Some(shares) = &mut prandbit_int {
             self.prandint_shares.append(shares);
+        }
+        if let Some(shares) = &mut random_shares_small_field {
+            self.random_shares_small_field.append(shares);
         }
     }
 
@@ -450,6 +456,7 @@ mod test {
             None,
             None,
             None,
+            None,
         );
 
         assert_eq!(cache.len(), (2, 1, 0, 0, 0));
@@ -478,6 +485,7 @@ mod test {
         cache.add(
             Some(vec![triple.clone()]),
             Some(vec![share.clone()]),
+            None,
             None,
             None,
             None,
@@ -583,7 +591,14 @@ mod test {
             RobustShare::new(Fr::from(0), 1, 1),
         );
         let share = RobustShare::new(Fr::from(0), 1, 1);
-        cache.add(Some(vec![triple]), Some(vec![share]), None, None, None);
+        cache.add(
+            Some(vec![triple]),
+            Some(vec![share]),
+            None,
+            None,
+            None,
+            None,
+        );
 
         // 1. Drain cache into batches
         let instance_id: Vec<u8> = b"session_001".to_vec();
@@ -627,8 +642,8 @@ mod test {
             RobustShare::new(Fr::from(0), 1, 1),
             RobustShare::new(Fr::from(0), 1, 1),
         );
-        c1.add(Some(vec![triple.clone()]), None, None, None, None);
-        c2.add(Some(vec![triple.clone()]), None, None, None, None);
+        c1.add(Some(vec![triple.clone()]), None, None, None, None, None);
+        c2.add(Some(vec![triple.clone()]), None, None, None, None, None);
         let instance_id: Vec<u8> = b"session_001".to_vec();
 
         let b1 = PreprocBatch::<Fr>::from_cache(&mut c1, "Fr", 4, 1, instance_id.clone())

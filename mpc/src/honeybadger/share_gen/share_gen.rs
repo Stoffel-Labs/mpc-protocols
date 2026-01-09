@@ -3,6 +3,7 @@ use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
 use async_trait::async_trait;
+use std::any::type_name;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
@@ -89,7 +90,11 @@ where
         N: Network + Send + Sync,
         G: Rng + Send,
     {
-        info!("Receiving init for share from {0:?}", self.id);
+        info!(
+            "Receiving init for share from {0:?} using field {1:?}",
+            self.id,
+            type_name::<F>()
+        );
 
         assert_eq!(session_id.sub_id(), 0);
 
@@ -102,7 +107,12 @@ where
         for (recipient_id, share_t) in shares_deg_t.into_iter().enumerate() {
             // Create and serialize the payload.
             let mut payload = Vec::new();
-            share_t.serialize_compressed(&mut payload)?;
+            share_t.serialize_compressed(&mut payload).map_err(|e| {
+                RanShaError::ArkSerialization {
+                    source: e,
+                    location: "init",
+                }
+            })?;
 
             // Create and serialize the generic message.
             let generic_message = WrappedMessage::RanSha(RanShaMessage::new(
@@ -168,7 +178,11 @@ where
         };
 
         let share: ShamirShare<F, 1, Robust> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())
+                .map_err(|e| RanShaError::ArkSerialization {
+                    source: e,
+                    location: "receive_shares_handler",
+                })?;
 
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut ransha_storage = binding.lock().await;
@@ -231,7 +245,12 @@ where
             let share_deg_t = r_deg_t[i].clone();
 
             let mut bytes_rec_message = Vec::new();
-            share_deg_t.serialize_compressed(&mut bytes_rec_message)?;
+            share_deg_t
+                .serialize_compressed(&mut bytes_rec_message)
+                .map_err(|e| RanShaError::ArkSerialization {
+                    source: e,
+                    location: "init_ransha",
+                })?;
             let message = WrappedMessage::RanSha(RanShaMessage::new(
                 self.id,
                 RanShaMessageType::ReconstructMessage,
@@ -263,7 +282,12 @@ where
         }
 
         let share: ShamirShare<F, 1, Robust> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())
+                .map_err(|e| RanShaError::ArkSerialization {
+                    source: e,
+                    location: "reconstruction_handler",
+                })?;
+
         if share.degree != self.threshold {
             return Err(RanShaError::ShareError(ShareError::DegreeMismatch));
         }
