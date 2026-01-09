@@ -1065,8 +1065,7 @@ where
                         assert!(self.preprocess
                             .triple_gen
                             .batch_recon_node
-                            .clear_store(sessionid)
-                            .await);
+                            .clear_store(sessionid));
                     }
                 }
 

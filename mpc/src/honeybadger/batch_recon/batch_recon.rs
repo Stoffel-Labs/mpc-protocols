@@ -14,9 +14,10 @@ use crate::{
 };
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
+use dashmap::DashMap;
 use futures::lock::Mutex;
+use std::marker::PhantomData;
 use std::sync::Arc;
-use std::{collections::HashMap, marker::PhantomData};
 use stoffelnet::network_utils::Network;
 use tracing::{debug, error, info, warn};
 /// --------------------------BatchRecPub--------------------------
@@ -39,26 +40,24 @@ use tracing::{debug, error, info, warn};
 pub struct BatchReconNode<F: FftField> {
     pub id: usize, // This node's unique identifier
     pub n: usize,  // Total number of nodes/shares
-    pub t: usize,
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BatchReconStore<F>>>>>>, // Number of malicious parties
+    pub t: usize,  // Number of malicious parties
+    pub store: Arc<DashMap<SessionId, Arc<Mutex<BatchReconStore<F>>>>>,
 }
 
 impl<F: FftField> BatchReconNode<F> {
     /// Creates a new `Node` instance.
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, BatchReconError> {
-        let store = Arc::new(Mutex::new(HashMap::new()));
+        let store = Arc::new(DashMap::new());
         Ok(Self { id, n, t, store })
     }
 
-    pub async fn clear_entire_store(&self) {
-        let mut store = self.store.lock().await;
-        store.clear();
+    pub fn clear_entire_store(&self) {
+        self.store.clear();
     }
 
-    pub async fn clear_store(&self, session_id: SessionId) -> bool {
-        let mut store = self.store.lock().await;
-        store.remove(&session_id).is_some()
-     }
+    pub fn clear_store(&self, session_id: SessionId) -> bool {
+        self.store.remove(&session_id).is_some()
+    }
 
     /// Initiates the batch reconstruction protocol for a given node.
     ///
@@ -128,34 +127,54 @@ impl<F: FftField> BatchReconNode<F> {
                 let val = F::deserialize_compressed(msg.payload.as_slice())
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
-                // Lock the session store to update the session state.
-                let session_store = self.get_or_create_store(msg.session_id).await;
-                // Lock the session-specific store to access or update the session state.
-                let mut store = session_store.lock().await;
+                let session_store = self.get_or_create_store(msg.session_id);
 
-                // Store the received evaluation share if it's from a new sender.
-                if !store.evals_received.iter().any(|s| s.id == sender_id) {
+                // Phase 1: Quick lock to store share and check threshold
+                let should_interpolate = {
+                    let mut store = session_store.lock().await;
+
+                    // O(1) deduplication using HashSet
+                    if !store.evals_seen.insert(sender_id) {
+                        return Ok(()); // Duplicate
+                    }
                     store
                         .evals_received
                         .push(RobustShare::new(val, sender_id, self.t));
-                }
-                // Check if we have enough evaluation shares and haven't already computed our `y_j`.
-                if store.evals_received.len() >= 2 * self.t + 1 && store.y_j.is_none() {
+
+                    // Check threshold + atomic claim
+                    store.evals_received.len() >= 2 * self.t + 1
+                        && store.y_j.is_none()
+                        && store.try_claim_eval_interpolation()
+                }; // Lock released
+
+                if should_interpolate {
                     info!(
                         self_id = self.id,
                         "Enough Evals collected, interpolating y_j"
                     );
 
-                    // Attempt to interpolate the polynomial and get our specific `y_j` value.
-                    match RobustShare::recover_secret(&store.evals_received, self.n) {
+                    // Phase 2: Clone shares (brief lock)
+                    let shares = {
+                        let store = session_store.lock().await;
+                        store.evals_received.clone()
+                    };
+
+                    // Phase 3: Interpolation OUTSIDE lock
+                    let result = RobustShare::recover_secret(&shares, self.n);
+
+                    // Phase 4: Store result and broadcast
+                    match result {
                         Ok((_, value)) => {
-                            store.y_j = Some(RobustShare {
-                                share: [value],
-                                id: self.id,
-                                degree: self.t,
-                                _sharetype: PhantomData,
-                            });
-                            drop(store);
+                            {
+                                let mut store = session_store.lock().await;
+                                store.y_j = Some(RobustShare {
+                                    share: [value],
+                                    id: self.id,
+                                    degree: self.t,
+                                    _sharetype: PhantomData,
+                                });
+                            } // Lock released before network
+
                             info!(node = self.id, "Broadcasting y_j value: {:?}", value);
 
                             let mut payload = Vec::new();
@@ -169,9 +188,7 @@ impl<F: FftField> BatchReconNode<F> {
                                 payload,
                             );
 
-                            //Wrap the msg in global enum
                             let wrapped = WrappedMessage::BatchRecon(new_msg);
-                            // Broadcast our computed `y_j` to all other parties.
                             let encoded = bincode::serialize(&wrapped)
                                 .map_err(BatchReconError::SerializationError)?;
                             let _ = net
@@ -197,34 +214,55 @@ impl<F: FftField> BatchReconNode<F> {
                 let y_j = F::deserialize_compressed(msg.payload.as_slice())
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
-                // Lock the session store to update the session state.
-                let session_store = self.get_or_create_store(msg.session_id).await;
-                // Lock the session-specific store to access or update the session state.
-                let mut store = session_store.lock().await;
+                let session_store = self.get_or_create_store(msg.session_id);
 
-                // Store the received revealed `y_j` value if it's from a new sender.
-                if !store.reveals_received.iter().any(|s| s.id == sender_id) {
+                // Phase 1: Quick lock to store share and check threshold
+                let should_interpolate = {
+                    let mut store = session_store.lock().await;
+
+                    // O(1) deduplication using HashSet
+                    if !store.reveals_seen.insert(sender_id) {
+                        return Ok(()); // Duplicate
+                    }
                     store
                         .reveals_received
                         .push(RobustShare::new(y_j, sender_id, self.t));
-                }
-                // Check if we have enough revealed `y_j` values and haven't already reconstructed the secrets.
-                if store.reveals_received.len() >= 2 * self.t + 1 && store.secrets.is_none() {
+
+                    // Check threshold + atomic claim
+                    store.reveals_received.len() >= 2 * self.t + 1
+                        && store.secrets.is_none()
+                        && store.try_claim_reveal_interpolation()
+                }; // Lock released
+
+                if should_interpolate {
                     info!(
                         self_id = self.id,
                         "Enough Reveals collected, interpolating secrets"
                     );
-                    // Attempt to interpolate the polynomial whose coefficients are the original secrets.
-                    match RobustShare::recover_secret(&store.reveals_received, self.n) {
+
+                    // Phase 2: Clone shares (brief lock)
+                    let shares = {
+                        let store = session_store.lock().await;
+                        store.reveals_received.clone()
+                    };
+
+                    // Phase 3: Interpolation OUTSIDE lock
+                    let interpolation_result = RobustShare::recover_secret(&shares, self.n);
+
+                    // Phase 4: Store result and send finalization message
+                    match interpolation_result {
                         Ok((poly, _)) => {
                             let mut result = poly;
-                            // Resize the coefficient vector to `t + 1` to get all secrets.
                             result.resize(self.t + 1, F::zero());
-                            store.secrets = Some(result.clone());
+
+                            {
+                                let mut store = session_store.lock().await;
+                                store.secrets = Some(result.clone());
+                            } // Lock released before network
+
                             info!(self_id = self.id, "Secrets successfully reconstructed");
 
-                            // Send the finalization message back to the triple generation or the
-                            // multiplication protocol.
+                            // Send the finalization message back to the calling protocol
                             match calling_proto {
                                 ProtocolType::Triple => {
                                     let mut bytes_message = Vec::new();
@@ -315,14 +353,10 @@ impl<F: FftField> BatchReconNode<F> {
         Ok(())
     }
 
-    pub async fn get_or_create_store(
-        &self,
-        session_id: SessionId,
-    ) -> Arc<Mutex<BatchReconStore<F>>> {
-        let mut storage = self.store.lock().await;
-        storage
+    pub fn get_or_create_store(&self, session_id: SessionId) -> Arc<Mutex<BatchReconStore<F>>> {
+        self.store
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(BatchReconStore::empty())))
+            .or_insert_with(|| Arc::new(Mutex::new(BatchReconStore::with_capacity(self.n))))
             .clone()
     }
 }
