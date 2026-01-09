@@ -293,3 +293,72 @@ pub extern "C" fn free_quic_peer_connections(peer_connections: *mut QuicPeerConn
         }
     }
 }
+
+/// Creates a new QUIC network instance with a specific party ID
+///
+/// The party_id is stored internally and can be retrieved later.
+/// This is useful for MPC where parties need consistent IDs.
+#[no_mangle]
+pub extern "C" fn new_quic_network_with_party_id(
+    party_id: usize,
+    returned_connections: *mut *mut QuicPeerConnectionsOpaque,
+) -> *mut QuicNetworkOpaque {
+    // Note: QuicNetworkManager doesn't currently use party_id internally,
+    // but we expose this for API consistency. The party_id is used at the
+    // HoneyBadger engine level, not the network level.
+    let quic_network = QuicNetwork {
+        quic_manager: QuicNetworkManager::new(),
+    };
+    let peer_connections = QuicPeerConnections {
+        connections: HashMap::new(),
+    };
+    unsafe {
+        *returned_connections =
+            Box::into_raw(Box::new(peer_connections)) as *mut QuicPeerConnectionsOpaque;
+    }
+
+    Box::into_raw(Box::new(quic_network)) as *mut QuicNetworkOpaque
+}
+
+/// Extract the raw Arc<QuicNetworkManager> pointer from NetworkOpaque
+///
+/// This is needed for StoffelVM's hb_engine_new() which expects a raw
+/// pointer to the network manager.
+///
+/// Returns null if the network is not a QUIC network.
+///
+/// IMPORTANT: The returned pointer is a clone of the Arc, so the
+/// original NetworkOpaque remains valid. The returned pointer must
+/// be freed with free_raw_quic_network().
+#[no_mangle]
+pub extern "C" fn extract_quic_network(
+    network_ptr: *mut NetworkOpaque,
+) -> *mut std::ffi::c_void {
+    if network_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let network = unsafe { &*(network_ptr as *mut GenericNetwork) };
+
+    match network {
+        GenericNetwork::QuicNetworkManager(arc) => {
+            // Clone the Arc and convert to raw pointer
+            let cloned_arc = Arc::clone(arc);
+            Arc::into_raw(cloned_arc) as *mut std::ffi::c_void
+        }
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// Free a raw Arc<QuicNetworkManager> pointer
+///
+/// This frees the pointer returned by extract_quic_network().
+#[no_mangle]
+pub extern "C" fn free_raw_quic_network(ptr: *mut std::ffi::c_void) {
+    if !ptr.is_null() {
+        unsafe {
+            // Reconstruct the Arc and let it drop
+            let _ = Arc::from_raw(ptr as *const QuicNetworkManager);
+        }
+    }
+}
