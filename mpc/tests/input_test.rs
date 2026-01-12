@@ -1,7 +1,7 @@
 use crate::utils::test_utils::{
     create_global_nodes, generate_independent_shares, receive, setup_tracing, test_setup,
 };
-use ark_bls12_381::{Fr, G1Projective as G};
+use ark_bls12_381::Fr;
 use stoffelmpc_mpc::honeybadger::input::InputError;
 use stoffelmpc_mpc::{
     common::{rbc::rbc::Avid, SecretSharingScheme, ShamirShare},
@@ -49,7 +49,7 @@ async fn test_multiple_clients_parallel_input() {
             0,
             client_ids.clone(),
         );
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(server_recv, nodes.clone(), net.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
 
     for (i, &cid) in client_ids.iter().enumerate() {
         let input = inputs[i].clone();
@@ -124,7 +124,7 @@ async fn test_input_recovery_with_missing_server() {
         vec![clientid],
     );
 
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(server_recv, nodes.clone(), net.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
     let mut recv = client_recv.remove(&clientid).unwrap();
     let net_clone = net.clone();
     tokio::spawn(async move {
@@ -190,7 +190,7 @@ async fn test_input_with_too_many_faulty_shares() {
     );
 
     // Start server receiver loop
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(server_recv, nodes.clone(), net.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
 
     // Start client receiver loop
     let mut recv = client_recv.remove(&client_id).unwrap();

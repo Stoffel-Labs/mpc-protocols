@@ -3,7 +3,7 @@ use crate::utils::test_utils::{
     generate_independent_shares, initialize_global_nodes_randousha, initialize_global_nodes_ransha,
     receive, receive_client, setup_tracing, test_setup, test_setup_bad,
 };
-use ark_bls12_381::{Fr, G1Projective as G};
+use ark_bls12_381::Fr;
 use ark_ff::{AdditiveGroup, Field, UniformRand};
 use ark_std::{
     rand::{
@@ -69,7 +69,7 @@ async fn randousha_e2e() {
         vec![],
     );
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     // init all randousha nodes
     initialize_global_nodes_randousha(
@@ -141,7 +141,7 @@ async fn ransha_e2e() {
         vec![],
     );
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     // init all ransha nodes
     initialize_global_nodes_ransha(nodes.clone(), session_id, Arc::clone(&network)).await;
@@ -207,7 +207,7 @@ async fn test_input_protocol_e2e() {
     );
 
     //Receive at server
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(server_recv, nodes.clone(), net.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
     //Receive at client
     let net_clone2 = net.clone();
     let mut recv = client_recv.remove(&clientid[0]).unwrap();
@@ -295,7 +295,7 @@ async fn gen_masks_for_input_e2e() {
 
     //----------------------------------------RECIEVE----------------------------------------
     //At servers
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
     //At client
     let net_clone2 = network.clone();
     let mut recv = client_recv.remove(&clientid[0]).unwrap();
@@ -448,11 +448,7 @@ async fn mul_e2e_bad_net() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork, G>(
-        receivers,
-        nodes.clone(),
-        network.clone(),
-    );
+    receive::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
     //Load the triples
@@ -579,7 +575,7 @@ async fn mul_e2e() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
     //Load the triples
@@ -695,11 +691,7 @@ async fn mul_e2e_with_preprocessing_bad_net() {
 
     //----------------------------------------RECIEVE----------------------------------------
     //At servers
-    receive::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork, G>(
-        receivers,
-        nodes.clone(),
-        network.clone(),
-    );
+    receive::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //At client
     receive_client(client_recv, clients.clone(), network.clone());
@@ -879,7 +871,7 @@ async fn mul_e2e_with_preprocessing() {
 
     //----------------------------------------RECIEVE----------------------------------------
     //At servers
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //At client
     receive_client(client_recv, clients.clone(), network.clone());
@@ -1057,7 +1049,7 @@ async fn preprocessing_e2e() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
 
@@ -1130,7 +1122,7 @@ async fn preprocessing_e2e_big() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
 
@@ -1205,11 +1197,7 @@ async fn preprocessing_e2e_bad_net() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork, G>(
-        receivers,
-        nodes.clone(),
-        network.clone(),
-    );
+    receive::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
 
@@ -1359,7 +1347,7 @@ async fn test_rand_bit() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     // init all nodes
     let mut handles = Vec::new();
@@ -1498,7 +1486,7 @@ async fn fpmul_e2e() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
     //Load
@@ -1607,7 +1595,7 @@ async fn fpmul_e2e_with_preprocessing() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
 
@@ -1695,7 +1683,7 @@ async fn add_fixed_e2e() {
     );
 
     // Receiver loop
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //----------------------------------------RUN ADDITION----------------------------------------
     let mut handles = Vec::new();
@@ -1763,7 +1751,7 @@ async fn sub_fixed_e2e() {
         vec![],
     );
 
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     let mut handles = Vec::new();
     for pid in 0..n_parties {
@@ -1821,7 +1809,7 @@ async fn add_int_e2e() {
         vec![],
     );
 
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     let mut handles = Vec::new();
     for pid in 0..n_parties {
@@ -1879,7 +1867,7 @@ async fn sub_int_e2e() {
         vec![],
     );
 
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     let mut handles = Vec::new();
     for pid in 0..n_parties {
@@ -1948,7 +1936,7 @@ async fn mul_int_e2e_with_preprocessing() {
     }
 
     //----------------------------------------RECEIVE LOOP----------------------------------------
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //----------------------------------------RUN PREPROCESSING----------------------------------------
     let mut pre_handles = Vec::new();
@@ -2056,7 +2044,7 @@ async fn fpdiv_const_e2e() {
     );
 
     //----------------------------------------RECEIVE LOOP----------------------------------------
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
 
     //----------------------------------------LOAD PREPROCESSING----------------------------------------
     for pid in 0..n_parties {

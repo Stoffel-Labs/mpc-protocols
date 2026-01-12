@@ -1,5 +1,4 @@
 use ark_bls12_381::Fr;
-use ark_ec::CurveGroup;
 use ark_ff::{FftField, PrimeField, UniformRand};
 use ark_std::rand::rngs::{OsRng, StdRng};
 use ark_std::rand::SeedableRng;
@@ -373,7 +372,7 @@ pub fn generate_independent_shares<F: FftField>(
 
 //--------------------------NODE--------------------------
 
-pub fn receive<F, R, S, N, G>(
+pub fn receive<F, R, S, N>(
     mut receivers: Vec<Receiver<Vec<u8>>>,
     mut nodes: Vec<HoneyBadgerMPCNode<F, R>>,
     net: Arc<N>,
