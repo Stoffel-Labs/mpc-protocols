@@ -1,5 +1,7 @@
 use ark_bls12_381::Fr;
 use ark_ff::{FftField, PrimeField, UniformRand};
+use ark_std::rand::rngs::{OsRng, StdRng};
+use ark_std::rand::SeedableRng;
 use ark_std::test_rng;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -613,7 +615,7 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
     R: RBC + 'static,
     N: Network + Send + Sync + 'static,
 {
-    let mut rng = test_rng();
+    let mut rng = StdRng::from_rng(OsRng).unwrap();
 
     for node in nodes {
         let mut node_rds = node.preprocess.share_gen;

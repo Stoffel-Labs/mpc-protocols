@@ -1,4 +1,5 @@
 pub mod rbc;
+
 /// In MPC, the most fundamental underlying type is called a share.
 /// Think of a share as a piece of a secret that has been split among a set of parties.
 /// As such, on its own, you don't derive any information. But when combined with other parties,
@@ -6,6 +7,9 @@ pub mod rbc;
 /// When wanting to implement your own custom MPC protocols that can plug
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
+
+/// Implementation of the hbACSS protocol from https://eprint.iacr.org/2021/159.
+pub mod acss;
 
 pub mod types;
 
@@ -16,7 +20,6 @@ use crate::{
     },
     honeybadger::SessionId,
 };
-
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -321,6 +324,7 @@ where
     async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
     where
         N: 'async_trait;
+    async fn rand(&mut self, network: Arc<N>) -> Result<S, Self::Error>;
 }
 
 #[async_trait]

@@ -466,6 +466,25 @@ where
             .map_err(HoneyBadgerError::from)
     }
 
+    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
+        let (_, no_rand, _, _) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        if no_rand == 0 {
+            //Run preprocessing
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(network.clone(), &mut rng).await?;
+        }
+        // Extract the preprocessing triple.
+        let rand_value = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(1)?;
+        Ok(rand_value[0].clone())
+    }
+
     async fn process(
         &mut self,
         sender_id: PartyId,
@@ -724,6 +743,7 @@ where
         Ok(())
     }
 }
+
 #[async_trait]
 impl<F, N, R> MPCTypeOps<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
 where
@@ -1148,6 +1168,7 @@ where
         // ------------------------
         self.ensure_prandint_shares(network.clone()).await?;
         info!("PrandInt share generation done");
+
         Ok(())
     }
 }
@@ -1165,7 +1186,7 @@ where
     ) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
-        G: Rng,
+        G: Rng + Send,
     {
         // Outputs in batches of (n-2t)
         let batch = self.params.n_parties - 2 * self.params.threshold;
@@ -1514,6 +1535,7 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
+    Avss = 15,
 }
 
 impl TryFrom<u8> for ProtocolType {
@@ -1536,6 +1558,7 @@ impl TryFrom<u8> for ProtocolType {
             12 => Ok(ProtocolType::FpMul),
             13 => Ok(ProtocolType::Trunc),
             14 => Ok(ProtocolType::FpDivConst),
+            15 => Ok(ProtocolType::Avss),
             _ => Err(()),
         }
     }

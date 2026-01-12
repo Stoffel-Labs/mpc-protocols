@@ -444,7 +444,6 @@ async fn mul_e2e_bad_net() {
     let n_parties = 4;
     let t = 1;
     let mut rng = test_rng();
-    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111); // foresees the session ID
     let no_of_multiplication = 5;
 
     //Setup
@@ -586,7 +585,6 @@ async fn mul_e2e() {
     let n_parties = 4;
     let t = 1;
     let mut rng = test_rng();
-    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111); // foresees the session ID
     let no_of_multiplication = 5;
 
     //Setup
@@ -720,7 +718,6 @@ async fn mul_e2e_with_preprocessing_bad_net() {
     let n_parties = 4;
     let t = 1;
     let no_of_triples = 2 * t + 1;
-    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111);
     let clientid: Vec<ClientId> = vec![100, 200];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     let no_of_multiplications = 2; // 10*10, 20*20
@@ -914,7 +911,6 @@ async fn mul_e2e_with_preprocessing() {
     let n_parties = 4;
     let t = 1;
     let no_of_triples = 2 * t + 1;
-    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111);
     let clientid: Vec<ClientId> = vec![100, 200];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     let no_of_multiplications = 2; // 10*10, 20*20
