@@ -527,10 +527,11 @@ mod test {
         };
 
         // Reserve it
-        let bid = batch
-            .reserve_with_registry(client_id, &registry)
-            .await
-            .unwrap();
+        let bid = <PreprocBatch<Fr> as PreprocBatchOps<Fr>>::reserve_with_registry(
+            &mut batch, client_id, &registry,
+        )
+        .await
+        .unwrap();
         assert_eq!(bid, batch.meta.id);
         assert_eq!(batch.meta.reserved, Some(client_id));
 
@@ -539,10 +540,11 @@ mod test {
         assert_eq!(reserved, vec![bid]);
 
         // Double-reserve should error
-        let err = batch
-            .reserve_with_registry(client_id, &registry)
-            .await
-            .unwrap_err();
+        let err = <PreprocBatch<Fr> as PreprocBatchOps<Fr>>::reserve_with_registry(
+            &mut batch, client_id, &registry,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, HoneyBadgerError::AlreadyReserved));
     }
 
@@ -569,9 +571,10 @@ mod test {
         // 2. Reserve all for a client
         let client = Uuid::new_v4();
         for b in &mut batches {
-            b.reserve_with_registry(client, &registry).await.unwrap();
+            <PreprocBatch<Fr> as PreprocBatchOps<Fr>>::reserve_with_registry(b, client, &registry)
+                .await
+                .unwrap();
         }
-
         // 3. Verify all reserved
         let reserved_batches = registry.get_reserved_batches(&client).await;
         assert_eq!(reserved_batches.len(), batches.len());
@@ -582,7 +585,9 @@ mod test {
         assert!(bt + rs > 0);
 
         // 5. Release one
-        registry.release_batch(&client, &batches[0].id()).await;
+        let batch_id = <PreprocBatch<Fr> as PreprocBatchOps<Fr>>::id(&batches[0]);
+        registry.release_batch(&client, &batch_id).await;
+
         let remaining = registry.get_reserved_batches(&client).await;
         assert_eq!(remaining.len(), batches.len() - 1);
     }

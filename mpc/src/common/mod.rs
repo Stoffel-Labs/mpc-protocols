@@ -1,4 +1,5 @@
 pub mod rbc;
+
 /// In MPC, the most fundamental underlying type is called a share.
 /// Think of a share as a piece of a secret that has been split among a set of parties.
 /// As such, on its own, you don't derive any information. But when combined with other parties,
@@ -6,6 +7,9 @@ pub mod rbc;
 /// When wanting to implement your own custom MPC protocols that can plug
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
+
+/// Implementation of the hbACSS protocol from https://eprint.iacr.org/2021/159.
+pub mod acss;
 
 pub mod types;
 
@@ -16,7 +20,7 @@ use crate::{
     },
     honeybadger::SessionId,
 };
-
+use ark_ec::CurveGroup;
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -28,7 +32,7 @@ use std::{
     sync::Arc,
     usize,
 };
-use stoffelnet::network_utils::{Network, ClientId, PartyId};
+use stoffelnet::network_utils::{ClientId, Network, PartyId};
 
 #[derive(Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
@@ -289,7 +293,11 @@ where
     type MPCOpts;
     type Error: std::fmt::Debug;
 
-    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, Self::Error>
+    fn setup(
+        id: PartyId,
+        params: Self::MPCOpts,
+        input_ids: Vec<ClientId>,
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized;
 
@@ -298,6 +306,7 @@ where
     async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
     where
         N: 'async_trait;
+    async fn rand(&mut self, network: Arc<N>) -> Result<S, Self::Error>;
 }
 
 #[async_trait]
@@ -381,4 +390,33 @@ where
         y: Vec<Self::Sint>,
         net: Arc<N>,
     ) -> Result<Vec<Self::Sint>, Self::Error>;
+}
+
+pub trait SecretKey<F, S, G>
+where
+    F: FftField,
+    S: SecretSharingScheme<F>,
+    G: CurveGroup<ScalarField = F>,
+{
+    fn get_share(&self) -> &S;
+    fn get_commitment(&self) -> &Vec<G>;
+}
+
+#[async_trait]
+pub trait ADKG<F, K, S, N, G>
+where
+    F: FftField,
+    S: SecretSharingScheme<F>,
+    N: Network,
+    G: CurveGroup<ScalarField = F>,
+    K: SecretKey<F, S, G>,
+{
+    type Error;
+
+    async fn secret_key(
+        &mut self,
+        no_of_keys: usize,
+        network: Arc<N>,
+    ) -> Result<Vec<K>, Self::Error>;
+    async fn public_key(&self, secret_key: Vec<K>, net: Arc<N>) -> Result<Vec<G>, Self::Error>;
 }
