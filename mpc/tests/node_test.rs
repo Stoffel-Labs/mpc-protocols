@@ -4,7 +4,6 @@ use crate::utils::test_utils::{
     receive, receive_client, setup_tracing, test_setup, test_setup_bad,
 };
 use ark_bls12_381::{Fr, G1Projective as G};
-use ark_ec::PrimeGroup;
 use ark_ff::{AdditiveGroup, Field, UniformRand};
 use ark_std::{
     rand::{
@@ -19,12 +18,11 @@ use std::{collections::HashMap, sync::Arc};
 use stoffelmpc_mpc::{
     common::{
         rbc::rbc::Avid,
-        share::{avss::FeldmanShamirShare, shamir::Shamirshare},
         types::{
             fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
             integer::SecretInt,
         },
-        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, SecretSharingScheme, ShamirShare, ADKG,
+        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, SecretSharingScheme, ShamirShare,
     },
     honeybadger::{
         fpmul::f256::F2_8,
@@ -58,10 +56,9 @@ async fn randousha_e2e() {
     let (network, receivers, _) = test_setup(n_parties, vec![]);
     let (_, n_shares_t, n_shares_2t) = construct_e2e_input(n_parties, degree_t);
     // create global nodes
-    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         111,
@@ -131,10 +128,9 @@ async fn ransha_e2e() {
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
     // create global nodes
-    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         111,
@@ -197,10 +193,9 @@ async fn test_input_protocol_e2e() {
     // Set up InputServers/InputClient
     let mut client =
         InputClient::<Fr, Avid>::new(clientid[0], n, t, 111, input_values.clone()).unwrap();
-    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n,
         t,
-        0,
         0,
         0,
         111,
@@ -282,10 +277,9 @@ async fn gen_masks_for_input_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     //Create global nodes for InputServers
-    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         111,
@@ -439,10 +433,9 @@ async fn mul_e2e_bad_net() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         111,
@@ -465,13 +458,10 @@ async fn mul_e2e_bad_net() {
     //Load the triples
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        node.preprocessing_material.lock().await.add(
-            Some(triple[pid].clone()),
-            None,
-            None,
-            None,
-            None,
-        );
+        node.preprocessing_material
+            .lock()
+            .await
+            .add(Some(triple[pid].clone()), None, None, None);
     }
 
     // init all nodes
@@ -574,10 +564,9 @@ async fn mul_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         111,
@@ -596,13 +585,10 @@ async fn mul_e2e() {
     //Load the triples
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        node.preprocessing_material.lock().await.add(
-            Some(triple[pid].clone()),
-            None,
-            None,
-            None,
-            None,
-        );
+        node.preprocessing_material
+            .lock()
+            .await
+            .add(Some(triple[pid].clone()), None, None, None);
     }
 
     // init all nodes
@@ -690,12 +676,11 @@ async fn mul_e2e_with_preprocessing_bad_net() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(
         n_parties,
         t,
         no_of_triples,
         2,
-        0,
         111,
         0,
         0,
@@ -875,12 +860,11 @@ async fn mul_e2e_with_preprocessing() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         no_of_triples,
         2,
-        0,
         111,
         0,
         0,
@@ -1049,7 +1033,6 @@ async fn preprocessing_e2e() {
     let k = 4;
     let no_of_triples = 7;
     let no_of_randomshares = 4;
-    let no_of_v_randomshares = 4;
     let instance_id = 111;
     let n_prandbit = 4;
     let n_prandint = 4;
@@ -1059,12 +1042,11 @@ async fn preprocessing_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         no_of_triples,
         no_of_randomshares,
-        no_of_v_randomshares,
         instance_id,
         n_prandbit,
         n_prandint,
@@ -1104,11 +1086,10 @@ async fn preprocessing_e2e() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_shares, n_v_shares, n_prandbit, n_prandint) =
+        let (n_triples, n_shares, n_prandbit, n_prandint) =
             node.preprocessing_material.lock().await.len();
         assert_eq!(n_triples, 5); //>no_of_triples
         assert_eq!(n_shares, 2); //>no_of_randomshares
-        assert_eq!(n_v_shares, 6);
         assert_eq!(n_prandbit, 4);
         assert_eq!(n_prandint, 4);
     }
@@ -1134,12 +1115,11 @@ async fn preprocessing_e2e_big() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         no_of_triples,
         no_of_randomshares,
-        0,
         instance_id,
         n_prandbit,
         n_prandint,
@@ -1179,7 +1159,7 @@ async fn preprocessing_e2e_big() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_shares, _, n_prandbit, n_prandint) =
+        let (n_triples, n_shares, n_prandbit, n_prandint) =
             node.preprocessing_material.lock().await.len();
         info!("{}: {} {}", pid, n_triples, n_shares);
         assert_eq!(n_triples, 20000); //>no_of_triples
@@ -1210,12 +1190,11 @@ async fn preprocessing_e2e_bad_net() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(
         n_parties,
         t,
         no_of_triples,
         no_of_randomshares,
-        0,
         111,
         0,
         0,
@@ -1259,7 +1238,7 @@ async fn preprocessing_e2e_bad_net() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_random_shares, _, n_prandbit_shares, n_prandint_shares) =
+        let (n_triples, n_random_shares, n_prandbit_shares, n_prandint_shares) =
             node.preprocessing_material.lock().await.len();
         assert_eq!(n_triples, 6); //>no_of_triples
         assert_eq!(n_random_shares, 0); //>no_of_randomshares
@@ -1365,12 +1344,11 @@ async fn test_rand_bit() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         no_of_rand_bits,
         no_of_rand_bits,
-        0,
         111,
         0,
         0,
@@ -1505,10 +1483,9 @@ async fn fpmul_e2e() {
     }
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         111,
@@ -1529,7 +1506,6 @@ async fn fpmul_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             Some(triple[pid].clone()),
-            None,
             None,
             Some(r_bits[pid].clone()),
             Some(vec![r_int[pid].clone()]),
@@ -1616,12 +1592,11 @@ async fn fpmul_e2e_with_preprocessing() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         n_triples,
         n_random_shares,
-        0,
         instance_id,
         n_prandbit,
         n_prandint,
@@ -1706,10 +1681,9 @@ async fn add_fixed_e2e() {
     }
 
     //----------------------------------------SETUP NODES----------------------------------------
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         instance_id,
@@ -1776,10 +1750,9 @@ async fn sub_fixed_e2e() {
         ));
     }
 
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         instance_id,
@@ -1835,10 +1808,9 @@ async fn add_int_e2e() {
         b_int.push(SecretInt::new(y[i].clone(), bitlen));
     }
 
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         instance_id,
@@ -1894,10 +1866,9 @@ async fn sub_int_e2e() {
         b_int.push(SecretInt::new(y[i].clone(), bitlen));
     }
 
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         instance_id,
@@ -1951,12 +1922,11 @@ async fn mul_int_e2e_with_preprocessing() {
     let (network, receivers, _) = test_setup(n_parties, vec![]);
 
     //----------------------------------------SETUP NODES----------------------------------------
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         /*beaver triples*/ 2, // safe for one mul
         /*random shares */ 2,
-        0,
         instance_id,
         /*prandbit*/ 0,
         /*prandint*/ 0,
@@ -2072,10 +2042,9 @@ async fn fpdiv_const_e2e() {
     }
 
     //----------------------------------------SETUP NODES----------------------------------------
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         222,
@@ -2094,7 +2063,6 @@ async fn fpdiv_const_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             None, // No Beaver triple needed
-            None,
             None,
             Some(r_bits[pid].clone()),      // PRandBit[]
             Some(vec![r_int[pid].clone()]), // PRandInt[]
@@ -2139,126 +2107,4 @@ async fn fpdiv_const_e2e() {
 
     // 2.75 * 2^4 = 44
     assert_eq!(rec, Fr::from(44u64));
-}
-
-#[tokio::test]
-async fn adkg_e2e() {
-    setup_tracing();
-    //----------------------------------------SETUP PARAMETERS----------------------------------------
-    let n_parties = 5;
-    let t = 1;
-    let no_of_keys = 3;
-    //Setup
-    let (network, receivers, _) = test_setup(n_parties, vec![]);
-
-    //----------------------------------------SETUP NODES----------------------------------------
-    // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
-        n_parties,
-        t,
-        0,
-        0,
-        no_of_keys,
-        111,
-        0,
-        0,
-        0,
-        0,
-        vec![],
-    );
-
-    //----------------------------------------RECIEVE----------------------------------------
-    // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
-
-    //----------------------------------------RUN PROTOCOL----------------------------------------
-    // init all nodes
-    let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<FeldmanShamirShare<Fr, G>>)>(100);
-    let mut handles = Vec::new();
-    for pid in 0..n_parties {
-        let mut node = nodes[pid].clone();
-        let net = network.clone();
-        let fin_send = fin_send.clone();
-        let handle = tokio::spawn(async move {
-            {
-                let key_shares = node.secret_key(no_of_keys, net).await.expect("mul failed");
-                fin_send.send((pid, key_shares)).await.unwrap();
-            }
-        });
-        handles.push(handle);
-    }
-
-    // Wait for all mul tasks to finish
-    futures::future::join_all(handles).await;
-    let mut per_party: Vec<Option<Vec<FeldmanShamirShare<Fr, G>>>> = vec![None; n_parties];
-    while let Some((pid, shares)) = fin_recv.recv().await {
-        per_party[pid] = Some(shares);
-        if per_party.iter().all(|x| x.is_some()) {
-            break;
-        }
-    }
-
-    let mut per_key: Vec<Vec<FeldmanShamirShare<Fr, G>>> =
-        vec![Vec::with_capacity(n_parties); no_of_keys];
-
-    for pid in 0..n_parties {
-        let shares = per_party[pid].as_ref().unwrap();
-        assert_eq!(shares.len(), no_of_keys);
-
-        for k in 0..no_of_keys {
-            per_key[k].push(shares[k].clone());
-        }
-    }
-
-    //----------------------------------------VALIDATE EACH KEY----------------------------------------
-    for key_idx in 0..no_of_keys {
-        let feldman_shares = &per_key[key_idx];
-
-        // Reconstruct secret from t+1 shares
-        let shamir_shares: Vec<Shamirshare<Fr>> = feldman_shares
-            .iter()
-            .map(|fs| fs.feldmanshare.clone())
-            .collect();
-
-        let subset = shamir_shares[0..(t + 1)].to_vec();
-        let (_, secret_rec) =
-            Shamirshare::<Fr>::recover_secret(&subset, n_parties).expect("recover_secret failed");
-
-        //-------------------------------- PK checks --------------------------------
-        let pk_expected = G::generator() * secret_rec;
-
-        // Feldman invariant: pk == C_0
-        let c0 = feldman_shares[0].commitments[0];
-        assert_eq!(pk_expected, c0, "pk != Feldman C0 (key {})", key_idx);
-
-        // ADKG public_key API
-        let pk_from_method = nodes[0]
-            .public_key(vec![feldman_shares[0].clone()], network.clone())
-            .await
-            .expect("public_key failed")[0];
-
-        assert_eq!(
-            pk_from_method, pk_expected,
-            "public_key() != g^secret (key {})",
-            key_idx
-        );
-
-        //-------------------------------- Commitments consistency --------------------------------
-        let reference_commitments = &feldman_shares[0].commitments;
-
-        assert_eq!(
-            reference_commitments.len(),
-            t + 1,
-            "commitment length mismatch (key {})",
-            key_idx
-        );
-
-        for (pid, fs) in feldman_shares.iter().enumerate() {
-            assert_eq!(
-                fs.commitments, *reference_commitments,
-                "Feldman commitments mismatch at party {}, key {}",
-                pid, key_idx
-            );
-        }
-    }
 }

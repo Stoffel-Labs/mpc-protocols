@@ -36,11 +36,10 @@ async fn test_multiple_clients_parallel_input() {
         .map(|mask| generate_independent_shares(mask, t, n))
         .collect();
 
-    let mut nodes: Vec<HoneyBadgerMPCNode<Fr, Avid, G>> =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes: Vec<HoneyBadgerMPCNode<Fr, Avid>> =
+        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
             n,
             t,
-            0,
             0,
             0,
             111,
@@ -112,10 +111,9 @@ async fn test_input_recovery_with_missing_server() {
     let local_shares = generate_independent_shares(&mask_values, t, n);
     let mut client =
         InputClient::<Fr, Avid>::new(clientid, n, t, 111, input_values.clone()).unwrap();
-    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n,
         t,
-        0,
         0,
         0,
         111,
@@ -178,10 +176,9 @@ async fn test_input_with_too_many_faulty_shares() {
 
     let mut local_shares = generate_independent_shares(&[mask_value], t, n);
     let mut client = InputClient::<Fr, Avid>::new(client_id, n, t, 111, vec![input_value]).unwrap();
-    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
         n,
         t,
-        0,
         0,
         0,
         111,
