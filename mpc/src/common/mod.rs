@@ -403,7 +403,7 @@ where
 }
 
 #[async_trait]
-pub trait ADKG<F, K, S, N, G>
+pub trait ADKG<F, K, S, N, G>: MPCProtocol<F, S, N>
 where
     F: FftField,
     S: SecretSharingScheme<F>,
@@ -411,8 +411,6 @@ where
     G: CurveGroup<ScalarField = F>,
     K: SecretKey<F, S, G>,
 {
-    type Error;
-
     async fn secret_key(
         &mut self,
         no_of_keys: usize,

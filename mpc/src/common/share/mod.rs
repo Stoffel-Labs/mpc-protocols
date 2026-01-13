@@ -6,8 +6,6 @@ use ark_ff::FftField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use thiserror::Error;
 
-use crate::honeybadger::robust_interpolate::InterpolateError;
-
 use super::ShamirShare;
 
 #[derive(Debug, Error)]
@@ -29,9 +27,8 @@ pub enum ShareError {
 
 /// Creates a Vandermonde matrix `V` of size `n x (t+1)`.
 /// Each row `j` contains powers of `domain.element(j)`: `[1, alpha_j, alpha_j^2, ..., alpha_j^t]`.
-pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Result<Vec<Vec<F>>, InterpolateError> {
-    let domain =
-        GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
+pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Result<Vec<Vec<F>>, ShareError> {
+    let domain = GeneralEvaluationDomain::<F>::new(n).ok_or(ShareError::NoSuitableDomain(n))?;
     let mut matrix = vec![vec![F::zero(); t + 1]; n];
     for j in 0..n {
         let alpha_j = domain.element(j);
@@ -51,7 +48,7 @@ pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Result<Vec<Vec<F>>, 
 pub fn apply_vandermonde<F: FftField, P>(
     vandermonde: &[Vec<F>],
     shares: &[ShamirShare<F, 1, P>],
-) -> Result<Vec<ShamirShare<F, 1, P>>, InterpolateError>
+) -> Result<Vec<ShamirShare<F, 1, P>>, ShareError>
 where
     ShamirShare<F, 1, P>: Clone
         + Mul<F, Output = Result<ShamirShare<F, 1, P>, ShareError>>
@@ -60,9 +57,7 @@ where
     let share_len = shares.len();
     for (_, row) in vandermonde.iter().enumerate() {
         if row.len() != share_len {
-            return Err(InterpolateError::InvalidInput(
-                "Incorrect matrix length".to_string(),
-            ));
+            return Err(ShareError::InvalidInput);
         }
     }
     vandermonde
