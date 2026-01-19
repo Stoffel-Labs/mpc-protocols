@@ -80,3 +80,14 @@ pub extern "C" fn node_receiver_recv_sync(
         }
     }
 }
+
+#[no_mangle]
+pub extern "C" fn free_fake_network_receivers(receivers: *mut FakeNetworkReceiversOpaque) {
+    if !receivers.is_null() {
+        unsafe {
+            // Reconstruct the Box and drop it to free memory
+            let receivers = receivers as *mut FakeNetworkReceivers;
+            Box::from_raw(receivers);
+        }
+    }
+}

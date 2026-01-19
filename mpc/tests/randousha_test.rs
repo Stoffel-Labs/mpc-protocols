@@ -96,6 +96,7 @@ async fn test_init_reconstruct_flow() {
             .clone()
             .get_or_create_store(session_id)
             .await
+            .unwrap()
             .lock()
             .await
             .clone();
@@ -214,6 +215,7 @@ async fn test_reconstruct_handler() {
     let store = randousha_node
         .get_or_create_store(session_id)
         .await
+        .unwrap()
         .lock()
         .await
         .clone();
@@ -324,6 +326,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let store = randousha_node
         .get_or_create_store(session_id)
         .await
+        .unwrap()
         .lock()
         .await
         .clone();
@@ -360,7 +363,7 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
-    let node_store = randousha_node.get_or_create_store(session_id).await;
+    let node_store = randousha_node.get_or_create_store(session_id).await.unwrap();
 
     // first n-(t+1)-1 message should return error
     for i in 0..n_parties - (threshold + 2) {
@@ -419,7 +422,7 @@ async fn test_output_handler() {
         .await
         .expect("output handler should not fail");
     {
-        let storage_mutex = randousha_node.get_or_create_store(session_id).await;
+        let storage_mutex = randousha_node.get_or_create_store(session_id).await.unwrap();
         let storage = storage_mutex.lock().await;
         let output = storage.protocol_output.clone();
 
@@ -504,7 +507,7 @@ async fn randousha_e2e() {
 
     for nodes in &randousha_nodes {
         let mut node_locked = nodes.lock().await;
-        let store = node_locked.get_or_create_store(session_id).await;
+        let store = node_locked.get_or_create_store(session_id).await.unwrap();
         let store_locked = store.lock().await;
         assert!(store_locked.state == RanDouShaState::Finished);
     }

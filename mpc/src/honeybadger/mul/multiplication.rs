@@ -466,6 +466,10 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         session_id: SessionId,
     ) -> Arc<Mutex<MultStorage<F>>> {
         let mut storage = self.mult_storage.lock().await;
+
+        // should never occur, since only exec ID changes for different runs
+        assert!(storage.len() <= 256);
+
         storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(MultStorage::empty())))
