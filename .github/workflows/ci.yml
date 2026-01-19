@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust stable
+      - name: Install Rust 1.92.0
         uses: dtolnay/rust-toolchain@1.92.0
 
       - name: Cache cargo registry
@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust stable
+      - name: Install Rust 1.92.0
         uses: dtolnay/rust-toolchain@1.92.0
 
       - name: Cache cargo registry
@@ -64,7 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust stable
+      - name: Install Rust 1.92.0
         uses: dtolnay/rust-toolchain@1.92.0
         with:
           components: rustfmt, clippy
