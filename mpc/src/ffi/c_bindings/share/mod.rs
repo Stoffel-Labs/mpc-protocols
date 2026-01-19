@@ -1,7 +1,7 @@
-use std::{any::TypeId, mem::ManuallyDrop, slice};
+use std::{mem::ManuallyDrop, slice};
 
 use ark_bls12_381::Fr;
-use ark_ff::{BigInteger, FftField, PrimeField};
+use ark_ff::{BigInteger, PrimeField};
 
 use crate::{
     common::{

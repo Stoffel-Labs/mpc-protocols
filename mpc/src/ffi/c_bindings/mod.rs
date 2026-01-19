@@ -1,5 +1,4 @@
 use ark_bls12_381::Fr;
-use ark_ff::biginteger;
 use ark_ff::{BigInt, BigInteger, PrimeField};
 use num_bigint::BigUint;
 use std::{

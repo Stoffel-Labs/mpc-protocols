@@ -22,6 +22,7 @@ pub struct FakeInnerNetwork {
 
 impl FakeInnerNetwork {
     /// Creates a new fake network for testing using the given number of nodes and configuration.
+    #[allow(clippy::type_complexity)]
     pub fn new(
         n_nodes: usize,
         n_clients: Option<Vec<ClientId>>,

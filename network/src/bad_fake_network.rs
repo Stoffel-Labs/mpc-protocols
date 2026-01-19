@@ -64,7 +64,7 @@ use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
 /// 2. Get the next message with the smallest delay.
 /// 3. If the delay has expired (i.e., elapsed_time >= delay), send the message.
 /// 4. If the delay has not yet expired, update the delay by subtracting the elapsed time.
-/// Go to step 1.
+///    Go to step 1.
 /// 5. Add a newly received message (if any).
 /// 6. Update the min-heap with the changes.
 /// 7. Set a timer for the next message to expire or set it to Duration::MAX if there are no
@@ -147,7 +147,7 @@ impl PartialEq for KeyedMessage {
 impl Eq for KeyedMessage {}
 impl PartialOrd for KeyedMessage {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(Reverse(self.0).cmp(&Reverse(other.0)))
+        Some(self.cmp(other))
     }
 }
 
@@ -180,8 +180,9 @@ impl BadFakeInnerNetwork {
     ///      those in (1)
     ///   3. receiving endpoints to receive messages from the network, connected to those in (2)
     ///   4. a mapping of client IDs to their corresponding receiving endpoints at the client
-    /// The sending endpoints connected to (1) and (4) are managed by the network and exposed via
-    /// the `BadFakeNetwork::send` and `BadFakeNetwork::send_to_client` functions.
+    ///      The sending endpoints connected to (1) and (4) are managed by the network and exposed via
+    ///      the `BadFakeNetwork::send` and `BadFakeNetwork::send_to_client` functions.
+    #[allow(clippy::type_complexity)]
     pub fn new(
         n_nodes: usize,
         n_clients: Option<Vec<ClientId>>,
@@ -305,7 +306,7 @@ impl BadFakeNetwork {
     /// 2. If a message is received by the delaying thread from a node first,
     ///    a. a random delay for the message is sampled from the given distribution
     ///    b. `send_next_msgs` is called to add the new message and send any messages whose
-    ///       delay has expired
+    ///    delay has expired
     ///    c. The timer's expiration time is updated for the next iteration.
     /// 3. If the current timer expires first,
     ///    a. `send_next_msgs` is called to send any messages whose delay has expired

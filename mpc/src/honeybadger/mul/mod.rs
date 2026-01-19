@@ -10,10 +10,10 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, collections::HashMap};
+use std::collections::HashMap;
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
-use tokio::sync::{oneshot::{error::RecvError, channel, Sender, Receiver}};
+use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 pub mod multiplication;
 
@@ -42,7 +42,7 @@ where
     /// opened a-x and b-y values reconstructed using RBC
     pub openings: Option<(Vec<F>, Vec<F>)>,
     pub output_sender: Option<Sender<Vec<RobustShare<F>>>>,
-    pub output_receiver: Option<Receiver<Vec<RobustShare<F>>>>
+    pub output_receiver: Option<Receiver<Vec<RobustShare<F>>>>,
 }
 
 impl<F> MultStorage<F>
@@ -62,7 +62,7 @@ where
             received_shares: HashMap::new(),
             openings: None,
             output_sender: Some(output_sender),
-            output_receiver: Some(output_receiver)
+            output_receiver: Some(output_receiver),
         }
     }
 }

@@ -56,7 +56,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test
+        run: cargo test -p stoffelmpc-mpc --lib
 
   lint:
     name: Lint

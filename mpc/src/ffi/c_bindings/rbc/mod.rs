@@ -1,8 +1,4 @@
-use std::{
-    mem::{self, ManuallyDrop},
-    slice,
-    sync::Arc,
-};
+use std::{mem::ManuallyDrop, slice, sync::Arc};
 
 use crate::{
     common::{
@@ -135,8 +131,8 @@ impl From<Msg> for RbcMsg {
             sender_id: value.sender_id,
             session_id: value.session_id.as_u64(),
             round_id: value.round_id,
-            payload: payload,
-            metadata: metadata,
+            payload,
+            metadata,
             msg_type: (&value.msg_type).into(),
             msg_len: value.msg_len,
         }
