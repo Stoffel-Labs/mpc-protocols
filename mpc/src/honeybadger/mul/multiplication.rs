@@ -18,7 +18,6 @@ use std::{
     collections::HashMap,
     ops::{Mul, Sub},
     sync::Arc,
-    time::Instant,
 };
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
