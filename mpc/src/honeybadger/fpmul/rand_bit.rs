@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::ops::{Add, Mul};
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
@@ -127,7 +127,10 @@ where
             .init(session_id, a, a_copy, mult_triple, network.clone())
             .await?;
 
-        let a_square_share = self.mult_node.wait_for_result(session_id, Duration::from_millis(500)).await?;
+        let a_square_share = self
+            .mult_node
+            .wait_for_result(session_id, Duration::from_millis(500))
+            .await?;
 
         tracing::info!("Multiplication at Rand_bit done: {0:?}", self.id);
 

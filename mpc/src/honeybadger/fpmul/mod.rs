@@ -269,7 +269,7 @@ pub enum TruncPrError {
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
     #[error("unknown calling protocol in session ID {0:?}")]
-    SessionIdError(SessionId)
+    SessionIdError(SessionId),
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

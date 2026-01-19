@@ -26,8 +26,8 @@ use stoffelmpc_mpc::{
     },
     honeybadger::{
         fpmul::f256::F2_8,
-        mul::MulError,
         input::input::InputClient,
+        mul::MulError,
         output::output::{OutputClient, OutputServer},
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -39,7 +39,7 @@ use stoffelmpc_network::{bad_fake_network::BadFakeNetwork, fake_network::FakeNet
 use stoffelnet::network_utils::ClientId;
 use tokio::{
     sync::{mpsc, Mutex},
-    time::{Duration, sleep, timeout},
+    time::{sleep, timeout, Duration},
 };
 use tracing::info;
 
@@ -58,7 +58,16 @@ async fn randousha_e2e() {
     let (_, n_shares_t, n_shares_2t) = construct_e2e_input(n_parties, degree_t);
     // create global nodes
     let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n_parties, t, 0, 0, 111, 0, 0, 0, 0, vec![]
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![],
     );
     // spawn tasks to process received messages
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
@@ -120,7 +129,16 @@ async fn ransha_e2e() {
     let (network, receivers, _) = test_setup(n_parties, vec![]);
     // create global nodes
     let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n_parties, t, 0, 0, 111, 0, 0, 0, 0, vec![]
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![],
     );
     // spawn tasks to process received messages
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
@@ -174,8 +192,18 @@ async fn test_input_protocol_e2e() {
     // Set up InputServers/InputClient
     let mut client =
         InputClient::<Fr, Avid>::new(clientid[0], n, t, 111, input_values.clone()).unwrap();
-    let mut nodes =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111, 0, 0, 0, 0, clientid.clone());
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        clientid.clone(),
+    );
 
     //Receive at server
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
@@ -216,7 +244,12 @@ async fn test_input_protocol_e2e() {
     // Check final result: each server should have m_i = input_i
     let mut recovered_shares = vec![vec![]; input_values.len()];
     for server in &mut nodes {
-        let shares = server.preprocess.input.wait_for_all_inputs(Duration::MAX).await.expect("input error");
+        let shares = server
+            .preprocess
+            .input
+            .wait_for_all_inputs(Duration::MAX)
+            .await
+            .expect("input error");
         let server_shares = shares.get(&clientid[0]).unwrap();
         for (i, s) in server_shares.iter().enumerate() {
             recovered_shares[i].push(s.clone());
@@ -244,7 +277,16 @@ async fn gen_masks_for_input_e2e() {
     //----------------------------------------SETUP NODES----------------------------------------
     //Create global nodes for InputServers
     let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n_parties, t, 0, 0, 111, 0, 0, 0, 0, clientid.clone()
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        clientid.clone(),
     );
     //Create nodes for InputClient
     let mut client =
@@ -322,7 +364,12 @@ async fn gen_masks_for_input_e2e() {
     //Check final result: each server should have m_i = input_i
     let mut recovered_shares = vec![vec![]; input_values.len()];
     for server in &mut nodes {
-        let shares = server.preprocess.input.wait_for_all_inputs(Duration::from_millis(100)).await.expect("input error");
+        let shares = server
+            .preprocess
+            .input
+            .wait_for_all_inputs(Duration::from_millis(100))
+            .await
+            .expect("input error");
         let server_shares = shares.get(&clientid[0]).unwrap();
         for (i, s) in server_shares.iter().enumerate() {
             recovered_shares[i].push(s.clone());
@@ -344,7 +391,7 @@ async fn mul_e2e_bad_net() {
     let n_parties = 5;
     let t = 1;
     let mut rng = test_rng();
-    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111);   // foresees the session ID
+    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111); // foresees the session ID
     let no_of_multiplication = 5;
 
     //Setup
@@ -385,7 +432,16 @@ async fn mul_e2e_bad_net() {
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
     let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, BadFakeNetwork>(
-        n_parties, t, 0, 0, 111, 0, 0, 0, 0, vec![]
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![],
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -414,7 +470,8 @@ async fn mul_e2e_bad_net() {
 
         let handle = tokio::spawn(async move {
             {
-                let final_shares = node.mul(x_shares.clone(), y_shares.clone(), net.clone())
+                let final_shares = node
+                    .mul(x_shares.clone(), y_shares.clone(), net.clone())
                     .await
                     .expect("mul failed");
                 fin_send.send((pid, final_shares)).await.unwrap();
@@ -470,7 +527,7 @@ async fn mul_e2e() {
     let n_parties = 5;
     let t = 1;
     let mut rng = test_rng();
-    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111);   // foresees the session ID
+    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111); // foresees the session ID
     let no_of_multiplication = 5;
 
     //Setup
@@ -503,7 +560,16 @@ async fn mul_e2e() {
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
     let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n_parties, t, 0, 0, 111, 0, 0, 0, 0, vec![]
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![],
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -532,7 +598,8 @@ async fn mul_e2e() {
 
         let handle = tokio::spawn(async move {
             {
-                let final_shares = node.mul(x_shares.clone(), y_shares.clone(), net.clone())
+                let final_shares = node
+                    .mul(x_shares.clone(), y_shares.clone(), net.clone())
                     .await
                     .expect("mul failed");
                 fin_send.send((pid, final_shares)).await.unwrap();
@@ -615,11 +682,12 @@ async fn mul_e2e_with_preprocessing_bad_net() {
         0,
         0,
         0,
-        vec![clientid[0]]
+        vec![clientid[0]],
     );
 
     //Create Clients
-    let mut clients = create_clients::<Fr, Avid>(clientid.clone(), n_parties, t, 111, input_values, 2);
+    let mut clients =
+        create_clients::<Fr, Avid>(clientid.clone(), n_parties, t, 111, input_values, 2);
 
     //----------------------------------------RECIEVE----------------------------------------
     //At servers
@@ -680,7 +748,12 @@ async fn mul_e2e_with_preprocessing_bad_net() {
         let fin_send = fin_send.clone();
 
         let (x_shares, y_shares) = {
-            let input_store = node.preprocess.input.wait_for_all_inputs(Duration::from_millis(300)).await.expect("input error");
+            let input_store = node
+                .preprocess
+                .input
+                .wait_for_all_inputs(Duration::from_millis(300))
+                .await
+                .expect("input error");
             let inputs = input_store.get(&clientid[0]).unwrap();
             (
                 vec![inputs[0].clone(), inputs[1].clone()],
@@ -690,7 +763,8 @@ async fn mul_e2e_with_preprocessing_bad_net() {
 
         let handle = tokio::spawn(async move {
             {
-                let final_shares = node.mul(x_shares.clone(), y_shares.clone(), net.clone())
+                let final_shares = node
+                    .mul(x_shares.clone(), y_shares.clone(), net.clone())
                     .await
                     .expect("mul failed");
                 fin_send.send((pid, final_shares)).await.unwrap();
@@ -742,9 +816,15 @@ async fn mul_e2e_with_preprocessing_bad_net() {
     }
 
     // Collect reconstructed result
-    let recovered = match clients.get_mut(&output_clientid).unwrap().output.wait_for_output(Duration::from_millis(500)).await {
+    let recovered = match clients
+        .get_mut(&output_clientid)
+        .unwrap()
+        .output
+        .wait_for_output(Duration::from_millis(500))
+        .await
+    {
         Err(e) => panic!("Client failed to reconstruct output: {e}"),
-        Ok(output) => output
+        Ok(output) => output,
     };
 
     let output_values = vec![Fr::from(100), Fr::from(400)];
@@ -783,11 +863,12 @@ async fn mul_e2e_with_preprocessing() {
         0,
         0,
         0,
-        vec![clientid[0]]
+        vec![clientid[0]],
     );
 
     //Create Clients
-    let mut clients = create_clients::<Fr, Avid>(clientid.clone(), n_parties, t, 111, input_values, 2);
+    let mut clients =
+        create_clients::<Fr, Avid>(clientid.clone(), n_parties, t, 111, input_values, 2);
 
     //----------------------------------------RECIEVE----------------------------------------
     //At servers
@@ -846,7 +927,12 @@ async fn mul_e2e_with_preprocessing() {
         let fin_send = fin_send.clone();
 
         let (x_shares, y_shares) = {
-            let input_store = node.preprocess.input.wait_for_all_inputs(Duration::from_millis(500)).await.expect("input error");
+            let input_store = node
+                .preprocess
+                .input
+                .wait_for_all_inputs(Duration::from_millis(500))
+                .await
+                .expect("input error");
             let inputs = input_store.get(&clientid[0]).unwrap();
             (
                 vec![inputs[0].clone(), inputs[1].clone()],
@@ -856,7 +942,8 @@ async fn mul_e2e_with_preprocessing() {
 
         let handle = tokio::spawn(async move {
             {
-                let final_shares = node.mul(x_shares.clone(), y_shares.clone(), net.clone())
+                let final_shares = node
+                    .mul(x_shares.clone(), y_shares.clone(), net.clone())
                     .await
                     .expect("mul failed");
                 fin_send.send((pid, final_shares)).await.unwrap();
@@ -908,9 +995,15 @@ async fn mul_e2e_with_preprocessing() {
     }
 
     // Collect reconstructed result
-    let recovered = match clients.get_mut(&output_clientid).unwrap().output.wait_for_output(Duration::from_millis(1000)).await {
+    let recovered = match clients
+        .get_mut(&output_clientid)
+        .unwrap()
+        .output
+        .wait_for_output(Duration::from_millis(1000))
+        .await
+    {
         Err(e) => panic!("Client failed to reconstruct output: {e}"),
-        Ok(output) => output
+        Ok(output) => output,
     };
     let output_values = vec![Fr::from(100), Fr::from(400)];
     assert!(
@@ -922,7 +1015,6 @@ async fn mul_e2e_with_preprocessing() {
 }
 
 //----------------------------------------PREPROCESSING----------------------------------------
-
 
 #[tokio::test]
 async fn preprocessing_e2e() {
@@ -953,7 +1045,7 @@ async fn preprocessing_e2e() {
         n_prandint,
         l,
         k,
-        vec![]
+        vec![],
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1008,7 +1100,12 @@ async fn preprocessing_e2e_bad_net() {
     //Setup
     let (network, net_rx, node_channels, receivers, _) = test_setup_bad(n_parties, vec![]);
 
-    BadFakeNetwork::start(net_rx, node_channels.clone(), StdRng::seed_from_u64(1u64), Uniform::new_inclusive(1, 3));
+    BadFakeNetwork::start(
+        net_rx,
+        node_channels.clone(),
+        StdRng::seed_from_u64(1u64),
+        Uniform::new_inclusive(1, 3),
+    );
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
@@ -1022,7 +1119,7 @@ async fn preprocessing_e2e_bad_net() {
         0,
         0,
         0,
-        vec![]
+        vec![],
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1056,14 +1153,14 @@ async fn preprocessing_e2e_bad_net() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_random_shares, n_prandbit_shares, n_prandint_shares) = node.preprocessing_material.lock().await.len();
+        let (n_triples, n_random_shares, n_prandbit_shares, n_prandint_shares) =
+            node.preprocessing_material.lock().await.len();
         assert_eq!(n_triples, 6); //>no_of_triples
         assert_eq!(n_random_shares, 0); //>no_of_randomshares
         assert_eq!(n_prandbit_shares, 0);
         assert_eq!(n_prandint_shares, 0);
     }
 }
-
 
 #[tokio::test]
 async fn test_output_protocol_e2e() {
@@ -1123,7 +1220,7 @@ async fn test_output_protocol_e2e() {
     // Collect reconstructed result
     let recovered = match client.wait_for_output(Duration::MAX).await {
         Err(e) => panic!("Client failed to reconstruct output: {e}"),
-        Ok(output) => output
+        Ok(output) => output,
     };
 
     assert!(
@@ -1172,7 +1269,7 @@ async fn test_rand_bit() {
         0,
         0,
         0,
-        vec![]
+        vec![],
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1302,7 +1399,16 @@ async fn fpmul_e2e() {
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
     let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n_parties, t, 0, 0, 111, 0, 0, 0, 0, vec![]
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![],
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1411,7 +1517,7 @@ async fn fpmul_e2e_with_preprocessing() {
         n_prandint,
         bound_l,
         security_k,
-        vec![]
+        vec![],
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1500,7 +1606,7 @@ async fn add_fixed_e2e() {
         0,
         8,
         4,
-        vec![]
+        vec![],
     );
 
     // Receiver loop
@@ -1569,7 +1675,7 @@ async fn sub_fixed_e2e() {
         0,
         8,
         4,
-        vec![]
+        vec![],
     );
 
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
@@ -1627,7 +1733,7 @@ async fn add_int_e2e() {
         0,
         8,
         4,
-        vec![]
+        vec![],
     );
 
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
@@ -1685,7 +1791,7 @@ async fn sub_int_e2e() {
         0,
         8,
         4,
-        vec![]
+        vec![],
     );
 
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
@@ -1741,7 +1847,7 @@ async fn mul_int_e2e_with_preprocessing() {
         /*prandint*/ 0,
         0,
         0,
-        vec![]
+        vec![],
     );
 
     //----------------------------------------SECRET-SHARE INPUTS----------------------------------------
@@ -1852,7 +1958,16 @@ async fn fpdiv_const_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n_parties, t, 0, 0, 222, 0, 0, 0, 0, vec![]
+        n_parties,
+        t,
+        0,
+        0,
+        222,
+        0,
+        0,
+        0,
+        0,
+        vec![],
     );
 
     //----------------------------------------RECEIVE LOOP----------------------------------------

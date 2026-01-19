@@ -13,11 +13,11 @@ use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use thiserror::Error;
 use tokio::{
-    time::Duration,
     sync::{
         mpsc::{self, error::SendError, Receiver, Sender},
         Mutex,
-    }
+    },
+    time::Duration,
 };
 
 #[derive(Error, Debug)]
@@ -103,7 +103,10 @@ where
             )
             .await?;
 
-        let trunc_input = self.mult_node.wait_for_result(session_id, Duration::from_millis(500)).await?;
+        let trunc_input = self
+            .mult_node
+            .wait_for_result(session_id, Duration::from_millis(500))
+            .await?;
 
         self.mult_node.clear_store().await;
         self.trunc_node

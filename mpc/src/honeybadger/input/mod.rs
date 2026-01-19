@@ -2,9 +2,9 @@ use crate::{common::rbc::RbcError, honeybadger::robust_interpolate::InterpolateE
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::{ClientId, NetworkError};
-use tokio::{time::error::Elapsed, sync::watch::error::RecvError};
+use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
+use tokio::{sync::watch::error::RecvError, time::error::Elapsed};
 
 pub mod input;
 
@@ -29,7 +29,7 @@ pub enum InputError {
     #[error("error while waiting for all inputs")]
     WaitingError(#[from] RecvError),
     #[error("client {0:?} did not sent input in time")]
-    Timeout(#[from] Elapsed)
+    Timeout(#[from] Elapsed),
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub enum InputMessageType {
