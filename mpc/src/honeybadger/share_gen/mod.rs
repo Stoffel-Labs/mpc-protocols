@@ -50,7 +50,7 @@ pub enum RanShaError {
     #[error("session ID {0:?} malformed")]
     SessionIdError(SessionId),
     #[error("limit reached")]
-    LimitError
+    LimitError,
 }
 
 #[derive(Clone, Debug)]

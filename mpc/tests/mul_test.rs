@@ -1,40 +1,30 @@
 pub mod utils;
 
-use crate::utils::test_utils::{
-    construct_e2e_input_mul, setup_tracing, test_setup,
-};
+use crate::utils::test_utils::{construct_e2e_input_mul, setup_tracing, test_setup};
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
-use std::{
-    collections::HashMap, sync::Arc,
-    time::Duration, vec,
-};
+use itertools::izip;
+use rand::{seq::SliceRandom, thread_rng};
+use std::ops::{Mul, Sub};
+use std::{collections::HashMap, sync::Arc, time::Duration, vec};
 use stoffelmpc_mpc::common::{
-    rbc::rbc::Avid,
-    share::ShareError,
-    ShamirShare,
-    SecretSharingScheme, RBC
+    rbc::rbc::Avid, share::ShareError, SecretSharingScheme, ShamirShare, RBC,
 };
 use stoffelmpc_mpc::honeybadger::{
     mul::{
-        MulError, MultMessage, MultProtocolState,
-        ReconstructionMessage,
-        multiplication::Multiply
+        multiplication::Multiply, MulError, MultMessage, MultProtocolState, ReconstructionMessage,
     },
     robust_interpolate::robust_interpolate::{Robust, RobustShare},
     ProtocolType, SessionId, WrappedMessage,
 };
 use tokio::{
     sync::mpsc::{self},
+    sync::Mutex,
     task::JoinSet,
-    sync::Mutex
 };
 use tracing::{info, warn};
-use itertools::izip;
-use std::ops::{Mul, Sub};
-use rand::{seq::SliceRandom,thread_rng};
 
 #[tokio::test]
 async fn mul_e2e_batch_recon_and_rbc() {
@@ -117,13 +107,16 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
 
     // 5. Init multiplication at each node
     for i in 0..n_parties {
-        match mul_nodes[i].init(
-            session_id,
-            x_inputs_per_node[i].clone(),
-            y_inputs_per_node[i].clone(),
-            beaver_triples[i].clone(),
-            Arc::clone(&network)
-        ).await {
+        match mul_nodes[i]
+            .init(
+                session_id,
+                x_inputs_per_node[i].clone(),
+                y_inputs_per_node[i].clone(),
+                beaver_triples[i].clone(),
+                Arc::clone(&network),
+            )
+            .await
+        {
             Ok(()) => (),
             Err(e) => {
                 panic!(
@@ -155,19 +148,18 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
                 // Match the message type and route it appropriately
                 match &wrapped {
                     WrappedMessage::Mul(msg) => {
-                        let result = mul_node
-                            .process(msg.clone())
-                            .await;
+                        let result = mul_node.process(msg.clone()).await;
 
                         match result {
-                            Ok(()) => { }
-                            Err(MulError::WaitForOk) => {info!("{} waiting", mul_node.id);}
-                            Err(MulError::ResultAlreadyReceived(_)) => { info!("{} already received result", mul_node.id); }
+                            Ok(()) => {}
+                            Err(MulError::WaitForOk) => {
+                                info!("{} waiting", mul_node.id);
+                            }
+                            Err(MulError::ResultAlreadyReceived(_)) => {
+                                info!("{} already received result", mul_node.id);
+                            }
                             Err(e) => {
-                                panic!(
-                                    "Node {} encountered unexpected error: {e}",
-                                    mul_node.id
-                                );
+                                panic!("Node {} encountered unexpected error: {e}", mul_node.id);
                             }
                         }
                     }
@@ -182,19 +174,18 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
                     }
                     WrappedMessage::BatchRecon(batch_msg) => {
                         match batch_msg.session_id.calling_protocol() {
-                            Some(ProtocolType::Mul) => {
-                                mul_node
-                                    .batch_recon
-                                    .process(batch_msg.clone(), Arc::clone(&net_clone))
-                                    .await.expect("batch recon error")
-                            }
+                            Some(ProtocolType::Mul) => mul_node
+                                .batch_recon
+                                .process(batch_msg.clone(), Arc::clone(&net_clone))
+                                .await
+                                .expect("batch recon error"),
                             _ => {
                                 panic!("Unexpected caller of batch recon");
                             }
                         }
                     }
                     _ => {
-                          panic!("Unexpected protocol type");
+                        panic!("Unexpected protocol type");
                     }
                 }
             }
@@ -207,7 +198,10 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
     let mut final_results = HashMap::<usize, Vec<RobustShare<Fr>>>::new();
     for i in 0..n_parties {
         let node = &mul_nodes[i];
-        let final_shares = node.wait_for_result(session_id, Duration::from_millis(500)).await.unwrap();
+        let final_shares = node
+            .wait_for_result(session_id, Duration::from_millis(500))
+            .await
+            .unwrap();
 
         final_results.insert(node.id, final_shares);
         if final_results.len() == n_parties {
@@ -224,8 +218,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
     }
 
     // 8. Compare with expected results
-    let mut per_multiplication_shares: Vec<Vec<RobustShare<Fr>>> =
-        vec![Vec::new(); no_of_mul];
+    let mut per_multiplication_shares: Vec<Vec<RobustShare<Fr>>> = vec![Vec::new(); no_of_mul];
 
     for pid in 0..n_parties {
         for i in 0..no_of_mul {

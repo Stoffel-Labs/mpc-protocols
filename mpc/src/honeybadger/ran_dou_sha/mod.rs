@@ -58,7 +58,7 @@ pub enum RanDouShaError {
     #[error("session ID {0:?} malformed")]
     SessionIdError(SessionId),
     #[error("limit reached")]
-    LimitError
+    LimitError,
 }
 
 /// Storage for the Random Double Sharing protocol.
@@ -86,10 +86,6 @@ pub struct RanDouShaStore<F: FftField> {
 pub enum RanDouShaState {
     /// The protocol has been initialized.
     Initialized,
-    /// The protocol is in the reconstruction phase.
-    Reconstruction,
-    /// The protocol is in the output phase.
-    Output,
     /// The protocol has been finished.
     Finished,
 }
@@ -308,8 +304,6 @@ where
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
-        store.state = RanDouShaState::Reconstruction;
-
         let sender_id = msg.sender_id;
         store
             .received_r_shares_degree_t
@@ -399,8 +393,6 @@ where
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
-        store.state = RanDouShaState::Output;
-
         // push to received_ok_msg if sender doesn't exist
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
@@ -461,13 +453,15 @@ where
 mod tests {
     use super::*;
     use crate::common::rbc::rbc::Avid;
-    use crate::honeybadger::ran_dou_sha::messages::{RanDouShaMessage, RanDouShaMessageType, RanDouShaPayload, ReconstructionMessage};
+    use crate::honeybadger::ran_dou_sha::messages::{
+        RanDouShaMessage, RanDouShaMessageType, RanDouShaPayload, ReconstructionMessage,
+    };
     use crate::honeybadger::SessionId;
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
-    use tokio::sync::mpsc;
     use std::sync::Arc;
     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_randousha_storage_limit_in_reconstruction_handler() {
@@ -479,13 +473,7 @@ mod tests {
         let mut exec = 0u8;
         let mut round = 0u8;
         for _ in 0..super::MAX_RAN_DOU_SHA_SESSIONS {
-            let sid = SessionId::new(
-                ProtocolType::Randousha,
-                exec,
-                0,
-                round,
-                111,
-            );
+            let sid = SessionId::new(ProtocolType::Randousha, exec, 0, round, 111);
             let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
             let mut payload = Vec::new();
             rec_msg.serialize_compressed(&mut payload).unwrap();
@@ -508,13 +496,7 @@ mod tests {
         }
 
         // Now try to process a message that would require a new session (should hit the limit)
-        let over_sid = SessionId::new(
-            ProtocolType::Randousha,
-            255,
-            0,
-            255,
-            0,
-        );
+        let over_sid = SessionId::new(ProtocolType::Randousha, 255, 0, 255, 0);
         let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
         let mut payload = Vec::new();
         rec_msg.serialize_compressed(&mut payload).unwrap();
@@ -526,7 +508,10 @@ mod tests {
         );
 
         let result = node.reconstruction_handler(msg, net).await;
-        assert!(matches!(result, Err(RanDouShaError::LimitError)), "Should error on exceeding storage limit");
+        assert!(
+            matches!(result, Err(RanDouShaError::LimitError)),
+            "Should error on exceeding storage limit"
+        );
     }
 
     #[tokio::test]

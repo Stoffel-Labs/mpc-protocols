@@ -27,6 +27,7 @@ use stoffelmpc_mpc::{
     honeybadger::{
         fpmul::f256::F2_8,
         input::input::InputClient,
+        mul::MulError,
         output::output::{OutputClient, OutputServer},
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -37,7 +38,7 @@ use stoffelmpc_mpc::{
 use stoffelmpc_network::{bad_fake_network::BadFakeNetwork, fake_network::FakeNetwork};
 use stoffelnet::network_utils::ClientId;
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, Mutex},
     time::{sleep, timeout, Duration},
 };
 use tracing::info;
@@ -394,6 +395,7 @@ async fn mul_e2e_bad_net() {
     let n_parties = 5;
     let t = 1;
     let mut rng = test_rng();
+    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111); // foresees the session ID
     let no_of_multiplication = 5;
 
     //Setup
@@ -529,6 +531,7 @@ async fn mul_e2e() {
     let n_parties = 5;
     let t = 1;
     let mut rng = test_rng();
+    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111); // foresees the session ID
     let no_of_multiplication = 5;
 
     //Setup

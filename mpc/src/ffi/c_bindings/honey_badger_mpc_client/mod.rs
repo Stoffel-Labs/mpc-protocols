@@ -3,13 +3,13 @@ use std::{ptr::slice_from_raw_parts, sync::Arc};
 use ark_bls12_381::Fr;
 
 use crate::{
-    common::{rbc::rbc::Bracha, RBC},
+    common::rbc::rbc::Bracha,
     ffi::c_bindings::{
         network::{self, GenericNetwork},
         share::FieldKind,
         ByteSlice, U256Slice, U256,
     },
-    honeybadger::{output, HoneyBadgerError, HoneyBadgerMPCClient},
+    honeybadger::{HoneyBadgerError, HoneyBadgerMPCClient},
 };
 
 // opaque pointer for HoneyBadgerMPCClient
@@ -46,7 +46,7 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerAlreadyReservedError,
     HoneyBadgerLimitError,
     HoneyBadgerInstanceIdError,
-    HoneyBadgerAvssError
+    HoneyBadgerAvssError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {

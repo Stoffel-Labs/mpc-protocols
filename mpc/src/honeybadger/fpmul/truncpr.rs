@@ -73,6 +73,13 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
     ) -> Result<(), TruncPrError> {
         info!(node_id = self.id, "TruncPr start");
 
+        let calling_proto = match session.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(TruncPrError::SessionIdError(session));
+            }
+        };
+
         let store = self.get_or_create_store(session).await; // k,m already set in store
         let mut s = store.lock().await;
         s.k = k;
@@ -102,7 +109,7 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
         let bytes_wrapped = bincode::serialize(&wrapped)?;
 
         let sessionid = SessionId::new(
-            session.calling_protocol().unwrap(),
+            calling_proto,
             session.exec_id(),
             0,
             self.id as u8,
@@ -188,10 +195,10 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use crate::common::rbc::rbc::Avid;
+    use crate::honeybadger::fpmul::{TruncPrError, TruncPrMessage};
+    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use crate::honeybadger::SessionId;
-    use crate::honeybadger::fpmul::{TruncPrMessage, TruncPrError};
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
     use tokio::sync::mpsc;

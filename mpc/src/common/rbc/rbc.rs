@@ -1760,6 +1760,8 @@ impl ACS {
             "Initiating common subset"
         );
 
+        assert!(msg.session_id.calling_protocol().is_some());
+
         let mut store = self.store.lock().await;
 
         if !store.has_aba_input(msg.session_id.sub_id().into()) {

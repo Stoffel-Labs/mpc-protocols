@@ -498,25 +498,6 @@ where
             .map_err(HoneyBadgerError::from)
     }
 
-    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
-        let (_, no_rand, _, _) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-        if no_rand == 0 {
-            //Run preprocessing
-            let mut rng = StdRng::from_rng(OsRng).unwrap();
-            self.run_preprocessing(network.clone(), &mut rng).await?;
-        }
-        // Extract the preprocessing triple.
-        let rand_value = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(1)?;
-        Ok(rand_value[0].clone())
-    }
-
     async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
         let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
 
@@ -758,6 +739,29 @@ where
         }
 
         Ok(())
+    }
+
+    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
+        // Check if we have a random share available
+        let (_, n_random, _, _) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+
+        // If no random shares available, generate some
+        if n_random == 0 {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.ensure_random_shares(network, &mut rng, 1).await?;
+        }
+
+        // Take one random share from the preprocessing material
+        let shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(1)?;
+
+        Ok(shares.into_iter().next().unwrap())
     }
 }
 
@@ -1488,6 +1492,16 @@ where
 
         // Clear stores
         self.preprocess.rand_bit.clear_store().await;
+
+        //Prandbit share generation
+        info!("PRandbit share generation");
+        let _sessionid = SessionId::new(
+            ProtocolType::PRandBit,
+            self.counters.prand_bit_counter.get_next().await?,
+            0,
+            0,
+            self.params.instance_id,
+        );
 
         // Run PRandBit protocol
         self.preprocess

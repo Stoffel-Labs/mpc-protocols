@@ -61,7 +61,7 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> FeldmanShamirShare<F, G> {
         })
     }
 }
-impl<F, G> SecretKey<F,Shamirshare<F>,G> for FeldmanShamirShare<F, G>
+impl<F, G> SecretKey<F, Shamirshare<F>, G> for FeldmanShamirShare<F, G>
 where
     F: FftField,
     G: CurveGroup<ScalarField = F>,

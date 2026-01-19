@@ -1,19 +1,14 @@
 use std::{
-    alloc::GlobalAlloc,
     collections::HashMap,
     ffi::{c_char, CStr, CString},
-    mem::{self, ManuallyDrop},
+    mem::ManuallyDrop,
     net::SocketAddr,
     slice,
     str::FromStr,
     sync::{Arc, LazyLock},
 };
 
-use rustls::crypto::hash::Hash;
-use stoffelnet::{
-    network_utils::{ClientId, PartyId},
-    transports::quic::{NetworkManager, PeerConnection, QuicNetworkManager},
-};
+use stoffelnet::transports::quic::{NetworkManager, PeerConnection, QuicNetworkManager};
 
 use crate::ffi::c_bindings::{
     network::{GenericNetwork, NetworkErrorCode, NetworkOpaque},
