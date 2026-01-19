@@ -94,7 +94,7 @@ pub extern "C" fn free_fake_network_receivers(receivers: *mut FakeNetworkReceive
         unsafe {
             // Reconstruct the Box and drop it to free memory
             let receivers = receivers as *mut FakeNetworkReceivers;
-            Box::from_raw(receivers);
+            drop(Box::from_raw(receivers));
         }
     }
 }
