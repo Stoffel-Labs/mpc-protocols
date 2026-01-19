@@ -18,6 +18,7 @@ use std::{
     collections::HashMap,
     ops::{Mul, Sub},
     sync::Arc,
+    time::Instant,
 };
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::Mutex;
@@ -730,23 +731,34 @@ pub mod tests {
         }
 
         // wait for left out node to receive messages and calculate result
-        sleep(Duration::from_millis(500)).await;
-
-        let storage_bind = nodes[node_id].get_or_create_mult_storage(session_id).await;
-        let storage = storage_bind.lock().await;
-
         let no_of_batch = no_of_mul / (t + 1);
+        let timeout_duration = Duration::from_secs(10);
+        let start = Instant::now();
 
-        // all openings except for the RBC ones should be there, but enough shares
-        // for reconstruction should be there
-        assert!((0..no_of_batch).all(|i| storage.output_open_mult1.contains_key(&((2 * i) as u8))));
-        assert!(
-            (0..no_of_batch).all(|i| storage.output_open_mult2.contains_key(&((2 * i + 1) as u8)))
-        );
-        assert!(storage.openings.is_none());
-        assert!(storage.received_shares.len() >= 2 * t + 1);
+        loop {
+            let storage_bind = nodes[node_id].get_or_create_mult_storage(session_id).await;
+            let storage = storage_bind.lock().await;
 
-        drop(storage);
+            let has_mult1_keys =
+                (0..no_of_batch).all(|i| storage.output_open_mult1.contains_key(&((2 * i) as u8)));
+            let has_mult2_keys = (0..no_of_batch)
+                .all(|i| storage.output_open_mult2.contains_key(&((2 * i + 1) as u8)));
+            let has_enough_shares = storage.received_shares.len() >= 2 * t + 1;
+
+            if has_mult1_keys && has_mult2_keys && has_enough_shares {
+                // Condition met, verify remaining assertion and continue
+                assert!(storage.openings.is_none());
+                break;
+            }
+
+            drop(storage);
+
+            if start.elapsed() > timeout_duration {
+                panic!("Timeout waiting for storage to be populated");
+            }
+
+            sleep(Duration::from_millis(50)).await;
+        }
 
         // so now we call init...
         assert!(nodes[node_id]
