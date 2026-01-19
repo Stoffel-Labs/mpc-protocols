@@ -18,7 +18,6 @@ use std::{
     collections::HashMap,
     ops::{Mul, Sub},
     sync::Arc,
-    time::Instant,
 };
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
@@ -566,7 +565,7 @@ pub mod tests {
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
     use tokio::{
         sync::mpsc::{self, Receiver},
-        time::{sleep, Duration},
+        time::{sleep, Duration, Instant},
     };
 
     async fn construct_input_mul(
