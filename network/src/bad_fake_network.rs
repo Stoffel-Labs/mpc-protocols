@@ -99,8 +99,8 @@ async fn send_next_msgs(
 
             // 3.
             let result = node_channels[msg.1 .0].send(msg.1 .1.to_vec()).await;
-            if result.is_err() {
-                panic!("network thread encountered error {}", result.unwrap_err());
+            if let Err(e) = result {
+                panic!("network thread encountered error {}", e);
             }
         } else {
             #[cfg(debug_assertions)]
