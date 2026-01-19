@@ -258,8 +258,7 @@ mod tests {
         assert_eq!(broadcast_result.unwrap(), message.len());
 
         // Verify all nodes received the message
-        for i in 0..n_nodes {
-            let node_recv = &mut receivers[i];
+        for node_recv in receivers.iter_mut().take(n_nodes) {
             let received_message_result = node_recv.try_recv();
             assert!(received_message_result.is_ok());
             assert_eq!(received_message_result.unwrap(), message.to_vec());
