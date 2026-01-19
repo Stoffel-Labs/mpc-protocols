@@ -89,15 +89,19 @@ where
     pub async fn get_or_create_storage(
         &self,
         session_id: SessionId,
-    ) -> Arc<Mutex<RandBitStorage<F>>> {
+    ) -> Result<Arc<Mutex<RandBitStorage<F>>>, RandBitError> {
         let mut storage = self.storage.lock().await;
 
         // only exec ID changes between different runs
-        assert!(storage.len() <= 256);
-        storage
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            return Err(RandBitError::LimitError(
+                "Maximum number of concurrent sessions (256) exceeded".to_string(),
+            ));
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(RandBitStorage::empty())))
-            .clone()
+            .clone())
     }
 
     pub async fn init<N>(
@@ -118,7 +122,7 @@ where
 
         // Mark the protocol as initialized.
         {
-            let storage_bind = self.get_or_create_storage(session_id).await;
+            let storage_bind = self.get_or_create_storage(session_id).await?;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.a_share = Some(a.clone());
@@ -176,7 +180,7 @@ where
             0,
             message.session_id.instance_id(),
         );
-        let storage_bind = self.get_or_create_storage(session_id).await;
+        let storage_bind = self.get_or_create_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
         let a = storage
             .a_share
@@ -223,7 +227,7 @@ where
 
         let a_share_array = self
             .get_or_create_storage(session_id)
-            .await
+            .await?
             .lock()
             .await
             .a_share
@@ -247,7 +251,7 @@ where
 
         // Mark the protocol as finished.
         {
-            let storage_bind = self.get_or_create_storage(session_id).await;
+            let storage_bind = self.get_or_create_storage(session_id).await?;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Finished;
             storage.protocol_output = Some(d_share_array.clone());
@@ -268,31 +272,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::rbc::rbc::Avid;
     use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use crate::honeybadger::triple_gen::ShamirBeaverTriple;
-    use crate::common::rbc::rbc::Avid;
     use ark_bls12_381::Fr;
-    use tokio::sync::mpsc;
     use std::sync::Arc;
     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+    use tokio::sync::mpsc;
 
     #[tokio::test]
-    async fn test_randbit_init_storage_limit() {
+    async fn test_randbit_storage_limit() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = RandBit::<Fr, Avid>::new(0, 5, 1, tx).unwrap();
-        let session_id = SessionId::new(crate::honeybadger::ProtocolType::RandBit, 0, 0, 0, 111);
+        let node = RandBit::<Fr, Avid>::new(0, 5, 1, tx).unwrap();
 
-        // threshold + 1 = 2, so 2 * 257 elements will exceed the 256 batch limit
-        let a = vec![RobustShare::new(Fr::from(1u8), 0, 1); 257 * 2];
-        let triples = vec![ShamirBeaverTriple {
-            a: RobustShare::new(Fr::from(1u8), 0, 1),
-            b: RobustShare::new(Fr::from(1u8), 0, 1),
-            mult: RobustShare::new(Fr::from(1u8), 0, 1),
-        }; 257 * 2];
+        // Fill up storage to the limit (256 sessions)
+        for i in 0u8..=255 {
+            let session_id =
+                SessionId::new(crate::honeybadger::ProtocolType::RandBit, i, 0, 0, 111);
+            let _ = node.get_or_create_storage(session_id).await;
+        }
 
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(100)).0);
-
-        let result = node.init(a, triples, session_id, net).await;
-        assert!(matches!(result, Err(RandBitError::LimitError(_))), "Should error on exceeding storage limit");
+        // The 257th session should fail
+        let session_id = SessionId::new(crate::honeybadger::ProtocolType::RandBit, 0, 1, 0, 111);
+        let result = node.get_or_create_storage(session_id).await;
+        assert!(
+            matches!(result, Err(RandBitError::LimitError(_))),
+            "Should error on exceeding storage limit"
+        );
     }
 }

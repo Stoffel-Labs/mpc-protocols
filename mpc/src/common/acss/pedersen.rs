@@ -82,8 +82,9 @@ where
     }
 }
 
+#[cfg(test)]
 mod tests {
-    use crate::common::acss::pedersen::{PedersenPolyCommParams, PedersenPolyCommitment};
+    use super::*;
     use ark_bls12_381::Fr;
     use ark_poly::univariate::DensePolynomial;
     use ark_poly::DenseUVPolynomial;

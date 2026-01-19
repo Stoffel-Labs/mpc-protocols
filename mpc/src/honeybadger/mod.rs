@@ -75,13 +75,7 @@ use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
-use std::{
-    fmt,
-    sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc,
-    },
-};
+use std::{fmt, sync::Arc};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use thiserror::Error;
 use tokio::{
@@ -295,17 +289,17 @@ pub struct SubProtocolCounters {
 impl SubProtocolCounters {
     pub fn new() -> Self {
         Self {
-            ran_dou_sha_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            ran_sha_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            triple_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            batch_recon_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            dou_sha_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            mul_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            rand_bit_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            prand_bit_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            prand_int_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            fpmul_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
-            fpdiv_const_counter: SubProtocolCounter(Arc::new(AtomicU8::new(0))),
+            ran_dou_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            ran_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            triple_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            batch_recon_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            dou_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            mul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            rand_bit_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            prand_bit_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            prand_int_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            fpmul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            fpdiv_const_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -485,7 +479,7 @@ where
 
         let session_id = SessionId::new(
             ProtocolType::Mul,
-            self.counters.mul_counter.get_next(),
+            self.counters.mul_counter.get_next().await?,
             0,
             0,
             self.params.instance_id,
@@ -746,6 +740,29 @@ where
 
         Ok(())
     }
+
+    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
+        // Check if we have a random share available
+        let (_, n_random, _, _) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+
+        // If no random shares available, generate some
+        if n_random == 0 {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.ensure_random_shares(network, &mut rng, 1).await?;
+        }
+
+        // Take one random share from the preprocessing material
+        let shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(1)?;
+
+        Ok(shares.into_iter().next().unwrap())
+    }
 }
 
 #[async_trait]
@@ -830,7 +847,7 @@ where
 
         let session_id = SessionId::new(
             ProtocolType::FpMul,
-            self.counters.fpmul_counter.get_next(),
+            self.counters.fpmul_counter.get_next().await?,
             0,
             0,
             self.params.instance_id,
@@ -1478,9 +1495,9 @@ where
 
         //Prandbit share generation
         info!("PRandbit share generation");
-        let sessionid = SessionId::new(
+        let _sessionid = SessionId::new(
             ProtocolType::PRandBit,
-            self.counters.prand_bit_counter.get_next(),
+            self.counters.prand_bit_counter.get_next().await?,
             0,
             0,
             self.params.instance_id,

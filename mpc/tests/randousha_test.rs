@@ -363,7 +363,10 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
-    let node_store = randousha_node.get_or_create_store(session_id).await.unwrap();
+    let node_store = randousha_node
+        .get_or_create_store(session_id)
+        .await
+        .unwrap();
 
     // first n-(t+1)-1 message should return error
     for i in 0..n_parties - (threshold + 2) {
@@ -422,7 +425,10 @@ async fn test_output_handler() {
         .await
         .expect("output handler should not fail");
     {
-        let storage_mutex = randousha_node.get_or_create_store(session_id).await.unwrap();
+        let storage_mutex = randousha_node
+            .get_or_create_store(session_id)
+            .await
+            .unwrap();
         let storage = storage_mutex.lock().await;
         let output = storage.protocol_output.clone();
 

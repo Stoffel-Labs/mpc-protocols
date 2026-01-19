@@ -54,7 +54,7 @@ pub enum TripleGenError {
     #[error("session ID {0:?} malformed")]
     SessionIdError(SessionId),
     #[error("limit reached")]
-    LimitError
+    LimitError,
 }
 
 /// Represents a Beaver triple of non-robust Shamir shares.

@@ -54,6 +54,8 @@ pub enum RandBitError {
     SenderError(#[from] SendError<SessionId>),
     #[error("unknown calling protocol in session ID {0:?}")]
     SessionIdError(SessionId),
+    #[error("storage limit exceeded: {0}")]
+    LimitError(String),
 }
 
 #[derive(Copy, Clone, Debug)]

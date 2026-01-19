@@ -195,10 +195,10 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use crate::common::rbc::rbc::Avid;
+    use crate::honeybadger::fpmul::{TruncPrError, TruncPrMessage};
+    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use crate::honeybadger::SessionId;
-    use crate::honeybadger::fpmul::{TruncPrMessage, TruncPrError};
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
     use tokio::sync::mpsc;

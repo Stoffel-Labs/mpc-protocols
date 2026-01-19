@@ -116,7 +116,11 @@ where
         Ok(())
     }
 
-    pub async fn process<N>(&mut self, msg: RanShaMessage, network: Arc<N>) -> Result<(), RanShaError>
+    pub async fn process<N>(
+        &mut self,
+        msg: RanShaMessage,
+        network: Arc<N>,
+    ) -> Result<(), RanShaError>
     where
         N: Network + Send + Sync,
     {
