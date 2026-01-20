@@ -3,10 +3,7 @@ pub mod share_gen_avss;
 use crate::{
     common::{
         rbc::RbcError,
-        share::{
-            avss::{AvssError, FeldmanShamirShare},
-            ShareError,
-        },
+        share::{avss::AvssError, feldman::FeldmanShamirShare, ShareError},
     },
     honeybadger::SessionId,
 };

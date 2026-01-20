@@ -1,5 +1,6 @@
 pub mod avss;
 pub mod shamir;
+pub mod feldman;
 use std::ops::{Add, Mul};
 
 use ark_ff::FftField;

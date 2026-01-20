@@ -1,10 +1,9 @@
 use crate::{
-    common::{rbc::RbcError, share::shamir::Shamirshare, SecretKey, RBC},
+    common::{rbc::RbcError, share::feldman::FeldmanShamirShare, SecretSharingScheme, RBC},
     honeybadger::{SessionId, WrappedMessage},
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
-use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use bincode::ErrorKind;
@@ -41,37 +40,6 @@ pub enum AvssError {
     ShareError(#[from] crate::common::share::ShareError),
     #[error("send error")]
     SendError(#[from] tokio::sync::mpsc::error::SendError<SessionId>),
-}
-
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct FeldmanShamirShare<F: FftField, G: CurveGroup<ScalarField = F>> {
-    pub feldmanshare: Shamirshare<F>,
-    pub commitments: Vec<G>,
-}
-
-impl<F: FftField, G: CurveGroup<ScalarField = F>> FeldmanShamirShare<F, G> {
-    pub fn new(share: F, id: usize, degree: usize, commitments: Vec<G>) -> Result<Self, AvssError> {
-        let shamirshare = Shamirshare::new(share, id, degree);
-        if commitments.len() != degree + 1 {
-            return Err(AvssError::InvalidCommitmentLength);
-        }
-        Ok(FeldmanShamirShare {
-            feldmanshare: shamirshare,
-            commitments: commitments,
-        })
-    }
-}
-impl<F, G> SecretKey<F, Shamirshare<F>, G> for FeldmanShamirShare<F, G>
-where
-    F: FftField,
-    G: CurveGroup<ScalarField = F>,
-{
-    fn get_share(&self) -> &Shamirshare<F> {
-        &self.feldmanshare
-    }
-    fn get_commitment(&self) -> &Vec<G> {
-        &self.commitments
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -210,14 +178,10 @@ where
     {
         info!("Receiving init for avss from {0:?}", self.id);
         // Generate the random polynomial of degree `degree` with `secret` as constant term
-        let mut poly = DensePolynomial::rand(self.t, rng);
-        poly[0] = secret;
 
-        let commitments: Vec<_> = poly
-            .coeffs
-            .iter()
-            .map(|a_j| G::generator().mul(a_j))
-            .collect();
+        let ids: Vec<usize> = (1..=self.n_parties).collect();
+        let shares: Vec<FeldmanShamirShare<F, G>> =
+            FeldmanShamirShare::compute_shares(secret, self.n_parties, self.t, Some(&ids), rng)?;
 
         // Dealer ephemeral keypair
         let sk_d = F::rand(rng);
@@ -229,13 +193,8 @@ where
         let mut encrypted = Vec::with_capacity(self.n_parties);
 
         for i in 0..self.n_parties {
-            let x = F::from((i + 1) as u64);
-            let y = poly.evaluate(&x);
-
-            let share = FeldmanShamirShare::new(y, i + 1, self.t, commitments.clone())?;
-
             let mut pt = Vec::new();
-            share.serialize_compressed(&mut pt)?;
+            shares[i].serialize_compressed(&mut pt)?;
 
             let ss = self.pk_map[i].mul(sk_d);
             let key = kdf_from_point(&ss);

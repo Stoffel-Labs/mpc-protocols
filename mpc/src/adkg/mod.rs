@@ -2,11 +2,8 @@ use crate::{
     adkg::share_gen::{share_gen_avss::RanShaAvssNode, RanShaAvssError},
     common::{
         rbc::RbcError,
-        share::{
-            avss::{AvssError, FeldmanShamirShare},
-            shamir::Shamirshare,
-        },
-        MPCProtocol, PreprocessingMPCProtocol, SecretKey, ADKG, RBC,
+        share::{avss::AvssError, feldman::FeldmanShamirShare},
+        MPCProtocol, PreprocessingMPCProtocol, RBC,
     },
     honeybadger::{ProtocolType, SessionId, WrappedMessage},
 };
@@ -31,6 +28,7 @@ use tokio::sync::{
 use tracing::{info, warn};
 
 pub mod share_gen;
+pub mod triple_gen;
 
 #[derive(Error, Debug)]
 pub enum AdkgError {
@@ -58,7 +56,7 @@ pub enum AdkgError {
 }
 
 #[derive(Clone, Debug)]
-/// Configuration options for the HoneyBadgerMPCNode protocol.
+/// Configuration options for the AdkgMPCNode protocol.
 pub struct AdkgNodeOpts<F, G>
 where
     F: FftField,
@@ -81,7 +79,7 @@ where
     F: FftField,
     G: CurveGroup<ScalarField = F>,
 {
-    /// Creates a new struct of initialization options for the HoneyBadgerMPCNode protocol.
+    /// Creates a new struct of initialization options for the AdkgMPCNode protocol.
     pub fn new(
         n_parties: usize,
         threshold: usize,
@@ -140,7 +138,7 @@ where
     }
 }
 
-/// Information pertaining a HoneyBadgerMPCNode protocol participant.
+/// Information pertaining a AdkgMPCNode protocol participant.
 #[derive(Clone, Debug)]
 pub struct AdkgNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
     /// ID of the current execution node.
@@ -184,7 +182,7 @@ impl SubProtocolCounters {
 }
 
 #[async_trait]
-impl<F, R, N, G> MPCProtocol<F, Shamirshare<F>, N> for AdkgNode<F, R, G>
+impl<F, R, N, G> MPCProtocol<F, FeldmanShamirShare<F, G>, N> for AdkgNode<F, R, G>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
@@ -246,16 +244,16 @@ where
 
     async fn mul(
         &mut self,
-        _a: Vec<Shamirshare<F>>,
-        _b: Vec<Shamirshare<F>>,
+        _a: Vec<FeldmanShamirShare<F, G>>,
+        _b: Vec<FeldmanShamirShare<F, G>>,
         _network: Arc<N>,
-    ) -> Result<Vec<Shamirshare<F>>, Self::Error>
+    ) -> Result<Vec<FeldmanShamirShare<F, G>>, Self::Error>
     where
         N: 'async_trait,
     {
         Err(AdkgError::NotSupported)
     }
-    async fn rand(&mut self, network: Arc<N>) -> Result<Shamirshare<F>, Self::Error> {
+    async fn rand(&mut self, network: Arc<N>) -> Result<FeldmanShamirShare<F, G>, Self::Error> {
         let no_rand = {
             let store = self.preprocessing_material.lock().await;
             store.len()
@@ -271,53 +269,24 @@ where
             .lock()
             .await
             .take_v_random_shares(1)?;
-        Ok(rand_value[0].feldmanshare.clone())
+        Ok(rand_value[0].clone())
     }
 }
 
-#[async_trait]
-impl<F, N, R, G> ADKG<F, FeldmanShamirShare<F, G>, Shamirshare<F>, N, G> for AdkgNode<F, R, G>
+impl<F, R, G> AdkgNode<F, R, G>
 where
     F: PrimeField,
-    N: Network + Send + Sync + 'static,
     R: RBC,
     G: CurveGroup<ScalarField = F>,
 {
-    async fn secret_key(
-        &mut self,
-        no_of_keys: usize,
-        network: Arc<N>,
-    ) -> Result<Vec<FeldmanShamirShare<F, G>>, Self::Error> {
-        let no_vrand = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-        if no_vrand == 0 {
-            //Run preprocessing
-            let mut rng = StdRng::from_rng(OsRng).unwrap();
-            self.run_preprocessing(network.clone(), &mut rng).await?;
-        }
-
-        let vrand_shares = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_v_random_shares(no_of_keys)?;
-
-        Ok(vrand_shares.clone())
-    }
-    async fn public_key(
-        &self,
-        secret_keys: Vec<FeldmanShamirShare<F, G>>,
-        _net: Arc<N>,
-    ) -> Result<Vec<G>, Self::Error> {
-        let commitments: Vec<_> = secret_keys.iter().map(|k| k.get_commitment()[0]).collect();
-        Ok(commitments)
+    pub fn public_key(&self, secret_key: FeldmanShamirShare<F, G>) -> G {
+        let commitment = secret_key.commitments[0];
+        commitment
     }
 }
 
 #[async_trait]
-impl<F, R, N, C> PreprocessingMPCProtocol<F, Shamirshare<F>, N> for AdkgNode<F, R, C>
+impl<F, R, N, C> PreprocessingMPCProtocol<F, FeldmanShamirShare<F, C>, N> for AdkgNode<F, R, C>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,

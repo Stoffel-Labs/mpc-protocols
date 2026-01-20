@@ -13,9 +13,8 @@ use std::sync::Arc;
 use stoffelmpc_mpc::{
     adkg::{AdkgNode, AdkgNodeOpts},
     common::{
-        rbc::rbc::Avid,
-        share::{avss::FeldmanShamirShare, shamir::Shamirshare},
-        MPCProtocol, PreprocessingMPCProtocol, SecretSharingScheme, ADKG, RBC,
+        rbc::rbc::Avid, share::feldman::FeldmanShamirShare, MPCProtocol, PreprocessingMPCProtocol,
+        SecretSharingScheme, RBC,
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
@@ -106,19 +105,18 @@ async fn adkg_e2e() {
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 5;
     let t = 1;
-    let no_of_keys = 3;
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_adkg_nodes::<Fr, Avid, Shamirshare<Fr>, FakeNetwork, G>(
-        n_parties, t, no_of_keys, 111,
+    let nodes = create_adkg_nodes::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
+        n_parties, t, 1, 111,
     );
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    adkg_receive::<Fr, Avid, Shamirshare<Fr>, FakeNetwork, G>(
+    adkg_receive::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
         receivers,
         nodes.clone(),
         network.clone(),
@@ -126,7 +124,7 @@ async fn adkg_e2e() {
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
     // init all nodes
-    let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<FeldmanShamirShare<Fr, G>>)>(100);
+    let (fin_send, mut fin_recv) = mpsc::channel::<(usize, FeldmanShamirShare<Fr, G>)>(100);
     let mut handles = Vec::new();
     for pid in 0..n_parties {
         let mut node = nodes[pid].clone();
@@ -134,8 +132,8 @@ async fn adkg_e2e() {
         let fin_send = fin_send.clone();
         let handle = tokio::spawn(async move {
             {
-                let key_shares = node.secret_key(no_of_keys, net).await.expect("mul failed");
-                fin_send.send((pid, key_shares)).await.unwrap();
+                let key_share = node.rand(net).await.expect("mul failed");
+                fin_send.send((pid, key_share)).await.unwrap();
             }
         });
         handles.push(handle);
@@ -143,7 +141,7 @@ async fn adkg_e2e() {
 
     // Wait for all mul tasks to finish
     futures::future::join_all(handles).await;
-    let mut per_party: Vec<Option<Vec<FeldmanShamirShare<Fr, G>>>> = vec![None; n_parties];
+    let mut per_party: Vec<Option<FeldmanShamirShare<Fr, G>>> = vec![None; n_parties];
     while let Some((pid, shares)) = fin_recv.recv().await {
         per_party[pid] = Some(shares);
         if per_party.iter().all(|x| x.is_some()) {
@@ -151,68 +149,47 @@ async fn adkg_e2e() {
         }
     }
 
-    let mut per_key: Vec<Vec<FeldmanShamirShare<Fr, G>>> =
-        vec![Vec::with_capacity(n_parties); no_of_keys];
+    let mut feldman_shares: Vec<FeldmanShamirShare<Fr, G>> = Vec::with_capacity(n_parties);
 
     for pid in 0..n_parties {
         let shares = per_party[pid].as_ref().unwrap();
-        assert_eq!(shares.len(), no_of_keys);
-
-        for k in 0..no_of_keys {
-            per_key[k].push(shares[k].clone());
-        }
+        feldman_shares.push(shares.clone());
     }
 
     //----------------------------------------VALIDATE EACH KEY----------------------------------------
-    for key_idx in 0..no_of_keys {
-        let feldman_shares = &per_key[key_idx];
 
-        // Reconstruct secret from t+1 shares
-        let shamir_shares: Vec<Shamirshare<Fr>> = feldman_shares
-            .iter()
-            .map(|fs| fs.feldmanshare.clone())
-            .collect();
+    // Reconstruct secret from t+1 shares
+    let subset = feldman_shares[0..(t + 1)].to_vec();
+    let (_, secret_rec) =
+        FeldmanShamirShare::recover_secret(&subset, n_parties).expect("recover_secret failed");
 
-        let subset = shamir_shares[0..(t + 1)].to_vec();
-        let (_, secret_rec) =
-            Shamirshare::<Fr>::recover_secret(&subset, n_parties).expect("recover_secret failed");
+    //-------------------------------- PK checks --------------------------------
+    let pk_expected = G::generator() * secret_rec;
 
-        //-------------------------------- PK checks --------------------------------
-        let pk_expected = G::generator() * secret_rec;
+    // Feldman invariant: pk == C_0
+    let c0 = feldman_shares[0].commitments[0];
+    assert_eq!(pk_expected, c0, "pk != Feldman C0 ");
 
-        // Feldman invariant: pk == C_0
-        let c0 = feldman_shares[0].commitments[0];
-        assert_eq!(pk_expected, c0, "pk != Feldman C0 (key {})", key_idx);
+    // ADKG public_key API
+    let pk_from_method = nodes[0].public_key(feldman_shares[0].clone());
 
-        // ADKG public_key API
-        let pk_from_method = nodes[0]
-            .public_key(vec![feldman_shares[0].clone()], network.clone())
-            .await
-            .expect("public_key failed")[0];
+    assert_eq!(pk_from_method, pk_expected, "public_key() != g^secret",);
 
+    //-------------------------------- Commitments consistency --------------------------------
+    let reference_commitments = &feldman_shares[0].commitments;
+
+    assert_eq!(
+        reference_commitments.len(),
+        t + 1,
+        "commitment length mismatch",
+    );
+
+    for (pid, fs) in feldman_shares.iter().enumerate() {
         assert_eq!(
-            pk_from_method, pk_expected,
-            "public_key() != g^secret (key {})",
-            key_idx
+            fs.commitments, *reference_commitments,
+            "Feldman commitments mismatch at party {}",
+            pid
         );
-
-        //-------------------------------- Commitments consistency --------------------------------
-        let reference_commitments = &feldman_shares[0].commitments;
-
-        assert_eq!(
-            reference_commitments.len(),
-            t + 1,
-            "commitment length mismatch (key {})",
-            key_idx
-        );
-
-        for (pid, fs) in feldman_shares.iter().enumerate() {
-            assert_eq!(
-                fs.commitments, *reference_commitments,
-                "Feldman commitments mismatch at party {}, key {}",
-                pid, key_idx
-            );
-        }
     }
 }
 
@@ -230,7 +207,7 @@ async fn preprocessing_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_adkg_nodes::<Fr, Avid, Shamirshare<Fr>, FakeNetwork, G>(
+    let nodes = create_adkg_nodes::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
         n_parties,
         t,
         no_of_randomshares,
@@ -239,7 +216,7 @@ async fn preprocessing_e2e() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    adkg_receive::<Fr, Avid, Shamirshare<Fr>, FakeNetwork, G>(
+    adkg_receive::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
         receivers,
         nodes.clone(),
         network.clone(),

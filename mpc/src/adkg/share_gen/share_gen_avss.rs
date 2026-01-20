@@ -2,9 +2,7 @@ use crate::{
     adkg::share_gen::{RanShaAvssError, RanShaAvssStore},
     common::{
         share::{
-            apply_vandermonde,
-            avss::{AvssNode, FeldmanShamirShare},
-            make_vandermonde,
+            apply_vandermonde, avss::AvssNode, feldman::FeldmanShamirShare, make_vandermonde
         },
         ShamirShare, RBC,
     },
