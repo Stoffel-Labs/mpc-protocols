@@ -32,7 +32,7 @@ use tracing_subscriber::FmtSubscriber;
 //--------------------------RBC--------------------------
 
 /// Helper function to set up parties,Network,Receivers
-pub async fn setup_network_and_parties<T: RBC, N: Network>(
+pub async fn setup_network_and_parties<T: RBC<Id = SessionId>, N: Network>(
     n: usize,
     t: usize,
     k: usize,
@@ -44,7 +44,7 @@ pub async fn setup_network_and_parties<T: RBC, N: Network>(
 
     let mut parties = Vec::with_capacity(n as usize);
     for i in 0..n {
-        let rbc = T::new(i, n, t, k)?; // Create a new RBC instance for each party
+        let rbc = T::new(i, n, t, k, Arc::new(WrappedMessage::rbc_wrap))?; // Create a new RBC instance for each party
         parties.push(rbc);
     }
     Ok((parties, net, receivers))
@@ -56,7 +56,7 @@ pub async fn spawn_parties<T, N>(
     receivers: Vec<mpsc::Receiver<Vec<u8>>>,
     net: Arc<N>,
 ) where
-    T: RBC + Clone + Send + Sync + 'static,
+    T: RBC<Id = SessionId> + Clone + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
     for (rbc, mut rx) in parties.iter().cloned().zip(receivers.into_iter()) {
@@ -166,7 +166,7 @@ pub fn initialize_node(
     t: usize,
     k: usize,
     output_sender: Sender<SessionId>,
-) -> RanDouShaNode<Fr, Avid> {
+) -> RanDouShaNode<Fr, Avid<SessionId>> {
     RanDouShaNode::new(node_id, output_sender, n, t, k).unwrap()
 }
 
@@ -176,7 +176,7 @@ pub fn create_nodes(
     senders: Vec<Sender<SessionId>>,
     t: usize,
     k: usize,
-) -> Vec<Arc<Mutex<RanDouShaNode<Fr, Avid>>>> {
+) -> Vec<Arc<Mutex<RanDouShaNode<Fr, Avid<SessionId>>>>> {
     (0..n_parties)
         .zip(senders)
         .map(|(id, sender)| Arc::new(Mutex::new(initialize_node(id, n_parties, t, k, sender))))
@@ -185,7 +185,7 @@ pub fn create_nodes(
 
 /// Initializes all nodes with their respective shares.
 pub async fn initialize_all_nodes(
-    nodes: &[Arc<Mutex<RanDouShaNode<Fr, Avid>>>],
+    nodes: &[Arc<Mutex<RanDouShaNode<Fr, Avid<SessionId>>>>],
     n_shares_t: &[Vec<NonRobustShare<Fr>>],
     n_shares_2t: &[Vec<NonRobustShare<Fr>>],
     session_id: SessionId,
@@ -230,7 +230,7 @@ pub async fn initialize_all_nodes(
 /// In the case of Abort, the node is dropped from the network and the task is cancelled
 /// For the rest of the errors, we panic
 pub fn spawn_receiver_tasks(
-    nodes: Vec<Arc<Mutex<RanDouShaNode<Fr, Avid>>>>,
+    nodes: Vec<Arc<Mutex<RanDouShaNode<Fr, Avid<SessionId>>>>>,
     mut receivers: Vec<Receiver<Vec<u8>>>,
     network: Arc<FakeNetwork>,
     fin_send: mpsc::Sender<(usize, Vec<DoubleShamirShare<Fr>>)>,
@@ -447,7 +447,7 @@ pub async fn initialize_global_nodes_randousha<F, R, N>(
     network: Arc<N>,
 ) where
     F: PrimeField,
-    R: RBC + 'static,
+    R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
 {
     assert!(nodes.len() == n_shares_t.len());
@@ -511,7 +511,7 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
     network: Arc<N>,
 ) where
     F: PrimeField,
-    R: RBC + 'static,
+    R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
 {
     let mut rng = StdRng::from_rng(OsRng).unwrap();
@@ -591,7 +591,7 @@ pub async fn construct_e2e_input_mul(
 }
 
 //--------------------------CLIENT--------------------------
-pub fn create_clients<F: FftField, R: RBC + 'static>(
+pub fn create_clients<F: FftField, R: RBC<Id = SessionId> + 'static>(
     client_ids: Vec<ClientId>,
     n_parties: usize,
     t: usize,
@@ -616,7 +616,7 @@ pub fn receive_client<F, R, N>(
     net: Arc<N>,
 ) where
     F: FftField + 'static,
-    R: RBC + 'static,
+    R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
 {
     assert_eq!(

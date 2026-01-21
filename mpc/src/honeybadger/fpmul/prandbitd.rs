@@ -1,5 +1,5 @@
 use crate::{
-    common::share::ShareError,
+    common::{share::ShareError, ProtocolSessionId},
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         fpmul::{
@@ -278,9 +278,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             for (i, chunk) in share_rplusb.chunks(self.t + 1).enumerate() {
                 let session_id_batch = SessionId::new(
                     calling_proto,
-                    msg.session_id.exec_id(),
-                    0,
-                    i as u8,
+                    SessionId::pack_slot24(msg.session_id.exec_id(), 0, i as u8),
                     msg.session_id.instance_id(),
                 );
                 self.batch_recon
@@ -304,9 +302,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
 
         let session_id = SessionId::new(
             calling_proto,
-            msg.session_id.exec_id(),
-            0,
-            0,
+            SessionId::pack_slot24(msg.session_id.exec_id(), 0, 0),
             msg.session_id.instance_id(),
         );
 

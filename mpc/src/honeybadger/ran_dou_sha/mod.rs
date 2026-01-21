@@ -4,7 +4,7 @@ use crate::{
     common::{
         rbc::RbcError,
         share::{apply_vandermonde, make_vandermonde, shamir::NonRobustShare, ShareError},
-        SecretSharingScheme, RBC,
+        ProtocolSessionId, SecretSharingScheme, RBC,
     },
     honeybadger::{
         double_share::DoubleShamirShare, ran_dou_sha::messages::RanDouShaPayload,
@@ -129,7 +129,7 @@ pub static MAX_RAN_DOU_SHA_SESSIONS: usize = 1024;
 impl<F, R> RanDouShaNode<F, R>
 where
     F: FftField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     pub fn new(
         id: PartyId,
@@ -138,7 +138,13 @@ where
         threshold: usize,
         k: usize, // for RBC init
     ) -> Result<Self, RanDouShaError> {
-        let rbc = R::new(id, n_parties, threshold, k)?;
+        let rbc = R::new(
+            id,
+            n_parties,
+            threshold,
+            k,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?;
         Ok(Self {
             id,
             n_parties,
@@ -357,9 +363,11 @@ where
                 // if the verification succeeds, broadcast true (aka. OK)
                 let sessionid = SessionId::new(
                     ProtocolType::Randousha,
-                    msg.session_id.exec_id(),
-                    self.id as u8,
-                    msg.session_id.round_id(),
+                    SessionId::pack_slot24(
+                        msg.session_id.exec_id(),
+                        self.id as u8,
+                        msg.session_id.round_id(),
+                    ),
                     msg.session_id.instance_id(),
                 );
                 self.rbc
@@ -466,14 +474,18 @@ mod tests {
     #[tokio::test]
     async fn test_randousha_storage_limit_in_reconstruction_handler() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanDouShaNode::<Fr, Avid>::new(0, tx, 5, 1, 2).unwrap();
+        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, tx, 5, 1, 2).unwrap();
         let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
 
         // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
         let mut exec = 0u8;
         let mut round = 0u8;
         for _ in 0..super::MAX_RAN_DOU_SHA_SESSIONS {
-            let sid = SessionId::new(ProtocolType::Randousha, exec, 0, round, 111);
+            let sid = SessionId::new(
+                ProtocolType::Randousha,
+                SessionId::pack_slot24(exec, 0, round),
+                111,
+            );
             let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
             let mut payload = Vec::new();
             rec_msg.serialize_compressed(&mut payload).unwrap();
@@ -496,7 +508,11 @@ mod tests {
         }
 
         // Now try to process a message that would require a new session (should hit the limit)
-        let over_sid = SessionId::new(ProtocolType::Randousha, 255, 0, 255, 0);
+        let over_sid = SessionId::new(
+            ProtocolType::Randousha,
+            SessionId::pack_slot24(255, 0, 255),
+            0,
+        );
         let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
         let mut payload = Vec::new();
         rec_msg.serialize_compressed(&mut payload).unwrap();
@@ -517,11 +533,12 @@ mod tests {
     #[tokio::test]
     async fn test_randousha_handle_invalid_sub_id() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanDouShaNode::<Fr, Avid>::new(0, tx, 5, 1, 2).unwrap();
+        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, tx, 5, 1, 2).unwrap();
         let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
 
         // Create a session id with sub_id != 0
-        let session_id = SessionId::new(crate::honeybadger::ProtocolType::Randousha, 0, 1, 0, 0);
+        let session_id =
+            SessionId::new(ProtocolType::Randousha, SessionId::pack_slot24(0, 1, 0), 0);
 
         // Create a dummy payload
         let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());

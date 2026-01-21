@@ -1,8 +1,7 @@
 use super::*;
 use crate::{
     common::{
-        share::{apply_vandermonde, make_vandermonde},
-        SecretSharingScheme,
+        share::{apply_vandermonde, make_vandermonde}, ProtocolSessionId, SecretSharingScheme
     },
     honeybadger::{
         fpmul::{PRandBitDMessage, PRandMessageType, RandBitMessage},

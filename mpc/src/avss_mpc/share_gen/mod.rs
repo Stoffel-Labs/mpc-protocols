@@ -1,11 +1,10 @@
 pub mod share_gen_avss;
 
 use crate::{
-    common::{
+    avss_mpc::AvssSessionId, common::{
         rbc::RbcError,
         share::{avss::AvssError, feldman::FeldmanShamirShare, ShareError},
-    },
-    honeybadger::SessionId,
+    }
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -23,7 +22,7 @@ pub enum RanShaAvssError {
     #[error("inner error: {0:?}")]
     ShareError(#[from] ShareError),
     #[error("error sending the output of the protocol execution: {0:?}")]
-    SendError(#[from] SendError<SessionId>),
+    SendError(#[from] SendError<AvssSessionId>),
 }
 
 #[derive(Clone, Debug)]

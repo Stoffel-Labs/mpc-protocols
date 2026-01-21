@@ -53,7 +53,7 @@ where
 impl<F, R> FPMulNode<F, R>
 where
     F: PrimeField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     pub fn new(
         id: usize,

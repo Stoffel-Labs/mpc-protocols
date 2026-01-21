@@ -1,11 +1,10 @@
 pub mod multiplication;
 
 use crate::{
-    common::{
+    avss_mpc::AvssSessionId, common::{
         rbc::RbcError,
         share::{feldman::FeldmanShamirShare, ShareError},
-    },
-    honeybadger::SessionId,
+    }
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -30,9 +29,9 @@ pub enum MulError {
     #[error("error while serializing an arkworks object: {0:?}")]
     ArkDeserialization(SerializationError),
     #[error("error sending the result: {0:?}")]
-    SendError(SessionId),
+    SendError(AvssSessionId),
     #[error("error receiving the result: {0:?}")]
-    ReceiveError(SessionId),
+    ReceiveError(AvssSessionId),
     #[error("Duplicate input: {0}")]
     Duplicate(String),
     #[error("Invalid input: {0}")]
@@ -40,13 +39,13 @@ pub enum MulError {
     #[error("error during the serialization using bincode: {0:?}")]
     BincodeSerializationError(#[from] Box<ErrorKind>),
     #[error("no such session ID exists: {0:?}")]
-    NoSuchSessionId(SessionId),
+    NoSuchSessionId(AvssSessionId),
     #[error("result already received: {0:?}")]
-    ResultAlreadyReceived(SessionId),
+    ResultAlreadyReceived(AvssSessionId),
     #[error("waiting for more openings")]
     WaitForOk,
     #[error("multiplication {0:?} did not complete in time")]
-    Timeout(SessionId),
+    Timeout(AvssSessionId),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -102,7 +101,7 @@ pub struct MultMessage {
     /// ID of the sender of the message.
     pub sender: PartyId,
     /// Session ID of the current instance of the protocol.
-    pub session_id: SessionId,
+    pub session_id: AvssSessionId,
     /// Payload contained in the message.
     ///
     /// This payload is a serialized field element containing either `triple.a - x` or
@@ -112,7 +111,7 @@ pub struct MultMessage {
 
 impl MultMessage {
     /// Creates a new generic multiplication message [`MultMessage`].
-    pub fn new(sender: PartyId, session_id: SessionId, payload: Vec<u8>) -> Self {
+    pub fn new(sender: PartyId, session_id: AvssSessionId, payload: Vec<u8>) -> Self {
         Self {
             sender,
             session_id,

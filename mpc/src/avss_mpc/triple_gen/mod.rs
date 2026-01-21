@@ -1,9 +1,8 @@
 use crate::{
-    common::{
+    avss_mpc::AvssSessionId, common::{
         rbc::RbcError,
         share::{avss::AvssError, feldman::FeldmanShamirShare, ShareError},
-    },
-    honeybadger::SessionId,
+    }
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -36,7 +35,7 @@ pub enum TripleGenError {
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
     #[error("error sending the finished session ID to the caller: {0:?}")]
-    SenderError(#[from] SendError<SessionId>),
+    SenderError(#[from] SendError<AvssSessionId>),
     #[error("invalid share length")]
     InvalidShareLength,
 }

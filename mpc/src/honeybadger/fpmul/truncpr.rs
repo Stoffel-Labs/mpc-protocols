@@ -1,5 +1,5 @@
 use crate::{
-    common::{SecretSharingScheme, RBC},
+    common::{ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
         fpmul::{mod_pow2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore},
         robust_interpolate::robust_interpolate::RobustShare,
@@ -23,14 +23,14 @@ pub struct TruncPrNode<F: PrimeField, R: RBC> {
     pub rbc: R,
 }
 
-impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
+impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     pub fn new(
         id: usize,
         n: usize,
         t: usize,
         output_channel: Sender<SessionId>,
     ) -> Result<Self, TruncPrError> {
-        let rbc = R::new(id, n, t, t + 1)?;
+        let rbc = R::new(id, n, t, t + 1, Arc::new(WrappedMessage::rbc_wrap))?;
         Ok(Self {
             id,
             n,
@@ -110,9 +110,7 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
 
         let sessionid = SessionId::new(
             calling_proto,
-            session.exec_id(),
-            0,
-            self.id as u8,
+            SessionId::pack_slot24(session.exec_id(), 0, self.id as u8),
             session.instance_id(),
         );
         self.rbc
@@ -206,10 +204,14 @@ mod tests {
     #[tokio::test]
     async fn test_truncpr_handle_open_invalid_sub_id() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = TruncPrNode::<Fr, Avid>::new(0, 5, 1, tx).unwrap();
+        let mut node = TruncPrNode::<Fr, Avid<SessionId>>::new(0, 5, 1, tx).unwrap();
 
         // Create a session id with sub_id != 0
-        let session_id = SessionId::new(crate::honeybadger::ProtocolType::Trunc, 0, 1, 0, 111);
+        let session_id = SessionId::new(
+            crate::honeybadger::ProtocolType::Trunc,
+            SessionId::pack_slot24(0, 1, 0),
+            111,
+        );
 
         // Create a dummy payload
         let dummy_share = RobustShare::new(Fr::from(1u8), 0, 1);
