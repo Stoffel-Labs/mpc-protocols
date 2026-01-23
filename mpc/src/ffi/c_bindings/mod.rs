@@ -1,5 +1,4 @@
 use ark_bls12_381::Fr;
-use ark_ff::biginteger;
 use ark_ff::{BigInt, BigInteger, PrimeField};
 use num_bigint::BigUint;
 use std::{
@@ -74,9 +73,10 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
-    BatchedRansha = 15,
-    BatchedRandousha = 16,
-    BatchedTriple = 17,
+    Avss = 15,
+    BatchedRansha = 16,
+    BatchedRandousha = 17,
+    BatchedTriple = 18,
 }
 
 impl From<ProtocolType> for crate::honeybadger::ProtocolType {
@@ -97,6 +97,7 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             ProtocolType::FpMul => crate::honeybadger::ProtocolType::FpMul,
             ProtocolType::Trunc => crate::honeybadger::ProtocolType::Trunc,
             ProtocolType::FpDivConst => crate::honeybadger::ProtocolType::FpDivConst,
+            ProtocolType::Avss => crate::honeybadger::ProtocolType::Avss,
             ProtocolType::BatchedRansha => crate::honeybadger::ProtocolType::BatchedRansha,
             ProtocolType::BatchedRandousha => crate::honeybadger::ProtocolType::BatchedRandousha,
             ProtocolType::BatchedTriple => crate::honeybadger::ProtocolType::BatchedTriple,
@@ -122,6 +123,7 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::FpMul => ProtocolType::FpMul,
             crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
             crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
+            crate::honeybadger::ProtocolType::Avss => ProtocolType::Avss,
             crate::honeybadger::ProtocolType::BatchedRansha => ProtocolType::BatchedRansha,
             crate::honeybadger::ProtocolType::BatchedRandousha => ProtocolType::BatchedRandousha,
             crate::honeybadger::ProtocolType::BatchedTriple => ProtocolType::BatchedTriple,

@@ -30,6 +30,7 @@ pub mod share_gen;
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
+        share::avss::AvssMessage,
         types::{
             fixed::{ClearFixedPoint, SecretFixedPoint},
             integer::{ClearInt, SecretInt},
@@ -753,6 +754,7 @@ where
                 }
             }
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
+            WrappedMessage::Avss(_) => warn!("Incorrect message recieved at process function"),
         }
 
         Ok(())
@@ -2200,6 +2202,7 @@ pub enum WrappedMessage {
     RandBit(RandBitMessage),
     Trunc(TruncPrMessage),
     PRandBit(PRandBitDMessage),
+    Avss(AvssMessage),
 }
 
 //-----------------Session-ID-----------------
@@ -2222,9 +2225,10 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
-    BatchedRansha = 15,
-    BatchedRandousha = 16,
-    BatchedTriple = 17,
+    Avss = 15,
+    BatchedRansha = 16,
+    BatchedRandousha = 17,
+    BatchedTriple = 18,
 }
 
 impl TryFrom<u8> for ProtocolType {
@@ -2247,9 +2251,10 @@ impl TryFrom<u8> for ProtocolType {
             12 => Ok(ProtocolType::FpMul),
             13 => Ok(ProtocolType::Trunc),
             14 => Ok(ProtocolType::FpDivConst),
-            15 => Ok(ProtocolType::BatchedRansha),
-            16 => Ok(ProtocolType::BatchedRandousha),
-            17 => Ok(ProtocolType::BatchedTriple),
+            15 => Ok(ProtocolType::Avss),
+            16 => Ok(ProtocolType::BatchedRansha),
+            17 => Ok(ProtocolType::BatchedRandousha),
+            18 => Ok(ProtocolType::BatchedTriple),
             _ => Err(()),
         }
     }

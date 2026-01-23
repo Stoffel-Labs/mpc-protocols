@@ -17,7 +17,10 @@ use stoffelmpc_mpc::{
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
-use tokio::{sync::{mpsc, Barrier}, task::JoinSet};
+use tokio::{
+    sync::{mpsc, Barrier},
+    task::JoinSet,
+};
 use tracing::warn;
 
 pub mod utils;
@@ -50,7 +53,16 @@ async fn test_reconstruct_handler_incorrect_share() {
     }
     // create global nodes
     let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n_parties, t, 0, 0, 111, 0, 0, 0, 0, vec![]
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![],
     );
 
     // receiver randousha node
@@ -129,6 +141,7 @@ async fn test_reconstruct_handler_incorrect_share() {
         .share_gen
         .get_or_create_store(session_id)
         .await
+        .unwrap()
         .lock()
         .await
         .clone();
@@ -163,7 +176,7 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
-    let node_store = ransha_node.get_or_create_store(session_id).await;
+    let node_store = ransha_node.get_or_create_store(session_id).await.unwrap();
 
     // first 2t-1 messages should be buffered and return Ok (not WaitForOk error)
     // This is the fix for out-of-order message handling

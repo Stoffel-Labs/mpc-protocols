@@ -76,6 +76,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         network: Arc<N>,
     ) -> Result<(), PRandError> {
         info!(node_id = self.id, "RISS started");
+
+        assert_eq!(session_id.sub_id(), 0);
+        assert_eq!(session_id.round_id(), 0);
+
         if batch_size % (self.t + 1) != 0
             && session_id.calling_protocol() == Some(ProtocolType::PRandBit)
         {
@@ -138,6 +142,13 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     ) -> Result<(), PRandError> {
         info!(node_id = self.id, sender = msg.sender_id, "At RISS handler");
 
+        let calling_proto = match msg.session_id.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(PRandError::SessionIdError(msg.session_id));
+            }
+        };
+
         let binding = self.get_or_create_store(msg.session_id).await;
         let mut store = binding.lock().await;
 
@@ -181,10 +192,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             .batch_size
             .ok_or_else(|| PRandError::NotSet("Batch size not set at RISS handler".to_string()))?;
         let total_tsets = store.no_of_tsets.ok_or_else(|| {
-            PRandError::NotSet(format!(
-                "No of tsets not set {:?}",
-                msg.session_id.calling_protocol().unwrap()
-            ))
+            PRandError::NotSet(format!("No of tsets not set {:?}", calling_proto))
         })?;
         if store.r_t.len() == total_tsets {
             info!(node_id = self.id, "Constructing Polynomials");
@@ -252,7 +260,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 .clone()
                 .ok_or_else(|| PRandError::NotSet("Small field bits not set".to_string()))?;
             drop(store);
-            
+
             // share of r + b
             let share_rplusb: Vec<RobustShare<F>> = share_q
                 .iter()
@@ -269,7 +277,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             // Batch reconstruct r+b
             for (i, chunk) in share_rplusb.chunks(self.t + 1).enumerate() {
                 let session_id_batch = SessionId::new(
-                    msg.session_id.calling_protocol().unwrap(),
+                    calling_proto,
                     msg.session_id.exec_id(),
                     0,
                     i as u8,
@@ -287,8 +295,15 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     pub async fn output_handler(&self, msg: PRandBitDMessage) -> Result<(), PRandError> {
         info!(node_id = self.id, "At output handler");
 
+        let calling_proto = match msg.session_id.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(PRandError::SessionIdError(msg.session_id));
+            }
+        };
+
         let session_id = SessionId::new(
-            msg.session_id.calling_protocol().unwrap(),
+            calling_proto,
             msg.session_id.exec_id(),
             0,
             0,
@@ -381,6 +396,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         session_id: SessionId,
     ) -> Arc<Mutex<PRandBitDStore<F, G>>> {
         let mut storage = self.store.lock().await;
+
+        // should never happen, since only exec ID changes for different runs
+        assert!(storage.len() <= 256);
         storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(PRandBitDStore::empty())))

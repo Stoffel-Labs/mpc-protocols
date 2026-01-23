@@ -5,10 +5,9 @@ use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
-use tokio::{time::error::Elapsed, sync::watch::error::RecvError};
+use tokio::{sync::watch::error::RecvError, time::error::Elapsed};
 
 use crate::{common::rbc::RbcError, honeybadger::robust_interpolate::InterpolateError};
-
 
 #[derive(Debug, Error)]
 pub enum OutputError {
@@ -31,7 +30,7 @@ pub enum OutputError {
     #[error("error while waiting for all inputs")]
     WaitingError(#[from] RecvError),
     #[error("client {0:?} did not sent input in time")]
-    Timeout(#[from] Elapsed)
+    Timeout(#[from] Elapsed),
 }
 
 /// Message sent in the Random Double Sharing protocol.
@@ -43,10 +42,7 @@ pub struct OutputMessage {
 }
 
 impl OutputMessage {
-    pub fn new(sender_id: usize,  payload: Vec<u8>) -> OutputMessage {
-        Self {
-            sender_id,
-            payload,
-        }
+    pub fn new(sender_id: usize, payload: Vec<u8>) -> OutputMessage {
+        Self { sender_id, payload }
     }
 }

@@ -1,16 +1,25 @@
+use ark_std::rand::{distributions::Distribution, rngs::StdRng};
 use async_trait::async_trait;
 use futures::future::join_all;
-use std::{cmp::{Ord, PartialOrd, PartialEq, Ordering, Reverse}, collections::{HashMap, BinaryHeap}, marker::Send, sync::Arc};
-use tokio::{spawn, time::{sleep, Duration, Instant}, sync::{Mutex, mpsc::{self, Receiver, Sender}}, task::JoinHandle};
-use ark_std::rand::{
-    distributions::Distribution,
-    rngs::StdRng,
+use std::{
+    cmp::{Ord, Ordering, PartialEq, PartialOrd, Reverse},
+    collections::{BinaryHeap, HashMap},
+    marker::Send,
+};
+use tokio::{
+    spawn,
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Mutex,
+    },
+    task::JoinHandle,
+    time::{sleep, Duration, Instant},
 };
 
+use once_cell::sync::Lazy;
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::FmtSubscriber;
-use once_cell::sync::Lazy;
 
 /*
  * This is a fake network with delays. Every sent message is assigned a delay sampled from some
@@ -54,12 +63,17 @@ use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
 /// 2. Get the next message with the smallest delay.
 /// 3. If the delay has expired (i.e., elapsed_time >= delay), send the message.
 /// 4. If the delay has not yet expired, update the delay by subtracting the elapsed time.
-/// Go to step 1.
+///    Go to step 1.
 /// 5. Add a newly received message (if any).
 /// 6. Update the min-heap with the changes.
 /// 7. Set a timer for the next message to expire or set it to Duration::MAX if there are no
 ///    messages.
-async fn send_next_msgs(net_msgs: &mut BinaryHeap<KeyedMessage>, node_channels: &mut Vec<Sender<Vec<u8>>>, recvd_msg: Option<KeyedMessage>, elapsed_time: Duration) -> Duration {
+async fn send_next_msgs(
+    net_msgs: &mut BinaryHeap<KeyedMessage>,
+    node_channels: &mut [Sender<Vec<u8>>],
+    recvd_msg: Option<KeyedMessage>,
+    elapsed_time: Duration,
+) -> Duration {
     let mut new_net_msgs = BinaryHeap::new();
 
     // 1.
@@ -77,17 +91,23 @@ async fn send_next_msgs(net_msgs: &mut BinaryHeap<KeyedMessage>, node_channels: 
                         debug!("TIME: new MAX={:?}", *max);
                     }
                 }
-                debug!("TIME: sent to {} with elapsed_time={:?} >= delay={:?}", msg.1.0, elapsed_time, msg.0);
+                debug!(
+                    "TIME: sent to {} with elapsed_time={:?} >= delay={:?}",
+                    msg.1 .0, elapsed_time, msg.0
+                );
             }
 
             // 3.
-            let result = node_channels[msg.1.0].send(msg.1.1.to_vec()).await;
-            if result.is_err() {
-                panic!("network thread encountered error {}", result.unwrap_err());
+            let result = node_channels[msg.1 .0].send(msg.1 .1.to_vec()).await;
+            if let Err(e) = result {
+                panic!("network thread encountered error {}", e);
             }
         } else {
             #[cfg(debug_assertions)]
-            debug!("TIME: msg for {} not ready yet: elapsed_time={:?} < delay={:?}", msg.1.0, elapsed_time, msg.0);
+            debug!(
+                "TIME: msg for {} not ready yet: elapsed_time={:?} < delay={:?}",
+                msg.1 .0, elapsed_time, msg.0
+            );
 
             // 4.
             msg.0 -= elapsed_time;
@@ -104,8 +124,7 @@ async fn send_next_msgs(net_msgs: &mut BinaryHeap<KeyedMessage>, node_channels: 
     *net_msgs = new_net_msgs;
 
     // 7.
-    let next_msg = net_msgs.peek();
-    if next_msg.is_none() { Duration::MAX } else { next_msg.unwrap().0 }
+    net_msgs.peek().map_or(Duration::MAX, |msg| msg.0)
 }
 
 #[derive(Debug)]
@@ -117,10 +136,10 @@ impl PartialEq for KeyedMessage {
     }
 }
 
-impl Eq for KeyedMessage { }
+impl Eq for KeyedMessage {}
 impl PartialOrd for KeyedMessage {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(Reverse(self.0).cmp(&Reverse(other.0)))
+        Some(self.cmp(other))
     }
 }
 
@@ -140,7 +159,7 @@ pub struct BadFakeNetwork {
     /// Fake nodes connected to the network
     nodes: Vec<FakeBadNode>,
     /// Channels to send messages to clients.
-    client_channels: HashMap<ClientId, Sender<Vec<u8>>>
+    client_channels: HashMap<ClientId, Sender<Vec<u8>>>,
 }
 
 impl BadFakeNetwork {
@@ -151,12 +170,13 @@ impl BadFakeNetwork {
     ///      those in (1)
     ///   3. receiving endpoints to receive messages from the network, connected to those in (2)
     ///   4. a mapping of client IDs to their corresponding receiving endpoints at the client
-    /// The sending endpoints connected to (1) and (4) are managed by the network and exposed via
-    /// the `BadFakeNetwork::send` and `BadFakeNetwork::send_to_client` functions.
+    ///      The sending endpoints connected to (1) and (4) are managed by the network and exposed via
+    ///      the `BadFakeNetwork::send` and `BadFakeNetwork::send_to_client` functions.
+    #[allow(clippy::type_complexity)]
     pub fn new(
         n_nodes: usize,
         n_clients: Option<Vec<ClientId>>,
-        config: BadFakeNetworkConfig
+        config: BadFakeNetworkConfig,
     ) -> (
         Self,
         Receiver<(PartyId, Vec<u8>)>,
@@ -195,7 +215,7 @@ impl BadFakeNetwork {
                 net_channels,
                 config,
                 nodes,
-                client_channels: client_channels.clone()
+                client_channels: client_channels.clone(),
             },
             net_rx,
             node_channels,
@@ -213,17 +233,22 @@ impl BadFakeNetwork {
     /// 2. If a message is received by the delaying thread from a node first,
     ///    a. a random delay for the message is sampled from the given distribution
     ///    b. `send_next_msgs` is called to add the new message and send any messages whose
-    ///       delay has expired
+    ///    delay has expired
     ///    c. The timer's expiration time is updated for the next iteration.
     /// 3. If the current timer expires first,
     ///    a. `send_next_msgs` is called to send any messages whose delay has expired
     ///    b. The timer's expiration time is updated for the next iteration.
-    pub fn start(mut net_rx: Receiver<(PartyId, Vec<u8>)>, mut node_channels: Vec<Sender<Vec<u8>>>, mut rng: StdRng, delay_dist: impl Distribution<u64> + 'static + Send) -> JoinHandle<()> {
+    pub fn start(
+        mut net_rx: Receiver<(PartyId, Vec<u8>)>,
+        mut node_channels: Vec<Sender<Vec<u8>>>,
+        mut rng: StdRng,
+        delay_dist: impl Distribution<u64> + 'static + Send,
+    ) -> JoinHandle<()> {
         spawn(async move {
             let mut net_msgs = BinaryHeap::new();
             let mut duration = Duration::MAX;
             let mut timer_start = Instant::now();
-    
+
             loop {
                 let timer = sleep(duration);
 
@@ -231,7 +256,7 @@ impl BadFakeNetwork {
                 debug!("TIME: new timer started with duration={:?}", duration);
 
                 tokio::pin!(timer);
-    
+
                 // 1.
                 tokio::select! {
                     // 2.
@@ -241,7 +266,7 @@ impl BadFakeNetwork {
                         }
 
                         let now = Instant::now();
-    
+
                         let (id, msg) = id_msg.unwrap();
                         // a.
                         let delay = Duration::from_millis(delay_dist.sample(&mut rng));
@@ -251,8 +276,8 @@ impl BadFakeNetwork {
 
                         // b.
                         duration = send_next_msgs(
-                            &mut net_msgs, 
-                            &mut node_channels, 
+                            &mut net_msgs,
+                            &mut node_channels,
                             Some(KeyedMessage(delay, (id, msg))),
                             now - timer_start
                         ).await;
@@ -276,7 +301,6 @@ impl BadFakeNetwork {
             }
         })
     }
-
 }
 
 #[async_trait]
@@ -408,9 +432,9 @@ impl BadFakeNetworkConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::collections::HashSet;
     use ark_std::rand::{distributions::Uniform, SeedableRng};
+    use std::collections::HashSet;
+    use std::sync::Arc;
     use tokio::sync::Mutex;
 
     use super::*;
@@ -441,9 +465,15 @@ mod tests {
 
         let n_nodes = 3;
         let config = BadFakeNetworkConfig::new(100);
-        let (network, net_rx, node_channels, mut receivers, _) = BadFakeNetwork::new(n_nodes, None, config);
+        let (network, net_rx, node_channels, mut receivers, _) =
+            BadFakeNetwork::new(n_nodes, None, config);
 
-        BadFakeNetwork::start(net_rx, node_channels, StdRng::seed_from_u64(1u64), Uniform::new_inclusive(1, 1));
+        BadFakeNetwork::start(
+            net_rx,
+            node_channels,
+            StdRng::seed_from_u64(1u64),
+            Uniform::new_inclusive(1, 1),
+        );
 
         let sender_id = 1;
         let recipient_id = 2;
@@ -479,10 +509,16 @@ mod tests {
 
         let n_nodes = 3;
         let config = BadFakeNetworkConfig::new(100);
-        let (network, net_rx, node_channels, mut receivers, _) = BadFakeNetwork::new(n_nodes, None, config);
+        let (network, net_rx, node_channels, mut receivers, _) =
+            BadFakeNetwork::new(n_nodes, None, config);
         let network = Arc::new(Mutex::new(network));
 
-        BadFakeNetwork::start(net_rx, node_channels, StdRng::seed_from_u64(1u64), Uniform::new_inclusive(1, 1));
+        BadFakeNetwork::start(
+            net_rx,
+            node_channels,
+            StdRng::seed_from_u64(1u64),
+            Uniform::new_inclusive(1, 1),
+        );
 
         let message = b"broadcast";
 
@@ -494,8 +530,7 @@ mod tests {
         sleep(Duration::from_millis(10)).await; // wait for broadcast to make it through the network
 
         // Verify all nodes received the message
-        for i in 0..n_nodes {
-            let node_recv = &mut receivers[i];
+        for node_recv in receivers.iter_mut().take(n_nodes) {
             let received_message_result = node_recv.try_recv();
             assert!(received_message_result.is_ok());
             assert_eq!(received_message_result.unwrap(), message.to_vec());
@@ -526,7 +561,12 @@ mod tests {
         let config = BadFakeNetworkConfig::new(100);
         let (mut network, net_rx, node_channels, _, _) = BadFakeNetwork::new(n_nodes, None, config);
 
-        BadFakeNetwork::start(net_rx, node_channels, StdRng::seed_from_u64(1u64), Uniform::new_inclusive(1, 1));
+        BadFakeNetwork::start(
+            net_rx,
+            node_channels,
+            StdRng::seed_from_u64(1u64),
+            Uniform::new_inclusive(1, 1),
+        );
 
         let recipient_id = 1;
         let message = b"test";
@@ -561,9 +601,15 @@ mod tests {
 
         let n_nodes = 2;
         let config = BadFakeNetworkConfig::new(500);
-        let (network, net_rx, node_channels, mut receivers, _) = BadFakeNetwork::new(n_nodes, None, config);
+        let (network, net_rx, node_channels, mut receivers, _) =
+            BadFakeNetwork::new(n_nodes, None, config);
 
-        BadFakeNetwork::start(net_rx, node_channels, StdRng::seed_from_u64(1u64), Uniform::new_inclusive(1, 100));
+        BadFakeNetwork::start(
+            net_rx,
+            node_channels,
+            StdRng::seed_from_u64(1u64),
+            Uniform::new_inclusive(1, 100),
+        );
 
         let n_msgs = 3u32;
         let recipient_id = 1;
@@ -576,7 +622,6 @@ mod tests {
 
             assert!(send_result.is_ok());
             assert_eq!(send_result.unwrap(), message.len());
-
         }
 
         let mut out_of_order = false;
@@ -588,13 +633,18 @@ mod tests {
 
             assert!(received_message_result.is_some());
 
-            let i_msg = u32::from_be_bytes(received_message_result.unwrap().try_into().expect("received unexpected message"));
+            let i_msg = u32::from_be_bytes(
+                received_message_result
+                    .unwrap()
+                    .try_into()
+                    .expect("received unexpected message"),
+            );
 
             assert!(i_msg < n_msgs);
             assert!(!i_recvd.contains(&i_msg));
 
             i_recvd.insert(i_msg);
-            
+
             if i_msg != i {
                 out_of_order = true;
             }

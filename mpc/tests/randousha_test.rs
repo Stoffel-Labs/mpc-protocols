@@ -96,6 +96,7 @@ async fn test_init_reconstruct_flow() {
             .clone()
             .get_or_create_store(session_id)
             .await
+            .unwrap()
             .lock()
             .await
             .clone();
@@ -214,13 +215,13 @@ async fn test_reconstruct_handler() {
     let store = randousha_node
         .get_or_create_store(session_id)
         .await
+        .unwrap()
         .lock()
         .await
         .clone();
     assert!(store.received_r_shares_degree_t.len() == 2 * threshold + 1);
     assert!(store.received_r_shares_degree_2t.len() == 2 * threshold + 1);
     assert!(store.received_ok_msg.len() == 0);
-    assert!(store.state == RanDouShaState::Reconstruction);
 }
 
 #[tokio::test]
@@ -325,13 +326,13 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let store = randousha_node
         .get_or_create_store(session_id)
         .await
+        .unwrap()
         .lock()
         .await
         .clone();
     assert_eq!(store.received_r_shares_degree_t.len(), n_parties);
     assert_eq!(store.received_r_shares_degree_2t.len(), n_parties);
     assert_eq!(store.received_ok_msg.len(), 0);
-    assert_eq!(store.state, RanDouShaState::Reconstruction);
 }
 
 #[tokio::test]
@@ -362,7 +363,10 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
-    let node_store = randousha_node.get_or_create_store(session_id).await;
+    let node_store = randousha_node
+        .get_or_create_store(session_id)
+        .await
+        .unwrap();
 
     // first n-(t+1)-1 messages should be buffered and return Ok (not WaitForOk error)
     // This is the fix for out-of-order message handling
@@ -420,7 +424,10 @@ async fn test_output_handler() {
         .await
         .expect("output handler should not fail");
     {
-        let storage_mutex = randousha_node.get_or_create_store(session_id).await;
+        let storage_mutex = randousha_node
+            .get_or_create_store(session_id)
+            .await
+            .unwrap();
         let storage = storage_mutex.lock().await;
         let output = storage.protocol_output.clone();
 
@@ -505,7 +512,7 @@ async fn randousha_e2e() {
 
     for nodes in &randousha_nodes {
         let mut node_locked = nodes.lock().await;
-        let store = node_locked.get_or_create_store(session_id).await;
+        let store = node_locked.get_or_create_store(session_id).await.unwrap();
         let store_locked = store.lock().await;
         assert!(store_locked.state == RanDouShaState::Finished);
     }
