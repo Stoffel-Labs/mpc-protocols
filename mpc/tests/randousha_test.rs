@@ -364,7 +364,8 @@ async fn test_output_handler() {
 
     let node_store = randousha_node.get_or_create_store(session_id).await;
 
-    // first n-(t+1)-1 message should return error
+    // first n-(t+1)-1 messages should be buffered and return Ok (not WaitForOk error)
+    // This is the fix for out-of-order message handling
     for i in 0..n_parties - (threshold + 2) {
         let output_message = RanDouShaMessage::new(
             i,
@@ -373,25 +374,23 @@ async fn test_output_handler() {
             RanDouShaPayload::Output(true),
         );
         let result = randousha_node.output_handler(output_message).await;
-        let e = result.expect_err("should return waitForOk");
-        assert_eq!(e.to_string(), RanDouShaError::WaitForOk.to_string());
+        result.expect("should buffer OK message and return Ok");
     }
-    // check the store (n-(t+1)-1 shares)
+    // check the store has buffered OKs
     assert!(node_store.lock().await.received_ok_msg.len() == n_parties - (threshold + 2));
 
-    // existed id should not be counted
+    // duplicate id should not be counted but still returns Ok
     let output_message = RanDouShaMessage::new(
         1,
         RanDouShaMessageType::OutputMessage,
         session_id,
         RanDouShaPayload::Output(true),
     );
-    let e = randousha_node
+    randousha_node
         .output_handler(output_message)
         .await
-        .expect_err("should return waitForOk");
-    assert_eq!(e.to_string(), RanDouShaError::WaitForOk.to_string());
-    // check the store (n-(t+1)-1 shares)
+        .expect("should return Ok for duplicate");
+    // check the store still has same count
     assert!(node_store.lock().await.received_ok_msg.len() == n_parties - (threshold + 2));
 
     // should return abort once received false outputMessage

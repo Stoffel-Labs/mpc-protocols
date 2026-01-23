@@ -17,7 +17,7 @@ use crate::honeybadger::{
 };
 
 /// Current state of the Shamir Beaver triple generation protocol.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProtocolState {
     /// The protocol has not been initialized.
     NotInitialized,

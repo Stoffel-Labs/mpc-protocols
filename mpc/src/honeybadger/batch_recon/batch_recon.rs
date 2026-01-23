@@ -337,6 +337,19 @@ impl<F: FftField> BatchReconNode<F> {
                                     let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
                                     net.send(self.id, &bytes_generic_msg).await?;
                                 }
+                                ProtocolType::BatchedTriple => {
+                                    let mut bytes_message = Vec::new();
+                                    result.serialize_compressed(&mut bytes_message)?;
+                                    let batched_triple_msg =
+                                        WrappedMessage::BatchedTriple(TripleGenMessage::new(
+                                            self.id,
+                                            msg.session_id,
+                                            bytes_message,
+                                        ));
+                                    let bytes_generic_msg =
+                                        bincode::serialize(&batched_triple_msg)?;
+                                    net.send(self.id, &bytes_generic_msg).await?;
+                                }
                                 _ => return Ok(()),
                             }
                         }

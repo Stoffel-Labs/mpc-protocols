@@ -121,7 +121,7 @@ pub fn test_setup_bad(
     Vec<Receiver<Vec<u8>>>,
     HashMap<ClientId, Receiver<Vec<u8>>>,
 ) {
-    let config = BadFakeNetworkConfig::new(500);
+    let config = BadFakeNetworkConfig::new(50000);
     let (network, net_rx, node_channels, receivers, client_recv) = BadFakeNetwork::new(n, Some(clientid), config);
     let network = Arc::new(network);
     (network, net_rx, node_channels, receivers, client_recv)

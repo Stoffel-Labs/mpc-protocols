@@ -394,6 +394,9 @@ where
     /// Wait to receive broadcast of output message from other party.
     /// Return [r_1]_t ... [r_t+1]_t & [r_1]_2t ... [r_t+1]_2t only if one receives more than
     /// (n - (t+1)) Ok message.
+    ///
+    /// This handler buffers OK messages even if shares aren't computed yet.
+    /// The init function checks for buffered OKs and completes if ready.
     pub async fn output_handler(&self, msg: RanDouShaMessage) -> Result<(), RanDouShaError> {
         let output = match msg.payload {
             RanDouShaPayload::Output(ok) => ok,
@@ -414,22 +417,22 @@ where
             return Ok(());
         }
 
-        store.state = RanDouShaState::Output;
-
-        // push to received_ok_msg if sender doesn't exist
+        // Buffer the OK message - this is the key fix for out-of-order messages
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
         }
+
+        // Check if we can complete now
         // wait for (n-(t+1)) Ok messages
         if store.received_ok_msg.len() < self.n_parties - (self.threshold + 1) {
-            return Err(RanDouShaError::WaitForOk);
+            return Ok(()); // Buffered, waiting for more OKs
         }
 
         // waiting for init to compute shares (use || not && - wait if EITHER is not ready)
         if store.computed_r_shares_degree_t.len() < self.threshold + 1
             || store.computed_r_shares_degree_2t.len() < self.threshold + 1
         {
-            return Err(RanDouShaError::WaitForOk);
+            return Ok(()); // Buffered, waiting for init to compute shares
         }
 
         // create vector for share [r_1]_t ... [r_t+1]_t

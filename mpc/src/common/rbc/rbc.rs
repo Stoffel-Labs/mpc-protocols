@@ -846,65 +846,39 @@ impl Avid {
         shards_map: HashMap<usize, Vec<u8>>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        let root = &msg.metadata[0..32];
+        let original_root = &msg.metadata[0..32];
         let handler_type = msg.msg_type;
         // Reconstruct all shards from existing shards
         let shards = decode_rs(shards_map, self.k, self.n - self.k)?;
         //Setting up payload and fingerprint for creating a message later
         let payload = shards[self.id].clone();
-        let mut fingerprint = root.to_vec();
+        let mut fingerprint = original_root.to_vec();
 
-        // When a server reconstructs a shard, it also reconstructs the corresponding
-        // hashes on the path from j to the root, and uses them for later verification
-        match generate_merkle_proofs_map(shards.clone(), self.n) {
-            Ok(proof_map) => {
-                // Get fingerprint for self, for creating message later
-                let self_proof = proof_map.get(&(self.id)).cloned().unwrap_or_else(|| {
-                    tracing::warn!(index = self.id, "Missing Merkle proof");
-                    Vec::new()
-                });
-                fingerprint.extend(self_proof);
+        // Build a new Merkle tree from the reconstructed shards and verify
+        // that its root matches the original. This is the correct way to verify
+        // reconstruction integrity - comparing roots directly rather than
+        // verifying new proofs against the old root (which was the bug).
+        let reconstructed_tree = gen_merkletree(shards.clone());
+        let reconstructed_root = reconstructed_tree.root().ok_or_else(|| {
+            RbcError::Internal("Failed to compute Merkle root from reconstructed shards".into())
+        })?;
 
-                // Verify each proof per shard reconstructed
-                for (id, proof) in proof_map {
-                    let mut fp = root.to_vec();
-                    fp.extend(proof);
-
-                    match verify_merkle(id, self.n, fp, shards[id].clone()) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            error!(
-                                id = self.id,
-                                session_id = msg.session_id.as_u64(),
-                                "Merkle proof generation failed in {handler_type} handler. Aborting."
-                            );
-                            return Err(RbcError::Internal(format!(
-                                "Merkle proof failed for id {}",
-                                id
-                            )));
-                        }
-                        Err(e) => {
-                            error!(
-                                id = self.id,
-                                session_id = msg.session_id.as_u64(),
-                                error = %e,
-                                "Error during Merkle verification in {handler_type} handler"
-                            );
-                            return Err(RbcError::ShardError(e));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                error!(
-                    id = self.id,
-                    session_id = msg.session_id.as_u64(),
-                    error = %e,
-                    "Failed to generate Merkle proof map in {handler_type} handler"
-                );
-                return Err(RbcError::ShardError(e));
-            }
+        // Verify that reconstruction produced identical data by comparing roots
+        if reconstructed_root.as_slice() != original_root {
+            error!(
+                id = self.id,
+                session_id = msg.session_id.as_u64(),
+                "Merkle root mismatch after reconstruction in {handler_type} handler. \
+                 Original root does not match reconstructed root. Aborting."
+            );
+            return Err(RbcError::Internal(
+                "Merkle root mismatch: reconstructed shards differ from original".into(),
+            ));
         }
+
+        // Generate proof for our shard from the (verified identical) reconstructed tree
+        let self_proof = reconstructed_tree.proof(&[self.id]).to_bytes();
+        fingerprint.extend(self_proof);
 
         // Create ready message
         let ready_msg = Msg::new(

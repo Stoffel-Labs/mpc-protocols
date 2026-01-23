@@ -206,6 +206,11 @@ where
         let binding = self.get_or_create_store(msg.session_id, batch_size).await;
         let mut store = binding.lock().await;
 
+        // Update batch_size in case store was pre-created with 0 by early-arriving OK messages
+        if store.batch_size == 0 && batch_size > 0 {
+            store.batch_size = batch_size;
+        }
+
         store.initial_shares.insert(msg.sender_id, shares);
         store.reception_tracker[msg.sender_id] = true;
 
@@ -286,6 +291,8 @@ where
         let bind_store = self.get_or_create_store(session_id, batch_size).await;
         let mut store = bind_store.lock().await;
         store.computed_r_shares = all_r_shares.clone();
+        // Update batch_size in case store was pre-created with 0 by early-arriving OK messages
+        store.batch_size = batch_size;
 
         // Check if we can complete the output phase now
         // Output messages may have arrived before computed_r_shares was ready
@@ -391,6 +398,12 @@ where
         let batch_size = shares.len();
         let binding = self.get_or_create_store(msg.session_id, batch_size).await;
         let mut store = binding.lock().await;
+
+        // Update batch_size in case store was pre-created with 0 by early-arriving OK messages
+        if store.batch_size == 0 && batch_size > 0 {
+            store.batch_size = batch_size;
+        }
+
         store.state = RanShaState::Reconstruction;
         store.received_r_shares.insert(msg.sender_id, shares);
 
@@ -398,16 +411,63 @@ where
         if self.id < 2 * self.threshold
             && store.received_r_shares.len() >= 2 * self.threshold + 1
         {
+            // Clone the shares data so we can drop the lock before the long verification loop.
+            // This prevents holding the mutex across await points and allows other tasks to
+            // access the store while we verify.
+            let received_shares: Vec<Vec<RobustShare<F>>> = store
+                .received_r_shares
+                .values()
+                .cloned()
+                .collect();
+            drop(store);
+
+            // IMPORTANT: Validate that all parties sent the same number of shares.
+            // With large batch sizes (e.g., 87k shares = 4MB+ messages), network truncation
+            // or corruption could cause different parties to have different batch_sizes.
+            // Using the minimum prevents index-out-of-bounds panics.
+            let min_batch_size = received_shares
+                .iter()
+                .map(|v| v.len())
+                .min()
+                .unwrap_or(0);
+
+            // If any party has a different batch_size, log a warning
+            if min_batch_size != batch_size {
+                tracing::warn!(
+                    session_id = msg.session_id.as_u64(),
+                    expected = batch_size,
+                    actual_min = min_batch_size,
+                    "Batch size mismatch in reconstruction verification. \
+                     Some parties may have truncated messages. Using minimum."
+                );
+            }
+
+            // Use the minimum batch_size to avoid index out of bounds
+            let effective_batch_size = min_batch_size;
+
             // Verify each batch's reconstruction
             let mut all_ok = true;
 
-            for k in 0..batch_size {
+            for k in 0..effective_batch_size {
                 // Collect the k-th share from each party for this verification
-                let shares_for_batch: Vec<RobustShare<F>> = store
-                    .received_r_shares
-                    .values()
-                    .map(|party_shares| party_shares[k].clone())
+                // Using .get() for additional safety even though we checked min_batch_size
+                let shares_for_batch: Vec<RobustShare<F>> = received_shares
+                    .iter()
+                    .filter_map(|party_shares| party_shares.get(k).cloned())
                     .collect();
+
+                // Ensure we have enough shares for verification
+                if shares_for_batch.len() < 2 * self.threshold + 1 {
+                    tracing::warn!(
+                        session_id = msg.session_id.as_u64(),
+                        k = k,
+                        shares_collected = shares_for_batch.len(),
+                        required = 2 * self.threshold + 1,
+                        "Not enough shares for batch verification"
+                    );
+                    all_ok = false;
+                    break;
+                }
 
                 match RobustShare::recover_secret(&shares_for_batch, self.n_parties) {
                     Ok(r) => {
@@ -422,9 +482,14 @@ where
                         break;
                     }
                 }
-            }
 
-            drop(store);
+                // Yield periodically to allow other tasks (especially message receivers) to run.
+                // This prevents CPU-bound verification from starving the async executor,
+                // which is critical for large batch sizes (e.g., 512*512 shares).
+                if k % 32 == 31 {
+                    tokio::task::yield_now().await;
+                }
+            }
 
             // Broadcast verification result via RBC
             let result = WrappedMessage::RanSha(RanShaMessage::new(
@@ -450,6 +515,10 @@ where
     }
 
     /// Handle output confirmation messages.
+    ///
+    /// This handler buffers OK messages even if the store doesn't exist yet.
+    /// This handles the case where OK messages arrive before init_ransha completes.
+    /// The init_ransha function checks for buffered OKs and completes if ready.
     pub async fn output_handler(&self, msg: RanShaMessage) -> Result<(), RanShaError> {
         let ok = match msg.payload {
             RanShaPayload::Output(o) => o,
@@ -460,15 +529,10 @@ where
             return Err(RanShaError::Abort);
         }
 
-        // We need to know the batch_size. Get it from store or use a default.
-        // The store should already exist from earlier phases.
-        let storage_guard = self.store.lock().await;
-        let store_arc = match storage_guard.get(&msg.session_id) {
-            Some(s) => s.clone(),
-            None => return Err(RanShaError::Abort),
-        };
-        drop(storage_guard);
-
+        // Get or create store. If it doesn't exist, create with batch_size=0 as placeholder.
+        // The real batch_size will be set by init_ransha when it runs.
+        // This ensures OK messages are buffered even if they arrive before init.
+        let store_arc = self.get_or_create_store(msg.session_id, 0).await;
         let mut store = store_arc.lock().await;
 
         // If already finished (e.g., completed early in init_ransha), just return Ok
@@ -476,18 +540,22 @@ where
             return Ok(());
         }
 
-        store.state = RanShaState::Output;
-
+        // Buffer the OK message - this is the key fix for out-of-order messages
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
         }
 
+        // Check if we can complete now
         if store.received_ok_msg.len() < 2 * self.threshold {
-            return Err(RanShaError::WaitForOk);
+            return Ok(()); // Buffered, waiting for more OKs
         }
 
         if store.computed_r_shares.is_empty() {
-            return Err(RanShaError::WaitForOk);
+            return Ok(()); // Buffered, waiting for init_ransha to compute shares
+        }
+
+        if store.batch_size == 0 {
+            return Ok(()); // Buffered, waiting for init_ransha to set batch_size
         }
 
         // Output: for each batch k, take shares [2t..n], giving (n-2t) shares per batch

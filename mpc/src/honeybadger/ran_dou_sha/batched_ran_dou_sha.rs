@@ -414,6 +414,8 @@ where
         let mut store = bind_store.lock().await;
         store.computed_r_shares_degree_t = all_r_shares_t.clone();
         store.computed_r_shares_degree_2t = all_r_shares_2t.clone();
+        // Update batch_size in case store was pre-created with 0 by early-arriving OK messages
+        store.batch_size = batch_size;
 
         // Check if we can complete the output phase now
         // Output messages may have arrived before computed shares were ready
@@ -548,22 +550,84 @@ where
             && self.id < self.n_parties
             && store.received_r_shares_t.len() >= 2 * self.threshold + 1
         {
+            // Clone the shares data so we can drop the lock before the long verification loop.
+            // This prevents holding the mutex across await points and allows other tasks to
+            // access the store while we verify.
+            let received_shares_t: Vec<Vec<NonRobustShare<F>>> = store
+                .received_r_shares_t
+                .values()
+                .cloned()
+                .collect();
+            let received_shares_2t: Vec<Vec<NonRobustShare<F>>> = store
+                .received_r_shares_2t
+                .values()
+                .cloned()
+                .collect();
+            drop(store);
+
+            // IMPORTANT: Validate that all parties sent the same number of shares.
+            // With large batch sizes (e.g., 87k shares = 4MB+ messages), network truncation
+            // or corruption could cause different parties to have different batch_sizes.
+            // Using the minimum prevents index-out-of-bounds panics.
+            let min_batch_size_t = received_shares_t
+                .iter()
+                .map(|v| v.len())
+                .min()
+                .unwrap_or(0);
+            let min_batch_size_2t = received_shares_2t
+                .iter()
+                .map(|v| v.len())
+                .min()
+                .unwrap_or(0);
+            let min_batch_size = min_batch_size_t.min(min_batch_size_2t);
+
+            // If any party has a different batch_size, log a warning
+            if min_batch_size != batch_size {
+                tracing::warn!(
+                    session_id = msg.session_id.as_u64(),
+                    expected = batch_size,
+                    actual_min = min_batch_size,
+                    min_t = min_batch_size_t,
+                    min_2t = min_batch_size_2t,
+                    "Batch size mismatch in RanDouSha reconstruction verification. \
+                     Some parties may have truncated messages. Using minimum."
+                );
+            }
+
+            // Use the minimum batch_size to avoid index out of bounds
+            let effective_batch_size = min_batch_size;
+
             // Verify each batch's reconstruction
             let mut all_ok = true;
 
-            for k in 0..batch_size {
+            for k in 0..effective_batch_size {
                 // Collect the k-th share from each party for verification
-                let shares_t_for_batch: Vec<NonRobustShare<F>> = store
-                    .received_r_shares_t
-                    .values()
-                    .map(|party_shares| party_shares[k].clone())
+                // Using .get() for additional safety even though we checked min_batch_size
+                let shares_t_for_batch: Vec<NonRobustShare<F>> = received_shares_t
+                    .iter()
+                    .filter_map(|party_shares| party_shares.get(k).cloned())
                     .collect();
 
-                let shares_2t_for_batch: Vec<NonRobustShare<F>> = store
-                    .received_r_shares_2t
-                    .values()
-                    .map(|party_shares| party_shares[k].clone())
+                let shares_2t_for_batch: Vec<NonRobustShare<F>> = received_shares_2t
+                    .iter()
+                    .filter_map(|party_shares| party_shares.get(k).cloned())
                     .collect();
+
+                // Ensure we have enough shares for verification
+                if shares_t_for_batch.len() < 2 * self.threshold + 1
+                    || shares_2t_for_batch.len() < 2 * self.threshold + 1
+                {
+                    tracing::warn!(
+                        session_id = msg.session_id.as_u64(),
+                        k = k,
+                        shares_t = shares_t_for_batch.len(),
+                        shares_2t = shares_2t_for_batch.len(),
+                        required = 2 * self.threshold + 1,
+                        "Not enough shares for batch verification in RanDouSha"
+                    );
+                    all_ok = false;
+                    break;
+                }
 
                 // Reconstruct and verify degree t polynomial
                 let reconstructed_t = match NonRobustShare::recover_secret(
@@ -604,9 +668,14 @@ where
                     all_ok = false;
                     break;
                 }
-            }
 
-            drop(store);
+                // Yield periodically to allow other tasks (especially message receivers) to run.
+                // This prevents CPU-bound verification from starving the async executor,
+                // which is critical for large batch sizes (e.g., 512*512 shares).
+                if k % 32 == 31 {
+                    tokio::task::yield_now().await;
+                }
+            }
 
             // Broadcast verification result via RBC
             let result = WrappedMessage::RanDouSha(RanDouShaMessage::new(
@@ -632,6 +701,10 @@ where
     }
 
     /// Handle output confirmation messages.
+    ///
+    /// This handler buffers OK messages even if the store doesn't exist yet.
+    /// This handles the case where OK messages arrive before apply_vandermonde completes.
+    /// The apply_vandermonde function checks for buffered OKs and completes if ready.
     pub async fn output_handler(&self, msg: RanDouShaMessage) -> Result<(), RanDouShaError> {
         let ok = match msg.payload {
             RanDouShaPayload::Output(o) => o,
@@ -642,12 +715,10 @@ where
             return Err(RanDouShaError::Abort);
         }
 
-        // Get store - it should already exist from earlier phases
-        let store_arc = match self.store.get(&msg.session_id) {
-            Some(s) => s.clone(),
-            None => return Err(RanDouShaError::Abort),
-        };
-
+        // Get or create store. If it doesn't exist, create with batch_size=0 as placeholder.
+        // The real batch_size will be set by apply_vandermonde when it runs.
+        // This ensures OK messages are buffered even if they arrive before init.
+        let store_arc = self.get_or_create_store(msg.session_id, 0).await;
         let mut store = store_arc.lock().await;
 
         // If already finished (e.g., completed early in apply_vandermonde), just return Ok
@@ -655,21 +726,25 @@ where
             return Ok(());
         }
 
-        store.state = RanDouShaState::Output;
-
+        // Buffer the OK message - this is the key fix for out-of-order messages
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
         }
 
+        // Check if we can complete now
         // Wait for (n - (t+1)) OK messages
         if store.received_ok_msg.len() < self.n_parties - (self.threshold + 1) {
-            return Err(RanDouShaError::WaitForOk);
+            return Ok(()); // Buffered, waiting for more OKs
         }
 
         if store.computed_r_shares_degree_t.is_empty()
             || store.computed_r_shares_degree_2t.is_empty()
         {
-            return Err(RanDouShaError::WaitForOk);
+            return Ok(()); // Buffered, waiting for apply_vandermonde to compute shares
+        }
+
+        if store.batch_size == 0 {
+            return Ok(()); // Buffered, waiting for apply_vandermonde to set batch_size
         }
 
         // Output: for each batch k, take the first (t+1) double shares

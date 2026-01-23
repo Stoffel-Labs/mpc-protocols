@@ -76,6 +76,7 @@ pub enum ProtocolType {
     FpDivConst = 14,
     BatchedRansha = 15,
     BatchedRandousha = 16,
+    BatchedTriple = 17,
 }
 
 impl From<ProtocolType> for crate::honeybadger::ProtocolType {
@@ -98,6 +99,7 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             ProtocolType::FpDivConst => crate::honeybadger::ProtocolType::FpDivConst,
             ProtocolType::BatchedRansha => crate::honeybadger::ProtocolType::BatchedRansha,
             ProtocolType::BatchedRandousha => crate::honeybadger::ProtocolType::BatchedRandousha,
+            ProtocolType::BatchedTriple => crate::honeybadger::ProtocolType::BatchedTriple,
         }
     }
 }
@@ -122,6 +124,7 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
             crate::honeybadger::ProtocolType::BatchedRansha => ProtocolType::BatchedRansha,
             crate::honeybadger::ProtocolType::BatchedRandousha => ProtocolType::BatchedRandousha,
+            crate::honeybadger::ProtocolType::BatchedTriple => ProtocolType::BatchedTriple,
         }
     }
 }

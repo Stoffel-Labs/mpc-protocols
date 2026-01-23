@@ -165,7 +165,8 @@ async fn test_output_handler() {
 
     let node_store = ransha_node.get_or_create_store(session_id).await;
 
-    // first 2t-1 message should return error
+    // first 2t-1 messages should be buffered and return Ok (not WaitForOk error)
+    // This is the fix for out-of-order message handling
     for i in 0..(2 * threshold - 1) {
         let output_message = RanShaMessage::new(
             i,
@@ -174,24 +175,22 @@ async fn test_output_handler() {
             RanShaPayload::Output(true),
         );
         let result = ransha_node.output_handler(output_message).await;
-        let e = result.expect_err("should return waitForOk");
-        assert_eq!(e.to_string(), RanShaError::WaitForOk.to_string());
+        result.expect("should buffer OK message and return Ok");
     }
-    // check the store 2t-1 shares)
+    // check the store has 2t-1 buffered OKs
     assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold - 1));
 
-    // existed id should not be counted
+    // duplicate id should not be counted but still returns Ok
     let output_message = RanShaMessage::new(
         1,
         RanShaMessageType::OutputMessage,
         session_id,
         RanShaPayload::Output(true),
     );
-    let e = ransha_node
+    ransha_node
         .output_handler(output_message)
         .await
-        .expect_err("should return waitForOk");
-    assert_eq!(e.to_string(), RanShaError::WaitForOk.to_string());
+        .expect("should return Ok for duplicate");
     assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold - 1));
 
     // should return abort once received false outputMessage

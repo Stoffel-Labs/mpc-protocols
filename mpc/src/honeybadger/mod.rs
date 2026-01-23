@@ -88,8 +88,10 @@ use tokio::{
     time::Duration
 };
 use futures::future::try_join_all;
+use sha2::{Sha256, Digest};
 use tracing::{info, warn};
 use triple_gen::triple_generation::TripleGenNode;
+use triple_gen::batched_triple_generation::BatchedTripleGenNode;
 
 #[derive(Error, Debug)]
 pub enum HoneyBadgerError {
@@ -136,6 +138,29 @@ pub enum HoneyBadgerError {
     JoinError,
     #[error("output channel closed before result was received")]
     ChannelClosed,
+}
+
+/// Derives a unique, cryptographically secure RNG seed for a parallel task.
+///
+/// Uses SHA-256 as a PRF to derive child seeds from a base seed, ensuring:
+/// - No seed collisions regardless of task index (unlike wrapping_add which collides at 256)
+/// - Unpredictable seeds even if some outputs are observed
+/// - Domain separation via session_id prevents cross-session correlations
+///
+/// # Arguments
+/// * `base_seed` - The parent RNG seed (should be cryptographically random)
+/// * `session_id` - Unique identifier for the protocol session
+/// * `task_index` - Index of the parallel task (0, 1, 2, ...)
+///
+/// # Returns
+/// A 32-byte seed suitable for `StdRng::from_seed()`
+fn derive_task_seed(base_seed: &[u8; 32], session_id: SessionId, task_index: usize) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(base_seed);
+    hasher.update(b"honeybadger-task-seed"); // Domain separation
+    hasher.update(&session_id.as_u64().to_le_bytes());
+    hasher.update(&(task_index as u64).to_le_bytes());
+    hasher.finalize().into()
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -227,6 +252,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub batched_ran_dou_sha: BatchedRanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
+    pub batched_triple_gen: BatchedTripleGenNode<F>,
     pub rand_bit: RandBit<F, R>,
     pub prand_bit: PRandBitNode<F, F>,
 }
@@ -239,6 +265,7 @@ pub struct OutputChannels {
     pub ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub batched_ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub triple_channel: Arc<Mutex<Receiver<SessionId>>>,
+    pub batched_triple_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub rand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub prand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub prand_int_channel: Arc<Mutex<Receiver<SessionId>>>,
@@ -363,6 +390,7 @@ where
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
         let (batched_ran_dou_sha_sender, batched_ran_dou_sha_receiver) = mpsc::channel(128);
         let (triple_sender, triple_receiver) = mpsc::channel(128);
+        let (batched_triple_sender, batched_triple_receiver) = mpsc::channel(128);
         let (share_gen_sender, share_gen_reciever) = mpsc::channel(128);
         let (batched_share_gen_sender, batched_share_gen_receiver) = mpsc::channel(128);
         let (rand_bit_sender, rand_bit_receiver) = mpsc::channel(128);
@@ -399,6 +427,8 @@ where
 
         let triple_gen_node =
             TripleGenNode::new(id, params.n_parties, params.threshold, triple_sender)?;
+        let batched_triple_gen_node =
+            BatchedTripleGenNode::new(id, params.n_parties, params.threshold, batched_triple_sender)?;
         let mul_node = Multiply::new(id, params.n_parties, params.threshold)?;
         let share_gen = RanShaNode::new(
             id,
@@ -433,6 +463,7 @@ where
                 ran_dou_sha: ran_dou_sha_node,
                 batched_ran_dou_sha: batched_ran_dou_sha_node,
                 triple_gen: triple_gen_node,
+                batched_triple_gen: batched_triple_gen_node,
                 rand_bit: rand_bit_node,
                 prand_bit: prand_bit_node,
             },
@@ -449,6 +480,7 @@ where
                 ran_dou_sha_channel: Arc::new(Mutex::new(ran_dou_sha_receiver)),
                 batched_ran_dou_sha_channel: Arc::new(Mutex::new(batched_ran_dou_sha_receiver)),
                 triple_channel: Arc::new(Mutex::new(triple_receiver)),
+                batched_triple_channel: Arc::new(Mutex::new(batched_triple_receiver)),
                 rand_bit_channel: Arc::new(Mutex::new(rand_bit_receiver)),
                 prand_bit_channel: Arc::new(Mutex::new(prand_bit_receiver)),
                 prand_int_channel: Arc::new(Mutex::new(prand_int_receiver)),
@@ -621,6 +653,12 @@ where
             WrappedMessage::Triple(triple_msg) => {
                 self.preprocess.triple_gen.process(triple_msg).await?;
             }
+            WrappedMessage::BatchedTriple(triple_msg) => {
+                self.preprocess
+                    .batched_triple_gen
+                    .process(triple_msg.session_id, triple_msg.sender_id, &triple_msg.payload, net)
+                    .await?;
+            }
             WrappedMessage::BatchRecon(batch_msg) => {
                 match batch_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Mul) => {
@@ -636,6 +674,11 @@ where
                             .batch_recon_node
                             .process(batch_msg, net)
                             .await?
+                    }
+                    Some(ProtocolType::BatchedTriple) => {
+                        // BatchedTriple uses direct message handling, not batch_recon
+                        // This branch should not be reached
+                        warn!("Unexpected BatchRecon message for BatchedTriple protocol");
                     }
                     Some(ProtocolType::RandBit) => {
                         if batch_msg.session_id.sub_id() == 0 {
@@ -1084,134 +1127,193 @@ where
             info!("Randousha pair generation done");
 
             // ------------------------
-            // Step 3. Generate triples (parallel)
+            // Step 3. Generate triples
             // ------------------------
+            // Use batched triple generation for large counts (single network round)
+            // Use regular parallel triple generation for small counts
+            // The batched approach combines all batch reconstructions into ONE network round
 
-            // Take random shares for triples
-            let random_shares_a = self
-                .preprocessing_material
-                .lock()
-                .await
-                .take_random_shares(total_triples_to_generate)?;
-            let random_shares_b = self
-                .preprocessing_material
-                .lock()
-                .await
-                .take_random_shares(total_triples_to_generate)?;
+            const BATCHED_TRIPLE_THRESHOLD: usize = 100;
 
-            // Outputs 2t+1 triples at a time
-            let a_chunks: Vec<_> = random_shares_a.chunks_exact(group_size).map(|c| c.to_vec()).collect();
-            let b_chunks: Vec<_> = random_shares_b.chunks_exact(group_size).map(|c| c.to_vec()).collect();
-            let r_chunks: Vec<_> = ran_dou_sha_pair[..total_triples_to_generate]
-                .chunks_exact(group_size)
-                .map(|c| c.to_vec())
-                .collect();
+            if total_triples_to_generate > 0 {
+                // Take random shares for triples
+                let random_shares_a = self
+                    .preprocessing_material
+                    .lock()
+                    .await
+                    .take_random_shares(total_triples_to_generate)?;
+                let random_shares_b = self
+                    .preprocessing_material
+                    .lock()
+                    .await
+                    .take_random_shares(total_triples_to_generate)?;
+                let ran_dou_sha_shares = ran_dou_sha_pair[..total_triples_to_generate].to_vec();
 
-            let num_triple_batches = a_chunks.len();
+                if total_triples_to_generate >= BATCHED_TRIPLE_THRESHOLD {
+                    // BATCHED: Single batch reconstruction for ALL triples
+                    info!(
+                        "Starting BATCHED triple generation: {} triples in 1 batch reconstruction",
+                        total_triples_to_generate
+                    );
 
-            if num_triple_batches > 0 {
-                info!("Starting parallel triple generation: {} batches", num_triple_batches);
+                    let session_id = SessionId::new(
+                        ProtocolType::BatchedTriple,
+                        self.counters.triple_counter.get_next(),
+                        0,
+                        0,
+                        self.params.instance_id,
+                    );
 
-                // Pre-compute all session IDs using nested counters for 16-bit range
-                // For each exec_id, round_id counts 0-255, then exec_id increments
-                let mut triple_exec_id = self.counters.triple_counter.get_next();
-                let mut triple_round_id: u8 = 0;
-                let triple_session_ids: Vec<SessionId> = (0..num_triple_batches)
-                    .map(|_| {
-                        let session_id = SessionId::new(
-                            ProtocolType::Triple,
-                            triple_exec_id,
-                            0,
-                            triple_round_id,
-                            self.params.instance_id,
-                        );
-                        if triple_round_id == 255 {
-                            triple_exec_id = self.counters.triple_counter.get_next();
-                            triple_round_id = 0;
-                        } else {
-                            triple_round_id += 1;
-                        }
-                        session_id
-                    })
-                    .collect();
+                    self.preprocess
+                        .batched_triple_gen
+                        .init(
+                            random_shares_a,
+                            random_shares_b,
+                            ran_dou_sha_shares,
+                            session_id,
+                            network.clone(),
+                        )
+                        .await?;
 
-                // Clone shared state for parallel access
-                let triple_gen = self.preprocess.triple_gen.clone();
-
-                // Spawn all triple init tasks in parallel
-                let triple_init_futures: Vec<_> = triple_session_ids
-                    .iter()
-                    .zip(a_chunks.into_iter().zip(b_chunks.into_iter()).zip(r_chunks.into_iter()))
-                    .map(|(&session_id, ((a, b), r))| {
-                        let triple_gen = triple_gen.clone();
-                        let net = network.clone();
-
-                        async move {
-                            triple_gen.init(a, b, r, session_id, net).await
-                        }
-                    })
-                    .collect();
-
-                try_join_all(triple_init_futures).await?;
-
-                // Collect all triple outputs into a map keyed by session ID
-                // IMPORTANT: We must add outputs in deterministic session ID order, not arrival order.
-                // With network delays, different parties may receive outputs in different orders.
-                // If we add in arrival order, parties get mismatched triples causing interpolation failures.
-                let triple_channel = self.outputchannels.triple_channel.clone();
-                let mut collected_triples: HashMap<SessionId, Vec<ShamirBeaverTriple<F>>> = HashMap::new();
-                let mut collected = 0;
-
-                while collected < num_triple_batches {
-                    if let Some(sid) = triple_channel.lock().await.recv().await {
-                        // Check for unknown or duplicate session IDs
-                        if !triple_session_ids.contains(&sid) {
+                    // Wait for single batch reconstruction to complete
+                    let batched_triple_channel = self.outputchannels.batched_triple_channel.clone();
+                    if let Some(sid) = batched_triple_channel.lock().await.recv().await {
+                        if sid != session_id {
                             warn!(
-                                "Triple collection received unknown session ID: {:?}. \
-                                This may indicate a bug or too many malicious nodes.",
-                                sid
+                                "Batched triple generation received unexpected session ID: {:?} (expected {:?})",
+                                sid, session_id
                             );
-                            continue;
-                        }
-                        if collected_triples.contains_key(&sid) {
-                            warn!(
-                                "Triple collection received duplicate session ID: {:?}. \
-                                This may indicate a bug or too many malicious nodes.",
-                                sid
-                            );
-                            continue;
                         }
 
-                        let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
-                        if let Some(triple_storage_mutex) = triple_gen_db.remove(&sid) {
-                            let triple_storage = triple_storage_mutex.lock().await;
-                            let triples = triple_storage.protocol_output.clone();
-                            collected_triples.insert(sid, triples);
+                        if let Some(storage_ref) = self.preprocess.batched_triple_gen.store.get(&session_id) {
+                            let storage = storage_ref.lock().await;
+                            let triples = storage.protocol_output.clone();
+                            drop(storage);
+                            drop(storage_ref);
+
+                            self.preprocessing_material.lock().await.add(
+                                Some(triples),
+                                None,
+                                None,
+                                None,
+                            );
+
+                            // Clear storage
                             self.preprocess
-                                .triple_gen
-                                .batch_recon_node
-                                .clear_store(sid)
+                                .batched_triple_gen
+                                .clear_store(session_id)
                                 .await;
-                            collected += 1;
                         }
-                    } else {
-                        break;
                     }
-                }
 
-                // Add triples in deterministic session ID order
-                for session_id in &triple_session_ids {
-                    if let Some(triples) = collected_triples.remove(session_id) {
-                        self.preprocessing_material.lock().await.add(
-                            Some(triples),
-                            None,
-                            None,
-                            None,
-                        );
+                    info!("Batched triple generation complete: {} triples", total_triples_to_generate);
+                } else {
+                    // REGULAR: Multiple parallel batch reconstructions (for small counts)
+                    let a_chunks: Vec<_> = random_shares_a.chunks_exact(group_size).map(|c| c.to_vec()).collect();
+                    let b_chunks: Vec<_> = random_shares_b.chunks_exact(group_size).map(|c| c.to_vec()).collect();
+                    let r_chunks: Vec<_> = ran_dou_sha_shares
+                        .chunks_exact(group_size)
+                        .map(|c| c.to_vec())
+                        .collect();
+
+                    let num_triple_batches = a_chunks.len();
+
+                    info!("Starting parallel triple generation: {} batches", num_triple_batches);
+
+                    // Pre-compute all session IDs using nested counters for 16-bit range
+                    let mut triple_exec_id = self.counters.triple_counter.get_next();
+                    let mut triple_round_id: u8 = 0;
+                    let triple_session_ids: Vec<SessionId> = (0..num_triple_batches)
+                        .map(|_| {
+                            let session_id = SessionId::new(
+                                ProtocolType::Triple,
+                                triple_exec_id,
+                                0,
+                                triple_round_id,
+                                self.params.instance_id,
+                            );
+                            if triple_round_id == 255 {
+                                triple_exec_id = self.counters.triple_counter.get_next();
+                                triple_round_id = 0;
+                            } else {
+                                triple_round_id += 1;
+                            }
+                            session_id
+                        })
+                        .collect();
+
+                    // Clone shared state for parallel access
+                    let triple_gen = self.preprocess.triple_gen.clone();
+
+                    // Spawn all triple init tasks in parallel
+                    let triple_init_futures: Vec<_> = triple_session_ids
+                        .iter()
+                        .zip(a_chunks.into_iter().zip(b_chunks.into_iter()).zip(r_chunks.into_iter()))
+                        .map(|(&session_id, ((a, b), r))| {
+                            let triple_gen = triple_gen.clone();
+                            let net = network.clone();
+
+                            async move {
+                                triple_gen.init(a, b, r, session_id, net).await
+                            }
+                        })
+                        .collect();
+
+                    try_join_all(triple_init_futures).await?;
+
+                    // Collect all triple outputs into a map keyed by session ID
+                    let triple_channel = self.outputchannels.triple_channel.clone();
+                    let mut collected_triples: HashMap<SessionId, Vec<ShamirBeaverTriple<F>>> = HashMap::new();
+                    let mut collected = 0;
+
+                    while collected < num_triple_batches {
+                        if let Some(sid) = triple_channel.lock().await.recv().await {
+                            if !triple_session_ids.contains(&sid) {
+                                warn!(
+                                    "Triple collection received unknown session ID: {:?}",
+                                    sid
+                                );
+                                continue;
+                            }
+                            if collected_triples.contains_key(&sid) {
+                                warn!(
+                                    "Triple collection received duplicate session ID: {:?}",
+                                    sid
+                                );
+                                continue;
+                            }
+
+                            let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
+                            if let Some(triple_storage_mutex) = triple_gen_db.remove(&sid) {
+                                let triple_storage = triple_storage_mutex.lock().await;
+                                let triples = triple_storage.protocol_output.clone();
+                                collected_triples.insert(sid, triples);
+                                self.preprocess
+                                    .triple_gen
+                                    .batch_recon_node
+                                    .clear_store(sid)
+                                    .await;
+                                collected += 1;
+                            }
+                        } else {
+                            break;
+                        }
                     }
-                }
 
-                info!("Parallel triple generation complete: {} batches", collected);
+                    // Add triples in deterministic session ID order
+                    for session_id in &triple_session_ids {
+                        if let Some(triples) = collected_triples.remove(session_id) {
+                            self.preprocessing_material.lock().await.add(
+                                Some(triples),
+                                None,
+                                None,
+                                None,
+                            );
+                        }
+                    }
+
+                    info!("Parallel triple generation complete: {} batches", collected);
+                }
             }
         }
         // ------------------------
@@ -1330,9 +1432,7 @@ where
             .map(|(i, &session_id)| {
                 let share_gen = share_gen.clone();
                 let net = network.clone();
-                let mut task_seed = base_seed;
-                task_seed[0] = task_seed[0].wrapping_add(i as u8);
-                task_seed[1] = task_seed[1].wrapping_add((i >> 8) as u8);
+                let task_seed = derive_task_seed(&base_seed, session_id, i);
                 let mut task_rng = StdRng::from_seed(task_seed);
 
                 async move {
@@ -1466,9 +1566,7 @@ where
             .map(|(i, &session_id)| {
                 let batched_share_gen = batched_share_gen.clone();
                 let net = network.clone();
-                let mut task_seed = base_seed;
-                task_seed[0] = task_seed[0].wrapping_add(i as u8);
-                task_seed[1] = task_seed[1].wrapping_add((i >> 8) as u8);
+                let task_seed = derive_task_seed(&base_seed, session_id, i);
                 let mut task_rng = StdRng::from_seed(task_seed);
 
                 async move {
@@ -1633,9 +1731,7 @@ where
             .map(|(i, &session_id)| {
                 let dou_sha = dou_sha.clone();
                 let net = network.clone();
-                let mut task_seed = base_seed;
-                task_seed[0] = task_seed[0].wrapping_add(i as u8);
-                task_seed[1] = task_seed[1].wrapping_add((i >> 8) as u8);
+                let task_seed = derive_task_seed(&base_seed, session_id, i);
                 let mut task_rng = StdRng::from_seed(task_seed);
 
                 async move {
@@ -1826,9 +1922,7 @@ where
             .map(|(i, &session_id)| {
                 let batched_ran_dou_sha = batched_ran_dou_sha.clone();
                 let net = network.clone();
-                let mut task_seed = base_seed;
-                task_seed[0] = task_seed[0].wrapping_add(i as u8);
-                task_seed[1] = task_seed[1].wrapping_add((i >> 8) as u8);
+                let task_seed = derive_task_seed(&base_seed, session_id, i);
                 let mut task_rng = StdRng::from_seed(task_seed);
 
                 async move {
@@ -2099,6 +2193,7 @@ pub enum WrappedMessage {
     Input(InputMessage),
     RanSha(RanShaMessage),
     Triple(TripleGenMessage),
+    BatchedTriple(TripleGenMessage),
     Dousha(DouShaMessage),
     Mul(MultMessage),
     Output(OutputMessage),
@@ -2129,6 +2224,7 @@ pub enum ProtocolType {
     FpDivConst = 14,
     BatchedRansha = 15,
     BatchedRandousha = 16,
+    BatchedTriple = 17,
 }
 
 impl TryFrom<u8> for ProtocolType {
@@ -2153,6 +2249,7 @@ impl TryFrom<u8> for ProtocolType {
             14 => Ok(ProtocolType::FpDivConst),
             15 => Ok(ProtocolType::BatchedRansha),
             16 => Ok(ProtocolType::BatchedRandousha),
+            17 => Ok(ProtocolType::BatchedTriple),
             _ => Err(()),
         }
     }

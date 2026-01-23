@@ -306,6 +306,10 @@ where
         Ok(())
     }
 
+    /// Handle output confirmation messages.
+    ///
+    /// This handler buffers OK messages even if shares aren't computed yet.
+    /// The init_ransha function checks for buffered OKs and completes if ready.
     pub async fn output_handler(&self, msg: RanShaMessage) -> Result<(), RanShaError> {
         trace!("party {:?} received shares for Output", self.id);
         let ok = match msg.payload {
@@ -324,18 +328,18 @@ where
             return Ok(());
         }
 
-        store.state = RanShaState::Output;
-
+        // Buffer the OK message - this is the key fix for out-of-order messages
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
         }
 
+        // Check if we can complete now
         if store.received_ok_msg.len() < 2 * self.threshold {
-            return Err(RanShaError::WaitForOk);
+            return Ok(()); // Buffered, waiting for more OKs
         }
 
         if store.computed_r_shares.len() < self.n_parties {
-            return Err(RanShaError::WaitForOk);
+            return Ok(()); // Buffered, waiting for init_ransha to compute shares
         }
 
         let output = store.computed_r_shares[2 * self.threshold..].to_vec();

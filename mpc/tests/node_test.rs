@@ -1008,8 +1008,8 @@ async fn preprocessing_e2e_bad_net() {
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 5;
     let t = 1;
-    let no_of_triples = 4;
-    let no_of_randomshares = 0;
+    let no_of_triples = 20000;
+    let no_of_randomshares = 20000;
 
     //Setup
     let (network, net_rx, node_channels, receivers, _) = test_setup_bad(n_parties, vec![]);

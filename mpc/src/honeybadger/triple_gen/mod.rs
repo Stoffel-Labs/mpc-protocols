@@ -10,12 +10,13 @@ use crate::{
     common::share::ShareError,
     honeybadger::{
         batch_recon::BatchReconError, double_share::DoubleShamirShare,
-        robust_interpolate::robust_interpolate::RobustShare,
+        robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         triple_gen::triple_generation::ProtocolState, SessionId,
     },
 };
 
 pub mod triple_generation;
+pub mod batched_triple_generation;
 
 /// Error type for the triple generation protocol.
 #[derive(Debug, Error)]
@@ -51,6 +52,8 @@ pub enum TripleGenError {
     SessionIdMismatch,
     #[error("error sending the thread asynchronously")]
     SendError(#[from] SendError<SessionId>),
+    #[error("interpolation error: {0:?}")]
+    InterpolateError(#[from] InterpolateError),
 }
 
 /// Represents a Beaver triple of non-robust Shamir shares.
