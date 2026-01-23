@@ -54,6 +54,10 @@ pub enum TripleGenError {
     SendError(#[from] SendError<SessionId>),
     #[error("interpolation error: {0:?}")]
     InterpolateError(#[from] InterpolateError),
+    #[error("session ID error: {0:?}")]
+    SessionIdError(SessionId),
+    #[error("session limit reached")]
+    LimitError,
 }
 
 /// Represents a Beaver triple of non-robust Shamir shares.

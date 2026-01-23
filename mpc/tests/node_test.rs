@@ -89,8 +89,7 @@ async fn randousha_e2e() {
                 .preprocess
                 .ran_dou_sha
                 .get_or_create_store(session_id)
-                .await
-                .unwrap();
+                .await;
 
             loop {
                 let store = store.lock().await;
@@ -155,8 +154,7 @@ async fn ransha_e2e() {
                 .preprocess
                 .share_gen
                 .get_or_create_store(session_id)
-                .await
-                .unwrap();
+                .await;
 
             loop {
                 let store = store.lock().await;
@@ -326,8 +324,7 @@ async fn gen_masks_for_input_e2e() {
                 .preprocess
                 .share_gen
                 .get_or_create_store(session_id)
-                .await
-                .unwrap();
+                .await;
 
             loop {
                 let store = store.lock().await;
@@ -348,8 +345,7 @@ async fn gen_masks_for_input_e2e() {
             .preprocess
             .share_gen
             .get_or_create_store(session_id)
-            .await
-            .unwrap();
+            .await;
         let local_shares = local_store.lock().await.protocol_output.clone();
         match node
             .preprocess

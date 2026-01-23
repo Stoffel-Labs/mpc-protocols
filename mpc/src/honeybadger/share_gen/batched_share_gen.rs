@@ -13,7 +13,6 @@ use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
-use futures::future::try_join_all;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
@@ -129,41 +128,28 @@ where
             }
         }
 
-        // Send K shares to each recipient concurrently
-        let send_futures: Vec<_> = shares_per_recipient
-            .into_iter()
-            .enumerate()
-            .map(|(recipient_id, shares)| {
-                let network = network.clone();
-                let sender_id = self.id;
+        // Send K shares to each recipient sequentially
+        for (recipient_id, shares) in shares_per_recipient.into_iter().enumerate() {
+            let mut payload = Vec::new();
+            for share in &shares {
+                share
+                    .serialize_compressed(&mut payload)
+                    .map_err(RanShaError::ArkSerialization)?;
+            }
 
-                async move {
-                    // Serialize all K shares together
-                    let mut payload = Vec::new();
-                    for share in &shares {
-                        share
-                            .serialize_compressed(&mut payload)
-                            .map_err(RanShaError::ArkSerialization)?;
-                    }
+            let generic_message = WrappedMessage::RanSha(RanShaMessage::new(
+                self.id,
+                RanShaMessageType::ShareMessage,
+                session_id,
+                RanShaPayload::BatchedShare(payload),
+            ));
+            let bytes_generic_msg = bincode::serialize(&generic_message)?;
 
-                    let generic_message = WrappedMessage::RanSha(RanShaMessage::new(
-                        sender_id,
-                        RanShaMessageType::ShareMessage,
-                        session_id,
-                        RanShaPayload::BatchedShare(payload),
-                    ));
-                    let bytes_generic_msg = bincode::serialize(&generic_message)?;
-
-                    network
-                        .send(recipient_id, &bytes_generic_msg)
-                        .await
-                        .map_err(RanShaError::NetworkError)?;
-                    Ok::<(), RanShaError>(())
-                }
-            })
-            .collect();
-
-        try_join_all(send_futures).await?;
+            network
+                .send(recipient_id, &bytes_generic_msg)
+                .await
+                .map_err(RanShaError::NetworkError)?;
+        }
 
         // Update state
         let storage_access = self.get_or_create_store(session_id, batch_size).await;
@@ -324,41 +310,30 @@ where
         // from each batch. Send batched reconstruction messages to parties 0..2t.
         //
         // Each party i (for i < 2t) receives the i-th share from each of the K batches.
-        let send_futures: Vec<_> = (0..2 * self.threshold)
-            .map(|target_party| {
-                let network = network.clone();
-                let sender_id = self.id;
+        for target_party in 0..2 * self.threshold {
+            let shares_for_party: Vec<RobustShare<F>> = (0..batch_size)
+                .map(|k| all_r_shares[k * self.n_parties + target_party].clone())
+                .collect();
 
-                // Collect the target_party-th share from each batch
-                let shares_for_party: Vec<RobustShare<F>> = (0..batch_size)
-                    .map(|k| all_r_shares[k * self.n_parties + target_party].clone())
-                    .collect();
+            let mut payload = Vec::new();
+            for share in &shares_for_party {
+                share
+                    .serialize_compressed(&mut payload)
+                    .map_err(RanShaError::ArkSerialization)?;
+            }
 
-                async move {
-                    let mut payload = Vec::new();
-                    for share in &shares_for_party {
-                        share
-                            .serialize_compressed(&mut payload)
-                            .map_err(RanShaError::ArkSerialization)?;
-                    }
-
-                    let message = WrappedMessage::RanSha(RanShaMessage::new(
-                        sender_id,
-                        RanShaMessageType::ReconstructMessage,
-                        session_id,
-                        RanShaPayload::BatchedReconstruct(payload),
-                    ));
-                    let bytes = bincode::serialize(&message)?;
-                    network
-                        .send(target_party, &bytes)
-                        .await
-                        .map_err(RanShaError::NetworkError)?;
-                    Ok::<(), RanShaError>(())
-                }
-            })
-            .collect();
-
-        try_join_all(send_futures).await?;
+            let message = WrappedMessage::RanSha(RanShaMessage::new(
+                self.id,
+                RanShaMessageType::ReconstructMessage,
+                session_id,
+                RanShaPayload::BatchedReconstruct(payload),
+            ));
+            let bytes = bincode::serialize(&message)?;
+            network
+                .send(target_party, &bytes)
+                .await
+                .map_err(RanShaError::NetworkError)?;
+        }
 
         info!(
             "Batched ShareGen: party {} sent reconstruction data for {} batches",

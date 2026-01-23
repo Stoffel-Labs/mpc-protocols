@@ -14,7 +14,7 @@ use crate::{
 };
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
-use futures::{future::try_join_all, lock::Mutex};
+use futures::lock::Mutex;
 use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
 use stoffelnet::network_utils::Network;
@@ -112,37 +112,24 @@ impl<F: FftField> BatchReconNode<F> {
             "initialized batch reconstruction with Vandermonde transform"
         );
 
-        // Pre-serialize all messages and send concurrently
-        let send_futures: Vec<_> = y_shares
-            .into_iter()
-            .enumerate()
-            .map(|(j, y_j_share)| {
-                let net = net.clone();
-                let sender_id = self.id;
+        // Send messages sequentially
+        for (j, y_j_share) in y_shares.into_iter().enumerate() {
+            let mut payload = Vec::new();
+            y_j_share
+                .share[0]
+                .serialize_compressed(&mut payload)
+                .map_err(BatchReconError::ArkSerialization)?;
 
-                async move {
-                    let mut payload = Vec::new();
-                    y_j_share
-                        .share[0]
-                        .serialize_compressed(&mut payload)
-                        .map_err(BatchReconError::ArkSerialization)?;
+            let msg =
+                BatchReconMsg::new(self.id, session_id, BatchReconMsgType::Eval, payload);
+            let wrapped = WrappedMessage::BatchRecon(msg);
+            let encoded_msg = bincode::serialize(&wrapped)
+                .map_err(BatchReconError::SerializationError)?;
 
-                    let msg =
-                        BatchReconMsg::new(sender_id, session_id, BatchReconMsgType::Eval, payload);
-                    let wrapped = WrappedMessage::BatchRecon(msg);
-                    let encoded_msg = bincode::serialize(&wrapped)
-                        .map_err(BatchReconError::SerializationError)?;
-
-                    net.send(j, &encoded_msg)
-                        .await
-                        .map_err(BatchReconError::NetworkError)?;
-                    Ok::<(), BatchReconError>(())
-                }
-            })
-            .collect();
-
-        // Execute all sends concurrently
-        try_join_all(send_futures).await?;
+            net.send(j, &encoded_msg)
+                .await
+                .map_err(BatchReconError::NetworkError)?;
+        }
         Ok(())
     }
 

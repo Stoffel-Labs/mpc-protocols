@@ -6,7 +6,6 @@ use crate::common::batch_ops::batch_horner_eval;
 use ark_ff::FftField;
 use ark_poly::{
     univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain,
-    Polynomial,
 };
 use ark_std::rand::Rng;
 use std::{collections::HashSet, marker::PhantomData};

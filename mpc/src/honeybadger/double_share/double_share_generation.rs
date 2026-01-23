@@ -9,7 +9,6 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use dashmap::DashMap;
-use futures::future::try_join_all;
 use itertools::izip;
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
@@ -119,40 +118,27 @@ where
         let shares_deg_2t =
             NonRobustShare::compute_shares(secret, self.n_parties, 2 * self.threshold, None, rng)?;
 
-        // Send all double shares concurrently
-        let send_futures: Vec<_> = izip!(shares_deg_t, shares_deg_2t)
-            .enumerate()
-            .map(|(recipient_id, (share_t, share_2t))| {
-                let network = network.clone();
-                let sender_id = self.id;
+        // Send all double shares sequentially
+        for (recipient_id, (share_t, share_2t)) in izip!(shares_deg_t, shares_deg_2t).enumerate() {
+            let double_share = DoubleShamirShare::new(share_t, share_2t);
+            let mut payload = Vec::new();
+            double_share
+                .serialize_compressed(&mut payload)
+                .map_err(DouShaError::ArkSerializationError)?;
 
-                async move {
-                    // Create and serialize the payload.
-                    let double_share = DoubleShamirShare::new(share_t, share_2t);
-                    let mut payload = Vec::new();
-                    double_share
-                        .serialize_compressed(&mut payload)
-                        .map_err(DouShaError::ArkSerializationError)?;
+            let generic_message =
+                WrappedMessage::Dousha(DouShaMessage::new(self.id, session_id, payload));
+            let bytes_generic_msg = bincode::serialize(&generic_message)?;
 
-                    // Create and serialize the generic message.
-                    let generic_message =
-                        WrappedMessage::Dousha(DouShaMessage::new(sender_id, session_id, payload));
-                    let bytes_generic_msg = bincode::serialize(&generic_message)?;
-
-                    info!(
-                        "sending double shares from {:?} to {:?}",
-                        sender_id, recipient_id
-                    );
-                    network
-                        .send(recipient_id, &bytes_generic_msg)
-                        .await
-                        .map_err(DouShaError::NetworkError)?;
-                    Ok::<(), DouShaError>(())
-                }
-            })
-            .collect();
-
-        try_join_all(send_futures).await?;
+            info!(
+                "sending double shares from {:?} to {:?}",
+                self.id, recipient_id
+            );
+            network
+                .send(recipient_id, &bytes_generic_msg)
+                .await
+                .map_err(DouShaError::NetworkError)?;
+        }
 
         // Update the state of the protocol to Initialized.
         let storage_access = self.get_or_create_store(session_id).await;

@@ -141,7 +141,6 @@ async fn test_reconstruct_handler_incorrect_share() {
         .share_gen
         .get_or_create_store(session_id)
         .await
-        .unwrap()
         .lock()
         .await
         .clone();
@@ -176,7 +175,7 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
-    let node_store = ransha_node.get_or_create_store(session_id).await.unwrap();
+    let node_store = ransha_node.get_or_create_store(session_id).await;
 
     // first 2t-1 messages should be buffered and return Ok (not WaitForOk error)
     // This is the fix for out-of-order message handling

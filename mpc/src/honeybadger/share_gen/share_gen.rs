@@ -2,7 +2,6 @@ use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
-use futures::future::try_join_all;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
@@ -83,41 +82,27 @@ where
         let shares_deg_t =
             RobustShare::compute_shares(secret, self.n_parties, self.threshold, None, rng)?;
 
-        // Create and send all shares concurrently
-        let send_futures: Vec<_> = shares_deg_t
-            .into_iter()
-            .enumerate()
-            .map(|(recipient_id, share_t)| {
-                let network = network.clone();
-                let sender_id = self.id;
+        // Send all shares sequentially
+        for (recipient_id, share_t) in shares_deg_t.into_iter().enumerate() {
+            let mut payload = Vec::new();
+            share_t
+                .serialize_compressed(&mut payload)
+                .map_err(RanShaError::ArkSerialization)?;
 
-                async move {
-                    // Create and serialize the payload.
-                    let mut payload = Vec::new();
-                    share_t
-                        .serialize_compressed(&mut payload)
-                        .map_err(RanShaError::ArkSerialization)?;
+            let generic_message = WrappedMessage::RanSha(RanShaMessage::new(
+                self.id,
+                RanShaMessageType::ShareMessage,
+                session_id,
+                RanShaPayload::Share(payload),
+            ));
+            let bytes_generic_msg = bincode::serialize(&generic_message)?;
 
-                    // Create and serialize the generic message.
-                    let generic_message = WrappedMessage::RanSha(RanShaMessage::new(
-                        sender_id,
-                        RanShaMessageType::ShareMessage,
-                        session_id,
-                        RanShaPayload::Share(payload),
-                    ));
-                    let bytes_generic_msg = bincode::serialize(&generic_message)?;
-
-                    info!("sending shares from {:?} to {:?}", sender_id, recipient_id);
-                    network
-                        .send(recipient_id, &bytes_generic_msg)
-                        .await
-                        .map_err(RanShaError::NetworkError)?;
-                    Ok::<(), RanShaError>(())
-                }
-            })
-            .collect();
-
-        try_join_all(send_futures).await?;
+            info!("sending shares from {:?} to {:?}", self.id, recipient_id);
+            network
+                .send(recipient_id, &bytes_generic_msg)
+                .await
+                .map_err(RanShaError::NetworkError)?;
+        }
 
         // Update the state of the protocol to Initialized.
         let storage_access = self.get_or_create_store(session_id).await;
@@ -213,35 +198,24 @@ where
             drop(store);
         }
 
-        // Send reconstruction messages concurrently
-        let send_futures: Vec<_> = (0..2 * self.threshold)
-            .map(|i| {
-                let network = network.clone();
-                let share_deg_t = r_deg_t[i].clone();
-                let sender_id = self.id;
-
-                async move {
-                    let mut bytes_rec_message = Vec::new();
-                    share_deg_t
-                        .serialize_compressed(&mut bytes_rec_message)
-                        .map_err(RanShaError::ArkSerialization)?;
-                    let message = WrappedMessage::RanSha(RanShaMessage::new(
-                        sender_id,
-                        RanShaMessageType::ReconstructMessage,
-                        session_id,
-                        RanShaPayload::Reconstruct(bytes_rec_message),
-                    ));
-                    let bytes = bincode::serialize(&message)?;
-                    network
-                        .send(i, &bytes)
-                        .await
-                        .map_err(RanShaError::NetworkError)?;
-                    Ok::<(), RanShaError>(())
-                }
-            })
-            .collect();
-
-        try_join_all(send_futures).await?;
+        // Send reconstruction messages sequentially
+        for i in 0..2 * self.threshold {
+            let mut bytes_rec_message = Vec::new();
+            r_deg_t[i]
+                .serialize_compressed(&mut bytes_rec_message)
+                .map_err(RanShaError::ArkSerialization)?;
+            let message = WrappedMessage::RanSha(RanShaMessage::new(
+                self.id,
+                RanShaMessageType::ReconstructMessage,
+                session_id,
+                RanShaPayload::Reconstruct(bytes_rec_message),
+            ));
+            let bytes = bincode::serialize(&message)?;
+            network
+                .send(i, &bytes)
+                .await
+                .map_err(RanShaError::NetworkError)?;
+        }
         Ok(())
     }
 

@@ -15,7 +15,6 @@ use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use dashmap::DashMap;
-use futures::future::try_join_all;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
@@ -212,47 +211,37 @@ where
             }
         }
 
-        // Send K double share pairs to each recipient concurrently
-        let send_futures: Vec<_> = shares_t_per_recipient
+        // Send K double share pairs to each recipient sequentially
+        for (recipient_id, (shares_t, shares_2t)) in shares_t_per_recipient
             .into_iter()
             .zip(shares_2t_per_recipient)
             .enumerate()
-            .map(|(recipient_id, (shares_t, shares_2t))| {
-                let network = network.clone();
-                let sender_id = self.id;
+        {
+            let mut payload = Vec::new();
+            for share in &shares_t {
+                share
+                    .serialize_compressed(&mut payload)
+                    .map_err(RanDouShaError::ArkSerialization)?;
+            }
+            for share in &shares_2t {
+                share
+                    .serialize_compressed(&mut payload)
+                    .map_err(RanDouShaError::ArkSerialization)?;
+            }
 
-                async move {
-                    // Serialize all K shares of degree t, then all K shares of degree 2t
-                    let mut payload = Vec::new();
-                    for share in &shares_t {
-                        share
-                            .serialize_compressed(&mut payload)
-                            .map_err(RanDouShaError::ArkSerialization)?;
-                    }
-                    for share in &shares_2t {
-                        share
-                            .serialize_compressed(&mut payload)
-                            .map_err(RanDouShaError::ArkSerialization)?;
-                    }
+            let message = WrappedMessage::RanDouSha(RanDouShaMessage::new(
+                self.id,
+                RanDouShaMessageType::BatchedShareMessage,
+                session_id,
+                RanDouShaPayload::BatchedShare(payload),
+            ));
+            let bytes = bincode::serialize(&message)?;
 
-                    let message = WrappedMessage::RanDouSha(RanDouShaMessage::new(
-                        sender_id,
-                        RanDouShaMessageType::BatchedShareMessage,
-                        session_id,
-                        RanDouShaPayload::BatchedShare(payload),
-                    ));
-                    let bytes = bincode::serialize(&message)?;
-
-                    network
-                        .send(recipient_id, &bytes)
-                        .await
-                        .map_err(RanDouShaError::NetworkError)?;
-                    Ok::<(), RanDouShaError>(())
-                }
-            })
-            .collect();
-
-        try_join_all(send_futures).await?;
+            network
+                .send(recipient_id, &bytes)
+                .await
+                .map_err(RanDouShaError::NetworkError)?;
+        }
 
         // Update state
         let storage_access = self.get_or_create_store(session_id, batch_size).await;
@@ -449,51 +438,38 @@ where
 
         // For reconstruction verification, send to parties t+1..n
         // Each party i receives shares at position i from each batch
-        let send_futures: Vec<_> = (self.threshold + 1..self.n_parties)
-            .map(|target_party| {
-                let network = network.clone();
-                let sender_id = self.id;
+        for target_party in self.threshold + 1..self.n_parties {
+            let shares_t_for_party: Vec<NonRobustShare<F>> = (0..batch_size)
+                .map(|k| all_r_shares_t[k * self.n_parties + target_party].clone())
+                .collect();
+            let shares_2t_for_party: Vec<NonRobustShare<F>> = (0..batch_size)
+                .map(|k| all_r_shares_2t[k * self.n_parties + target_party].clone())
+                .collect();
 
-                // Collect the target_party-th share from each batch
-                let shares_t_for_party: Vec<NonRobustShare<F>> = (0..batch_size)
-                    .map(|k| all_r_shares_t[k * self.n_parties + target_party].clone())
-                    .collect();
-                let shares_2t_for_party: Vec<NonRobustShare<F>> = (0..batch_size)
-                    .map(|k| all_r_shares_2t[k * self.n_parties + target_party].clone())
-                    .collect();
+            let mut payload = Vec::new();
+            for share in &shares_t_for_party {
+                share
+                    .serialize_compressed(&mut payload)
+                    .map_err(RanDouShaError::ArkSerialization)?;
+            }
+            for share in &shares_2t_for_party {
+                share
+                    .serialize_compressed(&mut payload)
+                    .map_err(RanDouShaError::ArkSerialization)?;
+            }
 
-                async move {
-                    let mut payload = Vec::new();
-                    // Serialize degree t shares first
-                    for share in &shares_t_for_party {
-                        share
-                            .serialize_compressed(&mut payload)
-                            .map_err(RanDouShaError::ArkSerialization)?;
-                    }
-                    // Then degree 2t shares
-                    for share in &shares_2t_for_party {
-                        share
-                            .serialize_compressed(&mut payload)
-                            .map_err(RanDouShaError::ArkSerialization)?;
-                    }
-
-                    let message = WrappedMessage::RanDouSha(RanDouShaMessage::new(
-                        sender_id,
-                        RanDouShaMessageType::BatchedReconstructMessage,
-                        session_id,
-                        RanDouShaPayload::BatchedReconstruct(payload),
-                    ));
-                    let bytes = bincode::serialize(&message)?;
-                    network
-                        .send(target_party, &bytes)
-                        .await
-                        .map_err(RanDouShaError::NetworkError)?;
-                    Ok::<(), RanDouShaError>(())
-                }
-            })
-            .collect();
-
-        try_join_all(send_futures).await?;
+            let message = WrappedMessage::RanDouSha(RanDouShaMessage::new(
+                self.id,
+                RanDouShaMessageType::BatchedReconstructMessage,
+                session_id,
+                RanDouShaPayload::BatchedReconstruct(payload),
+            ));
+            let bytes = bincode::serialize(&message)?;
+            network
+                .send(target_party, &bytes)
+                .await
+                .map_err(RanDouShaError::NetworkError)?;
+        }
 
         info!(
             "Batched RanDouSha: party {} sent reconstruction data for {} batches",
