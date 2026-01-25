@@ -238,7 +238,7 @@ Key test files:
 ### When Adding New Protocols
 - [ ] Document in README.md
 - [ ] Add to this file's protocol table
-- [ ] Update docs in `Stoffel-Dev/docs/`
+- [ ] Update docs in `[docs](https://github.com/Stoffel-Labs/docs.git)`
 
 ### When FFI Changes
 - [ ] Regenerate header files
