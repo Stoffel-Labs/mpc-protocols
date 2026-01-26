@@ -20,7 +20,6 @@ use crate::{
     },
     honeybadger::SessionId,
 };
-use ark_ec::CurveGroup;
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};

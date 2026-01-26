@@ -1,5 +1,9 @@
 use crate::{
-    common::{rbc::RbcError, share::feldman::FeldmanShamirShare, SecretSharingScheme, RBC},
+    common::{
+        rbc::RbcError,
+        share::{feldman::FeldmanShamirShare, ShareError},
+        SecretSharingScheme, RBC,
+    },
     honeybadger::{SessionId, WrappedMessage},
 };
 use ark_ec::CurveGroup;
@@ -28,6 +32,8 @@ pub enum AvssError {
     InvalidShare,
     #[error("invalid feldman commitment length")]
     InvalidCommitmentLength,
+    #[error("invalid share length")]
+    InvalidShareLength,
     #[error("commitments unavailable")]
     CommitmentsNotFound,
     #[error("serialization error")]
@@ -44,10 +50,10 @@ pub enum AvssError {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvssMessage {
-    sender_id: PartyId,
-    session_id: SessionId,
-    dealer_pk: Vec<u8>,
-    encrypted_shares: Vec<Vec<u8>>,
+    pub sender_id: PartyId,
+    pub session_id: SessionId,
+    pub dealer_pk: Vec<u8>,
+    pub encrypted_shares: Vec<Vec<Vec<u8>>>,
 }
 
 impl AvssMessage {
@@ -55,7 +61,7 @@ impl AvssMessage {
         sender: PartyId,
         session_id: SessionId,
         dealer_pk: Vec<u8>,
-        encrypted_shares: Vec<Vec<u8>>,
+        encrypted_shares: Vec<Vec<Vec<u8>>>,
     ) -> Self {
         Self {
             sender_id: sender,
@@ -133,7 +139,7 @@ where
     pub t: usize,
     pub sk_i: F,
     pub pk_map: Arc<Vec<G>>,
-    pub shares: Arc<Mutex<BTreeMap<SessionId, Option<FeldmanShamirShare<F, G>>>>>,
+    pub shares: Arc<Mutex<BTreeMap<SessionId, Option<Vec<FeldmanShamirShare<F, G>>>>>>,
     pub rbc: R,
     pub output_sender: Sender<SessionId>,
 }
@@ -167,7 +173,7 @@ where
 
     pub async fn init<Rnd, N>(
         &mut self,
-        secret: F,
+        secrets: Vec<F>,
         session_id: SessionId,
         rng: &mut Rnd,
         net: Arc<N>,
@@ -180,8 +186,12 @@ where
         // Generate the random polynomial of degree `degree` with `secret` as constant term
 
         let ids: Vec<usize> = (1..=self.n_parties).collect();
-        let shares: Vec<FeldmanShamirShare<F, G>> =
-            FeldmanShamirShare::compute_shares(secret, self.n_parties, self.t, Some(&ids), rng)?;
+        let shares: Vec<Vec<FeldmanShamirShare<F, G>>> = secrets
+            .into_iter()
+            .map(|secret| {
+                FeldmanShamirShare::compute_shares(secret, self.n_parties, self.t, Some(&ids), rng)
+            })
+            .collect::<Result<Vec<_>, ShareError>>()?;
 
         // Dealer ephemeral keypair
         let sk_d = F::rand(rng);
@@ -190,16 +200,26 @@ where
         let mut pk_d_bytes = Vec::new();
         pk_d.serialize_compressed(&mut pk_d_bytes)?;
 
-        let mut encrypted = Vec::with_capacity(self.n_parties);
+        let mut encrypted: Vec<Vec<Vec<u8>>> =
+            vec![Vec::with_capacity(shares.len()); self.n_parties];
 
-        for i in 0..self.n_parties {
-            let mut pt = Vec::new();
-            shares[i].serialize_compressed(&mut pt)?;
+        let keys: Vec<_> = self
+            .pk_map
+            .iter()
+            .map(|pk| {
+                let ss = pk.mul(sk_d);
+                kdf_from_point(&ss)
+            })
+            .collect();
+        let mut pt = Vec::new();
+        for x in shares {
+            assert_eq!(x.len(), self.n_parties);
 
-            let ss = self.pk_map[i].mul(sk_d);
-            let key = kdf_from_point(&ss);
-
-            encrypted.push(encrypt(key, &pt, rng)?);
+            for (i, share) in x.iter().enumerate() {
+                pt.clear();
+                share.serialize_compressed(&mut pt)?;
+                encrypted[i].push(encrypt(keys[i].clone(), &pt, rng)?);
+            }
         }
 
         //Broadcast to servers
@@ -224,26 +244,36 @@ where
             session_id = msg.session_id.as_u64(),
             "Processing AVSS share"
         );
-        let mut map = self.shares.lock().await;
-        if map.contains_key(&msg.session_id) {
-            return Ok(()); // ignore duplicates
-        }
+        {
+            let map = self.shares.lock().await;
+            if map.contains_key(&msg.session_id) {
+                return Ok(()); // ignore duplicates
+            }
+        };
 
         let pk_d: G = CanonicalDeserialize::deserialize_compressed(&msg.dealer_pk[..])?;
-        let ct = &msg.encrypted_shares[self.id];
+        let cts: &Vec<Vec<u8>> = &msg.encrypted_shares[self.id];
 
         let ss = pk_d.mul(self.sk_i);
         let key = kdf_from_point(&ss);
 
-        let pt = decrypt(key, ct)?;
-        let share: FeldmanShamirShare<F, G> =
-            CanonicalDeserialize::deserialize_compressed(&pt[..])?;
+        let mut shares = Vec::with_capacity(cts.len());
+        for ct in cts {
+            let pt = decrypt(key.clone(), ct)?;
+            let share: FeldmanShamirShare<F, G> =
+                CanonicalDeserialize::deserialize_compressed(&pt[..])?;
 
-        if !verify_feldman(share.clone()) {
-            return Err(AvssError::InvalidShare);
+            if !verify_feldman(share.clone()) {
+                return Err(AvssError::InvalidShare);
+            }
+
+            shares.push(share);
         }
 
-        map.insert(msg.session_id, Some(share));
+        {
+            let mut map = self.shares.lock().await;
+            map.insert(msg.session_id, Some(shares));
+        };
         self.output_sender.send(msg.session_id).await?;
         Ok(())
     }

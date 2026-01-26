@@ -1,9 +1,7 @@
 use crate::{
-    adkg::share_gen::{RanShaAvssError, RanShaAvssStore},
+    avss_mpc::share_gen::{RanShaAvssError, RanShaAvssStore},
     common::{
-        share::{
-            apply_vandermonde, avss::AvssNode, feldman::FeldmanShamirShare, make_vandermonde
-        },
+        share::{apply_vandermonde, avss::AvssNode, feldman::FeldmanShamirShare, make_vandermonde},
         ShamirShare, RBC,
     },
     honeybadger::SessionId,
@@ -100,7 +98,7 @@ where
             session_id.instance_id(),
         );
         self.avss
-            .init(secret, avss_sessionid, rng, network.clone())
+            .init(vec![secret], avss_sessionid, rng, network.clone())
             .await?;
 
         while let Some(id) = {
@@ -120,7 +118,7 @@ where
                 let sender_id = id.sub_id();
                 ransha_storage
                     .initial_shares
-                    .insert(sender_id.into(), avss_share);
+                    .insert(sender_id.into(), avss_share[0].clone());
 
                 ransha_storage.reception_tracker[sender_id as usize] = true;
                 // Check if the protocol has reached an end

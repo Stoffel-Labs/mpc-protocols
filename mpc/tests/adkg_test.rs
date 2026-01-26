@@ -1,7 +1,7 @@
 use crate::utils::test_utils::{setup_tracing, test_setup};
 use ark_bls12_381::{Fr, G1Projective as G};
 use ark_ec::{CurveGroup, PrimeGroup};
-use ark_ff::PrimeField;
+use ark_ff::{PrimeField, UniformRand};
 use ark_std::{
     rand::{
         rngs::{OsRng, StdRng},
@@ -9,9 +9,9 @@ use ark_std::{
     },
     test_rng,
 };
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use stoffelmpc_mpc::{
-    adkg::{AdkgNode, AdkgNodeOpts},
+    avss_mpc::{triple_gen::BeaverTriple, AdkgNode, AdkgNodeOpts},
     common::{
         rbc::rbc::Avid, share::feldman::FeldmanShamirShare, MPCProtocol, PreprocessingMPCProtocol,
         SecretSharingScheme, RBC,
@@ -61,6 +61,7 @@ pub fn create_adkg_nodes<F: PrimeField, R: RBC + 'static, S, N, G>(
     n_parties: usize,
     t: usize,
     n_v_random_shares: usize,
+    n_triples: usize,
     instance_id: u32,
 ) -> Vec<AdkgNode<F, R, G>>
 where
@@ -87,6 +88,7 @@ where
                 n_parties,
                 t,
                 n_v_random_shares,
+                n_triples,
                 sks[i],
                 pk_map.clone(),
                 instance_id,
@@ -97,6 +99,68 @@ where
     (0..n_parties)
         .map(|id| AdkgNode::setup(id, parameters[id].clone(), vec![]).unwrap())
         .collect()
+}
+
+pub async fn construct_e2e_input_mul(
+    n_parties: usize,
+    n_triples: usize,
+    threshold: usize,
+) -> ((Vec<Fr>, Vec<Fr>, Vec<Fr>), Vec<Vec<BeaverTriple<Fr, G>>>) {
+    let mut rng = test_rng();
+    let mut secrets_a = Vec::new();
+    let mut secrets_b = Vec::new();
+    let mut secrets_c = Vec::new();
+    let mut per_party_triples: Vec<Vec<BeaverTriple<Fr, G>>> = vec![Vec::new(); n_parties];
+    let ids: Vec<_> = (1..=n_parties).collect();
+
+    for _i in 0..n_triples {
+        // sample secrets a,b
+        let a_secret = Fr::rand(&mut rng);
+        let b_secret = Fr::rand(&mut rng);
+        let c_secret = a_secret * b_secret;
+
+        // make robust shares for each secret (length == n_parties)
+        let shares_a = FeldmanShamirShare::compute_shares(
+            a_secret,
+            n_parties,
+            threshold,
+            Some(&ids),
+            &mut rng,
+        )
+        .expect("share a creation failed");
+        let shares_b = FeldmanShamirShare::compute_shares(
+            b_secret,
+            n_parties,
+            threshold,
+            Some(&ids),
+            &mut rng,
+        )
+        .expect("share b creation failed");
+        let shares_c = FeldmanShamirShare::compute_shares(
+            c_secret,
+            n_parties,
+            threshold,
+            Some(&ids),
+            &mut rng,
+        )
+        .expect("share c creation failed");
+
+        // push the secrets to the vectors
+        secrets_a.push(a_secret);
+        secrets_b.push(b_secret);
+        secrets_c.push(c_secret);
+
+        // For each party, create their per-party ShamirBeaverTriple and push it
+        for pid in 0..n_parties {
+            let triple = BeaverTriple {
+                a: shares_a[pid].clone(),
+                b: shares_b[pid].clone(),
+                c: shares_c[pid].clone(),
+            };
+            per_party_triples[pid].push(triple);
+        }
+    }
+    ((secrets_a, secrets_b, secrets_c), per_party_triples)
 }
 
 #[tokio::test]
@@ -111,7 +175,7 @@ async fn adkg_e2e() {
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
     let nodes = create_adkg_nodes::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
-        n_parties, t, 1, 111,
+        n_parties, t, 1, 0, 111,
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -197,9 +261,10 @@ async fn adkg_e2e() {
 async fn preprocessing_e2e() {
     setup_tracing();
     //----------------------------------------SETUP PARAMETERS----------------------------------------
-    let n_parties = 5;
+    let n_parties = 4;
     let t = 1;
     let no_of_randomshares = 4;
+    let no_of_triples = 4;
     let instance_id = 111;
 
     //Setup
@@ -211,6 +276,7 @@ async fn preprocessing_e2e() {
         n_parties,
         t,
         no_of_randomshares,
+        no_of_triples,
         instance_id,
     );
 
@@ -249,8 +315,140 @@ async fn preprocessing_e2e() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let n_v_shares = node.preprocessing_material.lock().await.len();
+        let (n_triples, n_v_shares) = node.preprocessing_material.lock().await.len();
 
-        assert_eq!(n_v_shares, 6);
+        assert_eq!(n_v_shares, 4);
+        assert_eq!(n_triples, 4);
+    }
+}
+
+#[tokio::test]
+async fn mul_e2e() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 5;
+    let t = 1;
+    let mut rng = test_rng();
+    let no_of_multiplication = 2;
+    let ids: Vec<_> = (1..=n_parties).collect();
+
+    //Setup
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    //Generate triples
+    let (_, triple) = construct_e2e_input_mul(n_parties, no_of_multiplication, t).await;
+
+    // Prepare inputs for multiplication
+    let mut x_values = Vec::new();
+    let mut y_values = Vec::new();
+
+    let mut x_inputs_per_node = vec![Vec::new(); n_parties];
+    let mut y_inputs_per_node = vec![Vec::new(); n_parties];
+
+    for _i in 0..no_of_multiplication {
+        let x_value = Fr::rand(&mut rng);
+        x_values.push(x_value);
+        let y_value = Fr::rand(&mut rng);
+        y_values.push(y_value);
+
+        let shares_x =
+            FeldmanShamirShare::compute_shares(x_value, n_parties, t, Some(&ids), &mut rng)
+                .unwrap();
+        let shares_y =
+            FeldmanShamirShare::compute_shares(y_value, n_parties, t, Some(&ids), &mut rng)
+                .unwrap();
+
+        for p in 0..n_parties {
+            x_inputs_per_node[p].push(shares_x[p].clone());
+            y_inputs_per_node[p].push(shares_y[p].clone());
+        }
+    }
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    // create global nodes
+    let nodes = create_adkg_nodes::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
+        n_parties,
+        t,
+        0,
+        no_of_multiplication,
+        111,
+    );
+
+    //----------------------------------------RECIEVE----------------------------------------
+    // spawn tasks to process received messages
+    adkg_receive::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
+
+    //----------------------------------------RUN PROTOCOL----------------------------------------
+    //Load the triples
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        node.preprocessing_material
+            .lock()
+            .await
+            .add(Some(triple[pid].clone()), None);
+    }
+
+    // init all nodes
+    let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<FeldmanShamirShare<Fr, G>>)>(100);
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let fin_send = fin_send.clone();
+        let x_shares = x_inputs_per_node[pid].clone();
+        let y_shares = y_inputs_per_node[pid].clone();
+
+        let handle = tokio::spawn(async move {
+            {
+                let final_shares = node
+                    .mul(x_shares.clone(), y_shares.clone(), net.clone())
+                    .await
+                    .expect("mul failed");
+                fin_send.send((pid, final_shares)).await.unwrap();
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all mul tasks to finish
+    futures::future::join_all(handles).await;
+
+    let mut final_results = HashMap::<usize, Vec<FeldmanShamirShare<Fr, G>>>::new();
+    while let Some((id, final_shares)) = fin_recv.recv().await {
+        final_results.insert(id, final_shares);
+        if final_results.len() == n_parties {
+            // check final_shares consist of correct shares
+            for (id, mul_shares) in &final_results {
+                assert_eq!(mul_shares.len(), no_of_multiplication);
+                let _ = mul_shares.iter().map(|mul_share| {
+                    assert_eq!(mul_share.feldmanshare.degree, t);
+                    assert_eq!(mul_share.feldmanshare.id, *id);
+                });
+            }
+            break;
+        }
+    }
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+
+    let mut per_multiplication_shares: Vec<Vec<FeldmanShamirShare<Fr, G>>> =
+        vec![Vec::new(); no_of_multiplication];
+
+    for pid in 0..n_parties {
+        for i in 0..no_of_multiplication {
+            per_multiplication_shares[i].push(final_results.get(&pid).unwrap()[i].clone());
+        }
+    }
+
+    for i in 0..no_of_multiplication {
+        let shares_for_i = per_multiplication_shares[i][0..=t].to_vec();
+        let (_, z_rec) = FeldmanShamirShare::recover_secret(&shares_for_i, n_parties)
+            .expect("interpolate failed");
+        let expected = x_values[i] * y_values[i];
+
+        assert_eq!(z_rec, expected, "multiplication mismatch at index {}", i);
     }
 }

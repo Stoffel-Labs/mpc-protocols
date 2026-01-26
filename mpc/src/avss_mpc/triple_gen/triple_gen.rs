@@ -1,5 +1,5 @@
 use crate::{
-    adkg::triple_gen::{BeaverTriple, TripleGenError, TripleGenStore},
+    avss_mpc::triple_gen::{BeaverTriple, TripleGenError, TripleGenStore},
     common::{
         share::{avss::AvssNode, feldman::FeldmanShamirShare},
         RBC,
@@ -9,10 +9,12 @@ use crate::{
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_std::rand::Rng;
-use itertools::Itertools;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{
+    mpsc::{self, Sender},
+    Mutex,
+};
 use tracing::info;
 
 #[derive(Clone, Debug)]
@@ -23,6 +25,7 @@ pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
     pub avss: AvssNode<F, R, C>,
     pub avss_output: Arc<Mutex<mpsc::Receiver<SessionId>>>,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStore<F, C>>>>>>,
+    pub output_channel: Sender<SessionId>,
 }
 
 impl<F, R, C> TripleGenNode<F, R, C>
@@ -37,6 +40,7 @@ where
         threshold: usize,
         sk_i: F,
         pk_map: Arc<Vec<C>>,
+        output_channel: Sender<SessionId>,
     ) -> Result<Self, TripleGenError> {
         let (tx, rx) = mpsc::channel(256);
         let avss = AvssNode::new(id, n_parties, threshold, sk_i, pk_map, tx)?;
@@ -48,6 +52,7 @@ where
             avss,
             avss_output: Arc::new(Mutex::new(rx)),
             store: Arc::new(Mutex::new(HashMap::new())),
+            output_channel,
         })
     }
 
@@ -63,11 +68,11 @@ where
     pub async fn gen_triple<N, G>(
         &mut self,
         session_id: SessionId,
-        a: FeldmanShamirShare<F, C>,
-        b: FeldmanShamirShare<F, C>,
+        a: Vec<FeldmanShamirShare<F, C>>,
+        b: Vec<FeldmanShamirShare<F, C>>,
         rng: &mut G,
         network: Arc<N>,
-    ) -> Result<BeaverTriple<F, C>, TripleGenError>
+    ) -> Result<Vec<BeaverTriple<F, C>>, TripleGenError>
     where
         N: Network + Send + Sync,
         G: Rng + Send,
@@ -77,9 +82,19 @@ where
         let t = self.threshold;
         let m = 2 * t + 1;
 
-        // Local multiplication (degree 2t implicitly)
-        let c_i_prime = a.feldmanshare.share[0] * b.feldmanshare.share[0];
+        if a.len() != b.len() {
+            return Err(TripleGenError::InvalidShareLength);
+        }
+        let batch = a.len();
 
+        // === Step 1: local products (vector) ===
+        // c_i_prime[j] = a_i[j] * b_i[j]
+        let c_i_prime: Vec<F> = a
+            .iter()
+            .zip(b.iter())
+            .map(|(s1, s2)| s1.feldmanshare.share[0] * s2.feldmanshare.share[0])
+            .collect();
+        // === Step 2: dealers AVSS-share the batch vector ===
         let is_dealer = self.id < m;
         if is_dealer {
             let avss_sid = SessionId::new(
@@ -96,8 +111,9 @@ where
 
         // Create store once
         let store_ref = self.get_or_create_store(session_id).await;
-        let xs: Vec<F> = (0..m).map(|i| F::from(i as u64)).collect();
+        let xs: Vec<F> = (0..m).map(|i| F::from((i + 1) as u64)).collect();
 
+        // === Step 3: collect dealer outputs, then lagrange-combine component-wise ===
         while let Some(done) = {
             let mut rx = self.avss_output.lock().await;
             rx.recv().await
@@ -117,45 +133,63 @@ where
             }
 
             let mut avss_map = self.avss.shares.lock().await;
-            let piece = avss_map
+            let pieces = avss_map
                 .remove(&done)
                 .and_then(|x| x)
                 .ok_or(TripleGenError::MissingDealer(dealer))?;
             drop(avss_map);
+            if pieces.len() != batch {
+                return Err(TripleGenError::InvalidShareLength);
+            }
 
             let mut st = store_ref.lock().await;
-            st.received.insert(dealer, piece);
+            st.received.insert(dealer, pieces);
             st.reception_tracker[dealer] = true;
 
             if st.reception_tracker.iter().all(|&x| x) {
-                // Compute c_share = Σ λ_i * e_i(α_self)
-                let mut c_val = F::zero();
-                let mut c_comms = vec![C::zero(); t + 1];
+                // === Lagrange combine for each batch index j ===
+                let mut c_out: Vec<FeldmanShamirShare<F, C>> = Vec::with_capacity(batch);
 
-                for (&dealer, &x_i) in (0..2 * t + 1).collect_vec().iter().zip(xs.iter()) {
-                    let p = st
-                        .received
-                        .get(&dealer)
-                        .ok_or(TripleGenError::MissingDealer(dealer))?;
-                    let lambda = Self::lagrange_at_zero(x_i, &xs);
+                for j in 0..batch {
+                    let mut c_val_j = F::zero();
+                    let mut c_comms_j = vec![C::zero(); t + 1];
 
-                    c_val += lambda * p.feldmanshare.share[0];
+                    for dealer_id in 0..m {
+                        let x_i = xs[dealer_id];
+                        let lambda = Self::lagrange_at_zero(x_i, &xs);
 
-                    if p.commitments.len() != t + 1 {
-                        return Err(TripleGenError::CommitmentLengthMismatch);
+                        let share = st
+                            .received
+                            .get(&dealer_id)
+                            .ok_or(TripleGenError::MissingDealer(dealer_id))?;
+                        let s = &share[j];
+
+                        // share value
+                        c_val_j += lambda * s.feldmanshare.share[0];
+
+                        // commitments (degree t)
+                        if s.commitments.len() != t + 1 {
+                            return Err(TripleGenError::CommitmentLengthMismatch);
+                        }
+                        for k in 0..=t {
+                            c_comms_j[k] += s.commitments[k].mul(lambda);
+                        }
                     }
-                    for k in 0..=t {
-                        c_comms[k] += p.commitments[k].mul(lambda);
-                    }
+
+                    c_out.push(FeldmanShamirShare::new(c_val_j, self.id, t, c_comms_j)?);
                 }
-                let c = FeldmanShamirShare::new(c_val, self.id, t, c_comms)?;
-                let triple = BeaverTriple {
-                    a: a.clone(),
-                    b: b.clone(),
-                    c,
-                };
-                st.output = Some(triple.clone());
-                return Ok(triple);
+                let triples: Vec<BeaverTriple<F, C>> = c_out
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| BeaverTriple {
+                        a: a[i].clone(),
+                        b: b[i].clone(),
+                        c: c.clone(),
+                    })
+                    .collect();
+                st.output = Some(triples.clone());
+                self.output_channel.send(session_id).await?;
+                return Ok(triples);
             }
         }
         unreachable!()

@@ -1,11 +1,15 @@
-use crate::common::{
-    rbc::RbcError,
-    share::{avss::AvssError, feldman::FeldmanShamirShare, ShareError},
+use crate::{
+    common::{
+        rbc::RbcError,
+        share::{avss::AvssError, feldman::FeldmanShamirShare, ShareError},
+    },
+    honeybadger::SessionId,
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use std::collections::HashMap;
 use thiserror::Error;
+use tokio::sync::mpsc::error::SendError;
 
 pub mod triple_gen;
 
@@ -31,14 +35,18 @@ pub enum TripleGenError {
     RbcError(#[from] RbcError),
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
+    #[error("error sending the finished session ID to the caller: {0:?}")]
+    SenderError(#[from] SendError<SessionId>),
+    #[error("invalid share length")]
+    InvalidShareLength,
 }
 
 /// Store for one triple session
 #[derive(Clone, Debug)]
 pub struct TripleGenStore<F: FftField, C: CurveGroup<ScalarField = F>> {
-    pub received: HashMap<usize, FeldmanShamirShare<F, C>>,
+    pub received: HashMap<usize, Vec<FeldmanShamirShare<F, C>>>,
     pub reception_tracker: Vec<bool>,
-    pub output: Option<BeaverTriple<F, C>>,
+    pub output: Option<Vec<BeaverTriple<F, C>>>,
 }
 
 impl<F: FftField, C: CurveGroup<ScalarField = F>> TripleGenStore<F, C> {

@@ -57,8 +57,9 @@ async fn test_avss_end_to_end() {
         .collect();
 
     // --- Dealer starts AVSS ---
+    let secrets = vec![Fr::from(50), Fr::from(60), Fr::from(70)];
     nodes[0]
-        .init(Fr::from(50), session_id, &mut rng, network.clone())
+        .init(secrets.clone(), session_id, &mut rng, network.clone())
         .await
         .unwrap();
 
@@ -88,7 +89,7 @@ async fn test_avss_end_to_end() {
     // --- Allow protocol to finish ---
     tokio::time::sleep(Duration::from_millis(300)).await;
     // --- Check outputs ---
-    let mut shares = Vec::new();
+    let mut shares = vec![Vec::new(); 3];
     for node in &nodes {
         let map = node.shares.lock().await;
         let share = map
@@ -98,13 +99,17 @@ async fn test_avss_end_to_end() {
             .expect("empty share");
 
         // Feldman verification already checked in protocol
-        assert_eq!(share.feldmanshare.degree, t);
-        assert!(verify_feldman(share.clone()));
-        shares.push(share.feldmanshare.clone());
+        for (i, s) in share.iter().enumerate() {
+            assert_eq!(s.feldmanshare.degree, t);
+            assert!(verify_feldman(s.clone()));
+            shares[i].push(s.feldmanshare.clone());
+        }
     }
 
     // --- Reconstruct secret ---
-    let recovered = ShamirShare::recover_secret(&shares, n).unwrap();
-    assert_eq!(Fr::from(50), recovered.1);
-    info!("Recovered AVSS secret = {:?}", recovered.1);
+    for (i, s) in shares.iter().enumerate() {
+        let recovered = ShamirShare::recover_secret(&s, n).unwrap();
+        assert_eq!(secrets[i], recovered.1);
+        info!("Recovered AVSS secret = {:?}", recovered.1);
+    }
 }
