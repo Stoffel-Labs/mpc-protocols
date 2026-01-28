@@ -388,17 +388,6 @@ where
     }
 }
 
-impl<F, R, G> AdkgNode<F, R, G>
-where
-    F: PrimeField,
-    R: RBC,
-    G: CurveGroup<ScalarField = F>,
-{
-    pub fn public_key(&self, secret_key: FeldmanShamirShare<F, G>) -> G {
-        let commitment = secret_key.commitments[0];
-        commitment
-    }
-}
 
 #[async_trait]
 impl<F, R, N, C> PreprocessingMPCProtocol<F, FeldmanShamirShare<F, C>, N> for AdkgNode<F, R, C>

@@ -234,11 +234,6 @@ async fn adkg_e2e() {
     let c0 = feldman_shares[0].commitments[0];
     assert_eq!(pk_expected, c0, "pk != Feldman C0 ");
 
-    // ADKG public_key API
-    let pk_from_method = nodes[0].public_key(feldman_shares[0].clone());
-
-    assert_eq!(pk_from_method, pk_expected, "public_key() != g^secret",);
-
     //-------------------------------- Commitments consistency --------------------------------
     let reference_commitments = &feldman_shares[0].commitments;
 
