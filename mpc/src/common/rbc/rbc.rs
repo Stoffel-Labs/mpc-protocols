@@ -876,7 +876,7 @@ impl Avid {
 
         // When a server reconstructs a shard, it also reconstructs the corresponding
         // hashes on the path from j to the root, and uses them for later verification
-        match generate_merkle_proofs_map(shards.clone(), self.n) {
+        match generate_merkle_proofs_map(shards.clone()) {
             Ok(proof_map) => {
                 // Get fingerprint for self, for creating message later
                 let self_proof = proof_map.get(&(self.id)).cloned().unwrap_or_else(|| {

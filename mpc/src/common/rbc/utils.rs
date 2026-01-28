@@ -157,8 +157,8 @@ pub fn verify_merkle(
 /// Generate Merkle proofs for all leaves and return them as a map.
 pub fn generate_merkle_proofs_map(
     shards: Vec<Vec<u8>>,
-    n: usize,
 ) -> Result<HashMap<usize, Vec<u8>>, ShardError> {
+    let n = shards.len();
     let tree = gen_merkletree(shards);
 
     // ensure tree is valid
@@ -253,8 +253,8 @@ mod tests {
         let tree = gen_merkletree(shards.clone());
 
         // Generate proofs
-        let proofs_map = generate_merkle_proofs_map(shards.clone(), shards.len())
-            .expect("Proof generation should succeed");
+        let proofs_map =
+            generate_merkle_proofs_map(shards.clone()).expect("Proof generation should succeed");
 
         for (i, shard) in shards.iter().enumerate() {
             let mut proof_with_root = vec![];
