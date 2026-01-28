@@ -227,7 +227,7 @@ where
             drop(store);
 
             let ok: bool;
-            match RobustShare::recover_secret(&shares, self.n_parties) {
+            match RobustShare::recover_secret(&shares, self.n_parties, self.threshold) {
                 Ok(r) => {
                     let poly = DensePolynomial::from_coefficients_slice(&r.0);
                     ok = poly.degree() == self.threshold;

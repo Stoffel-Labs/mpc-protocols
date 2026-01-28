@@ -86,8 +86,8 @@ async fn generate_faulty_double_shares_e2e() {
             .map(|shares| shares[i].degree_2t.clone())
             .collect();
 
-        let secret_t = NonRobustShare::recover_secret(&shares_t, n_parties);
-        let secret_2t = NonRobustShare::recover_secret(&shares_2t, n_parties);
+        let secret_t = NonRobustShare::recover_secret(&shares_t, n_parties, threshold);
+        let secret_2t = NonRobustShare::recover_secret(&shares_2t, n_parties, threshold);
 
         assert_eq!(
             secret_t.unwrap().1,

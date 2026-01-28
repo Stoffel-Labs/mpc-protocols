@@ -40,14 +40,21 @@ pub struct BatchReconNode<F: FftField> {
     pub id: usize, // This node's unique identifier
     pub n: usize,  // Total number of nodes/shares
     pub t: usize,
+    pub degree: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BatchReconStore<F>>>>>>, // Number of malicious parties
 }
 
 impl<F: FftField> BatchReconNode<F> {
     /// Creates a new `Node` instance.
-    pub fn new(id: usize, n: usize, t: usize) -> Result<Self, BatchReconError> {
+    pub fn new(id: usize, n: usize, t: usize, degree: usize) -> Result<Self, BatchReconError> {
         let store = Arc::new(Mutex::new(HashMap::new()));
-        Ok(Self { id, n, t, store })
+        Ok(Self {
+            id,
+            n,
+            t,
+            degree,
+            store,
+        })
     }
 
     pub async fn clear_entire_store(&self) {
@@ -58,7 +65,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.store.lock().await;
         store.remove(&session_id).is_some()
-     }
+    }
 
     /// Initiates the batch reconstruction protocol for a given node.
     ///
@@ -69,13 +76,13 @@ impl<F: FftField> BatchReconNode<F> {
         session_id: SessionId,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
-        if shares.len() < self.t + 1 {
+        if shares.len() < self.degree + 1 {
             return Err(BatchReconError::InvalidInput(
                 "too little shares to start batch reconstruct".to_string(),
             ));
         }
-        let vandermonde = make_vandermonde::<F>(self.n, self.t)?;
-        let y_shares = apply_vandermonde(&vandermonde, &shares[..(self.t + 1)])?;
+        let vandermonde = make_vandermonde::<F>(self.n, self.degree)?;
+        let y_shares = apply_vandermonde(&vandermonde, &shares[..(self.degree + 1)])?;
 
         info!(
             id = self.id,
@@ -137,22 +144,22 @@ impl<F: FftField> BatchReconNode<F> {
                 if !store.evals_received.iter().any(|s| s.id == sender_id) {
                     store
                         .evals_received
-                        .push(RobustShare::new(val, sender_id, self.t));
+                        .push(RobustShare::new(val, sender_id, self.degree));
                 }
                 // Check if we have enough evaluation shares and haven't already computed our `y_j`.
-                if store.evals_received.len() >= 2 * self.t + 1 && store.y_j.is_none() {
+                if store.evals_received.len() >= self.degree + self.t + 1 && store.y_j.is_none() {
                     info!(
                         self_id = self.id,
                         "Enough Evals collected, interpolating y_j"
                     );
 
                     // Attempt to interpolate the polynomial and get our specific `y_j` value.
-                    match RobustShare::recover_secret(&store.evals_received, self.n) {
+                    match RobustShare::recover_secret(&store.evals_received, self.n, self.t) {
                         Ok((_, value)) => {
                             store.y_j = Some(RobustShare {
                                 share: [value],
                                 id: self.id,
-                                degree: self.t,
+                                degree: self.degree,
                                 _sharetype: PhantomData,
                             });
                             drop(store);
@@ -206,20 +213,22 @@ impl<F: FftField> BatchReconNode<F> {
                 if !store.reveals_received.iter().any(|s| s.id == sender_id) {
                     store
                         .reveals_received
-                        .push(RobustShare::new(y_j, sender_id, self.t));
+                        .push(RobustShare::new(y_j, sender_id, self.degree));
                 }
                 // Check if we have enough revealed `y_j` values and haven't already reconstructed the secrets.
-                if store.reveals_received.len() >= 2 * self.t + 1 && store.secrets.is_none() {
+                if store.reveals_received.len() >= self.degree + self.t + 1
+                    && store.secrets.is_none()
+                {
                     info!(
                         self_id = self.id,
                         "Enough Reveals collected, interpolating secrets"
                     );
                     // Attempt to interpolate the polynomial whose coefficients are the original secrets.
-                    match RobustShare::recover_secret(&store.reveals_received, self.n) {
+                    match RobustShare::recover_secret(&store.reveals_received, self.n, self.t) {
                         Ok((poly, _)) => {
                             let mut result = poly;
                             // Resize the coefficient vector to `t + 1` to get all secrets.
-                            result.resize(self.t + 1, F::zero());
+                            result.resize(self.degree + 1, F::zero());
                             store.secrets = Some(result.clone());
                             info!(self_id = self.id, "Secrets successfully reconstructed");
 

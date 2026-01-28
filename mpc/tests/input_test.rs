@@ -11,8 +11,8 @@ use stoffelmpc_mpc::{
         HoneyBadgerMPCNode, WrappedMessage,
     },
 };
-use tokio::time::{sleep, Duration};
 use stoffelmpc_network::fake_network::FakeNetwork;
+use tokio::time::{sleep, Duration};
 
 pub mod utils;
 #[tokio::test]
@@ -37,7 +37,18 @@ async fn test_multiple_clients_parallel_input() {
         .collect();
 
     let mut nodes: Vec<HoneyBadgerMPCNode<Fr, Avid>> =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111, 0, 0, 0, 0, client_ids.clone());
+        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+            n,
+            t,
+            0,
+            0,
+            111,
+            0,
+            0,
+            0,
+            0,
+            client_ids.clone(),
+        );
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
 
     for (i, &cid) in client_ids.iter().enumerate() {
@@ -67,7 +78,12 @@ async fn test_multiple_clients_parallel_input() {
     for (i, &cid) in client_ids.iter().enumerate() {
         let mut recovered_shares = vec![vec![]; inputs[i].len()];
         for server in &mut nodes {
-            let shares = server.preprocess.input.wait_for_all_inputs(Duration::from_millis(200)).await.expect("input error");
+            let shares = server
+                .preprocess
+                .input
+                .wait_for_all_inputs(Duration::from_millis(200))
+                .await
+                .expect("input error");
             let server_shares = shares.get(&cid).unwrap();
             for (j, s) in server_shares.iter().enumerate() {
                 recovered_shares[j].push(s.clone());
@@ -76,7 +92,7 @@ async fn test_multiple_clients_parallel_input() {
         for (j, secret) in inputs[i].iter().enumerate() {
             let shares: Vec<ShamirShare<Fr, 1, Robust>> =
                 recovered_shares[j].iter().cloned().collect();
-            let (_, r) = RobustShare::recover_secret(&shares, n).unwrap();
+            let (_, r) = RobustShare::recover_secret(&shares, n, t).unwrap();
             assert_eq!(r, *secret);
         }
     }
@@ -95,8 +111,18 @@ async fn test_input_recovery_with_missing_server() {
     let local_shares = generate_independent_shares(&mask_values, t, n);
     let mut client =
         InputClient::<Fr, Avid>::new(clientid, n, t, 111, input_values.clone()).unwrap();
-    let mut nodes =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111, 0, 0, 0, 0, vec![clientid]);
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![clientid],
+    );
 
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
     let mut recv = client_recv.remove(&clientid).unwrap();
@@ -122,13 +148,18 @@ async fn test_input_recovery_with_missing_server() {
 
     let mut recovered_shares = vec![];
     for server in &mut nodes[..3] {
-        let shares = server.preprocess.input.wait_for_all_inputs(Duration::from_millis(200)).await.expect("input error");
+        let shares = server
+            .preprocess
+            .input
+            .wait_for_all_inputs(Duration::from_millis(200))
+            .await
+            .expect("input error");
         let server_shares = shares.get(&clientid).unwrap();
         recovered_shares.push(server_shares[0].clone());
     }
 
     let shares: Vec<ShamirShare<Fr, 1, Robust>> = recovered_shares;
-    let (_, r) = RobustShare::recover_secret(&shares, n).unwrap();
+    let (_, r) = RobustShare::recover_secret(&shares, n, t).unwrap();
     assert_eq!(r, input_values[0]);
 }
 
@@ -145,8 +176,18 @@ async fn test_input_with_too_many_faulty_shares() {
 
     let mut local_shares = generate_independent_shares(&[mask_value], t, n);
     let mut client = InputClient::<Fr, Avid>::new(client_id, n, t, 111, vec![input_value]).unwrap();
-    let mut nodes =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111, 0, 0, 0, 0, vec![client_id]);
+    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
+        n,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![client_id],
+    );
 
     // Start server receiver loop
     receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
@@ -179,7 +220,11 @@ async fn test_input_with_too_many_faulty_shares() {
 
     // Ensure no server accepted the faulty masked input
     for (i, server) in nodes.iter_mut().enumerate() {
-        let shares = server.preprocess.input.wait_for_all_inputs(Duration::from_millis(300)).await;
+        let shares = server
+            .preprocess
+            .input
+            .wait_for_all_inputs(Duration::from_millis(300))
+            .await;
         assert!(
             matches!(shares, Err(InputError::Timeout(_))),
             "Server {i} should not have received input from client due to decoding failure"

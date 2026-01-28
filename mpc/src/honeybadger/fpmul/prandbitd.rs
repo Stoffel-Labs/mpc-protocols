@@ -44,7 +44,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         output_bit_channel: Sender<SessionId>,
         output_int_channel: Sender<SessionId>,
     ) -> Result<Self, PRandError> {
-        let batch_recon = BatchReconNode::new(id, n, t)?;
+        let batch_recon = BatchReconNode::new(id, n, t, t)?;
         Ok(Self {
             id,
             n,
@@ -188,10 +188,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             .batch_size
             .ok_or_else(|| PRandError::NotSet("Batch size not set at RISS handler".to_string()))?;
         let total_tsets = store.no_of_tsets.ok_or_else(|| {
-            PRandError::NotSet(format!(
-                "No of tsets not set {:?}",
-                calling_proto
-            ))
+            PRandError::NotSet(format!("No of tsets not set {:?}", calling_proto))
         })?;
         if store.r_t.len() == total_tsets {
             info!(node_id = self.id, "Constructing Polynomials");
@@ -259,7 +256,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 .clone()
                 .ok_or_else(|| PRandError::NotSet("Small field bits not set".to_string()))?;
             drop(store);
-            
+
             // share of r + b
             let share_rplusb: Vec<RobustShare<F>> = share_q
                 .iter()

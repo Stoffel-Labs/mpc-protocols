@@ -143,7 +143,7 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
         // reconstruct when we have t+1
         if s.open_buf.len() >= 2 * self.t + 1 {
             let shares: Vec<RobustShare<F>> = s.open_buf.values().cloned().collect();
-            let (_, c) = RobustShare::recover_secret(&shares, self.n)?;
+            let (_, c) = RobustShare::recover_secret(&shares, self.n,self.t)?;
 
             // c' = c mod 2^m  (public integer)
             let m = s.m;

@@ -5,16 +5,14 @@ use std::sync::Arc;
 use stoffelmpc_mpc::{
     common::{share::shamir::NonRobustShare, SecretSharingScheme},
     honeybadger::{
-        double_share::DoubleShamirShare,
-        robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::{triple_generation::TripleGenNode},
-        SessionId, WrappedMessage,
+        double_share::DoubleShamirShare, robust_interpolate::robust_interpolate::RobustShare,
+        triple_gen::triple_generation::TripleGenNode, SessionId, WrappedMessage,
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 pub fn create_nodes(
     n_parties: usize,
@@ -67,11 +65,9 @@ pub fn get_triple_init_test_shares(
         let r = Fr::rand(&mut rng);
         pairs_values.push(r);
 
-        let ids: Vec<usize> = (1..=n_parties).collect();
-        let shares_r_t =
-            NonRobustShare::compute_shares(r, n_parties, t, Some(&ids), &mut rng).unwrap();
+        let shares_r_t = NonRobustShare::compute_shares(r, n_parties, t, None, &mut rng).unwrap();
         let shares_r_2t =
-            NonRobustShare::compute_shares(r, n_parties, 2 * t, Some(&ids), &mut rng).unwrap();
+            NonRobustShare::compute_shares(r, n_parties, 2 * t, None, &mut rng).unwrap();
 
         for p in 0..n_parties {
             random_shares_a[p].push(shares_a[p].clone());
@@ -82,6 +78,7 @@ pub fn get_triple_init_test_shares(
             ));
         }
     }
+    info!("{:?}", a_values);
     (
         random_shares_a,
         random_shares_b,

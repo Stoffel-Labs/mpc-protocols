@@ -75,7 +75,7 @@ mod tests {
                 }
             }
 
-            if let Ok((_, value)) = RobustShare::recover_secret(&received, n) {
+            if let Ok((_, value)) = RobustShare::recover_secret(&received, n, t) {
                 reveals[j] = Some(value);
             }
         }
@@ -96,7 +96,7 @@ mod tests {
                     }
                 }
             }
-            if let Ok((mut poly, _)) = RobustShare::recover_secret(&y_values, n) {
+            if let Ok((mut poly, _)) = RobustShare::recover_secret(&y_values, n, t) {
                 //  Extract original secrets (coefficients) x_1 .. x_{t+1}
                 poly.resize(t + 1, Fr::zero());
                 recovered_all.push(poly);
@@ -129,7 +129,7 @@ mod tests {
 
         let mut handles = vec![];
         for i in 0..n {
-            let mut node = BatchReconNode::new(i, n, t).unwrap();
+            let mut node = BatchReconNode::new(i, n, t, t).unwrap();
             let shares = all_shares[i].clone();
             let net_clone = Arc::clone(&net);
             let mut recv = receivers.remove(0);

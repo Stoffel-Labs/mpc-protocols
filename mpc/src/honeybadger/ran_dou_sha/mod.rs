@@ -315,10 +315,16 @@ where
                 drop(store);
                 // (5) Perform reconstruction for both degrees.
                 // ShamirSecretSharing::reconstruct expects a vector of shares.
-                let reconstructed_r_t =
-                    NonRobustShare::recover_secret(&shares_t_for_recon, self.n_parties)?;
-                let reconstructed_r_2t =
-                    NonRobustShare::recover_secret(&shares_2t_for_recon, self.n_parties)?;
+                let reconstructed_r_t = NonRobustShare::recover_secret(
+                    &shares_t_for_recon,
+                    self.n_parties,
+                    self.threshold,
+                )?;
+                let reconstructed_r_2t = NonRobustShare::recover_secret(
+                    &shares_2t_for_recon,
+                    self.n_parties,
+                    self.threshold,
+                )?;
                 let poly1 = DensePolynomial::from_coefficients_slice(&reconstructed_r_t.0);
                 let poly2 = DensePolynomial::from_coefficients_slice(&reconstructed_r_2t.0);
 

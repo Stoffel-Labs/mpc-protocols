@@ -13,6 +13,7 @@ use stoffelmpc_mpc::{
         triple_gen::triple_generation::ProtocolState, ProtocolType, SessionId,
     },
 };
+use tracing::info;
 
 #[tokio::test]
 async fn test_triple_gen_e2e() {
@@ -63,10 +64,11 @@ async fn test_triple_gen_e2e() {
     }
 
     for i in 0..n_shares {
-        let (_, a) = RobustShare::recover_secret(&a_shares[i], n_parties).unwrap();
-        let (_, b) = RobustShare::recover_secret(&b_shares[i], n_parties).unwrap();
-        let (_, ab) = RobustShare::recover_secret(&ab_shares[i], n_parties).unwrap();
+        let (_, a) = RobustShare::recover_secret(&a_shares[i], n_parties, threshold).unwrap();
+        let (_, b) = RobustShare::recover_secret(&b_shares[i], n_parties, threshold).unwrap();
+        let (_, ab) = RobustShare::recover_secret(&ab_shares[i], n_parties, threshold).unwrap();
         assert!(a * b == ab);
+        info!("Here: {a}");
         assert!(a == a_values[i]);
         assert!(b == b_values[i]);
     }
@@ -93,21 +95,25 @@ async fn test_triple_init_test_shares() {
             randousha_pairs_2t_i.push(randousha_pairs[p][i].degree_2t.clone());
         }
         assert_eq!(
-            RobustShare::recover_secret(&a_i, n_parties).unwrap().1,
+            RobustShare::recover_secret(&a_i, n_parties, threshold)
+                .unwrap()
+                .1,
             a_values[i]
         );
         assert_eq!(
-            RobustShare::recover_secret(&b_i, n_parties).unwrap().1,
+            RobustShare::recover_secret(&b_i, n_parties, threshold)
+                .unwrap()
+                .1,
             b_values[i]
         );
         assert_eq!(
-            NonRobustShare::recover_secret(&randousha_pairs_t_i, n_parties)
+            NonRobustShare::recover_secret(&randousha_pairs_t_i, n_parties, threshold)
                 .unwrap()
                 .1,
             pairs_values[i]
         );
         assert_eq!(
-            NonRobustShare::recover_secret(&randousha_pairs_2t_i, n_parties)
+            NonRobustShare::recover_secret(&randousha_pairs_2t_i, n_parties, threshold)
                 .unwrap()
                 .1,
             pairs_values[i]
@@ -139,7 +145,7 @@ async fn test_triple_init_test_shares() {
             let share_i_p = sub_shares_deg_2t_all[p][i].clone();
             shares_i.push(share_i_p);
         }
-        let r = RobustShare::recover_secret(&shares_i, n_parties).unwrap();
+        let r = RobustShare::recover_secret(&shares_i, n_parties, threshold).unwrap();
         assert!(r.1 == (a_values[i] * b_values[i]) - pairs_values[i]);
     }
 }

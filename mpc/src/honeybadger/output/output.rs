@@ -7,8 +7,8 @@ use ark_serialize::CanonicalSerialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stoffelnet::network_utils::Network;
-use tokio::sync::{watch::{channel, Sender, Receiver}};
-use tokio::time::{Duration, timeout};
+use tokio::sync::watch::{channel, Receiver, Sender};
+use tokio::time::{timeout, Duration};
 use tracing::info;
 
 /// Conveys the output to the clients. This happens by each node sending their output shares
@@ -75,24 +75,23 @@ pub struct OutputClient<F: FftField> {
     pub t: usize,
     pub input_len: usize,
     output_sender: Sender<OutputClientData<F>>,
-    output_receiver: Receiver<OutputClientData<F>>
+    output_receiver: Receiver<OutputClientData<F>>,
 }
 
 impl<F: FftField> OutputClient<F> {
     pub fn new(id: usize, n: usize, t: usize, input_len: usize) -> Result<Self, OutputError> {
-        let (output_sender, output_receiver) = channel(
-            OutputClientData::<F> {
-                output: None,
-                output_shares: HashMap::new()
-            }
-        );
+        let (output_sender, output_receiver) = channel(OutputClientData::<F> {
+            output: None,
+            output_shares: HashMap::new(),
+        });
 
         Ok(Self {
             client_id: id,
             n,
             t,
             input_len,
-            output_sender, output_receiver
+            output_sender,
+            output_receiver,
         })
     }
 
@@ -143,7 +142,7 @@ impl<F: FftField> OutputClient<F> {
                 let mut output = Vec::new();
 
                 for output_elem in r_shares {
-                    let secret = match RobustShare::recover_secret(&output_elem, self.n) {
+                    let secret = match RobustShare::recover_secret(&output_elem, self.n, self.t) {
                         Ok(secret) => secret,
                         Err(e) => {
                             recovery_err = Some(e);
@@ -158,7 +157,7 @@ impl<F: FftField> OutputClient<F> {
 
             false
         });
-        
+
         if already_recvd {
             return Err(OutputError::Duplicate(format!(
                 "Already received from {}",
@@ -175,14 +174,14 @@ impl<F: FftField> OutputClient<F> {
     /// Waits for the output to be reconstructed. If this does not happen within the specified
     /// duration, it returns before.
     pub async fn wait_for_output(&mut self, duration: Duration) -> Result<Vec<F>, OutputError> {
-        let output_future = self.output_receiver.wait_for(|output_data| {
-            output_data.output.is_some()
-        });
+        let output_future = self
+            .output_receiver
+            .wait_for(|output_data| output_data.output.is_some());
 
         match timeout(duration, output_future).await {
             Err(elapsed_err) => Err(OutputError::Timeout(elapsed_err)),
             Ok(Err(recv_err)) => Err(OutputError::WaitingError(recv_err)),
-            Ok(Ok(output_data)) => Ok(output_data.output.as_ref().unwrap().clone())
+            Ok(Ok(output_data)) => Ok(output_data.output.as_ref().unwrap().clone()),
         }
     }
 
@@ -203,11 +202,11 @@ impl<F: FftField> OutputClient<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::honeybadger::output::OutputMessage;
+    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use ark_bls12_381::Fr;
     use ark_ff::UniformRand;
     use ark_std::test_rng;
-    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-    use crate::honeybadger::output::OutputMessage;
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -227,7 +226,9 @@ mod tests {
         // Send only 2 shares (less than 2t+1 = 3)
         for i in 0..2 {
             let mut payload = Vec::new();
-            vec![shares_vec[i].clone()].serialize_compressed(&mut payload).unwrap();
+            vec![shares_vec[i].clone()]
+                .serialize_compressed(&mut payload)
+                .unwrap();
             let msg = OutputMessage::new(i, payload);
             client.output_handler(msg).await.unwrap();
         }
@@ -237,7 +238,9 @@ mod tests {
 
         // Now send one more share (total 3, which is 2t+1)
         let mut payload = Vec::new();
-        vec![shares_vec[2].clone()].serialize_compressed(&mut payload).unwrap();
+        vec![shares_vec[2].clone()]
+            .serialize_compressed(&mut payload)
+            .unwrap();
         let msg = OutputMessage::new(2, payload);
         client.output_handler(msg).await.unwrap();
 
@@ -262,24 +265,34 @@ mod tests {
         // Send only 2 shares (less than 2t+1 = 3)
         for i in 0..2 {
             let mut payload = Vec::new();
-            vec![shares_vec[i].clone()].serialize_compressed(&mut payload).unwrap();
+            vec![shares_vec[i].clone()]
+                .serialize_compressed(&mut payload)
+                .unwrap();
             let msg = OutputMessage::new(i, payload);
             client.output_handler(msg).await.unwrap();
         }
 
         // Call wait_for_output (should fail)
         let result = client.wait_for_output(Duration::from_millis(10)).await;
-        assert!(result.is_err(), "Expected timeout error when only 2 shares are sent");
+        assert!(
+            result.is_err(),
+            "Expected timeout error when only 2 shares are sent"
+        );
 
         // Now send one more share (total 3, which is 2t+1)
         let mut payload = Vec::new();
-        vec![shares_vec[2].clone()].serialize_compressed(&mut payload).unwrap();
+        vec![shares_vec[2].clone()]
+            .serialize_compressed(&mut payload)
+            .unwrap();
         let msg = OutputMessage::new(2, payload);
         client.output_handler(msg).await.unwrap();
 
         // Now, call wait_for_output again (should succeed)
         let result2 = client.wait_for_output(Duration::from_millis(10)).await;
-        assert!(result2.is_ok(), "Expected output to be reconstructed after enough shares");
+        assert!(
+            result2.is_ok(),
+            "Expected output to be reconstructed after enough shares"
+        );
         assert_eq!(result2.unwrap(), vec![secret]);
     }
 }

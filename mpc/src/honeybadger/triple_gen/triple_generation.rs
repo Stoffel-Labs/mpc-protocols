@@ -43,7 +43,6 @@ where
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStorage<F>>>>>>,
     pub output_sender: Sender<SessionId>,
     /// Batch reconstruction node used in the triple generation
-    // TODO - should we put batch_recon_node here or in honeybadger node
     pub batch_recon_node: BatchReconNode<F>,
 }
 
@@ -58,7 +57,7 @@ where
         output_sender: Sender<SessionId>,
     ) -> Result<Self, TripleGenError> {
         // batch_recon_node is for opening degree 2t shares
-        let batch_recon_node = BatchReconNode::<F>::new(id, n_parties, threshold * 2)?;
+        let batch_recon_node = BatchReconNode::<F>::new(id, n_parties, threshold, threshold * 2)?;
         Ok(Self {
             id,
             n_parties,

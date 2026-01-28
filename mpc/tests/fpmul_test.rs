@@ -149,7 +149,7 @@ async fn test_prandbitd_end_to_end() {
 
     for y in shares {
         let owned: Vec<ShamirShare<_, 1, Robust>> = y.iter().map(|s| (*s).clone()).collect();
-        let (_, v) = RobustShare::recover_secret(&owned, n).unwrap();
+        let (_, v) = RobustShare::recover_secret(&owned, n, t).unwrap();
         let recovered_b_p = v;
 
         println!("Recovered b (prime field G) = {:?}", recovered_b_p);
@@ -290,7 +290,7 @@ async fn test_prandbitd_r_reconstruction() {
         }
 
         for i in 0..batch_size {
-            let (_, rec_r) = RobustShare::recover_secret(&shares[i], n).unwrap();
+            let (_, rec_r) = RobustShare::recover_secret(&shares[i], n, t).unwrap();
             assert_eq!(
                 rec_r,
                 F::from(r_int[i]),
@@ -435,7 +435,7 @@ async fn test_truncpr_end_to_end() {
         shares.push(s.share_d.clone().unwrap());
     }
 
-    let (_, d_reconstructed) = RobustShare::recover_secret(&shares, n).unwrap();
+    let (_, d_reconstructed) = RobustShare::recover_secret(&shares, n, t).unwrap();
     println!("Reconstructed [d] = {:?}", d_reconstructed);
 
     // === Verify correctness: expected floor(a / 2^m) ===
