@@ -286,6 +286,7 @@ where
         let output = store.computed_r_shares[2 * self.threshold..].to_vec();
         store.state = RanShaState::Finished;
         store.protocol_output = output;
+        drop(store);
         self.output_sender.send(msg.session_id).await?;
         Ok(())
     }

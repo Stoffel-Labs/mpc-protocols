@@ -165,13 +165,13 @@ where
             ));
         }
 
-        // First, we mark the protocol as initialized.
+        // Store the result in the inner memory of the node.
+        storage.protocol_output = result_triples;
         storage.protocol_state = ProtocolState::Finished;
+        drop(storage);
         self.output_sender.send(message.session_id).await?;
         info!(?message.session_id, id = message.sender_id, "TripleGen protocol finished");
 
-        // Store the result in the inner memory of the node.
-        storage.protocol_output = result_triples;
         Ok(())
     }
 

@@ -230,6 +230,7 @@ impl<F: FftField> BatchReconNode<F> {
                             // Resize the coefficient vector to `t + 1` to get all secrets.
                             result.resize(self.degree + 1, F::zero());
                             store.secrets = Some(result.clone());
+                            drop(store);
                             info!(self_id = self.id, "Secrets successfully reconstructed");
 
                             // Send the finalization message back to the triple generation or the

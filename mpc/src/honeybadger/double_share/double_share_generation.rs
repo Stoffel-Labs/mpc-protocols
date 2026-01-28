@@ -183,6 +183,7 @@ where
                 .map(|(_, v)| v.clone())
                 .collect();
             dousha_storage.state = ProtocolState::Finished;
+            drop(dousha_storage);
             self.output_sender.send(recv_message.session_id).await?;
         }
 

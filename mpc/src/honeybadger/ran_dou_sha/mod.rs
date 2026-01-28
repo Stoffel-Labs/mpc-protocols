@@ -410,6 +410,7 @@ where
         // Computation is done so set state to Finished
         store.state = RanDouShaState::Finished;
         store.protocol_output = output_double_share;
+        drop(store);
         self.output_sender.send(msg.session_id).await?;
 
         Ok(())

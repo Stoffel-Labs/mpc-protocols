@@ -188,6 +188,8 @@ impl Bracha {
             msg_type = %msg.msg_type,
             "Handling ECHO message"
         );
+        let mut broadcast_ready: Option<Msg> = None;
+        let mut broadcast_echo: Option<Msg> = None;
         // Lock the session store to update the session state.
         let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
@@ -212,27 +214,20 @@ impl Bracha {
             if count >= 2 * self.t + 1 {
                 if !store.ready {
                     store.mark_ready(); // Mark the session as ready.
-                    let new_msg = Msg::new(
+                    broadcast_ready = Some(Msg::new(
                         self.id,
                         msg.session_id,
                         msg.round_id,
                         msg.payload.clone(),
                         vec![],
                         GenericMsgType::Bracha(MsgType::Ready),
-                        msg.payload.clone().len(),
-                    );
-                    info!(
-                        id = self.id,
-                        session_id = msg.session_id.as_u64(),
-                        msg_type = "READY",
-                        "Broadcasting READY after ECHO threshold met"
-                    );
-                    self.broadcast(new_msg, net.clone()).await?;
+                        msg.payload.len(),
+                    ));
                 }
                 // If ECHO hasn't been sent yet, broadcast the ECHO message.
                 if !store.echo {
                     store.mark_echo(); // Mark ECHO as sent.
-                    let new_msg = Msg::new(
+                    broadcast_echo = Some(Msg::new(
                         self.id,
                         msg.session_id,
                         msg.round_id,
@@ -240,17 +235,28 @@ impl Bracha {
                         vec![],
                         GenericMsgType::Bracha(MsgType::Echo),
                         msg.payload.len(),
-                    );
-                    info!(
-                        id = self.id,
-                        session_id = msg.session_id.as_u64(),
-                        msg_type = "ECHO",
-                        "Re-broadcasting ECHO due to threshold"
-                    );
-
-                    self.broadcast(new_msg, net).await?;
+                    ));
                 }
             }
+        }
+        drop(store);
+        if let Some(m) = broadcast_ready {
+            info!(
+                id = self.id,
+                session_id = m.session_id.as_u64(),
+                msg_type = "READY",
+                "Broadcasting READY after ECHO threshold met"
+            );
+            self.broadcast(m, net.clone()).await?;
+        }
+        if let Some(m) = broadcast_echo {
+            info!(
+                id = self.id,
+                session_id = m.session_id.as_u64(),
+                msg_type = "ECHO",
+                "Re-broadcasting ECHO due to threshold"
+            );
+            self.broadcast(m, net).await?;
         }
         Ok(())
     }
@@ -267,6 +273,10 @@ impl Bracha {
             msg_type = %msg.msg_type,
             "Handling READY message"
         );
+
+        let mut broadcast_ready: Option<Msg> = None;
+        let mut broadcast_echo: Option<Msg> = None;
+        let mut send_output: Option<Vec<u8>> = None;
 
         // Lock the session store to update the session state.
         let session_store = self.get_or_create_store(msg.session_id).await;
@@ -293,7 +303,7 @@ impl Bracha {
             if count >= self.t + 1 && count < 2 * self.t + 1 {
                 if !store.ready {
                     store.mark_ready(); // Mark the session as ready.
-                    let new_msg = Msg::new(
+                    broadcast_ready = Some(Msg::new(
                         self.id,
                         msg.session_id,
                         msg.round_id,
@@ -301,19 +311,12 @@ impl Bracha {
                         vec![],
                         GenericMsgType::Bracha(MsgType::Ready),
                         msg.payload.clone().len(),
-                    );
-                    info!(
-                        id = self.id,
-                        session_id = msg.session_id.as_u64(),
-                        msg_type = "READY",
-                        "Broadcasting READY after t+1 threshold"
-                    );
-                    self.broadcast(new_msg, net.clone()).await?;
+                    ));
                 }
                 // If ECHO hasn't been sent yet, broadcast it along with READY.
                 if !store.echo {
                     store.mark_echo(); // Mark ECHO as sent.
-                    let new_msg = Msg::new(
+                    broadcast_echo = Some(Msg::new(
                         self.id,
                         msg.session_id,
                         msg.round_id,
@@ -321,28 +324,44 @@ impl Bracha {
                         vec![],
                         GenericMsgType::Bracha(MsgType::Echo),
                         msg.payload.len(),
-                    );
-                    info!(
-                        id = self.id,
-                        session_id = msg.session_id.as_u64(),
-                        msg_type = "ECHO",
-                        "Broadcasting ECHO along with READY"
-                    );
-                    self.broadcast(new_msg, net).await?;
+                    ));
                 }
             } else if count >= 2 * self.t + 1 {
                 // If consensus is reached, mark the session as ended and store the output.
                 store.mark_ended();
                 store.set_output(msg.payload.clone());
-                info!(
-                    id = self.id,
-                    session_id = msg.session_id.as_u64(),
-                    output = ?msg.payload,
-                    "Consensus achieved; RBC instance ended"
-                );
-                net.send(self.id, &msg.payload).await?;
+                send_output = Some(msg.payload);
             }
         }
+        drop(store);
+        if let Some(m) = broadcast_ready {
+            info!(
+                id = self.id,
+                session_id = msg.session_id.as_u64(),
+                msg_type = "READY",
+                "Broadcasting READY after t+1 threshold"
+            );
+            self.broadcast(m, net.clone()).await?;
+        }
+        if let Some(m) = broadcast_echo {
+            info!(
+                id = self.id,
+                session_id = msg.session_id.as_u64(),
+                msg_type = "ECHO",
+                "Broadcasting ECHO along with READY"
+            );
+            self.broadcast(m, net.clone()).await?;
+        }
+        if let Some(m) = send_output {
+            info!(
+                id = self.id,
+                session_id = msg.session_id.as_u64(),
+                output = ?m,
+                "Consensus achieved; RBC instance ended"
+            );
+            net.send(self.id, &m).await?;
+        }
+
         Ok(())
     }
     async fn get_or_create_store(&self, session_id: SessionId) -> Arc<Mutex<BrachaStore>> {
@@ -734,6 +753,9 @@ impl Avid {
         if msg.metadata.len() < 32 {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
+        let mut send_shards_map: Option<HashMap<usize, Vec<u8>>> = None;
+        let mut send_output: Option<Vec<u8>> = None;
+
         // Lock the session store to update the session state.
         let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
@@ -782,8 +804,7 @@ impl Avid {
                     if echo_count < threshold && ready_count == self.k {
                         //Send ready logic
                         let shards_map = store.get_shards_for_root(&root.to_vec());
-                        self.send_ready(msg.clone(), shards_map, net.clone())
-                            .await?;
+                        send_shards_map = Some(shards_map);
                     }
 
                     // Final consensus stage: enough READY messages to reconstruct
@@ -797,14 +818,20 @@ impl Avid {
                         let output = reconstruct_payload(shards, msg.msg_len, self.k)?;
                         store.mark_ended(); //Terminate broadcast
                         store.set_output(output.clone()); //store the output
-
+                        send_output = Some(output);
+                    }
+                    drop(store);
+                    if let Some(m) = send_shards_map {
+                        self.send_ready(msg.clone(), m, net.clone()).await?;
+                    }
+                    if let Some(m) = send_output {
                         info!(
                             id = self.id,
                             session_id = msg.session_id.as_u64(),
-                            output = ?output,
+                            output = ?m,
                             "Consensus achieved; AVID instance ended"
                         );
-                        net.send(self.id, &output).await?;
+                        net.send(self.id, &m).await?;
                     }
                 }
                 Ok(false) => {
