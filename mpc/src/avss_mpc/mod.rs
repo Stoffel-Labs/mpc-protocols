@@ -388,7 +388,6 @@ where
     }
 }
 
-
 #[async_trait]
 impl<F, R, N, C> PreprocessingMPCProtocol<F, FeldmanShamirShare<F, C>, N> for AdkgNode<F, R, C>
 where
