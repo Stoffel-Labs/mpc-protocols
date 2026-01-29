@@ -505,16 +505,16 @@ impl Network for BadFakeNetwork {
     fn is_client_connected(&self, client: ClientId) -> bool {
         self.inner.client_channels.contains_key(&client)
     }
-    fn local_party_id(&self) -> PartyId {
-        match self.sender {
-            BadSenderId::Node(i) => i,
-            BadSenderId::Client(i) => i,
-        }
-    }
+    // fn local_party_id(&self) -> PartyId {
+    //     match self.sender {
+    //         BadSenderId::Node(i) => i,
+    //         BadSenderId::Client(i) => i,
+    //     }
+    // }
 
-    fn party_count(&self) -> usize {
-        self.inner.nodes.len()
-    }
+    // fn party_count(&self) -> usize {
+    //     self.inner.nodes.len()
+    // }
 }
 
 /// Represents a node in the BadFakeNetwork.
