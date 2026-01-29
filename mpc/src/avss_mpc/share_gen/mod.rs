@@ -1,4 +1,4 @@
-pub mod share_gen_avss;
+ pub mod share_gen_avss;
 
 use crate::{
     avss_mpc::AvssSessionId,
