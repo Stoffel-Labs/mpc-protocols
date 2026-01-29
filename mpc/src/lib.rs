@@ -63,6 +63,7 @@
 #![allow(clippy::bind_instead_of_map)]
 #![allow(clippy::unnecessary_cast)]
 
+pub mod avss_mpc;
 pub mod common;
 pub mod ffi;
 /// This module implements the HoneyBadger protocol presented in the paper

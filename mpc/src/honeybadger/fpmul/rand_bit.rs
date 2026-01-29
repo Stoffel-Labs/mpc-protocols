@@ -273,11 +273,7 @@ where
 mod tests {
     use super::*;
     use crate::common::rbc::rbc::Avid;
-    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-    use crate::honeybadger::triple_gen::ShamirBeaverTriple;
     use ark_bls12_381::Fr;
-    use std::sync::Arc;
-    use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
     use tokio::sync::mpsc;
 
     #[tokio::test]

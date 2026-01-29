@@ -12,7 +12,7 @@ use stoffelmpc_mpc::{
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 
 pub mod utils;
 #[tokio::test]

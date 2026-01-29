@@ -20,7 +20,6 @@ use crate::{
     },
     honeybadger::SessionId,
 };
-use ark_ec::CurveGroup;
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -390,33 +389,4 @@ where
         y: Vec<Self::Sint>,
         net: Arc<N>,
     ) -> Result<Vec<Self::Sint>, Self::Error>;
-}
-
-pub trait SecretKey<F, S, G>
-where
-    F: FftField,
-    S: SecretSharingScheme<F>,
-    G: CurveGroup<ScalarField = F>,
-{
-    fn get_share(&self) -> &S;
-    fn get_commitment(&self) -> &Vec<G>;
-}
-
-#[async_trait]
-pub trait ADKG<F, K, S, N, G>
-where
-    F: FftField,
-    S: SecretSharingScheme<F>,
-    N: Network,
-    G: CurveGroup<ScalarField = F>,
-    K: SecretKey<F, S, G>,
-{
-    type Error;
-
-    async fn secret_key(
-        &mut self,
-        no_of_keys: usize,
-        network: Arc<N>,
-    ) -> Result<Vec<K>, Self::Error>;
-    async fn public_key(&self, secret_key: Vec<K>, net: Arc<N>) -> Result<Vec<G>, Self::Error>;
 }

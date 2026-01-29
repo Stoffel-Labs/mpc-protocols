@@ -3,27 +3,15 @@ pub mod utils;
 use crate::utils::test_utils::{construct_e2e_input_mul, setup_tracing, test_setup};
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
-use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
-use itertools::izip;
-use rand::{seq::SliceRandom, thread_rng};
-use std::ops::{Mul, Sub};
 use std::{collections::HashMap, sync::Arc, time::Duration, vec};
-use stoffelmpc_mpc::common::{
-    rbc::rbc::Avid, share::ShareError, SecretSharingScheme, ShamirShare, RBC,
-};
+use stoffelmpc_mpc::common::{rbc::rbc::Avid, SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::{
-    mul::{
-        multiplication::Multiply, MulError, MultMessage, MultProtocolState, ReconstructionMessage,
-    },
-    robust_interpolate::robust_interpolate::{Robust, RobustShare},
+    mul::{multiplication::Multiply, MulError},
+    robust_interpolate::robust_interpolate::RobustShare,
     ProtocolType, SessionId, WrappedMessage,
 };
-use tokio::{
-    sync::mpsc::{self},
-    sync::Mutex,
-    task::JoinSet,
-};
+use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 #[tokio::test]
@@ -206,7 +194,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
         final_results.insert(node.id, final_shares);
         if final_results.len() == n_parties {
             // check final_shares consist of correct shares
-            for (id, mul_shares) in &final_results {
+            for (_, mul_shares) in &final_results {
                 assert_eq!(mul_shares.len(), no_of_mul);
                 let _ = mul_shares.iter().map(|mul_share| {
                     assert_eq!(mul_share.degree, t);

@@ -9,10 +9,7 @@ use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 
 use crate::{
-    common::{
-        rbc::RbcError,
-        share::{avss::AvssError, ShareError},
-    },
+    common::{rbc::RbcError, share::ShareError},
     honeybadger::{
         robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId,
@@ -20,7 +17,6 @@ use crate::{
 };
 
 pub mod share_gen;
-pub mod share_gen_avss;
 
 /// Error type for the Random Single Share (RanSha) protocol.
 #[derive(Debug, Error)]
@@ -39,8 +35,6 @@ pub enum RanShaError {
     RbcError(#[from] RbcError),
     #[error("Share error: {0:?}")]
     ShareError(#[from] ShareError),
-    #[error("Avss error: {0:?}")]
-    AvssError(#[from] AvssError),
     #[error("error sending the output of the protocol execution: {0:?}")]
     SendError(#[from] SendError<SessionId>),
     #[error("received abort signal")]
