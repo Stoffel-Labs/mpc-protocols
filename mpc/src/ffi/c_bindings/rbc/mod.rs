@@ -254,7 +254,6 @@ pub extern "C" fn rbc_alloc(len: usize) -> *mut u8 {
     ptr
 }
 
-
 /// Creates a new Bracha instance with the given parameters.
 ///
 /// # Arguments

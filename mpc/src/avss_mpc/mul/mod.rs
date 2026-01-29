@@ -1,10 +1,11 @@
 pub mod multiplication;
 
 use crate::{
-    avss_mpc::AvssSessionId, common::{
+    avss_mpc::AvssSessionId,
+    common::{
         rbc::RbcError,
         share::{feldman::FeldmanShamirShare, ShareError},
-    }
+    },
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;

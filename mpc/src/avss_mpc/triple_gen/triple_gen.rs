@@ -20,8 +20,7 @@ use tokio::sync::{
 use tracing::info;
 
 #[derive(Clone, Debug)]
-pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>>
-{
+pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,

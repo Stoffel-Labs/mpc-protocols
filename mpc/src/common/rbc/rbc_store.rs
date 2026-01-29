@@ -10,7 +10,7 @@ use crate::common::ProtocolSessionId;
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Msg<Id: ProtocolSessionId> {
     pub sender_id: usize,         // ID of the sender node
-    pub session_id: Id,    // Unique session ID for each broadcast instance
+    pub session_id: Id,           // Unique session ID for each broadcast instance
     pub round_id: usize,          //Round ID
     pub payload: Vec<u8>, // Actual data being broadcasted (e.g., bytes of a secret or message)
     pub metadata: Vec<u8>, // info related to the message shared
@@ -22,7 +22,7 @@ fn hash_message(message: &[u8]) -> Vec<u8> {
     Sha256::digest(message).to_vec()
 }
 
-impl <Id: ProtocolSessionId>Msg<Id> {
+impl<Id: ProtocolSessionId> Msg<Id> {
     /// Constructor to create a new message.
     pub fn new(
         sender_id: usize,
