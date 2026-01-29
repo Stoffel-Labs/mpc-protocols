@@ -28,7 +28,6 @@ use stoffelmpc_mpc::{
     honeybadger::{
         fpmul::f256::F2_8,
         input::input::InputClient,
-        mul::MulError,
         output::output::{OutputClient, OutputServer},
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -42,7 +41,7 @@ use stoffelmpc_network::{
 };
 use stoffelnet::network_utils::ClientId;
 use tokio::{
-    sync::{mpsc, Mutex},
+    sync::mpsc,
     time::{sleep, timeout, Duration},
 };
 use tracing::info;

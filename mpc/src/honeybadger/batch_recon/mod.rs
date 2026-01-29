@@ -1,8 +1,11 @@
 pub mod batch_recon;
 
-use crate::honeybadger::{
-    robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
-    SessionId,
+use crate::{
+    common::share::ShareError,
+    honeybadger::{
+        robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
+        SessionId,
+    },
 };
 use ark_ff::FftField;
 use ark_serialize::SerializationError;
@@ -66,6 +69,8 @@ pub enum BatchReconError {
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
+    #[error("inner error: {0:?}")]
+    ShareError(#[from] ShareError),
     #[error("error while serializing an arkworks object: {0:?}")]
     ArkSerialization(#[from] SerializationError),
     #[error("error while serializing an arkworks object: {0:?}")]

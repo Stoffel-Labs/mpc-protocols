@@ -5,23 +5,21 @@ use std::{
     cmp::{Ord, Ordering, PartialEq, PartialOrd, Reverse},
     collections::{BinaryHeap, HashMap},
     marker::Send,
-    sync::Arc,
 };
 use tokio::{
     spawn,
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        Mutex,
-    },
+    sync::mpsc::{self, Receiver, Sender},
     task::JoinHandle,
     time::{sleep, Duration, Instant},
 };
 
 use once_cell::sync::Lazy;
+#[cfg(debug_assertions)]
+use tokio::sync::Mutex;
+#[cfg(debug_assertions)]
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::FmtSubscriber;
-
 /*
  * This is a fake network with delays. Every sent message is assigned a delay sampled from some
  * distribution. The message is inserted into a min-heap with the delay as its key.
@@ -507,16 +505,16 @@ impl Network for BadFakeNetwork {
     fn is_client_connected(&self, client: ClientId) -> bool {
         self.inner.client_channels.contains_key(&client)
     }
-    fn local_party_id(&self) -> PartyId {
-        match self.sender {
-            BadSenderId::Node(i) => i,
-            BadSenderId::Client(i) => i,
-        }
-    }
+    // fn local_party_id(&self) -> PartyId {
+    //     match self.sender {
+    //         BadSenderId::Node(i) => i,
+    //         BadSenderId::Client(i) => i,
+    //     }
+    // }
 
-    fn party_count(&self) -> usize {
-        self.inner.nodes.len()
-    }
+    // fn party_count(&self) -> usize {
+    //     self.inner.nodes.len()
+    // }
 }
 
 /// Represents a node in the BadFakeNetwork.

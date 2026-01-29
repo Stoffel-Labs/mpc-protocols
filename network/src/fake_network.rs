@@ -258,16 +258,16 @@ impl Network for FakeNetwork {
         self.inner.client_channels.contains_key(&client)
     }
 
-    fn local_party_id(&self) -> PartyId {
-        match self.sender {
-            SenderId::Node(i) => i,
-            SenderId::Client(i) => i,
-        }
-    }
+    // fn local_party_id(&self) -> PartyId {
+    //     match self.sender {
+    //         SenderId::Node(i) => i,
+    //         SenderId::Client(i) => i,
+    //     }
+    // }
 
-    fn party_count(&self) -> usize {
-        self.inner.nodes.len()
-    }
+    // fn party_count(&self) -> usize {
+    //     self.inner.nodes.len()
+    // }
 }
 
 /// Represents a node in the FakeNetwork.
@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(inner.nodes.len(), n_nodes);
 
         for i in 0..n_nodes {
-            assert_eq!(networks[i].local_party_id(), i);
+            // assert_eq!(networks[i].local_party_id(), i);
             assert!(networks[i].node(i).is_some());
             assert_eq!(networks[i].node(i).unwrap().id(), i);
         }
