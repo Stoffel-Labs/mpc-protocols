@@ -1485,7 +1485,6 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
-    Avss = 15,
 }
 
 impl ProtocolTag for ProtocolType {
