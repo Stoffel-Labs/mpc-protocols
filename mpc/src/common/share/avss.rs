@@ -1,10 +1,7 @@
-use crate::{
-    common::{
-        rbc::RbcError,
-        share::{feldman::FeldmanShamirShare, ShareError},
-        SecretSharingScheme, RBC,
-    },
-    honeybadger::{SessionId, WrappedMessage},
+use crate::common::{
+    rbc::RbcError,
+    share::{feldman::FeldmanShamirShare, ShareError},
+    ProtocolSessionId, RbcWrapFn, SecretSharingScheme, RBC,
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -45,21 +42,24 @@ pub enum AvssError {
     #[error("share error")]
     ShareError(#[from] crate::common::share::ShareError),
     #[error("send error")]
-    SendError(#[from] tokio::sync::mpsc::error::SendError<SessionId>),
+    SendError,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AvssMessage {
+pub struct AvssMessage<Id: ProtocolSessionId> {
     pub sender_id: PartyId,
-    pub session_id: SessionId,
+    pub session_id: Id,
     pub dealer_pk: Vec<u8>,
     pub encrypted_shares: Vec<Vec<Vec<u8>>>,
 }
 
-impl AvssMessage {
+impl<Id: ProtocolSessionId> AvssMessage<Id>
+where
+    Id: ProtocolSessionId,
+{
     pub fn new(
         sender: PartyId,
-        session_id: SessionId,
+        session_id: Id,
         dealer_pk: Vec<u8>,
         encrypted_shares: Vec<Vec<Vec<u8>>>,
     ) -> Self {
@@ -127,28 +127,52 @@ fn decrypt(key32: [u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>, AvssError> {
         .map_err(|_| AvssError::InvalidShare)
 }
 
-#[derive(Clone, Debug)]
-pub struct AvssNode<F, R, G>
+pub type AvssWrapFn<Id> =
+    Arc<dyn Fn(AvssMessage<Id>) -> Result<Vec<u8>, RbcError> + Send + Sync + 'static>;
+
+#[derive(Clone)]
+pub struct AvssNode<F, R, G, Id>
 where
     F: FftField,
     R: RBC,
     G: CurveGroup<ScalarField = F>,
+    Id: ProtocolSessionId,
 {
     pub id: PartyId,
     pub n_parties: usize,
     pub t: usize,
     pub sk_i: F,
     pub pk_map: Arc<Vec<G>>,
-    pub shares: Arc<Mutex<BTreeMap<SessionId, Option<Vec<FeldmanShamirShare<F, G>>>>>>,
+    pub shares: Arc<Mutex<BTreeMap<Id, Option<Vec<FeldmanShamirShare<F, G>>>>>>,
     pub rbc: R,
-    pub output_sender: Sender<SessionId>,
+    pub output_sender: Sender<Id>,
+    pub wrapper: AvssWrapFn<Id>,
 }
-
-impl<F, R, G> AvssNode<F, R, G>
+impl<F, R, G, Id> std::fmt::Debug for AvssNode<F, R, G, Id>
 where
     F: FftField,
-    R: RBC,
+    R: RBC + std::fmt::Debug,
     G: CurveGroup<ScalarField = F>,
+    Id: ProtocolSessionId,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AvssNode")
+            .field("id", &self.id)
+            .field("n_parties", &self.n_parties)
+            .field("t", &self.t)
+            .field("shares", &self.shares)
+            .field("rbc", &self.rbc)
+            .field("wrapper", &"<fn>") // 👈 intentionally opaque
+            .finish()
+    }
+}
+
+impl<F, R, G, Id> AvssNode<F, R, G, Id>
+where
+    F: FftField,
+    R: RBC<Id = Id>,
+    G: CurveGroup<ScalarField = F>,
+    Id: ProtocolSessionId,
 {
     pub fn new(
         id: PartyId,
@@ -156,9 +180,11 @@ where
         t: usize,
         sk_i: F,
         pk_map: Arc<Vec<G>>,
-        output_sender: Sender<SessionId>,
+        output_sender: Sender<Id>,
+        rbc_wrapper: RbcWrapFn<Id>,
+        avss_wrapper: AvssWrapFn<Id>,
     ) -> Result<Self, AvssError> {
-        let rbc = R::new(id, n_parties, t, t + 1)?;
+        let rbc = R::new(id, n_parties, t, t + 1, rbc_wrapper)?;
         Ok(Self {
             id,
             n_parties,
@@ -168,13 +194,14 @@ where
             shares: Arc::new(Mutex::new(BTreeMap::new())),
             rbc,
             output_sender,
+            wrapper: avss_wrapper,
         })
     }
 
     pub async fn init<Rnd, N>(
         &mut self,
         secrets: Vec<F>,
-        session_id: SessionId,
+        session_id: Id,
         rng: &mut Rnd,
         net: Arc<N>,
     ) -> Result<(), AvssError>
@@ -230,15 +257,13 @@ where
             encrypted_shares: encrypted,
         };
 
-        let wrapped = WrappedMessage::Avss(msg);
-        let bytes = bincode::serialize(&wrapped)?;
-
+        let bytes = (self.wrapper)(msg)?;
         self.rbc.init(bytes, session_id, net).await?;
 
         Ok(())
     }
 
-    pub async fn process(&mut self, msg: AvssMessage) -> Result<(), AvssError> {
+    pub async fn process(&mut self, msg: AvssMessage<Id>) -> Result<(), AvssError> {
         info!(
             party_id = ?self.id,
             session_id = msg.session_id.as_u64(),
@@ -274,7 +299,10 @@ where
             let mut map = self.shares.lock().await;
             map.insert(msg.session_id, Some(shares));
         };
-        self.output_sender.send(msg.session_id).await?;
+        self.output_sender
+            .send(msg.session_id)
+            .await
+            .map_err(|_| AvssError::SendError)?;
         Ok(())
     }
 }

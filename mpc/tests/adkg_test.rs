@@ -11,7 +11,7 @@ use ark_std::{
 };
 use std::{collections::HashMap, sync::Arc};
 use stoffelmpc_mpc::{
-    avss_mpc::{triple_gen::BeaverTriple, AdkgNode, AdkgNodeOpts},
+    avss_mpc::{triple_gen::BeaverTriple, AdkgNode, AdkgNodeOpts, AvssSessionId},
     common::{
         rbc::rbc::Avid, share::feldman::FeldmanShamirShare, MPCProtocol, PreprocessingMPCProtocol,
         SecretSharingScheme, RBC,
@@ -174,13 +174,14 @@ async fn adkg_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_adkg_nodes::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
-        n_parties, t, 1, 0, 111,
-    );
+    let nodes =
+        create_adkg_nodes::<Fr, Avid<AvssSessionId>, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
+            n_parties, t, 1, 0, 111,
+        );
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    adkg_receive::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
+    adkg_receive::<Fr, Avid<AvssSessionId>, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
         receivers,
         nodes.clone(),
         network.clone(),
@@ -267,17 +268,17 @@ async fn preprocessing_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_adkg_nodes::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
-        n_parties,
-        t,
-        no_of_randomshares,
-        no_of_triples,
-        instance_id,
-    );
+    let nodes = create_adkg_nodes::<
+        Fr,
+        Avid<AvssSessionId>,
+        FeldmanShamirShare<Fr, G>,
+        FakeNetwork,
+        G,
+    >(n_parties, t, no_of_randomshares, no_of_triples, instance_id);
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    adkg_receive::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
+    adkg_receive::<Fr, Avid<AvssSessionId>, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
         receivers,
         nodes.clone(),
         network.clone(),
@@ -360,17 +361,17 @@ async fn mul_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_adkg_nodes::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
-        n_parties,
-        t,
-        0,
-        no_of_multiplication,
-        111,
-    );
+    let nodes = create_adkg_nodes::<
+        Fr,
+        Avid<AvssSessionId>,
+        FeldmanShamirShare<Fr, G>,
+        FakeNetwork,
+        G,
+    >(n_parties, t, 0, no_of_multiplication, 111);
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    adkg_receive::<Fr, Avid, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
+    adkg_receive::<Fr, Avid<AvssSessionId>, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
         receivers,
         nodes.clone(),
         network.clone(),

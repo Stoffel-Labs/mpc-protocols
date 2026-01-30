@@ -30,13 +30,13 @@ pub mod share_gen;
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
-        share::avss::AvssMessage,
         types::{
             fixed::{ClearFixedPoint, SecretFixedPoint},
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ShamirShare, RBC,
+        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ProtocolSessionId, ProtocolTag,
+        ShamirShare, RBC,
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
@@ -160,7 +160,7 @@ where
     }
 }
 
-impl<F: FftField, R: RBC> HoneyBadgerMPCClient<F, R> {
+impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
     pub fn new(
         id: usize,
         n: usize,
@@ -361,7 +361,7 @@ impl<F, R, N> MPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     type MPCOpts = HoneyBadgerMPCNodeOpts;
     type Error = HoneyBadgerError;
@@ -479,9 +479,7 @@ where
 
         let session_id = SessionId::new(
             ProtocolType::Mul,
-            self.counters.mul_counter.get_next().await?,
-            0,
-            0,
+            SessionId::pack_slot24(self.counters.mul_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
 
@@ -735,7 +733,6 @@ where
                 }
             }
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
-            WrappedMessage::Avss(_) => warn!("Incorrect message recieved at process function"),
         }
 
         Ok(())
@@ -770,7 +767,7 @@ impl<F, N, R> MPCTypeOps<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
 where
     F: PrimeField,
     N: Network + Send + Sync + 'static,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     type Error = HoneyBadgerError;
     type Sfix = SecretFixedPoint<F, RobustShare<F>>;
@@ -847,9 +844,7 @@ where
 
         let session_id = SessionId::new(
             ProtocolType::FpMul,
-            self.counters.fpmul_counter.get_next().await?,
-            0,
-            0,
+            SessionId::pack_slot24(self.counters.fpmul_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
         let r_bits = r_bits_vec.iter().map(|(a, _)| a.clone()).collect();
@@ -932,9 +927,7 @@ where
         // 4. Prepare SessionId --------------------------------------------
         let session_id = SessionId::new(
             ProtocolType::FpDivConst,
-            self.counters.fpdiv_const_counter.get_next().await?,
-            0,
-            0,
+            SessionId::pack_slot24(self.counters.fpdiv_const_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
 
@@ -1055,7 +1048,7 @@ impl<F, R, N> PreprocessingMPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCN
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     /// Runs preprocessing to produce Random shares and Beaver triples
     /// Steps:
@@ -1155,9 +1148,7 @@ where
             for ((a, b), r) in a_chunks.zip(b_chunks).zip(r_chunks) {
                 let sessionid = SessionId::new(
                     ProtocolType::Triple,
-                    triple_counter,
-                    0,
-                    round_id,
+                    SessionId::pack_slot24(triple_counter, 0, round_id),
                     self.params.instance_id,
                 );
                 self.preprocess
@@ -1223,7 +1214,7 @@ where
 impl<F, R> HoneyBadgerMPCNode<F, R>
 where
     F: PrimeField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
     async fn ensure_random_shares<G, N>(
@@ -1251,9 +1242,7 @@ where
 
             let sessionid = SessionId::new(
                 ProtocolType::Ransha,
-                ran_sha_counter,
-                0,
-                round_id,
+                SessionId::pack_slot24(ran_sha_counter, 0, round_id),
                 self.params.instance_id,
             );
 
@@ -1320,9 +1309,7 @@ where
         for _ in 0..run {
             let sessionid = SessionId::new(
                 ProtocolType::Randousha,
-                ran_dou_sha_counter,
-                0,
-                round_id,
+                SessionId::pack_slot24(ran_dou_sha_counter, 0, round_id),
                 self.params.instance_id,
             );
 
@@ -1431,9 +1418,7 @@ where
 
         let randbit_sessionid = SessionId::new(
             ProtocolType::RandBit,
-            self.counters.rand_bit_counter.get_next().await?,
-            0,
-            0,
+            SessionId::pack_slot24(self.counters.rand_bit_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
 
@@ -1441,9 +1426,7 @@ where
         info!("PRandbit share generation");
         let prandbit_sessionid = SessionId::new(
             ProtocolType::PRandBit,
-            self.counters.prand_bit_counter.get_next().await?,
-            0,
-            0,
+            SessionId::pack_slot24(self.counters.prand_bit_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
 
@@ -1495,13 +1478,6 @@ where
 
         //Prandbit share generation
         info!("PRandbit share generation");
-        let _sessionid = SessionId::new(
-            ProtocolType::PRandBit,
-            self.counters.prand_bit_counter.get_next().await?,
-            0,
-            0,
-            self.params.instance_id,
-        );
 
         // Run PRandBit protocol
         self.preprocess
@@ -1569,9 +1545,7 @@ where
         info!("PRandInt share generation");
         let sessionid = SessionId::new(
             ProtocolType::PRandInt,
-            self.counters.prand_int_counter.get_next().await?,
-            0,
-            0,
+            SessionId::pack_slot24(self.counters.prand_int_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
 
@@ -1619,7 +1593,7 @@ where
 #[derive(Serialize, Deserialize, Debug)]
 pub enum WrappedMessage {
     RanDouSha(RanDouShaMessage),
-    Rbc(Msg),
+    Rbc(Msg<SessionId>),
     BatchRecon(BatchReconMsg),
     Input(InputMessage),
     RanSha(RanShaMessage),
@@ -1630,13 +1604,19 @@ pub enum WrappedMessage {
     RandBit(RandBitMessage),
     Trunc(TruncPrMessage),
     PRandBit(PRandBitDMessage),
-    Avss(AvssMessage),
+}
+
+impl WrappedMessage {
+    pub fn rbc_wrap(msg: Msg<SessionId>) -> Result<Vec<u8>, RbcError> {
+        let wrapped = WrappedMessage::Rbc(msg);
+        Ok(bincode::serialize(&wrapped)?)
+    }
 }
 
 //-----------------Session-ID-----------------
 //Used for re-routing inter-protocol messages
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ProtocolType {
     None = 0,
     Randousha = 1,
@@ -1653,31 +1633,33 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
-    Avss = 15,
 }
 
-impl TryFrom<u8> for ProtocolType {
-    type Error = ();
+impl ProtocolTag for ProtocolType {
+    #[inline]
+    fn to_u8(self) -> u8 {
+        self as u8
+    }
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(ProtocolType::None),
-            1 => Ok(ProtocolType::Randousha),
-            2 => Ok(ProtocolType::Ransha),
-            3 => Ok(ProtocolType::Input),
-            4 => Ok(ProtocolType::Rbc),
-            5 => Ok(ProtocolType::Triple),
-            6 => Ok(ProtocolType::BatchRecon),
-            7 => Ok(ProtocolType::Dousha),
-            8 => Ok(ProtocolType::Mul),
-            9 => Ok(ProtocolType::PRandInt),
-            10 => Ok(ProtocolType::PRandBit),
-            11 => Ok(ProtocolType::RandBit),
-            12 => Ok(ProtocolType::FpMul),
-            13 => Ok(ProtocolType::Trunc),
-            14 => Ok(ProtocolType::FpDivConst),
-            15 => Ok(ProtocolType::Avss),
-            _ => Err(()),
+    #[inline]
+    fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::None),
+            1 => Some(Self::Randousha),
+            2 => Some(Self::Ransha),
+            3 => Some(Self::Input),
+            4 => Some(Self::Rbc),
+            5 => Some(Self::Triple),
+            6 => Some(Self::BatchRecon),
+            7 => Some(Self::Dousha),
+            8 => Some(Self::Mul),
+            9 => Some(Self::PRandInt),
+            10 => Some(Self::PRandBit),
+            11 => Some(Self::RandBit),
+            12 => Some(Self::FpMul),
+            13 => Some(Self::Trunc),
+            14 => Some(Self::FpDivConst),
+            _ => None,
         }
     }
 }
@@ -1810,28 +1792,42 @@ impl fmt::Debug for SessionId {
     }
 }
 
-impl SessionId {
-    pub fn new(
-        caller: ProtocolType,
-        exec_id: u8,
-        sub_id: u8,
-        round_id: u8,
-        instance_id: u32,
-    ) -> Self {
-        let value = ((caller as u64 & 0xFF) << 56)
-            | ((exec_id as u64 & 0xFF) << 48)
-            | ((sub_id as u64 & 0xFF) << 40)
-            | ((round_id as u64 & 0xFF) << 32)
-            | instance_id as u64;
+impl ProtocolSessionId for SessionId {
+    type Protocol = ProtocolType;
+
+    fn new(protocol: ProtocolType, slot24: u32, instance_id: u32) -> Self {
+        let value = ((protocol as u64 & 0xFF) << 56)
+            | ((slot24 as u64 & 0xFF_FFFF) << 32)
+            | (instance_id as u64);
+
         SessionId(value)
     }
-
     //First 8 bits
-    pub fn calling_protocol(self) -> Option<ProtocolType> {
+    fn calling_protocol(self) -> Option<ProtocolType> {
         let val = ((self.0 >> 56) & 0xFF) as u8;
-        ProtocolType::try_from(val).ok()
+        ProtocolType::from_u8(val)
     }
 
+    fn slot24(self) -> u32 {
+        ((self.0 >> 32) & 0xFF_FFFF) as u32
+    }
+
+    //Last 32 bits
+    fn instance_id(self) -> u32 {
+        self.0 as u32
+    }
+
+    fn as_u64(self) -> u64 {
+        self.0
+    }
+    //Unsafe because this is meant for the FFI
+    //The caller must ensure that the u64 is well-formed
+    unsafe fn from_u64(id: u64) -> Self {
+        SessionId(id)
+    }
+}
+
+impl SessionId {
     //Second 8 bits
     pub fn exec_id(self) -> u8 {
         ((self.0 >> 48) & 0xFF) as u8
@@ -1847,19 +1843,9 @@ impl SessionId {
         ((self.0 >> 32) & 0xFF) as u8
     }
 
-    //Last 32 bits
-    pub fn instance_id(self) -> u32 {
-        self.0 as u32
-    }
-
-    pub fn as_u64(self) -> u64 {
-        self.0
-    }
-
-    //Unsafe because this is meant for the FFI
-    //The caller must ensure that the u64 is well-formed
-    pub unsafe fn from_u64(id: u64) -> Self {
-        SessionId(id)
+    #[inline]
+    pub fn pack_slot24(exec_id: u8, sub_id: u8, round_id: u8) -> u32 {
+        ((exec_id as u32) << 16) | ((sub_id as u32) << 8) | round_id as u32
     }
 }
 
@@ -1871,13 +1857,17 @@ mod tests {
 
     #[test]
     fn test_session_id_debug_format() {
-        let caller = ProtocolType::try_from(5u8).unwrap();
+        let caller = ProtocolType::from_u8(5u8).unwrap();
         let exec_id = 42u8;
         let sub_id = 7u8;
         let round_id = 3u8;
         let instance_id = 0xDEADBEEF;
 
-        let session_id = SessionId::new(caller, exec_id, sub_id, round_id, instance_id);
+        let session_id = SessionId::new(
+            caller,
+            SessionId::pack_slot24(exec_id, sub_id, round_id),
+            instance_id,
+        );
         let debug_str = format!("{:?}", session_id);
 
         assert_eq!(
@@ -1894,7 +1884,11 @@ mod tests {
         let round_id = 3u8;
         let instance_id = 0xDEADBEEF;
 
-        let session_id = SessionId::new(caller, exec_id, sub_id, round_id, instance_id);
+        let session_id = SessionId::new(
+            caller,
+            SessionId::pack_slot24(exec_id, sub_id, round_id),
+            instance_id,
+        );
 
         assert_eq!(session_id.calling_protocol().unwrap(), caller);
         assert_eq!(session_id.exec_id(), exec_id);
@@ -1904,9 +1898,11 @@ mod tests {
 
         let session_id2 = SessionId::new(
             session_id.calling_protocol().unwrap(),
-            session_id.exec_id(),
-            session_id.sub_id(),
-            session_id.round_id(),
+            SessionId::pack_slot24(
+                session_id.exec_id(),
+                session_id.sub_id(),
+                session_id.round_id(),
+            ),
             session_id.instance_id(),
         );
 

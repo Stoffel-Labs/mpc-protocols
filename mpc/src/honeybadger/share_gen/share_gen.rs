@@ -10,7 +10,7 @@ use tracing::info;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde, ShareError},
-        SecretSharingScheme, ShamirShare, RBC,
+        ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -36,7 +36,7 @@ pub static MAX_SHARE_GEN_SESSIONS: usize = 1024;
 impl<F, R> RanShaNode<F, R>
 where
     F: FftField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     pub fn new(
         id: PartyId,
@@ -45,7 +45,13 @@ where
         k: usize,
         output_sender: Sender<SessionId>,
     ) -> Result<Self, RanShaError> {
-        let rbc = R::new(id, n_parties, threshold, k)?;
+        let rbc = R::new(
+            id,
+            n_parties,
+            threshold,
+            k,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?;
         Ok(Self {
             id,
             n_parties,
@@ -288,9 +294,11 @@ where
             let bytes = bincode::serialize(&result)?;
             let sessionid = SessionId::new(
                 ProtocolType::Ransha,
-                msg.session_id.exec_id(),
-                self.id as u8,
-                msg.session_id.round_id(),
+                SessionId::pack_slot24(
+                    msg.session_id.exec_id(),
+                    self.id as u8,
+                    msg.session_id.round_id(),
+                ),
                 msg.session_id.instance_id(),
             );
             self.rbc
@@ -355,14 +363,18 @@ mod tests {
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_receive_shares_handler() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
         let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
 
         // Fill up the storage to the limit by calling receive_shares_handler with unique session IDs
         let mut exec = 0u8;
         let mut round = 0u8;
         for _ in 0..super::MAX_SHARE_GEN_SESSIONS {
-            let sid = SessionId::new(ProtocolType::Ransha, exec, 0, round, 0);
+            let sid = SessionId::new(
+                ProtocolType::Ransha,
+                SessionId::pack_slot24(exec, 0, round),
+                0,
+            );
             let share = RobustShare::new(Fr::from(1u8), 0, 1);
             let mut payload = Vec::new();
             share.serialize_compressed(&mut payload).unwrap();
@@ -385,7 +397,7 @@ mod tests {
         }
 
         // Now try to process a message that would require a new session (should hit the limit)
-        let over_sid = SessionId::new(ProtocolType::Ransha, 255, 0, 255, 0);
+        let over_sid = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(255, 0, 255), 0);
         let share = RobustShare::new(Fr::from(1u8), 0, 1);
         let mut payload = Vec::new();
         share.serialize_compressed(&mut payload).unwrap();
@@ -406,14 +418,18 @@ mod tests {
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_reconstruction_handler() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
         let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
 
         // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
         let mut exec = 0u8;
         let mut round = 0u8;
         for _ in 0..super::MAX_SHARE_GEN_SESSIONS {
-            let sid = SessionId::new(ProtocolType::Ransha, exec, 0, round, 0);
+            let sid = SessionId::new(
+                ProtocolType::Ransha,
+                SessionId::pack_slot24(exec, 0, round),
+                0,
+            );
             let share = RobustShare::new(Fr::from(1u8), 0, 1);
             let mut payload = Vec::new();
             share.serialize_compressed(&mut payload).unwrap();
@@ -436,7 +452,7 @@ mod tests {
         }
 
         // Now try to process a message that would require a new session (should hit the limit)
-        let over_sid = SessionId::new(ProtocolType::Ransha, 255, 0, 255, 0);
+        let over_sid = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(255, 0, 255), 0);
         let share = RobustShare::new(Fr::from(1u8), 0, 1);
         let mut payload = Vec::new();
         share.serialize_compressed(&mut payload).unwrap();
@@ -457,13 +473,17 @@ mod tests {
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_output_handler() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
 
         // Fill up the storage to the limit by calling output_handler with unique session IDs
         let mut exec = 0u8;
         let mut round = 0u8;
         for _ in 0..super::MAX_SHARE_GEN_SESSIONS {
-            let sid = SessionId::new(ProtocolType::Ransha, exec, 0, round, 0);
+            let sid = SessionId::new(
+                ProtocolType::Ransha,
+                SessionId::pack_slot24(exec, 0, round),
+                0,
+            );
             let msg = RanShaMessage::new(
                 0,
                 RanShaMessageType::OutputMessage,
@@ -483,7 +503,7 @@ mod tests {
         }
 
         // Now try to process a message that would require a new session (should hit the limit)
-        let over_sid = SessionId::new(ProtocolType::Ransha, 255, 0, 255, 0);
+        let over_sid = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(255, 0, 255), 0);
         let msg = RanShaMessage::new(
             0,
             RanShaMessageType::OutputMessage,
@@ -501,11 +521,11 @@ mod tests {
     #[tokio::test]
     async fn test_sharegen_receive_shares_handler_invalid_sub_id() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
         let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
 
         // Create a session id with sub_id != 0
-        let session_id = SessionId::new(ProtocolType::Ransha, 0, 1, 0, 0);
+        let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(0, 1, 0), 0);
         let share = RobustShare::new(Fr::from(1u8), 0, 1);
         let mut payload = Vec::new();
         share.serialize_compressed(&mut payload).unwrap();
@@ -526,11 +546,11 @@ mod tests {
     #[tokio::test]
     async fn test_sharegen_reconstruction_handler_invalid_sub_id() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
         let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
 
         // Create a session id with sub_id != 0
-        let session_id = SessionId::new(ProtocolType::Ransha, 0, 1, 0, 0);
+        let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(0, 1, 0), 0);
         let share = RobustShare::new(Fr::from(1u8), 0, 1);
         let mut payload = Vec::new();
         share.serialize_compressed(&mut payload).unwrap();
@@ -551,10 +571,10 @@ mod tests {
     #[tokio::test]
     async fn test_sharegen_output_handler_invalid_sub_id() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
 
         // Create a session id with sub_id != 0
-        let session_id = SessionId::new(ProtocolType::Ransha, 0, 1, 0, 0);
+        let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(0, 1, 0), 0);
         let msg = RanShaMessage::new(
             0,
             RanShaMessageType::OutputMessage,

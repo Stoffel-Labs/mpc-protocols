@@ -1,10 +1,11 @@
-use crate::avss_mpc::mul::{MulError, MultProtocolState, MultStorage, ReconstructionMessage};
+use crate::avss_mpc::mul::{
+    MulError, MultMessage, MultProtocolState, MultStorage, ReconstructionMessage,
+};
 use crate::avss_mpc::triple_gen::BeaverTriple;
+use crate::avss_mpc::{AvssSessionId, AvssWrappedMessage};
 use crate::common::share::feldman::FeldmanShamirShare;
-use crate::common::SecretSharingScheme;
 use crate::common::{share::ShareError, RBC};
-use crate::honeybadger::mul::MultMessage;
-use crate::honeybadger::{SessionId, WrappedMessage};
+use crate::common::{ProtocolSessionId, SecretSharingScheme};
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -20,13 +21,19 @@ pub struct Multiply<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub mult_storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<MultStorage<F, G>>>>>>,
+    pub mult_storage: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<MultStorage<F, G>>>>>>,
     pub rbc: R,
 }
 
-impl<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> Multiply<F, R, G> {
+impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Multiply<F, R, G> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
-        let rbc = R::new(id, n, threshold, threshold + 1)?;
+        let rbc = R::new(
+            id,
+            n,
+            threshold,
+            threshold + 1,
+            Arc::new(AvssWrappedMessage::rbc_wrap),
+        )?;
         Ok(Self {
             id,
             n,
@@ -43,7 +50,7 @@ impl<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> Multiply<F, R, G> {
 
     pub async fn init<N: Network + Send + Sync>(
         &mut self,
-        session_id: SessionId,
+        session_id: AvssSessionId,
         x: Vec<FeldmanShamirShare<F, G>>,
         y: Vec<FeldmanShamirShare<F, G>>,
         beaver_triples: Vec<BeaverTriple<F, G>>,
@@ -87,15 +94,14 @@ impl<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> Multiply<F, R, G> {
         let mut bytes_rec_message = Vec::new();
         reconst_message.serialize_compressed(&mut bytes_rec_message)?;
 
-        let rbc_sessionid = SessionId::new(
+        let rbc_sessionid = AvssSessionId::new(
             session_id.calling_protocol().unwrap(),
-            session_id.exec_id(),
-            0,
-            self.id as u8,
+            AvssSessionId::pack_slot24(session_id.exec_id(), 0, self.id as u8),
             session_id.instance_id(),
         );
 
-        let wrapped = WrappedMessage::Mul(MultMessage::new(self.id, session_id, bytes_rec_message));
+        let wrapped =
+            AvssWrappedMessage::Mul(MultMessage::new(self.id, session_id, bytes_rec_message));
         let bytes_wrapped = bincode::serialize(&wrapped)?;
 
         self.rbc
@@ -185,7 +191,7 @@ impl<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> Multiply<F, R, G> {
 
     pub async fn get_or_create_mult_storage(
         &self,
-        session_id: SessionId,
+        session_id: AvssSessionId,
     ) -> Arc<Mutex<MultStorage<F, G>>> {
         let mut storage = self.mult_storage.lock().await;
 
@@ -200,7 +206,7 @@ impl<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> Multiply<F, R, G> {
 
     pub async fn wait_for_result(
         &self,
-        session_id: SessionId,
+        session_id: AvssSessionId,
         duration: Duration,
     ) -> Result<Vec<FeldmanShamirShare<F, G>>, MulError> {
         // scoped because self.mult_storage and storage locks must not be held anymore
