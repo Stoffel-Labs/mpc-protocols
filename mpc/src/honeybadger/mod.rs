@@ -28,6 +28,7 @@ pub mod preprocessing;
 pub mod share_gen;
 
 use crate::common::math::goldilocks::GoldilocksField;
+use crate::honeybadger::fpmul::rand_bit::{RandBitError, RandBitMessage};
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
@@ -51,8 +52,7 @@ use crate::{
             fpmul::{FPError, FPMulNode},
             prandbitd::PRandBitNode,
             rand_bit::RandBit,
-            PRandBitDMessage, PRandError, RandBitError, RandBitMessage, TruncPrError,
-            TruncPrMessage,
+            PRandBitDMessage, PRandError, TruncPrError, TruncPrMessage,
         },
         input::{
             input::{InputClient, InputServer},

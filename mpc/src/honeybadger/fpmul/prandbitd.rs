@@ -1,3 +1,7 @@
+//! This is an implementation of the PRandBit protocol mentioned in the paper Secure Computation
+//! With Fixed-Point Numbers. PRandBit is the protocol that combines the protocol RandBit and the
+//! share conversion protocols that involve RISS.
+
 use crate::{
     common::{share::ShareError, ProtocolSessionId},
     honeybadger::{

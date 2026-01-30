@@ -1,3 +1,4 @@
+use crate::honeybadger::ProtocolType;
 use crate::{
     common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC},
     honeybadger::{
@@ -180,7 +181,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         beaver_triples: Vec<ShamirBeaverTriple<F>>,
         network: Arc<N>,
     ) -> Result<(), MulError> {
-        info!(party = self.id, "Initializing multiplication");
+        info!(session_id = ?session_id, party = self.id, "Initializing multiplication");
         if x.len() != y.len() || x.len() != beaver_triples.len() {
             return Err(MulError::InvalidInput(
                 "Length of x and y vectors and Beaver triples must match".to_string(),
@@ -284,6 +285,8 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                     SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i) as u8),
                     session_id.instance_id(),
                 );
+                info!(id = self.id, session_id = ?session_id1, "Calling batch reconstruction for a - x values");
+
                 // Execute batch reconstruction for a-x values
                 self.batch_recon
                     .init_batch_reconstruct(chunk_a, session_id1, Arc::clone(&network))
@@ -296,6 +299,8 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                     SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i + 1) as u8),
                     session_id.instance_id(),
                 );
+                info!(id = self.id, session_id = ?session_id2, "Calling batch reconstruction for b - y values");
+
                 // Execute batch reconstruction for b-y values
                 self.batch_recon
                     .init_batch_reconstruct(chunk_b, session_id2, Arc::clone(&network))
@@ -305,6 +310,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
         // 9.
         if need_rbc {
+            info!(id = self.id, "Running RBC needed");
             // Reconstruct < t+1 values
             let reconst_message =
                 ReconstructionMessage::new(remaining_a.to_vec(), remaining_b.to_vec());
@@ -357,6 +363,8 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             msg.session_id.instance_id(),
         );
 
+        info!(session_id = ?session_id, "Receiving shares from the batch reconstruction");
+
         // 1.
         let storage_bind = self.get_or_create_mult_storage(session_id).await;
         let mut storage = storage_bind.lock().await;
@@ -366,7 +374,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         // 2.
-        if msg.session_id.sub_id() == 1 {
+        if msg.session_id.sub_id() == 0 {
             let open: Vec<F> =
                 CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
             let round_id = msg.session_id.round_id();
@@ -423,10 +431,13 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         // 4.
         if storage.received_shares.len() >= 2 * self.t + 1 && storage.openings.is_none() {
             // `share_len != 0`, since some honest nodes have sent us their shares
-            info!("Received enough messages with shares to try reconstruction using RBC");
+            info!(
+                id = self.id,
+                "Received enough messages with shares to try reconstruction using RBC"
+            );
             let openings = reconstruct_rbc(&storage.received_shares, share_len, self.n)?;
 
-            info!("Reconstruction succeeded");
+            info!(id = self.id, "Reconstruction succeeded");
             storage.openings = Some(openings);
         }
 
@@ -449,7 +460,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             .map_err(|_| MulError::SendError(session_id))?;
         storage.protocol_state = MultProtocolState::Finished;
 
-        info!("Multiplication completed at node {}", self.id);
+        info!(id = self.id, "Multiplication completed at node");
 
         Ok(())
     }
@@ -479,25 +490,34 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         session_id: SessionId,
         duration: Duration,
     ) -> Result<Vec<RobustShare<F>>, MulError> {
-        // scoped because self.mult_storage and storage locks must not be held anymore
-        // when receiving afterwards
+        // Scoped because self.mult_storage and storage locks must not be held anymore
+        // when receiving afterward.
         let output_receiver = {
-            let mult_storage = self.mult_storage.lock().await;
-            let storage_bind = match mult_storage.get(&session_id) {
-                Some(value) => value,
-                None => return Err(MulError::NoSuchSessionId(session_id)),
+            let storage = {
+                let mult_storage = self.mult_storage.lock().await;
+                let storage_bind = match mult_storage.get(&session_id) {
+                    Some(value) => value,
+                    None => return Err(MulError::NoSuchSessionId(session_id)),
+                };
+                storage_bind.clone()
             };
-            let mut storage = storage_bind.lock().await;
 
-            storage
+            let mut storage_guard = storage.lock().await;
+            storage_guard
                 .output_receiver
                 .take()
                 .ok_or(MulError::ResultAlreadyReceived(session_id))?
         };
 
         match timeout(duration, output_receiver).await {
-            Err(_) => Err(MulError::Timeout(session_id)),
-            Ok(Err(_)) => Err(MulError::ReceiveError(session_id)),
+            Err(_) => {
+                error!("Timeout reached while waiting for result");
+                Err(MulError::Timeout(session_id))
+            }
+            Ok(Err(_)) => {
+                error!("Error received while waiting for result. Aborting");
+                Err(MulError::ReceiveError(session_id))
+            }
             Ok(Ok(mul_shares)) => Ok(mul_shares),
         }
     }

@@ -30,8 +30,8 @@ pub fn create_nodes(
 
 /// Spawns receiver tasks for all nodes.
 ///
-/// In the case of a SendError, we log the error and continue because of the expected Abort behaviour
-/// In the case of Abort, the node is dropped from the network and the task is cancelled
+/// In the case of a SendError, we log the error and continue because of the expected Abort behavior.
+/// In the case of Abort, the node is dropped from the network, and the task is canceled
 /// For the rest of the errors, we panic
 pub fn spawn_receiver_tasks(
     nodes: &[Arc<Mutex<DoubleShareNode<Fr>>>],

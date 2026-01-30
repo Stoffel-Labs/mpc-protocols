@@ -26,7 +26,7 @@ use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::warn;
+use tracing::{error, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::FmtSubscriber;
 
@@ -192,8 +192,8 @@ pub async fn initialize_all_nodes(
     session_id: SessionId,
     network: Arc<FakeNetwork>,
 ) {
-    assert!(nodes.len() == n_shares_t.len());
-    assert!(nodes.len() == n_shares_2t.len());
+    assert_eq!(nodes.len(), n_shares_t.len());
+    assert_eq!(nodes.len(), n_shares_2t.len());
 
     for node in nodes {
         let node_locked = &mut node.lock().await;
@@ -207,11 +207,11 @@ pub async fn initialize_all_nodes(
             )
             .await
         {
-            Ok(()) => (),
+            Ok(()) => {}
             Err(e) => {
                 if let RanDouShaError::NetworkError(NetworkError::SendError) = e {
                     // allow for SendError because of Abort
-                    eprintln!(
+                    error!(
                         "Test: Init handler for node {} got expected SendError: {:?}",
                         node_locked.id, e
                     );
@@ -239,9 +239,9 @@ pub fn spawn_receiver_tasks(
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
     for node in nodes {
-        let randousha_node = Arc::clone(&node);
+        let randousha_node = node.clone();
         let mut receiver = receivers.remove(0);
-        let net_clone = Arc::clone(&network);
+        let net_clone = network.clone();
         let fin_send = fin_send.clone();
         let abort_count = abort_counter.clone();
 
@@ -306,15 +306,14 @@ pub fn spawn_receiver_tasks(
                             .process(msg.clone(), Arc::clone(&net_clone))
                             .await
                         {
-                            warn!("Rbc processing error: {e}");
+                            warn!("RBC processing error: {e}");
                         }
                     }
-                    _ => todo!(),
+                    _ => {}
                 }
             }
         });
     }
-
     set
 }
 

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
+use tracing::error;
 
 /// Simulates a network for testing purposes. The channels for the network are simulated as `tokio`
 /// channels.
@@ -55,7 +56,7 @@ impl FakeNetwork {
                 node_channels,
                 config,
                 nodes,
-                client_channels: client_channels.clone(),
+                client_channels,
             },
             receivers,
             client_receivers,
@@ -70,22 +71,18 @@ impl Network for FakeNetwork {
 
     async fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
         if let Some(sender) = self.node_channels.get(recipient) {
-            sender
-                .send(message.to_vec())
-                .await
-                .map_err(|_| NetworkError::SendError)?;
+            sender.send(message.to_vec()).await.map_err(|e| {
+                error!(
+                    "Error sending the message using the channel: {:?}",
+                    e.to_string()
+                );
+                NetworkError::SendError
+            })?;
             Ok(message.len())
         } else {
+            error!("No channel found for party with id: {:?}", recipient);
             Err(NetworkError::PartyNotFound(recipient))
         }
-    }
-
-    fn node(&self, id: PartyId) -> Option<&Self::NodeType> {
-        self.nodes.iter().find(|node| node.id() == id)
-    }
-
-    fn node_mut(&mut self, id: PartyId) -> Option<&mut Self::NodeType> {
-        self.nodes.iter_mut().find(|node| node.id == id)
     }
 
     async fn broadcast(&self, message: &[u8]) -> Result<usize, NetworkError> {
@@ -117,6 +114,14 @@ impl Network for FakeNetwork {
         &self.config
     }
 
+    fn node(&self, id: PartyId) -> Option<&Self::NodeType> {
+        self.nodes.iter().find(|node| node.id() == id)
+    }
+
+    fn node_mut(&mut self, id: PartyId) -> Option<&mut Self::NodeType> {
+        self.nodes.iter_mut().find(|node| node.id == id)
+    }
+
     // --- New client communication methods ---
 
     async fn send_to_client(
@@ -145,6 +150,7 @@ impl Network for FakeNetwork {
 }
 
 /// Represents a node in the FakeNetwork.
+#[derive(Clone)]
 pub struct FakeNode {
     /// The id of the node.
     pub id: PartyId,

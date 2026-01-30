@@ -70,6 +70,8 @@ where
 /// Error that occurs during the execution of the Batch reconstruction.
 #[derive(Debug, Error)]
 pub enum MulError {
+    #[error("Original session ID not set")]
+    SessionIdNotSet,
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),

@@ -3,7 +3,6 @@ use crate::{
     honeybadger::{
         batch_recon::BatchReconError,
         fpmul::f256::{F2_8Error, F2_8},
-        mul::MulError,
         robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId,
     },
@@ -14,7 +13,7 @@ use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use stoffelnet::network_utils::{NetworkError, PartyId};
+use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 
@@ -58,57 +57,15 @@ pub enum RandBitError {
     LimitError(String),
 }
 
-#[derive(Copy, Clone, Debug)]
+/// State of the protocol.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ProtocolState {
+    /// The protocol is initialized.
     Initialized,
+    /// The protocol is not initialized yet..
     NotInitialized,
+    /// The protocol has finished.
     Finished,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RandBitMessage {
-    pub sender: PartyId,
-    pub session_id: SessionId,
-    pub payload: Vec<u8>,
-}
-
-impl RandBitMessage {
-    pub fn new(sender: PartyId, session_id: SessionId, payload: Vec<u8>) -> Self {
-        Self {
-            sender,
-            session_id,
-            payload,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct RandBitStorage<F>
-where
-    F: FftField,
-{
-    /// State of the protocol.
-    pub protocol_state: ProtocolState,
-    /// Output of the protocol. If the protocol is not finished yet, `protocol_output` will be
-    /// [`None`].
-    pub protocol_output: Option<Vec<RobustShare<F>>>,
-    /// Share of `a`
-    pub a_share: Option<Vec<RobustShare<F>>>,
-    pub output_open: HashMap<u8, Vec<F>>,
-}
-
-impl<F> RandBitStorage<F>
-where
-    F: FftField,
-{
-    pub fn empty() -> Self {
-        Self {
-            protocol_state: ProtocolState::NotInitialized,
-            protocol_output: None,
-            a_share: None,
-            output_open: HashMap::new(),
-        }
-    }
 }
 
 //--------------------------------------------Prandbitd--------------------------------------------
