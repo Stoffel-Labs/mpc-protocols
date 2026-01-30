@@ -1,15 +1,17 @@
 use crate::{
     avss_mpc::{
-        mul::{multiplication::Multiply, MulError},
+        mul::{multiplication::Multiply, MulError, MultMessage},
         share_gen::{share_gen_avss::RanShaAvssNode, RanShaAvssError},
         triple_gen::{triple_gen::TripleGenNode, BeaverTriple, TripleGenError},
     },
     common::{
-        rbc::RbcError,
-        share::{avss::AvssError, feldman::FeldmanShamirShare},
-        MPCProtocol, PreprocessingMPCProtocol, RBC,
+        rbc::{rbc_store::Msg, RbcError},
+        share::{
+            avss::{AvssError, AvssMessage},
+            feldman::FeldmanShamirShare,
+        },
+        MPCProtocol, PreprocessingMPCProtocol, ProtocolSessionId, ProtocolTag, RBC,
     },
-    honeybadger::{ProtocolType, SessionId, WrappedMessage},
 };
 use ark_ec::CurveGroup;
 use ark_ff::{FftField, PrimeField};
@@ -19,7 +21,8 @@ use ark_std::rand::{
 };
 use async_trait::async_trait;
 use bincode::ErrorKind;
-use std::{sync::Arc, time::Duration};
+use serde::{Deserialize, Serialize};
+use std::{fmt, sync::Arc, time::Duration};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::{
@@ -181,8 +184,8 @@ pub struct AdkgNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub share_gen_avss: RanShaAvssNode<F, R, G>,
     pub triple_gen: TripleGenNode<F, R, G>,
     pub mul_node: Multiply<F, R, G>,
-    pub share_gen_avss_channel: Arc<Mutex<Receiver<SessionId>>>,
-    pub triple_channel: Arc<Mutex<Receiver<SessionId>>>,
+    pub share_gen_avss_channel: Arc<Mutex<Receiver<AvssSessionId>>>,
+    pub triple_channel: Arc<Mutex<Receiver<AvssSessionId>>>,
     pub counters: SubProtocolCounters,
 }
 
@@ -237,7 +240,7 @@ impl<F, R, N, G> MPCProtocol<F, FeldmanShamirShare<F, G>, N> for AdkgNode<F, R, 
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
-    R: RBC,
+    R: RBC<Id = AvssSessionId>,
     G: CurveGroup<ScalarField = F>,
 {
     type MPCOpts = AdkgNodeOpts<F, G>;
@@ -287,9 +290,9 @@ where
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), Self::Error> {
-        let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
+        let wrapped: AvssWrappedMessage = bincode::deserialize(&raw_msg)?;
         match wrapped {
-            WrappedMessage::Rbc(rbc_msg) => {
+            AvssWrappedMessage::Rbc(rbc_msg) => {
                 if sender_id != rbc_msg.sender_id {
                     return Err(AdkgError::InvalidPartyId);
                 }
@@ -317,7 +320,7 @@ where
                     }
                 }
             }
-            WrappedMessage::Mul(mul_message) => {
+            AvssWrappedMessage::Mul(mul_message) => {
                 if sender_id != mul_message.sender {
                     return Err(AdkgError::InvalidPartyId);
                 }
@@ -365,11 +368,9 @@ where
             .await
             .take_triples(x.len())?;
 
-        let session_id = SessionId::new(
+        let session_id = AvssSessionId::new(
             ProtocolType::Mul,
-            self.counters.mul_counter.get_next().await?,
-            0,
-            0,
+            AvssSessionId::pack_slot24(self.counters.mul_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
 
@@ -408,7 +409,7 @@ impl<F, R, N, C> PreprocessingMPCProtocol<F, FeldmanShamirShare<F, C>, N> for Ad
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
-    R: RBC,
+    R: RBC<Id = AvssSessionId>,
     C: CurveGroup<ScalarField = F>,
 {
     async fn run_preprocessing<G>(
@@ -491,11 +492,9 @@ where
             let mut round_id = 0u8;
 
             for (a, b) in a_chunks.zip(b_chunks) {
-                let sessionid = SessionId::new(
+                let sessionid = AvssSessionId::new(
                     ProtocolType::Triple,
-                    triple_counter,
-                    0,
-                    round_id,
+                    AvssSessionId::pack_slot24(triple_counter, 0, round_id),
                     self.params.instance_id,
                 );
                 self.triple_gen
@@ -531,7 +530,7 @@ where
 impl<F, R, C> AdkgNode<F, R, C>
 where
     F: PrimeField,
-    R: RBC,
+    R: RBC<Id = AvssSessionId>,
     C: CurveGroup<ScalarField = F>,
 {
     async fn ensure_v_random_shares<G, N>(
@@ -556,11 +555,9 @@ where
 
         for i in 0..run {
             info!("Verifiable random share generation run {}", i);
-            let sessionid = SessionId::new(
+            let sessionid = AvssSessionId::new(
                 ProtocolType::Avss,
-                v_ran_sha_counter,
-                0,
-                round_id,
+                AvssSessionId::pack_slot24(v_ran_sha_counter, 0, round_id),
                 self.params.instance_id,
             );
 
@@ -588,5 +585,126 @@ where
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum AvssWrappedMessage {
+    Rbc(Msg<AvssSessionId>),
+    Avss(AvssMessage<AvssSessionId>),
+    Mul(MultMessage),
+}
+
+impl AvssWrappedMessage {
+    pub fn rbc_wrap(msg: Msg<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
+        let wrapped = AvssWrappedMessage::Rbc(msg);
+        Ok(bincode::serialize(&wrapped)?)
+    }
+
+    pub fn avss_wrap(msg: AvssMessage<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
+        let wrapped = AvssWrappedMessage::Avss(msg);
+        Ok(bincode::serialize(&wrapped)?)
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ProtocolType {
+    None = 0,
+    Rbc = 1,
+    Avss = 2,
+    Triple = 3,
+    Mul = 4,
+}
+
+impl ProtocolTag for ProtocolType {
+    #[inline]
+    fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    #[inline]
+    fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::None),
+            1 => Some(Self::Rbc),
+            2 => Some(Self::Avss),
+            3 => Some(Self::Triple),
+            4 => Some(Self::Mul),
+
+            _ => None,
+        }
+    }
+}
+
+#[derive(PartialOrd, Ord, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Hash)]
+pub struct AvssSessionId(u64);
+
+impl fmt::Debug for AvssSessionId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        let caller = (self.0 >> 56) as u8;
+        let slot24 = self.slot24();
+        let instance_id = self.instance_id();
+
+        write!(
+            f,
+            "[caller={},slot24_id={},instance_id={}]",
+            caller, slot24, instance_id
+        )
+    }
+}
+impl ProtocolSessionId for AvssSessionId {
+    type Protocol = ProtocolType;
+
+    fn new(protocol: ProtocolType, slot24: u32, instance_id: u32) -> Self {
+        let value = ((protocol as u64 & 0xFF) << 56)
+            | ((slot24 as u64 & 0xFF_FFFF) << 32)
+            | (instance_id as u64);
+
+        AvssSessionId(value)
+    }
+
+    fn calling_protocol(self) -> Option<ProtocolType> {
+        let val = ((self.0 >> 56) & 0xFF) as u8;
+        ProtocolType::from_u8(val)
+    }
+
+    fn slot24(self) -> u32 {
+        ((self.0 >> 32) & 0xFF_FFFF) as u32
+    }
+
+    fn instance_id(self) -> u32 {
+        self.0 as u32
+    }
+
+    fn as_u64(self) -> u64 {
+        self.0
+    }
+    //Unsafe because this is meant for the FFI
+    //The caller must ensure that the u64 is well-formed
+    unsafe fn from_u64(id: u64) -> Self {
+        AvssSessionId(id)
+    }
+}
+
+impl AvssSessionId {
+    //Second 8 bits
+    pub fn exec_id(self) -> u8 {
+        ((self.0 >> 48) & 0xFF) as u8
+    }
+
+    //Third 8 bits
+    pub fn sub_id(self) -> u8 {
+        ((self.0 >> 40) & 0xFF) as u8
+    }
+
+    //Fourth 8 bits
+    pub fn round_id(self) -> u8 {
+        ((self.0 >> 32) & 0xFF) as u8
+    }
+
+    #[inline]
+    pub fn pack_slot24(exec_id: u8, sub_id: u8, round_id: u8) -> u32 {
+        ((exec_id as u32) << 16) | ((sub_id as u32) << 8) | round_id as u32
     }
 }

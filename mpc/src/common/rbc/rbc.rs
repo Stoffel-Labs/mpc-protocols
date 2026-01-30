@@ -1,10 +1,7 @@
 /// This file contains more common reliable broadcast protocols used in MPC.
 /// You can reuse them in your own custom MPC protocol implementations.
 use super::{rbc_store::*, utils::*, RbcError};
-use crate::{
-    common::RBC,
-    honeybadger::{SessionId, WrappedMessage},
-};
+use crate::common::{ProtocolSessionId, RbcWrapFn, RBC};
 use async_trait::async_trait;
 use bincode;
 use std::{collections::HashMap, sync::Arc};
@@ -34,23 +31,30 @@ use tracing::{debug, error, info, warn};
 ///     b. (READY,m) -> sends (READY, m)
 /// 4. Party on recieving 2t+1 (READY, m) output m and terminate
 #[derive(Clone)]
-pub struct Bracha {
-    pub id: usize, // The ID of the initiator
-    pub n: usize,  // Total number of parties in the network
-    pub t: usize,  // Number of allowed malicious parties
-    pub k: usize,  //threshold (Not really used in Bracha)
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
-    pub output_sender: Sender<SessionId>,
+pub struct Bracha<Id: ProtocolSessionId + 'static> {
+    pub id: usize,                                               // The ID of the initiator
+    pub n: usize, // Total number of parties in the network
+    pub t: usize, // Number of allowed malicious parties
+    pub k: usize, //threshold (Not really used in Bracha)
+    pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
+    pub output_sender: Sender<Id>,
+    pub wrapper: RbcWrapFn<Id>,
 }
+
 #[async_trait]
-impl RBC for Bracha {
+impl<Id> RBC for Bracha<Id>
+where
+    Id: ProtocolSessionId + 'static,
+{
+    type Id = Id;
     /// Creates a new Bracha instance with the given parameters.
     fn new(
         id: usize,
         n: usize,
         t: usize,
         k: usize,
-        output_sender: Sender<SessionId>,
+        output_sender: Sender<Id>,
+        wrapper: RbcWrapFn<Id>,
     ) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
@@ -63,13 +67,14 @@ impl RBC for Bracha {
             k,
             store: Arc::new(Mutex::new(HashMap::new())),
             output_sender,
+            wrapper,
         })
     }
     /// Returns the unique identifier of the current party.
     fn id(&self) -> usize {
         self.id
     }
-    async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, RbcError> {
+    async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let mut store = self.store.lock().await;
 
         let output_store = store
@@ -93,7 +98,7 @@ impl RBC for Bracha {
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: SessionId,
+        session_id: Id,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         // Create an INIT message with the given payload and session ID.
@@ -118,7 +123,7 @@ impl RBC for Bracha {
     /// Processes incoming messages based on their type.
     async fn process<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         match &msg.msg_type {
@@ -136,34 +141,35 @@ impl RBC for Bracha {
     /// Broadcast messages to other nodes.
     async fn broadcast<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        let wrap_msg = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrap_msg)?;
+        let encoded = (self.wrapper)(msg)?;
         net.broadcast(&encoded).await?;
         Ok(())
     }
     /// Send to another node
     async fn send<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
         recv: usize,
     ) -> Result<(), RbcError> {
-        let wrap_msg = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrap_msg)?;
+        let encoded = (self.wrapper)(msg)?;
         net.send(recv, &encoded).await?;
         Ok(())
     }
 }
 
-impl Bracha {
+impl<Id> Bracha<Id>
+where
+    Id: ProtocolSessionId + 'static,
+{
     // Handlers
     /// Handles the "INIT" message. Responds by broadcasting an "ECHO" message if necessary.
     pub async fn init_handler<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -205,7 +211,7 @@ impl Bracha {
     /// Handles the "ECHO" message. If the threshold of echoes is met, a "READY" message is broadcast.
     pub async fn echo_handler<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -215,8 +221,8 @@ impl Bracha {
             msg_type = %msg.msg_type,
             "Handling ECHO message"
         );
-        let mut broadcast_ready: Option<Msg> = None;
-        let mut broadcast_echo: Option<Msg> = None;
+        let mut broadcast_ready: Option<Msg<Id>> = None;
+        let mut broadcast_echo: Option<Msg<Id>> = None;
         // Lock the session store to update the session state.
         let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
@@ -290,7 +296,7 @@ impl Bracha {
     /// Handles the "READY" message. If the threshold is met, the session ends and the output is stored.
     pub async fn ready_handler<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -301,8 +307,8 @@ impl Bracha {
             "Handling READY message"
         );
 
-        let mut broadcast_ready: Option<Msg> = None;
-        let mut broadcast_echo: Option<Msg> = None;
+        let mut broadcast_ready: Option<Msg<Id>> = None;
+        let mut broadcast_echo: Option<Msg<Id>> = None;
         let mut send_output: Option<Vec<u8>> = None;
 
         // Lock the session store to update the session state.
@@ -394,7 +400,7 @@ impl Bracha {
 
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: SessionId) -> Arc<Mutex<BrachaStore>> {
+    async fn get_or_create_store(&self, session_id: Id) -> Arc<Mutex<BrachaStore>> {
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store
@@ -476,23 +482,26 @@ impl Bracha {
 /// - Return (h == hr)
 
 #[derive(Clone)]
-pub struct Avid {
-    pub id: usize,                                                    //Initiators ID
-    pub n: usize,                                                     //Network size
-    pub t: usize,                                                     //No. of malicious parties
-    pub k: usize,                                                     //Threshold
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
-    pub output_sender: Sender<SessionId>,
+pub struct Avid<Id: ProtocolSessionId> {
+    pub id: usize,                                             //Initiators ID
+    pub n: usize,                                              //Network size
+    pub t: usize,                                              //No. of malicious parties
+    pub k: usize,                                              //Threshold
+    pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
+    pub output_sender: Sender<Id>,
+    pub wrapper: RbcWrapFn<Id>,
 }
 #[async_trait]
-impl RBC for Avid {
+impl<Id: ProtocolSessionId> RBC for Avid<Id> {
+    type Id = Id;
     /// Creates a new Avid instance with the given parameters.
     fn new(
         id: usize,
         n: usize,
         t: usize,
         k: usize,
-        output_sender: Sender<SessionId>,
+        output_sender: Sender<Id>,
+        wrapper: RbcWrapFn<Id>,
     ) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
@@ -512,6 +521,7 @@ impl RBC for Avid {
             k,
             store: Arc::new(Mutex::new(HashMap::new())),
             output_sender,
+            wrapper,
         })
     }
     fn id(&self) -> usize {
@@ -521,7 +531,7 @@ impl RBC for Avid {
         let mut store = self.store.lock().await;
         store.clear();
     }
-    async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, RbcError> {
+    async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let mut store = self.store.lock().await;
 
         let output_store = store
@@ -541,7 +551,7 @@ impl RBC for Avid {
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: SessionId,
+        session_id: Id,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -591,7 +601,7 @@ impl RBC for Avid {
     /// Processes incoming messages based on their type.
     async fn process<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         match &msg.msg_type {
@@ -608,35 +618,33 @@ impl RBC for Avid {
     /// Broadcast messages to other nodes.
     async fn broadcast<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        let wrapped = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrapped)?;
+        let encoded = (self.wrapper)(msg)?;
         net.broadcast(&encoded).await?;
         Ok(())
     }
     /// Send to another node
     async fn send<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
         recv: usize,
     ) -> Result<(), RbcError> {
-        let wrapped = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrapped)?;
+        let encoded = (self.wrapper)(msg)?;
         net.send(recv, &encoded).await?;
         Ok(())
     }
 }
 
-impl Avid {
+impl<Id: ProtocolSessionId> Avid<Id> {
     // Handlers
 
     /// Handles the "SEND" message. Responds by broadcasting an "ECHO" message if necessary.
     pub async fn send_handler<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -706,7 +714,7 @@ impl Avid {
     /// Handles the "ECHO" message. Might broadcast "READY" message .
     pub async fn echo_handler<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -794,7 +802,7 @@ impl Avid {
     /// Handles the "READY" message. If the threshold is met, the session ends and the output is stored.
     pub async fn ready_handler<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -919,7 +927,7 @@ impl Avid {
     //This the logic for sending a READY message in both the echo and ready handler
     async fn send_ready<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         shards_map: HashMap<usize, Vec<u8>>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
@@ -1004,7 +1012,7 @@ impl Avid {
         self.broadcast(ready_msg, net).await?;
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: SessionId) -> Arc<Mutex<AvidStore>> {
+    async fn get_or_create_store(&self, session_id: Id) -> Arc<Mutex<AvidStore>> {
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store
@@ -1048,26 +1056,30 @@ impl Avid {
 ///    - Else (i.e., `vals` contain
 
 #[derive(Clone)]
-pub struct ABA {
-    pub id: usize,                       // The ID of the initiator
+pub struct ABA<Id: ProtocolSessionId> {
+    pub id: usize,                                            // The ID of the initiator
     pub n: usize,                        // Total number of parties in the network
     pub t: usize,                        // Number of allowed malicious parties
     pub k: usize,                        //threshold
     pub skshare: Arc<OnceCell<Vec<u8>>>, //Secret key share
     pub pkset: Arc<OnceCell<Vec<u8>>>,   //Public key set
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<AbaStore>>>>>, // Stores the ABA session state
-    pub coin: Arc<Mutex<HashMap<SessionId, Arc<Mutex<CoinStore>>>>>, // Stores the common coin session state
-    pub output_sender: Sender<SessionId>,
+    pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<AbaStore>>>>>, // Stores the ABA session state
+    pub coin: Arc<Mutex<HashMap<Id, Arc<Mutex<CoinStore>>>>>, // Stores the common coin session state
+    pub output_sender: Sender<Id>,
+
+    pub wrapper: RbcWrapFn<Id>,
 }
 #[async_trait]
-impl RBC for ABA {
+impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
+    type Id = Id;
     /// Creates a new ABA instance with the given parameters.
     fn new(
         id: usize,
         n: usize,
         t: usize,
         k: usize,
-        output_sender: Sender<SessionId>,
+        output_sender: Sender<Id>,
+        wrapper: RbcWrapFn<Id>,
     ) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
@@ -1095,6 +1107,7 @@ impl RBC for ABA {
             store: Arc::new(Mutex::new(HashMap::new())),
             coin: Arc::new(Mutex::new(HashMap::new())),
             output_sender,
+            wrapper,
         })
     }
     fn id(&self) -> usize {
@@ -1107,7 +1120,7 @@ impl RBC for ABA {
         store.clear();
         coin_store.clear();
     }
-    async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, RbcError> {
+    async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let mut store = self.store.lock().await;
 
         let output_store = store
@@ -1127,7 +1140,7 @@ impl RBC for ABA {
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: SessionId,
+        session_id: Id,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -1174,10 +1187,10 @@ impl RBC for ABA {
     /// Processes incoming messages based on their type.
     async fn process<N: Network + Send + Sync + 'static>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-                match &msg.msg_type {
+        match &msg.msg_type {
             GenericMsgType::ABA(msg_type) => match msg_type {
                 MsgTypeAba::Est => self.est_handler(msg, net).await?,
                 MsgTypeAba::Aux => self.aux_handler(msg, net).await?,
@@ -1191,38 +1204,36 @@ impl RBC for ABA {
     }
     async fn broadcast<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        let wrapped = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrapped)?;
+        let encoded = (self.wrapper)(msg)?;
         net.broadcast(&encoded).await?;
         Ok(())
     }
     /// Send to another node
     async fn send<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
         recv: usize,
     ) -> Result<(), RbcError> {
-        let wrapped = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrapped)?;
+        let encoded = (self.wrapper)(msg)?;
         net.send(recv, &encoded).await?;
         Ok(())
     }
 }
-impl ABA {
+impl<Id: ProtocolSessionId + 'static> ABA<Id> {
     //Handlers
 
     /// Handles the estimate value, Responds by broadcasting an aux message if necessary.
     pub async fn est_handler<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id.as_u64(),
             id = self.id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
@@ -1304,7 +1315,7 @@ impl ABA {
     /// Handles the aux value and sends a new est message or terminates.
     pub async fn aux_handler<N: Network + Send + Sync + 'static>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -1497,7 +1508,7 @@ impl ABA {
     //Function to wait and get notified when the coin is ready
     async fn wait_for_coin(
         &self,
-        session_id: SessionId,
+        session_id: Id,
         round_id: usize,
         timeout_ms: u64,
     ) -> Option<bool> {
@@ -1536,7 +1547,7 @@ impl ABA {
         }
     }
 
-    async fn get_or_create_store(&self, session_id: SessionId) -> Arc<Mutex<AbaStore>> {
+    async fn get_or_create_store(&self, session_id: Id) -> Arc<Mutex<AbaStore>> {
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store
@@ -1545,7 +1556,7 @@ impl ABA {
             .clone()
     }
 
-    async fn get_or_create_coinstore(&self, session_id: SessionId) -> Arc<Mutex<CoinStore>> {
+    async fn get_or_create_coinstore(&self, session_id: Id) -> Arc<Mutex<CoinStore>> {
         let mut store = self.coin.lock().await;
         // Get or create the session state for the current session.
         store
@@ -1557,7 +1568,7 @@ impl ABA {
     //Create and broadcast est message for the next round
     async fn send_est_for_next_round<N: Network + Send + Sync>(
         &self,
-        msg: &Msg,
+        msg: &Msg<Id>,
         round: usize,
         value: bool,
         net: Arc<N>,
@@ -1576,7 +1587,7 @@ impl ABA {
     }
 
     //Store secret key shares and public keyshare set
-    fn key_handler(&self, msg: Msg) -> Result<(), RbcError> {
+    fn key_handler(&self, msg: Msg<Id>) -> Result<(), RbcError> {
         info!(
             id = self.id,
             session_id = msg.session_id.as_u64(),
@@ -1599,7 +1610,7 @@ impl ABA {
     //Initialise the common coin
     pub async fn init_coin<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -1653,7 +1664,7 @@ impl ABA {
     }
 
     //Collect the signature share and generate the common coin
-    async fn coin_handler(&self, msg: Msg) -> Result<(), RbcError> {
+    async fn coin_handler(&self, msg: Msg<Id>) -> Result<(), RbcError> {
         info!(
             session_id = msg.session_id.as_u64(),
             id = self.id,
@@ -1801,7 +1812,12 @@ impl Dealer {
     }
 
     /// Perform key generation and send shares to all parties
-    pub async fn distribute_keys<N: Network>(&self, msg: Msg, net: Arc<N>) -> Result<(), RbcError> {
+    pub async fn distribute_keys<N: Network, Id: ProtocolSessionId>(
+        &self,
+        msg: Msg<Id>,
+        net: Arc<N>,
+        wrapper: RbcWrapFn<Id>,
+    ) -> Result<(), RbcError> {
         let mut rng = rand::thread_rng();
         let skset = SecretKeySet::random(self.t, &mut rng);
         let pkset = skset.public_keys();
@@ -1823,8 +1839,7 @@ impl Dealer {
                 msg.msg_len,
             );
 
-            let wrap = WrappedMessage::Rbc(key_msg);
-            let encoded = bincode::serialize(&wrap)?;
+            let encoded = (wrapper)(key_msg)?;
             net.send(i, &encoded).await?;
         }
         Ok(())
@@ -1839,25 +1854,26 @@ impl Dealer {
 /// 2. Run n Asynchronous Binary agreement(ABA) protocol per RBC to decide whether that RBC should be part of
 /// the common subset
 #[derive(Clone)]
-pub struct ACS {
+pub struct ACS<Id: ProtocolSessionId> {
     pub id: usize,                   // The ID of the initiator
     pub n: usize,                    // Total number of parties in the network
     pub t: usize,                    // Number of allowed malicious parties
     pub k: usize,                    // threshold
     pub store: Arc<Mutex<AcsStore>>, // Stores the ACS session state
-    pub aba: ABA,                    //ABA instance for the common subset
-    pub aba_output: Arc<Mutex<Receiver<SessionId>>>,
-    pub acs_output_sender: Sender<SessionId>,
+    pub aba: ABA<Id>,                //ABA instance for the common subset
+    pub aba_output: Arc<Mutex<Receiver<Id>>>,
+    pub acs_output_sender: Sender<Id>,
 }
 
-impl ACS {
+impl<Id: ProtocolSessionId + 'static> ACS<Id> {
     /// Creates a new ACS instance with the given parameters.
     pub fn new(
         id: usize,
         n: usize,
         t: usize,
         k: usize,
-        acs_output_sender: Sender<SessionId>,
+        acs_output_sender: Sender<Id>,
+        wrapper: RbcWrapFn<Id>,
     ) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
@@ -1876,7 +1892,7 @@ impl ACS {
             ));
         }
         let (s, r) = mpsc::channel(256);
-        let aba = ABA::new(id, n, t, k, s)?;
+        let aba = ABA::new(id, n, t, k, s, wrapper)?;
         Ok(ACS {
             id,
             n,
@@ -1892,7 +1908,7 @@ impl ACS {
     ///Initialies the ABA protocol, called when an RBC terminates
     pub async fn init<N: Network + Send + Sync + 'static>(
         &self,
-        msg: Msg,
+        msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
@@ -1907,9 +1923,9 @@ impl ACS {
 
         let mut store = self.store.lock().await;
 
-        if !store.has_aba_input(msg.session_id.sub_id().into()) {
-            store.set_aba_input(msg.session_id.sub_id().into(), true);
-            store.set_rbc_output(msg.session_id.sub_id().into(), msg.payload);
+        if !store.has_aba_input(msg.session_id.slot24().into()) {
+            store.set_aba_input(msg.session_id.slot24().into(), true);
+            store.set_rbc_output(msg.session_id.slot24().into(), msg.payload);
 
             //Initiate aba for session id
             let payload = set_value_round(true, 0);
@@ -1937,7 +1953,7 @@ impl ACS {
 
                 // Store ABA output
                 let mut store = store_clone.lock().await;
-                store.set_aba_output(msg.session_id.sub_id().into(), output);
+                store.set_aba_output(msg.session_id.slot24().into(), output);
 
                 // Check if enough parties agreed with output 1
                 let true_count = store.get_aba_output_one_count();
@@ -1958,11 +1974,12 @@ impl ACS {
                     } else {
                         for sid in uninitiated {
                             let payload = set_value_round(false, 0);
-                            let sessionid = SessionId::new(
+                            let sessionid = Id::new(
                                 msg.session_id.calling_protocol().unwrap(),
-                                0,
-                                sid as u8,
-                                msg.session_id.round_id(),
+                                //Todo: Fix this logic
+                                //0,
+                                sid as u32,
+                                //msg.session_id.round_id(),
                                 msg.session_id.instance_id(),
                             );
                             let _ = self_clone
@@ -2010,11 +2027,11 @@ impl ACS {
                 }
             });
         } else if store
-            .get_rbc_output(msg.session_id.sub_id().into())
+            .get_rbc_output(msg.session_id.slot24().into())
             .is_none()
         {
             // RBC finished *after* ABA started
-            store.set_rbc_output(msg.session_id.sub_id().into(), msg.payload);
+            store.set_rbc_output(msg.session_id.slot24().into(), msg.payload);
 
             // Now try finalizing in case all ABA + RBC outputs are ready
             let store_clone = self.store.clone();
@@ -2071,25 +2088,30 @@ impl ACS {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::honeybadger::{SessionId, WrappedMessage};
+    fn default_hb_rbc_wrap(msg: Msg<SessionId>) -> Result<Vec<u8>, RbcError> {
+        let wrapped = WrappedMessage::Rbc(msg);
+        Ok(bincode::serialize(&wrapped)?)
+    }
 
     #[test]
     fn test_bracha_avid_valid_params() {
         let (s, _) = mpsc::channel(256);
         // Test for Bracha
-        let bracha = Bracha::new(0, 4, 1, 2, s.clone());
+        let bracha = Bracha::new(0, 4, 1, 2, s.clone(), Arc::new(default_hb_rbc_wrap));
         assert!(
             bracha.is_ok(),
             "Expected valid parameters for Bracha to succeed"
         );
 
         // Test for Avid
-        let avid = Avid::new(0, 6, 1, 2, s.clone());
+        let avid = Avid::new(0, 6, 1, 2, s.clone(), Arc::new(default_hb_rbc_wrap));
         assert!(
             avid.is_ok(),
             "Expected valid parameters for Avid to succeed"
         );
 
-        let avid = Avid::new(1, 9, 2, 4, s);
+        let avid = Avid::new(1, 9, 2, 4, s.clone(), Arc::new(default_hb_rbc_wrap));
         assert!(
             avid.is_ok(),
             "Expected valid parameters for Avid to succeed"
@@ -2100,7 +2122,7 @@ mod tests {
     fn test_bracha_avid_invalid_t() {
         let (s, _) = mpsc::channel(256);
         // Test for Bracha
-        let bracha = Bracha::new(0, 4, 2, 2, s.clone()); // Invalid t
+        let bracha = Bracha::new(0, 4, 2, 2, s.clone(), Arc::new(default_hb_rbc_wrap)); // Invalid t
         assert!(bracha.is_err(), "Expected invalid t to fail for Bracha");
         if let Err(msg) = bracha {
             assert!(
@@ -2110,7 +2132,7 @@ mod tests {
         }
 
         // Test for Avid
-        let avid = Avid::new(0, 6, 2, 2, s.clone()); // Invalid t (t >= ceil(n / 3))
+        let avid = Avid::new(0, 6, 2, 2, s.clone(), Arc::new(default_hb_rbc_wrap)); // Invalid t (t >= ceil(n / 3))
         assert!(avid.is_err(), "Expected invalid t to fail for Avid");
         if let Err(msg) = avid {
             assert!(
@@ -2119,7 +2141,7 @@ mod tests {
             );
         }
 
-        let avid = Avid::new(1, 9, 4, 4, s); // Invalid t (t >= ceil(n / 3))
+        let avid = Avid::new(1, 9, 4, 4, s, Arc::new(default_hb_rbc_wrap)); // Invalid t (t >= ceil(n / 3))
         assert!(avid.is_err(), "Expected invalid t to fail for Avid");
     }
 
@@ -2127,7 +2149,7 @@ mod tests {
     fn test_bracha_avid_invalid_k() {
         let (s, _) = mpsc::channel(256);
         // Test for Avid with invalid k
-        let avid = Avid::new(0, 6, 1, 0, s.clone()); // Invalid k (k < t + 1)
+        let avid = Avid::new(0, 6, 1, 0, s.clone(), Arc::new(default_hb_rbc_wrap)); // Invalid k (k < t + 1)
         assert!(avid.is_err(), "Expected invalid k to fail for Avid");
         if let Err(msg) = avid {
             assert!(
@@ -2136,11 +2158,11 @@ mod tests {
             );
         }
 
-        let avid = Avid::new(1, 9, 2, 7, s.clone()); // Invalid k (k > n - 2t)
+        let avid = Avid::new(1, 9, 2, 7, s.clone(), Arc::new(default_hb_rbc_wrap)); // Invalid k (k > n - 2t)
         assert!(avid.is_err(), "Expected invalid k to fail for Avid");
 
         // Test for Bracha with valid parameters
-        let bracha = Bracha::new(0, 5, 1, 3, s); // Valid k for Bracha
+        let bracha = Bracha::new(0, 5, 1, 3, s, Arc::new(default_hb_rbc_wrap)); // Valid k for Bracha
         assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
     }
 
@@ -2149,17 +2171,17 @@ mod tests {
         let (s, _) = mpsc::channel(256);
 
         // n = 5, t = 1, k = 2: valid case for both Bracha and Avid
-        let bracha = Bracha::new(0, 5, 1, 2, s.clone());
+        let bracha = Bracha::new(0, 5, 1, 2, s.clone(), Arc::new(default_hb_rbc_wrap));
         assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
-        let avid = Avid::new(0, 5, 1, 2, s.clone());
+        let avid = Avid::new(0, 5, 1, 2, s.clone(), Arc::new(default_hb_rbc_wrap));
         assert!(avid.is_ok(), "Expected valid parameters for Avid");
 
         // n = 5, t = 2, k = 2: invalid for Avid as k cannot be n - 2 * t
-        let avid_invalid = Avid::new(0, 5, 2, 2, s.clone());
+        let avid_invalid = Avid::new(0, 5, 2, 2, s.clone(), Arc::new(default_hb_rbc_wrap));
         assert!(avid_invalid.is_err(), "Expected invalid k to fail for Avid");
 
         // n = 5, t = 2: invalid as t cannot be >= ceil(n / 3)
-        let bracha_invalid = Bracha::new(0, 5, 2, 2, s);
+        let bracha_invalid = Bracha::new(0, 5, 2, 2, s, Arc::new(default_hb_rbc_wrap));
         assert!(
             bracha_invalid.is_err(),
             "Expected invalid t to fail for Bracha"
@@ -2170,17 +2192,17 @@ mod tests {
     fn test_bracha_avid_zero_t() {
         let (s, _) = mpsc::channel(256);
         // t = 0 should always be valid for both Bracha and Avid as long as k >= 1
-        let bracha = Bracha::new(2, 3, 0, 1, s.clone());
+        let bracha = Bracha::new(2, 3, 0, 1, s.clone(), Arc::new(default_hb_rbc_wrap));
         assert!(bracha.is_ok(), "Expected t = 0 to be valid for Bracha");
 
-        let avid = Avid::new(2, 5, 0, 1, s.clone());
+        let avid = Avid::new(2, 5, 0, 1, s.clone(), Arc::new(default_hb_rbc_wrap));
         assert!(avid.is_ok(), "Expected t = 0 to be valid for Avid");
 
         // n = 3, t = 0, k = 2: valid for both Bracha and Avid
-        let bracha = Bracha::new(2, 3, 0, 2, s.clone());
+        let bracha = Bracha::new(2, 3, 0, 2, s.clone(), Arc::new(default_hb_rbc_wrap));
         assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
 
-        let avid = Avid::new(3, 3, 0, 2, s);
+        let avid = Avid::new(3, 3, 0, 2, s.clone(), Arc::new(default_hb_rbc_wrap));
         assert!(avid.is_ok(), "Expected valid parameters for Avid");
     }
 }

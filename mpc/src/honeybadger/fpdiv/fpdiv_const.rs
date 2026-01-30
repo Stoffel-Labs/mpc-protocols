@@ -47,7 +47,7 @@ where
 impl<F, R> FPDivConstNode<F, R>
 where
     F: PrimeField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     pub fn new(id: usize, n_parties: usize, threshold: usize) -> Result<Self, FPDivConstError> {
         Ok(Self {

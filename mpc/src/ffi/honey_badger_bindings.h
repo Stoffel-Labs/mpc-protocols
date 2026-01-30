@@ -180,6 +180,17 @@ typedef struct AbaOpaque {
 
 } AbaOpaque;
 
+typedef struct {
+    uintptr_t ctx;
+    enum RbcErrorCode (*call)(
+        void *ctx,
+        const uint8_t *msg_ptr,
+        size_t msg_len,
+        uint8_t **out_ptr,
+        size_t *out_len
+    );
+} RbcWrapCtx;
+
 typedef struct FieldOpaque {
 
 } FieldOpaque;
@@ -382,9 +393,13 @@ enum RbcErrorCode deserialize_rbc_msg(struct ByteSlice msg, struct RbcMsg *outpu
 enum RbcErrorCode bracha_new(uintptr_t id,
                              uintptr_t n,
                              uintptr_t t,
-                             struct BrachaOpaque **bracha_pointer);
+                             struct BrachaOpaque **bracha_pointer,    
+                             RbcWrapCtx wrapper
+);
 
 void free_bracha(struct BrachaOpaque *bracha_pointer);
+
+uint8_t *rbc_alloc(size_t len);
 
 uintptr_t get_bracha_id(struct BrachaOpaque *bracha_pointer);
 

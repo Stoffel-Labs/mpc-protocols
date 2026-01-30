@@ -6,13 +6,11 @@ use ark_ec::PrimeGroup;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::sync::Arc;
+use stoffelmpc_mpc::avss_mpc::{AvssSessionId, AvssWrappedMessage, ProtocolType};
+use stoffelmpc_mpc::common::ProtocolSessionId;
+use stoffelmpc_mpc::common::{rbc::rbc::Avid, ShamirShare};
 use stoffelmpc_mpc::common::{share::avss::verify_feldman, SecretSharingScheme};
 use stoffelmpc_mpc::common::{share::avss::AvssNode, RBC};
-use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
-use stoffelmpc_mpc::{
-    common::{rbc::rbc::Avid, ShamirShare},
-    honeybadger::WrappedMessage,
-};
 use stoffelmpc_network::fake_network::SenderId;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinSet;
@@ -25,7 +23,8 @@ async fn test_avss_end_to_end() {
 
     let n = 4;
     let t = 1;
-    let session_id = SessionId::new(ProtocolType::Avss, 0, 0, 0, 111);
+    let session_id =
+        AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot24(0, 0, 0), 111);
     let mut rng = test_rng();
 
     // --- Fake network ---
@@ -51,9 +50,19 @@ async fn test_avss_end_to_end() {
         .collect();
 
     // --- Initialize AVSS nodes ---
-    let mut nodes: Vec<AvssNode<Fr, Avid, G>> = (0..n)
+    let mut nodes: Vec<AvssNode<Fr, Avid<AvssSessionId>, G, AvssSessionId>> = (0..n)
         .map(|i| {
-            AvssNode::new(i, n, t, sks[i], pk_map.clone(), sender_channels[i].clone()).unwrap()
+            AvssNode::new(
+                i,
+                n,
+                t,
+                sks[i],
+                pk_map.clone(),
+                sender_channels[i].clone(),
+                Arc::new(AvssWrappedMessage::rbc_wrap),
+                Arc::new(AvssWrappedMessage::avss_wrap),
+            )
+            .unwrap()
         })
         .collect();
 
@@ -79,9 +88,9 @@ async fn test_avss_end_to_end() {
 
         set.spawn(async move {
             while let Some(received) = merged_rx.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&received.1).unwrap();
+                let wrapped: AvssWrappedMessage = bincode::deserialize(&received.1).unwrap();
                 match wrapped {
-                    WrappedMessage::Rbc(msg) => {
+                    AvssWrappedMessage::Rbc(msg) => {
                         node.rbc.process(msg, net.clone()).await.unwrap();
                         let _ = node.drain_rbc_output().await;
                     }

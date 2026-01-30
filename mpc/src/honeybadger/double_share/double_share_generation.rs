@@ -1,5 +1,5 @@
 use crate::{
-    common::{share::shamir::NonRobustShare, SecretSharingScheme},
+    common::{share::shamir::NonRobustShare, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
         double_share::{DouShaError, DouShaMessage, DouShaStorage},
         SessionId, WrappedMessage,

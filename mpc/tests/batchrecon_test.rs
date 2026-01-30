@@ -9,7 +9,7 @@ mod tests {
     use stoffelmpc_mpc::{
         common::{
             share::{apply_vandermonde, make_vandermonde},
-            SecretSharingScheme,
+            ProtocolSessionId, SecretSharingScheme,
         },
         honeybadger::{
             batch_recon::{batch_recon::BatchReconNode, BatchReconMsg, BatchReconMsgType},
@@ -31,7 +31,11 @@ mod tests {
         let t = 1;
         let n = 4;
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(4u64)];
-        let session_id = SessionId::new(ProtocolType::BatchRecon, 123, 0, 0, 111);
+        let session_id = SessionId::new(
+            ProtocolType::BatchRecon,
+            SessionId::pack_slot24(123, 0, 0),
+            111,
+        );
         assert_eq!(secrets.len(), t + 1);
 
         // Step 0: Generate shares
@@ -121,7 +125,11 @@ mod tests {
 
         let n = 4;
         let t = 1;
-        let session_id = SessionId::new(ProtocolType::BatchRecon, 123, 0, 0, 111);
+        let session_id = SessionId::new(
+            ProtocolType::BatchRecon,
+            SessionId::pack_slot24(123, 0, 0),
+            111,
+        );
         let config = FakeNetworkConfig::new(100);
         let (inner, mut receivers, _) = FakeInnerNetwork::new(n, None, config);
         let net: Vec<_> = (0..n)

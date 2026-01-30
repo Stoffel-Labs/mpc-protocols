@@ -10,9 +10,9 @@ mod tests {
                 rbc_store::{AbaStore, GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAvid},
                 utils::set_value_round,
             },
-            RBC,
+            ProtocolSessionId, RBC,
         },
-        honeybadger::{ProtocolType, SessionId},
+        honeybadger::{ProtocolType, SessionId, WrappedMessage},
     };
     use stoffelmpc_network::fake_network::FakeNetwork;
     use tokio::sync::Mutex;
@@ -29,10 +29,10 @@ mod tests {
         let n = 4;
         let t = 1;
         let payload = b"Hello, MPC!".to_vec();
-        let session_id = SessionId::new(ProtocolType::Rbc, 123, 0, 0, 12);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 12);
 
         let (parties, net, receivers) =
-            setup_network_and_parties::<Bracha, FakeNetwork>(n, t, t + 1, 500)
+            setup_network_and_parties::<Bracha<SessionId>, FakeNetwork>(n, t, t + 1, 500)
                 .await
                 .expect("Failed to set up parties");
         spawn_parties(&parties, receivers, net.clone()).await;
@@ -75,9 +75,9 @@ mod tests {
         let n = 4;
         let t = 1;
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 101),
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 102),
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 103),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 101),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 102),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 103),
         ];
         let payloads = vec![
             b"Payload A".to_vec(),
@@ -86,7 +86,7 @@ mod tests {
         ];
 
         let (parties, net, receivers) =
-            setup_network_and_parties::<Bracha, FakeNetwork>(n, t, t + 1, 500)
+            setup_network_and_parties::<Bracha<SessionId>, FakeNetwork>(n, t, t + 1, 500)
                 .await
                 .expect("Failed to set up parties");
         spawn_parties(&parties, receivers, net.clone()).await;
@@ -129,10 +129,10 @@ mod tests {
         let n = 4;
         let t = 1;
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 10),
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 20),
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 30),
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 40),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 10),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 20),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 30),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 40),
         ];
         let payloads = vec![
             b"From Party 0".to_vec(),
@@ -142,7 +142,7 @@ mod tests {
         ];
 
         let (parties, net, receivers) =
-            setup_network_and_parties::<Bracha, FakeNetwork>(n, t, t + 1, 500)
+            setup_network_and_parties::<Bracha<SessionId>, FakeNetwork>(n, t, t + 1, 500)
                 .await
                 .expect("Failed to set up parties");
         spawn_parties(&parties, receivers, net.clone()).await;
@@ -183,11 +183,11 @@ mod tests {
 
         let n = 4;
         let t = 1;
-        let session_id = SessionId::new(ProtocolType::Rbc, 123, 0, 0, 11);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 11);
         let payload = b"out-of-order".to_vec();
 
         let (parties, net, receivers) =
-            setup_network_and_parties::<Bracha, FakeNetwork>(n, t, t + 1, 500)
+            setup_network_and_parties::<Bracha<SessionId>, FakeNetwork>(n, t, t + 1, 500)
                 .await
                 .expect("Failed to set up parties");
         spawn_parties(&parties, receivers, net.clone()).await;
@@ -261,7 +261,7 @@ mod tests {
         println!("Running Avid RBC with n={}, t={}, k={}", n, t, k);
 
         let (parties, net, receivers) =
-            setup_network_and_parties::<Avid, FakeNetwork>(n, t, t + 1, 500)
+            setup_network_and_parties::<Avid<SessionId>, FakeNetwork>(n, t, t + 1, 500)
                 .await
                 .expect("Failed to set up parties");
         spawn_parties(&parties, receivers, net.clone()).await;
@@ -319,7 +319,7 @@ mod tests {
                 n,
                 t,
                 k,
-                SessionId::new(ProtocolType::Rbc, 123, 0, 0, 100),
+                SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 100),
                 payload.clone(),
             )
             .await;
@@ -334,10 +334,10 @@ mod tests {
         let t = 1;
 
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 10),
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 20),
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 30),
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 40),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 10),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 20),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 30),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 40),
         ];
         let payloads = vec![
             b"From Party 0".to_vec(),
@@ -347,7 +347,7 @@ mod tests {
         ];
 
         let (parties, net, receivers) =
-            setup_network_and_parties::<Avid, FakeNetwork>(n, t, t + 1, 500)
+            setup_network_and_parties::<Avid<SessionId>, FakeNetwork>(n, t, t + 1, 500)
                 .await
                 .expect("Failed to set up parties");
         spawn_parties(&parties, receivers, net.clone()).await;
@@ -389,11 +389,11 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = 2;
-        let session_id = SessionId::new(ProtocolType::Rbc, 123, 0, 0, 11);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 11);
         let payload = b"out-of-order".to_vec();
 
         let (parties, net, receivers) =
-            setup_network_and_parties::<Avid, FakeNetwork>(n, t, k, 500)
+            setup_network_and_parties::<Avid<SessionId>, FakeNetwork>(n, t, k, 500)
                 .await
                 .expect("Failed to set up parties");
         spawn_parties(&parties, receivers, net.clone()).await;
@@ -461,10 +461,10 @@ mod tests {
         let n = 7;
         let t = 2;
         let payload = b"crash fault test".to_vec();
-        let session_id = SessionId::new(ProtocolType::Rbc, 123, 0, 0, 2025);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 2025);
 
         let (parties, net, receivers) =
-            setup_network_and_parties::<Bracha, FakeNetwork>(n, t, t + 1, 500)
+            setup_network_and_parties::<Bracha<SessionId>, FakeNetwork>(n, t, t + 1, 500)
                 .await
                 .expect("Failed to set up parties");
 
@@ -513,7 +513,7 @@ mod tests {
         );
 
         let (parties, net, receivers) =
-            setup_network_and_parties::<Avid, FakeNetwork>(n, t, k, 500)
+            setup_network_and_parties::<Avid<SessionId>, FakeNetwork>(n, t, k, 500)
                 .await
                 .expect("Failed to set up parties");
 
@@ -572,7 +572,11 @@ mod tests {
                 n,
                 t,
                 k,
-                SessionId::new(ProtocolType::Rbc, 123, 0, 0, 100 + i as u32),
+                SessionId::new(
+                    ProtocolType::Rbc,
+                    SessionId::pack_slot24(123, 0, 0),
+                    100 + i as u32,
+                ),
                 payload.clone(),
             )
             .await;
@@ -586,13 +590,14 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_id = SessionId::new(ProtocolType::Rbc, 123, 0, 0, 99);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 99);
 
         let round_id = 0;
 
-        let (parties, net, receivers) = setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 500)
-            .await
-            .expect("Failed to set up parties");
+        let (parties, net, receivers) =
+            setup_network_and_parties::<ABA<SessionId>, FakeNetwork>(n, t, k, 500)
+                .await
+                .expect("Failed to set up parties");
 
         spawn_parties(&parties, receivers, net.clone()).await;
 
@@ -607,7 +612,13 @@ mod tests {
             GenericMsgType::ABA(MsgTypeAba::Key),
             0,
         );
-        let _ = dealer.distribute_keys(dealer_msg, net[0].clone()).await;
+        let _ = dealer
+            .distribute_keys(
+                dealer_msg,
+                net[0].clone(),
+                Arc::new(WrappedMessage::rbc_wrap),
+            )
+            .await;
 
         // Wait for keys to propagate and be set
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -667,11 +678,11 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_id = SessionId::new(ProtocolType::Rbc, 123, 0, 0, 42);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 42);
         let round_id = 0;
 
         let (parties, net, receivers) =
-            setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 1000)
+            setup_network_and_parties::<ABA<SessionId>, FakeNetwork>(n, t, k, 1000)
                 .await
                 .expect("Failed to set up parties");
         spawn_parties(&parties, receivers, net.clone()).await;
@@ -687,7 +698,13 @@ mod tests {
             GenericMsgType::ABA(MsgTypeAba::Key),
             0,
         );
-        let _ = dealer.distribute_keys(key_dist_msg, net[0].clone()).await;
+        let _ = dealer
+            .distribute_keys(
+                key_dist_msg,
+                net[0].clone(),
+                Arc::new(WrappedMessage::rbc_wrap),
+            )
+            .await;
 
         tokio::time::sleep(Duration::from_millis(5)).await;
 
@@ -774,13 +791,13 @@ mod tests {
         let t = 1;
         let k = t + 1;
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 100),
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 101),
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 102),
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 103),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 100),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 101),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 102),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 103),
         ];
         let (parties, net, receivers) =
-            setup_network_and_parties::<ABA, FakeNetwork>(n, t, k, 1000)
+            setup_network_and_parties::<ABA<SessionId>, FakeNetwork>(n, t, k, 1000)
                 .await
                 .expect("Failed to set up parties");
         spawn_parties(&parties, receivers, net.clone()).await;
@@ -789,14 +806,20 @@ mod tests {
         let dealer = Dealer::new(n, t);
         let key_dist_msg = Msg::new(
             0,
-            SessionId::new(ProtocolType::Rbc, 123, 0, 0, 0),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 0),
             0,
             vec![],
             vec![],
             GenericMsgType::ABA(MsgTypeAba::Key),
             0,
         );
-        let _ = dealer.distribute_keys(key_dist_msg, net[0].clone()).await;
+        let _ = dealer
+            .distribute_keys(
+                key_dist_msg,
+                net[0].clone(),
+                Arc::new(WrappedMessage::rbc_wrap),
+            )
+            .await;
 
         tokio::time::sleep(Duration::from_millis(5)).await;
 

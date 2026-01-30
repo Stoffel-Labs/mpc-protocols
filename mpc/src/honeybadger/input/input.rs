@@ -1,4 +1,4 @@
-use crate::common::{SecretSharingScheme, RBC};
+use crate::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use crate::honeybadger::input::InputError;
 use crate::honeybadger::input::InputMessage;
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -97,7 +97,7 @@ fn calculate_input_shares<F: FftField>(
         .collect()
 }
 
-impl<F: FftField, R: RBC> InputServer<F, R> {
+impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
     pub fn new(
         id: usize,
         n: usize,
@@ -105,7 +105,14 @@ impl<F: FftField, R: RBC> InputServer<F, R> {
         input_ids: Vec<ClientId>,
     ) -> Result<Self, InputError> {
         let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
-        let rbc = R::new(id, n, t, t + 1, rbc_sender)?;
+        let rbc = R::new(
+            id,
+            n,
+            t,
+            t + 1,
+            rbc_sender,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?;
         let (status_sender, status_receiver) = channel(
             input_ids
                 .into_iter()
@@ -348,7 +355,7 @@ impl<F: FftField, R: RBC> Clone for InputClient<F, R> {
     }
 }
 
-impl<F: FftField, R: RBC> InputClient<F, R> {
+impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
     pub fn new(
         id: usize,
         n: usize,
@@ -357,7 +364,14 @@ impl<F: FftField, R: RBC> InputClient<F, R> {
         inputs: Vec<F>,
     ) -> Result<Self, InputError> {
         let (rbc_sender, _) = tokio::sync::mpsc::channel(200);
-        let rbc = R::new(id, n, t, t + 1, rbc_sender)?;
+        let rbc = R::new(
+            id,
+            n,
+            t,
+            t + 1,
+            rbc_sender,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?;
         Ok(Self {
             client_id: id,
             n,
@@ -437,9 +451,11 @@ impl<F: FftField, R: RBC> InputClient<F, R> {
             //Broadcast to servers
             let sessionid = SessionId::new(
                 ProtocolType::Input,
-                0, // subprotocol ID not needed because only called once
-                self.client_id as u8,
-                0,
+                SessionId::pack_slot24(
+                    0, // subprotocol ID not needed because only called once
+                    self.client_id as u8,
+                    0,
+                ),
                 self.instance_id,
             );
 
@@ -530,9 +546,10 @@ pub mod tests {
         let rand_shares = RobustShare::compute_shares(rand_secret, n, t, None, &mut rng).unwrap();
 
         let mut client =
-            InputClient::<Fr, Avid>::new(clientid, n, t, 111, vec![input].clone()).unwrap();
+            InputClient::<Fr, Avid<SessionId>>::new(clientid, n, t, 111, vec![input].clone())
+                .unwrap();
         let mut nodes: Vec<_> = (0..n)
-            .map(|i| InputServer::<Fr, Avid>::new(i, n, t, vec![clientid]).unwrap())
+            .map(|i| InputServer::<Fr, Avid<SessionId>>::new(i, n, t, vec![clientid]).unwrap())
             .collect();
 
         // all but one node call init

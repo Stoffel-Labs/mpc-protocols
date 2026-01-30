@@ -7,12 +7,31 @@
 
 #include "../honey_badger_bindings.h"
 
-void setup_bracha_parties(size_t n, size_t t, BrachaOpaque **parties)
+static enum RbcErrorCode wrap_identity(
+    void *ctx,
+    const uint8_t *msg_ptr,
+    size_t msg_len,
+    uint8_t **out_ptr,
+    size_t *out_len)
 {
-    // create n bracha instances
+    (void)ctx;
+
+    uint8_t *buf = rbc_alloc(msg_len);
+    if (!buf)
+        return RbcInternal;
+
+    memcpy(buf, msg_ptr, msg_len);
+    *out_ptr = buf;
+    *out_len = msg_len;
+
+    return RbcSuccess;
+}
+
+void setup_bracha_parties(size_t n, size_t t, BrachaOpaque **parties, RbcWrapCtx w)
+{
     for (size_t i = 0; i < n; i++)
     {
-        enum RbcErrorCode e = bracha_new(i, n, t, &parties[i]);
+        enum RbcErrorCode e = bracha_new(i, n, t, &parties[i], w);
         if (e != RbcSuccess)
         {
             printf("Error in creating bracha instance for party %zu\n", i);
@@ -77,7 +96,12 @@ void test_bracha_rbc_basic()
     struct FakeNetworkReceiversOpaque *receivers;
     struct NetworkOpaque _net;
 
-    setup_bracha_parties(n, t, prt_array);
+    RbcWrapCtx w = {
+        .ctx = 0,
+        .call = wrap_identity,
+    };
+
+    setup_bracha_parties(n, t, prt_array, w);
     struct NetworkOpaque *net = new_fake_network(n, NULL, channel_buff_size, &receivers);
     // get bracha instance id
     uintptr_t id = get_bracha_id(prt_array[3]);
@@ -92,7 +116,7 @@ void test_bracha_rbc_basic()
     enum RbcErrorCode e = sync_bracha_init(prt_array[0], payload, session_id, net);
     if (e != RbcSuccess)
     {
-	free_fake_network_receivers(receivers);
+        free_fake_network_receivers(receivers);
         printf("Error in bracha init for party 1, error code: %d\n", e);
         exit(1);
     }
@@ -158,7 +182,7 @@ void test_bracha_rbc_basic()
         }
         printf("Output for party %zu: %s\n", i, output.pointer);
         assert(strcmp((char *)output.pointer, myString) == 0);
-	free_bytes_slice(output);
+        free_bytes_slice(output);
     }
     for (size_t i = 0; i < n; i++)
     {

@@ -1,10 +1,12 @@
 use crate::{
-    avss_mpc::triple_gen::{BeaverTriple, TripleGenError, TripleGenStore},
+    avss_mpc::{
+        triple_gen::{BeaverTriple, TripleGenError, TripleGenStore},
+        AvssSessionId, AvssWrappedMessage,
+    },
     common::{
         share::{avss::AvssNode, feldman::FeldmanShamirShare},
-        RBC,
+        ProtocolSessionId, RBC,
     },
-    honeybadger::SessionId,
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -22,16 +24,16 @@ pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub avss: AvssNode<F, R, C>,
-    pub avss_output: Arc<Mutex<mpsc::Receiver<SessionId>>>,
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStore<F, C>>>>>>,
-    pub output_channel: Sender<SessionId>,
+    pub avss: AvssNode<F, R, C, AvssSessionId>,
+    pub avss_output: Arc<Mutex<mpsc::Receiver<AvssSessionId>>>,
+    pub store: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<TripleGenStore<F, C>>>>>>,
+    pub output_channel: Sender<AvssSessionId>,
 }
 
 impl<F, R, C> TripleGenNode<F, R, C>
 where
     F: FftField,
-    R: RBC,
+    R: RBC<Id = AvssSessionId>,
     C: CurveGroup<ScalarField = F> + Send + Sync,
 {
     pub fn new(
@@ -40,10 +42,19 @@ where
         threshold: usize,
         sk_i: F,
         pk_map: Arc<Vec<C>>,
-        output_channel: Sender<SessionId>,
+        output_channel: Sender<AvssSessionId>,
     ) -> Result<Self, TripleGenError> {
         let (tx, rx) = mpsc::channel(256);
-        let avss = AvssNode::new(id, n_parties, threshold, sk_i, pk_map, tx)?;
+        let avss = AvssNode::new(
+            id,
+            n_parties,
+            threshold,
+            sk_i,
+            pk_map,
+            tx,
+            Arc::new(AvssWrappedMessage::rbc_wrap),
+            Arc::new(AvssWrappedMessage::avss_wrap),
+        )?;
 
         Ok(Self {
             id,
@@ -56,7 +67,10 @@ where
         })
     }
 
-    async fn get_or_create_store(&mut self, sid: SessionId) -> Arc<Mutex<TripleGenStore<F, C>>> {
+    async fn get_or_create_store(
+        &mut self,
+        sid: AvssSessionId,
+    ) -> Arc<Mutex<TripleGenStore<F, C>>> {
         let mut map = self.store.lock().await;
         map.entry(sid)
             .or_insert(Arc::new(Mutex::new(TripleGenStore::empty(
@@ -67,7 +81,7 @@ where
 
     pub async fn gen_triple<N, G>(
         &mut self,
-        session_id: SessionId,
+        session_id: AvssSessionId,
         a: Vec<FeldmanShamirShare<F, C>>,
         b: Vec<FeldmanShamirShare<F, C>>,
         rng: &mut G,
@@ -97,11 +111,13 @@ where
         // === Step 2: dealers AVSS-share the batch vector ===
         let is_dealer = self.id < m;
         if is_dealer {
-            let avss_sid = SessionId::new(
+            let avss_sid = AvssSessionId::new(
                 session_id.calling_protocol().unwrap(),
-                session_id.exec_id(),
-                self.id as u8,
-                session_id.round_id(),
+                AvssSessionId::pack_slot24(
+                    session_id.exec_id(),
+                    self.id as u8,
+                    session_id.round_id(),
+                ),
                 session_id.instance_id(),
             );
             self.avss

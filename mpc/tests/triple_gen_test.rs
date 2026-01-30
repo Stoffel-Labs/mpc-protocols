@@ -7,7 +7,7 @@ use ark_bls12_381::Fr;
 use itertools::izip;
 use std::{matches, time::Duration};
 use stoffelmpc_mpc::{
-    common::{share::shamir::NonRobustShare, SecretSharingScheme},
+    common::{share::shamir::NonRobustShare, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
         robust_interpolate::robust_interpolate::RobustShare,
         triple_gen::triple_generation::ProtocolState, ProtocolType, SessionId,
@@ -20,7 +20,7 @@ async fn test_triple_gen_e2e() {
     let n_parties = 13;
     let threshold = 2;
     let n_shares = 2 * threshold + 1;
-    let session_id = SessionId::new(ProtocolType::Triple, 123, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Triple, SessionId::pack_slot24(123, 0, 0), 111);
     let (random_shares_a, random_shares_b, randousha_pairs, a_values, b_values, _) =
         get_triple_init_test_shares(n_shares, n_parties, threshold);
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);

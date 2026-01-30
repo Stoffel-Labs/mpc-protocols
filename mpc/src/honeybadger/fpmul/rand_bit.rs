@@ -1,4 +1,4 @@
-use crate::common::RBC;
+use crate::common::{ProtocolSessionId, RBC};
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
 use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitMessage, RandBitStorage};
 use crate::honeybadger::mul::concat_sorted;
@@ -55,7 +55,7 @@ where
 impl<F, R> RandBit<F, R>
 where
     F: FftField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     pub fn new(id: PartyId, n_parties: usize, threshold: usize) -> Result<Self, RandBitError> {
         let batch_recon_node = BatchReconNode::new(id, n_parties, threshold, threshold)?;
@@ -165,9 +165,7 @@ where
         for (i, chunk) in a_square_share.chunks(self.threshold + 1).enumerate() {
             let session_id_batch = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                session_id.exec_id(),
-                0,
-                i as u8,
+                SessionId::pack_slot24(session_id.exec_id(), 0, i as u8),
                 session_id.instance_id(),
             );
             self.batch_recon
@@ -196,9 +194,7 @@ where
 
         let session_id = SessionId::new(
             calling_proto,
-            message.session_id.exec_id(),
-            0,
-            0,
+            SessionId::pack_slot24(message.session_id.exec_id(), 0, 0),
             message.session_id.instance_id(),
         );
         let storage_bind = self.get_or_create_storage(session_id).await?;
@@ -304,18 +300,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_randbit_storage_limit() {
-        let node = RandBit::<Fr, Avid>::new(0, 5, 1).unwrap();
+        let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
 
         // Fill up storage to the limit (256 sessions)
         for i in 0u8..=255 {
-            let session_id =
-                SessionId::new(crate::honeybadger::ProtocolType::RandBit, i, 0, 0, 111);
-
+            let session_id = SessionId::new(
+                crate::honeybadger::ProtocolType::RandBit,
+                SessionId::pack_slot24(i, 0, 0),
+                111,
+            );
             let _ = node.get_or_create_storage(session_id).await;
         }
 
         // The 257th session should fail
-        let session_id = SessionId::new(crate::honeybadger::ProtocolType::RandBit, 0, 1, 0, 111);
+        let session_id = SessionId::new(
+            crate::honeybadger::ProtocolType::RandBit,
+            SessionId::pack_slot24(0, 1, 0),
+            111,
+        );
         let result = node.get_or_create_storage(session_id).await;
         assert!(
             matches!(result, Err(RandBitError::LimitError(_))),

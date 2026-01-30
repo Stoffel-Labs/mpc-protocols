@@ -13,18 +13,16 @@ pub mod acss;
 
 pub mod types;
 
-use crate::{
-    common::{
-        rbc::{rbc_store::Msg, RbcError},
-        share::ShareError,
-    },
-    honeybadger::SessionId,
+use crate::common::{
+    rbc::{rbc_store::Msg, RbcError},
+    share::ShareError,
 };
 use ark_ff::{FftField, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use async_trait::async_trait;
+use std::fmt;
 use std::{
     collections::HashSet,
     marker::PhantomData,
@@ -249,45 +247,50 @@ where
 /// to each other. And the receivers need to agree on the senders' messages.
 /// The primitive that does this is called Reliable Broadcast (RBC).
 /// When implementing your own custom MPC protocols, you must implement the RBC trait.
+pub type RbcWrapFn<Id> = Arc<dyn Fn(Msg<Id>) -> Result<Vec<u8>, RbcError> + Send + Sync + 'static>;
+
 #[async_trait]
 pub trait RBC: Send + Sync {
+    type Id: ProtocolSessionId;
+
     /// Creates a new instance
     fn new(
         id: usize,
         n: usize,
         t: usize,
         k: usize,
-        output_sender: Sender<SessionId>,
+        output_sender: Sender<Self::Id>,
+        wrapper: RbcWrapFn<Self::Id>,
     ) -> Result<Self, RbcError>
     where
         Self: Sized;
     /// Returns the unique identifier of the current party.
     fn id(&self) -> usize;
     async fn clear_store(&self);
-    async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, RbcError>;
+    async fn get_store(&self, session_id: Self::Id) -> Result<Vec<u8>, RbcError>;
     /// Required for initiating the broadcast
     async fn init<N: Network + Send + Sync>(
         &self,
         payload: Vec<u8>,
-        session_id: SessionId,
+        session_id: Self::Id,
         parties: Arc<N>,
     ) -> Result<(), RbcError>;
     ///Processing messages sent by other nodes based on their type
     async fn process<N: Network + Send + Sync + 'static>(
         &self,
-        msg: Msg,
+        msg: Msg<Self::Id>,
         parties: Arc<N>,
     ) -> Result<(), RbcError>;
     /// Broadcast messages to other nodes.
     async fn broadcast<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Self::Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError>;
     /// Send to another node
     async fn send<N: Network + Send + Sync>(
         &self,
-        msg: Msg,
+        msg: Msg<Self::Id>,
         net: Arc<N>,
         recv: usize,
     ) -> Result<(), RbcError>;
@@ -408,4 +411,48 @@ where
         y: Vec<Self::Sint>,
         net: Arc<N>,
     ) -> Result<Vec<Self::Sint>, Self::Error>;
+}
+
+/// A protocol identifier that fits into 8 bits.
+///
+pub trait ProtocolTag:
+    Copy + Clone + Eq + Ord + std::hash::Hash + Send + Sync + fmt::Debug
+{
+    /// Encode the protocol into an 8-bit tag
+    fn to_u8(self) -> u8;
+
+    /// Decode the protocol from an 8-bit tag
+    fn from_u8(v: u8) -> Option<Self>;
+}
+
+/// Fixed-layout session identifier.
+///
+/// Layout (u64):
+/// [ protocol | slot24 | instance_id ]
+///   8 bits     24 bits   32 bits
+///
+/// Interpretation of `slot24` is protocol-defined.
+pub trait ProtocolSessionId:
+    Copy + Clone + Eq + Ord + std::hash::Hash + Send + Sync + fmt::Debug
+{
+    type Protocol: ProtocolTag;
+
+    /* ---------- construction ---------- */
+    fn new(protocol: Self::Protocol, slot24: u32, instance_id: u32) -> Self;
+
+    /* ---------- fixed fields ---------- */
+    fn calling_protocol(self) -> Option<Self::Protocol>;
+    fn instance_id(self) -> u32;
+
+    /* ---------- flexible field ---------- */
+
+    /// Protocol-defined 24-bit field
+    fn slot24(self) -> u32;
+
+    /* ---------- raw access ---------- */
+    fn as_u64(self) -> u64;
+
+    /// # Safety
+    /// Caller must ensure the raw value is well-formed.
+    unsafe fn from_u64(raw: u64) -> Self;
 }

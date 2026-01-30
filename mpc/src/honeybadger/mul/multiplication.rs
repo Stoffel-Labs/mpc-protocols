@@ -1,5 +1,5 @@
 use crate::{
-    common::{share::ShareError, SecretSharingScheme, ShamirShare, RBC},
+    common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC},
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         mul::{
@@ -8,7 +8,7 @@ use crate::{
         },
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         triple_gen::ShamirBeaverTriple,
-        SessionId,
+        SessionId, WrappedMessage,
     },
 };
 use ark_ff::FftField;
@@ -139,11 +139,18 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-impl<F: FftField, R: RBC> Multiply<F, R> {
+impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
         let (rbc_sender, rbc_receiver) = mpsc::channel(200);
         let batch_recon = BatchReconNode::<F>::new(id, n, threshold, threshold)?;
-        let rbc = R::new(id, n, threshold, threshold + 1, rbc_sender)?;
+        let rbc = R::new(
+            id,
+            n,
+            threshold,
+            threshold + 1,
+            rbc_sender,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?;
         Ok(Self {
             id,
             n,
@@ -319,9 +326,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             if !have_batch_recon1[i] {
                 let session_id1 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
-                    session_id.exec_id(),
-                    1,
-                    (2 * i) as u8,
+                    SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i) as u8),
                     session_id.instance_id(),
                 );
                 // Execute batch reconstruction for a-x values
@@ -333,9 +338,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             if !have_batch_recon2[i] {
                 let session_id2 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
-                    session_id.exec_id(),
-                    1,
-                    (2 * i + 1) as u8,
+                    SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i + 1) as u8),
                     session_id.instance_id(),
                 );
                 // Execute batch reconstruction for b-y values
@@ -355,9 +358,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
 
             let sessionid = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                session_id.exec_id(),
-                2,
-                self.id as u8,
+                SessionId::pack_slot24(session_id.exec_id(), 2, self.id as u8),
                 session_id.instance_id(),
             );
 
@@ -396,9 +397,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
 
         let session_id = SessionId::new(
             calling_proto,
-            msg.session_id.exec_id(),
-            0,
-            0,
+            SessionId::pack_slot24(msg.session_id.exec_id(), 0, 0),
             msg.session_id.instance_id(),
         );
 
@@ -640,7 +639,7 @@ pub mod tests {
         let t = 3;
         let node_id = 0;
         let no_of_mul = 10;
-        let session_id = SessionId::new(ProtocolType::Mul, 123, 0, 0, 111);
+        let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot24(123, 0, 0), 111);
         let mut rng = test_rng();
 
         // 1. Generate Beaver triples
@@ -724,7 +723,7 @@ pub mod tests {
             .collect();
 
         let mut nodes: Vec<_> = (0..n)
-            .map(|i| Multiply::<Fr, Avid>::new(i, n, t).unwrap())
+            .map(|i| Multiply::<Fr, Avid<SessionId>>::new(i, n, t).unwrap())
             .collect();
 
         // all but one node call init
@@ -883,7 +882,7 @@ pub mod tests {
         let node_id = 0;
         let no_of_mul = 10;
         let split_at = no_of_mul - no_of_mul % (t + 1);
-        let session_id = SessionId::new(ProtocolType::Mul, 123, 0, 0, 111);
+        let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot24(123, 0, 0), 111);
         let mut rng = test_rng();
 
         // 1. Generate Beaver triples
@@ -963,7 +962,7 @@ pub mod tests {
         }
 
         // 4. Create node
-        let mut mul_node = Multiply::<Fr, Avid>::new(node_id, n_parties, t).unwrap();
+        let mut mul_node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n_parties, t).unwrap();
 
         let storage_bind = mul_node.get_or_create_mult_storage(session_id).await;
         let mut storage = storage_bind.lock().await;
@@ -992,16 +991,12 @@ pub mod tests {
         {
             let session_id_a = SessionId::new(
                 ProtocolType::Mul,
-                session_id.exec_id(),
-                1,
-                (2 * i) as u8,
+                SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i) as u8),
                 session_id.instance_id(),
             );
             let session_id_b = SessionId::new(
                 ProtocolType::Mul,
-                session_id.exec_id(),
-                1,
-                (2 * i + 1) as u8,
+                SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i + 1) as u8),
                 session_id.instance_id(),
             );
 
@@ -1050,9 +1045,7 @@ pub mod tests {
 
                 let shared_session_id = SessionId::new(
                     ProtocolType::Mul,
-                    session_id.exec_id(),
-                    2,
-                    mul_node.id as u8,
+                    SessionId::pack_slot24(session_id.exec_id(), 2, mul_node.id as u8),
                     session_id.instance_id(),
                 );
 
