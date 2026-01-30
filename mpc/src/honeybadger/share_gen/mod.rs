@@ -29,6 +29,7 @@ pub enum RanShaError {
     NetworkError(#[from] NetworkError),
     #[error("error while serializing an arkworks object in {location}: {source:?}")]
     ArkSerialization {
+        #[source]
         source: SerializationError,
         location: &'static str,
     },

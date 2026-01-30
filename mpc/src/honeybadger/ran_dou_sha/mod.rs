@@ -426,13 +426,13 @@ where
         N: Network + Send + Sync,
     {
         match msg.msg_type {
-            messages::RanDouShaMessageType::OutputMessage => {
+            RanDouShaMessageType::OutputMessage => {
                 self.output_handler(msg).await?;
-                return Ok(());
+                Ok(())
             }
-            messages::RanDouShaMessageType::ReconstructMessage => {
+            RanDouShaMessageType::ReconstructMessage => {
                 self.reconstruction_handler(msg, network).await?;
-                return Ok(());
+                Ok(())
             }
         }
     }

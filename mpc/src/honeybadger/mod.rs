@@ -28,6 +28,7 @@ pub mod preprocessing;
 pub mod share_gen;
 
 use crate::common::math::goldilocks::GoldilocksField;
+use crate::honeybadger::fpmul::rand_bit::{RandBitError, RandBitMessage};
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
@@ -51,8 +52,7 @@ use crate::{
             fpmul::{FPError, FPMulNode},
             prandbitd::PRandBitNode,
             rand_bit::RandBit,
-            PRandBitDMessage, PRandError, RandBitError, RandBitMessage, TruncPrError,
-            TruncPrMessage,
+            PRandBitDMessage, PRandError, TruncPrError, TruncPrMessage,
         },
         input::{
             input::{InputClient, InputServer},
@@ -2016,6 +2016,7 @@ impl fmt::Debug for SessionId {
 }
 
 impl SessionId {
+    /// Creates a new session ID.
     pub fn new(
         caller: ProtocolType,
         exec_id: u8,
@@ -2031,7 +2032,7 @@ impl SessionId {
         SessionId(value)
     }
 
-    //First 8 bits
+    /// Retrieves the calling protocol for the session ID, with corresponds to the first 8 bits.
     pub fn calling_protocol(self) -> Option<ProtocolType> {
         let val = ((self.0 >> 56) & 0xFF) as u8;
         ProtocolType::try_from(val).ok()

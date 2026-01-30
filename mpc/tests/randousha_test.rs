@@ -1,4 +1,4 @@
-pub mod utils;
+mod utils;
 
 use crate::utils::test_utils::{
     construct_e2e_input, create_nodes, get_reconstruct_input, initialize_all_nodes,
@@ -432,8 +432,11 @@ async fn test_output_handler() {
         }
     }
     // check the store (n-(t+1) shares)
-    assert!(node_store.lock().await.received_ok_msg.len() == n_parties - (threshold + 1));
-    assert!(node_store.lock().await.state == RanDouShaState::Finished);
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        n_parties - (threshold + 1)
+    );
+    assert_eq!(node_store.lock().await.state, RanDouShaState::Finished);
 }
 
 #[tokio::test]
@@ -455,7 +458,7 @@ async fn randousha_e2e() {
         receiver_channels.push(receiver);
     }
 
-    info!("channels created");
+    info!("Channels created");
 
     // create randousha nodes
     let randousha_nodes = create_nodes(n_parties, sender_channels, threshold, threshold + 1);
@@ -464,7 +467,7 @@ async fn randousha_e2e() {
     let _set = spawn_receiver_tasks(
         randousha_nodes.clone(),
         receivers,
-        Arc::clone(&network),
+        network.clone(),
         fin_send,
         None,
     );
@@ -477,7 +480,7 @@ async fn randousha_e2e() {
         &n_shares_t,
         &n_shares_2t,
         session_id,
-        Arc::clone(&network),
+        network.clone(),
     )
     .await;
 
@@ -486,8 +489,8 @@ async fn randousha_e2e() {
     let mut final_results = HashMap::<usize, Vec<DoubleShamirShare<Fr>>>::new();
     while let Some((id, final_shares)) = fin_recv.recv().await {
         final_results.insert(id, final_shares);
-        if final_results.len() == 10 {
-            // check final_shares consist of correct shares
+        if final_results.len() == n_parties {
+            // Check final_shares consist of correct shares
             for (id, double_shares) in final_results {
                 assert_eq!(double_shares.len(), threshold + 1);
                 let _ = double_shares.iter().map(|double_share| {
@@ -501,14 +504,14 @@ async fn randousha_e2e() {
         }
     }
 
-    // wait for all randousha nodes to finish
+    // Wait for all randousha nodes to finish
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     for nodes in &randousha_nodes {
         let mut node_locked = nodes.lock().await;
         let store = node_locked.get_or_create_store(session_id).await;
         let store_locked = store.lock().await;
-        assert!(store_locked.state == RanDouShaState::Finished);
+        assert_eq!(store_locked.state, RanDouShaState::Finished);
     }
 }
 
@@ -567,7 +570,7 @@ async fn test_e2e_reconstruct_mismatch() {
     let num_aborted_tasks = abort_count.load(Ordering::SeqCst);
 
     // since there are 10 nodes, each one should have receive abort by some party
-    assert!(num_aborted_tasks == 10);
+    assert_eq!(num_aborted_tasks, 10);
 
     let mut final_shares_received = Vec::new();
     while let Ok(msg) = fin_recv.try_recv() {
@@ -581,7 +584,7 @@ async fn test_e2e_reconstruct_mismatch() {
 
 #[tokio::test]
 async fn test_e2e_wrong_degree() {
-    // Setup the test.
+    // Set up the test.
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
@@ -642,7 +645,7 @@ async fn test_e2e_wrong_degree() {
     let num_aborted_tasks = abort_count.load(Ordering::SeqCst);
 
     // since there are 10 nodes, each one should have receive abort by some party
-    assert!(num_aborted_tasks == 10);
+    assert_eq!(num_aborted_tasks, 10);
 
     let mut final_shares_received = Vec::new();
     while let Ok(msg) = fin_recv.try_recv() {

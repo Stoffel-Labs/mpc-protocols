@@ -1,11 +1,12 @@
 use super::*;
+use crate::honeybadger::fpmul::rand_bit::RandBitMessage;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde},
         SecretSharingScheme,
     },
     honeybadger::{
-        fpmul::{PRandBitDMessage, PRandMessageType, RandBitMessage},
+        fpmul::{PRandBitDMessage, PRandMessageType},
         mul::MultMessage,
         robust_interpolate::robust_interpolate::RobustShare,
         triple_gen::TripleGenMessage,
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
 use stoffelnet::network_utils::Network;
 use tracing::{debug, error, info, warn};
+
 /// --------------------------BatchRecPub--------------------------
 ///
 /// Goal: Publicly reconstruct t+1 secret-shared values [x₁, ..., x_{t+1}]
@@ -58,7 +60,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.store.lock().await;
         store.remove(&session_id).is_some()
-     }
+    }
 
     /// Initiates the batch reconstruction protocol for a given node.
     ///
@@ -71,7 +73,7 @@ impl<F: FftField> BatchReconNode<F> {
     ) -> Result<(), BatchReconError> {
         if shares.len() < self.t + 1 {
             return Err(BatchReconError::InvalidInput(
-                "too little shares to start batch reconstruct".to_string(),
+                "Too few shares to start batch reconstruct".to_string(),
             ));
         }
         let vandermonde = make_vandermonde::<F>(self.n, self.t)?;
@@ -79,7 +81,8 @@ impl<F: FftField> BatchReconNode<F> {
 
         info!(
             id = self.id,
-            "initialized batch reconstruction with Vandermonde transform"
+            session_id = ?session_id,
+            "Initialized batch reconstruction with Vandermonde transform"
         );
 
         for (j, y_j_share) in y_shares.into_iter().enumerate() {
@@ -94,7 +97,10 @@ impl<F: FftField> BatchReconNode<F> {
             let encoded_msg =
                 bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
 
-            let _ = net.send(j, &encoded_msg).await?;
+            net.send(j, &encoded_msg).await.map_err(|e| {
+                error!("Error sending y_j shares to the other party");
+                e
+            })?;
         }
         Ok(())
     }
@@ -110,7 +116,7 @@ impl<F: FftField> BatchReconNode<F> {
     ) -> Result<(), BatchReconError> {
         match msg.msg_type {
             BatchReconMsgType::Eval => {
-                debug!(
+                info!(
                     self_id = self.id,
                     from = msg.sender_id,
                     "Received Eval message"
@@ -165,21 +171,28 @@ impl<F: FftField> BatchReconNode<F> {
                             // Broadcast our computed `y_j` to all other parties.
                             let encoded = bincode::serialize(&wrapped)
                                 .map_err(BatchReconError::SerializationError)?;
-                            let _ = net
-                                .broadcast(&encoded)
-                                .await
-                                .map_err(|e| BatchReconError::NetworkError(e))?;
+                            let _ = net.broadcast(&encoded).await.map_err(|e| {
+                                error!("Error broadcasting y_j value: {:?}", e);
+                                BatchReconError::NetworkError(e)
+                            })?;
                         }
                         Err(e) => {
                             warn!(self_id = self.id, "Interpolation of y_j failed: {:?}", e);
                             return Err(BatchReconError::InterpolateError(e));
                         }
                     }
+                } else {
+                    info!(
+                        self_id = self.id,
+                        "Not enough eval points yet. The party needs {} points, current points: {}",
+                        2 * self.t + 1,
+                        store.evals_received.len()
+                    );
                 }
                 Ok(())
             }
             BatchReconMsgType::Reveal => {
-                debug!(
+                info!(
                     self_id = self.id,
                     from = msg.sender_id,
                     "Received Reveal message"
@@ -188,30 +201,42 @@ impl<F: FftField> BatchReconNode<F> {
                 let y_j = F::deserialize_compressed(msg.payload.as_slice())
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
-                // Lock the session store to update the session state.
-                let session_store = self.get_or_create_store(msg.session_id).await;
-                // Lock the session-specific store to access or update the session state.
-                let mut store = session_store.lock().await;
-
                 // Store the received revealed `y_j` value if it's from a new sender.
-                if !store.reveals_received.iter().any(|s| s.id == sender_id) {
+                let (reveals_received, secrets) = {
+                    // Lock the session store to update the session state.
+                    let session_store = self.get_or_create_store(msg.session_id).await;
+                    // Lock the session-specific store to access or update the session state.
+                    let store = session_store.lock().await;
+                    (store.reveals_received.clone(), store.secrets.clone())
+                };
+                if !reveals_received.iter().any(|s| s.id == sender_id) {
+                    let session_store = self.get_or_create_store(msg.session_id).await;
+                    // Lock the session-specific store to access or update the session state.
+                    let mut store = session_store.lock().await;
                     store
                         .reveals_received
                         .push(RobustShare::new(y_j, sender_id, self.t));
                 }
                 // Check if we have enough revealed `y_j` values and haven't already reconstructed the secrets.
-                if store.reveals_received.len() >= 2 * self.t + 1 && store.secrets.is_none() {
+                if reveals_received.len() >= 2 * self.t + 1 && secrets.is_none() {
                     info!(
                         self_id = self.id,
                         "Enough Reveals collected, interpolating secrets"
                     );
                     // Attempt to interpolate the polynomial whose coefficients are the original secrets.
-                    match RobustShare::recover_secret(&store.reveals_received.clone(), self.n) {
+                    match RobustShare::recover_secret(&reveals_received, self.n) {
                         Ok((poly, _)) => {
                             let mut result = poly;
                             // Resize the coefficient vector to `t + 1` to get all secrets.
                             result.resize(self.t + 1, F::zero());
-                            store.secrets = Some(result.clone());
+
+                            // Store the reconstructed secrets in the session store.
+                            {
+                                let session_store = self.get_or_create_store(msg.session_id).await;
+                                // Lock the session-specific store to access or update the session state.
+                                let mut store = session_store.lock().await;
+                                store.secrets = Some(result.clone());
+                            }
                             info!(self_id = self.id, "Secrets successfully reconstructed");
 
                             // Send the finalization message back to the triple generation or the
@@ -238,13 +263,14 @@ impl<F: FftField> BatchReconNode<F> {
                                         msg.session_id,
                                         bytes_message,
                                     ));
+                                    info!("Finished reconstruction of message for multiplication");
                                     let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
                                     net.send(self.id, &bytes_generic_msg).await?;
                                 }
                                 ProtocolType::RandBit => {
                                     let mut bytes_message = Vec::new();
                                     result.serialize_compressed(&mut bytes_message)?;
-                                    if msg.session_id.sub_id() == 0 {
+                                    if msg.session_id.sub_id() == 1 {
                                         let rand_generic_msg =
                                             WrappedMessage::RandBit(RandBitMessage::new(
                                                 self.id,
@@ -253,8 +279,9 @@ impl<F: FftField> BatchReconNode<F> {
                                             ));
                                         let bytes_generic_msg =
                                             bincode::serialize(&rand_generic_msg)?;
+                                        info!("Finished reconstruction of message within RandBit");
                                         net.send(self.id, &bytes_generic_msg).await?;
-                                    } else {
+                                    } else if msg.session_id.sub_id() == 0 {
                                         let mult_generic_msg =
                                             WrappedMessage::Mul(MultMessage::new(
                                                 self.id,
@@ -263,7 +290,12 @@ impl<F: FftField> BatchReconNode<F> {
                                             ));
                                         let bytes_generic_msg =
                                             bincode::serialize(&mult_generic_msg)?;
+                                        info!("Finished reconstruction of message within RandBit::Multiplication");
                                         net.send(self.id, &bytes_generic_msg).await?;
+                                    } else {
+                                        return Err(BatchReconError::InvalidInput(
+                                            "Invalid sub_id for RandBit".to_string(),
+                                        ));
                                     }
                                 }
                                 ProtocolType::PRandBit => {
@@ -297,6 +329,7 @@ impl<F: FftField> BatchReconNode<F> {
             }
         }
     }
+
     pub async fn process<N: Network>(
         &mut self,
         msg: BatchReconMsg,
