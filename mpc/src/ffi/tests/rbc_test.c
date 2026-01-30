@@ -116,6 +116,7 @@ void test_bracha_rbc_basic()
     enum RbcErrorCode e = sync_bracha_init(prt_array[0], payload, session_id, net);
     if (e != RbcSuccess)
     {
+	free_fake_network_receivers(receivers);
         printf("Error in bracha init for party 1, error code: %d\n", e);
         exit(1);
     }
@@ -181,6 +182,7 @@ void test_bracha_rbc_basic()
         }
         printf("Output for party %zu: %s\n", i, output.pointer);
         assert(strcmp((char *)output.pointer, myString) == 0);
+	free_bytes_slice(output);
     }
     for (size_t i = 0; i < n; i++)
     {

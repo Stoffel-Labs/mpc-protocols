@@ -49,7 +49,6 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerInvalidPartyIdError,
     HoneyBadgerLimitError,
     HoneyBadgerInstanceIdError,
-    HoneyBadgerAvssError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
