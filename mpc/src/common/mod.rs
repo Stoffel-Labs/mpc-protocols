@@ -248,7 +248,7 @@ pub trait RBC: Send + Sync {
 
     /// Creates a new instance
     fn new(
-        id: usize,
+        id: PartyId,
         n: usize,
         t: usize,
         k: usize,
@@ -257,7 +257,7 @@ pub trait RBC: Send + Sync {
     where
         Self: Sized;
     /// Returns the unique identifier of the current party.
-    fn id(&self) -> usize;
+    fn id(&self) -> PartyId;
     async fn clear_store(&self);
     /// Required for initiating the broadcast
     async fn init<N: Network + Send + Sync>(
@@ -283,7 +283,7 @@ pub trait RBC: Send + Sync {
         &self,
         msg: Msg<Self::Id>,
         net: Arc<N>,
-        recv: usize,
+        recv: PartyId,
     ) -> Result<(), RbcError>;
 }
 

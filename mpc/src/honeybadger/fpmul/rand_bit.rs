@@ -270,12 +270,13 @@ mod tests {
     use super::*;
     use crate::common::rbc::rbc::Avid;
     use ark_bls12_381::Fr;
+    use stoffelnet::network_utils::SenderId;
     use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_randbit_storage_limit() {
         let (tx, _rx) = mpsc::channel(1);
-        let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1, tx).unwrap();
+        let node = RandBit::<Fr, Avid<SessionId>>::new(SenderId::new(0), 5, 1, tx).unwrap();
 
         // Fill up storage to the limit (256 sessions)
         for i in 0u8..=255 {

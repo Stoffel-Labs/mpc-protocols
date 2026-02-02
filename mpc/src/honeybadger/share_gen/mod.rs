@@ -4,7 +4,7 @@ use ark_ff::FftField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::NetworkError;
+use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 
@@ -49,11 +49,11 @@ pub enum RanShaError {
 
 #[derive(Clone, Debug)]
 pub struct RanShaStore<F: FftField> {
-    pub initial_shares: HashMap<usize, RobustShare<F>>,
+    pub initial_shares: HashMap<PartyId, RobustShare<F>>,
     pub reception_tracker: Vec<bool>,
-    pub received_r_shares: HashMap<usize, RobustShare<F>>,
+    pub received_r_shares: HashMap<PartyId, RobustShare<F>>,
     pub computed_r_shares: Vec<RobustShare<F>>,
-    pub received_ok_msg: Vec<usize>,
+    pub received_ok_msg: Vec<PartyId>,
     pub state: RanShaState,
     pub protocol_output: Vec<RobustShare<F>>,
 }
@@ -105,7 +105,7 @@ pub enum RanShaPayload {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct RanShaMessage {
     /// ID of the sender of the message.
-    pub sender_id: usize,
+    pub sender_id: PartyId,
     /// Type of the message according to the handler.
     pub msg_type: RanShaMessageType,
     /// Session ID of the execution.
@@ -116,7 +116,7 @@ pub struct RanShaMessage {
 
 impl RanShaMessage {
     pub fn new(
-        sender_id: usize,
+        sender_id: PartyId,
         msg_type: RanShaMessageType,
         session_id: SessionId,
         payload: RanShaPayload,

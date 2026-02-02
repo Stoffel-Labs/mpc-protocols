@@ -26,7 +26,7 @@ use tokio::sync::{
     Mutex,
 };
 
-use stoffelnet::network_utils::{Network, NetworkError, PartyId};
+use stoffelnet::network_utils::{Network, NetworkError, Node, PartyId};
 use tracing::info;
 
 /// Error that occurs during the execution of the Random Double Share Error.
@@ -75,7 +75,7 @@ pub struct RanDouShaStore<F: FftField> {
     /// with the shares of s.
     pub computed_r_shares_degree_2t: Vec<NonRobustShare<F>>,
     /// Vector that stores the nodes who have sent the output ok msg.
-    pub received_ok_msg: Vec<usize>,
+    pub received_ok_msg: Vec<PartyId>,
     /// Current state of the protocol.
     pub state: RanDouShaState,
     pub protocol_output: Vec<DoubleShamirShare<F>>,
@@ -242,10 +242,10 @@ where
         drop(store);
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
-        for i in 0..self.n_parties {
-            if i >= self.threshold + 1 && i < self.n_parties {
-                let share_deg_t = r_deg_t[i].clone();
-                let share_deg_2t = r_deg_2t[i].clone();
+        for i in network.parties().iter().map(|i| i.id()) {
+            if i.raw() >= self.threshold + 1 && i.raw() < self.n_parties {
+                let share_deg_t = r_deg_t[i.raw()].clone();
+                let share_deg_2t = r_deg_2t[i.raw()].clone();
                 let reconst_message = ReconstructionMessage::new(share_deg_t, share_deg_2t);
 
                 // Serializing the reconstruction message and wrapping it into a generic message.
@@ -320,7 +320,7 @@ where
 
         // (2) Check if this party (self.id) is one of the designated checking parties.
         // Condition from the protocol: `t + 1 < i <= n`
-        if self.id >= self.threshold + 1 && self.id < self.n_parties {
+        if self.id.raw() >= self.threshold + 1 && self.id.raw() < self.n_parties {
             // (3) Check if enough shares have been received to reconstruct.
             // To reconstruct a (t) degree polynomial, you need t+1 distinct shares.
             // To reconstruct a (2t) degree polynomial, you need 2t+1 distinct shares.
@@ -365,7 +365,7 @@ where
                     ProtocolType::Randousha,
                     SessionId::pack_slot24(
                         msg.session_id.exec_id(),
-                        self.id as u8,
+                        self.id.raw() as u8,
                         msg.session_id.round_id(),
                     ),
                     msg.session_id.instance_id(),
@@ -469,12 +469,14 @@ mod tests {
     use ark_serialize::CanonicalSerialize;
     use std::sync::Arc;
     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+    use stoffelnet::network_utils::SenderId;
     use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_randousha_storage_limit_in_reconstruction_handler() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, tx, 5, 1, 2).unwrap();
+        let mut node =
+            RanDouShaNode::<Fr, Avid<SessionId>>::new(SenderId::new(0), tx, 5, 1, 2).unwrap();
         let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
 
         // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
@@ -490,7 +492,7 @@ mod tests {
             let mut payload = Vec::new();
             rec_msg.serialize_compressed(&mut payload).unwrap();
             let msg = RanDouShaMessage::new(
-                0,
+                SenderId::new(0),
                 RanDouShaMessageType::ReconstructMessage,
                 sid,
                 RanDouShaPayload::Reconstruct(payload),
@@ -517,7 +519,7 @@ mod tests {
         let mut payload = Vec::new();
         rec_msg.serialize_compressed(&mut payload).unwrap();
         let msg = RanDouShaMessage::new(
-            0,
+            SenderId::new(0),
             RanDouShaMessageType::ReconstructMessage,
             over_sid,
             RanDouShaPayload::Reconstruct(payload),
@@ -533,7 +535,8 @@ mod tests {
     #[tokio::test]
     async fn test_randousha_handle_invalid_sub_id() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, tx, 5, 1, 2).unwrap();
+        let mut node =
+            RanDouShaNode::<Fr, Avid<SessionId>>::new(SenderId::new(0), tx, 5, 1, 2).unwrap();
         let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
 
         // Create a session id with sub_id != 0
@@ -545,7 +548,7 @@ mod tests {
         let mut payload = Vec::new();
         rec_msg.serialize_compressed(&mut payload).unwrap();
         let msg = RanDouShaMessage::new(
-            0,
+            SenderId::new(0),
             RanDouShaMessageType::ReconstructMessage,
             session_id,
             RanDouShaPayload::Reconstruct(payload),

@@ -1,6 +1,7 @@
 use std::{ptr::slice_from_raw_parts, sync::Arc};
 
 use ark_bls12_381::Fr;
+use stoffelnet::network_utils::SenderId;
 
 use crate::{
     common::rbc::rbc::Bracha,
@@ -98,7 +99,7 @@ pub extern "C" fn new_honey_badger_mpc_client(
                 .map(|fr| Fr::from(fr.clone()))
                 .collect::<Vec<_>>();
             let client = HoneyBadgerMPCClient::<_, Bracha<SessionId>>::new(
-                id,
+                SenderId::new(id),
                 n,
                 t,
                 instance_id,

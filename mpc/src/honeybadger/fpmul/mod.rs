@@ -156,10 +156,10 @@ pub enum PRandMessageType {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct PRandBitDMessage {
     /// ID of the sender of the message.
-    pub sender_id: usize,
+    pub sender_id: PartyId,
     pub msg_type: PRandMessageType,
     pub session_id: SessionId,
-    pub tset: Vec<usize>,
+    pub tset: Vec<PartyId>,
     pub r_t: Vec<i64>,
     pub payload: Vec<u8>,
 }
@@ -167,10 +167,10 @@ pub struct PRandBitDMessage {
 impl PRandBitDMessage {
     /// Creates a new PRandBitDMessage.
     pub fn new(
-        sender_id: usize,
+        sender_id: PartyId,
         msg_type: PRandMessageType,
         session_id: SessionId,
-        tset: Vec<usize>,
+        tset: Vec<PartyId>,
         r_t: Vec<i64>,
         payload: Vec<u8>,
     ) -> Self {
@@ -191,8 +191,8 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     /// we store the full mask r_T = sum_i r_T^i
     pub batch_size: Option<usize>,
     pub output_open: HashMap<u8, Vec<F>>,
-    pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<i64>>>, // tset -> {sender -> val}
-    pub r_t: HashMap<Vec<usize>, Vec<i64>>,
+    pub riss_shares: HashMap<Vec<PartyId>, HashMap<PartyId, Vec<i64>>>, // tset -> {sender -> val}
+    pub r_t: HashMap<Vec<PartyId>, Vec<i64>>,
     pub no_of_tsets: Option<usize>,
     pub share_r_q: Option<Vec<RobustShare<F>>>, //smaller field
     pub share_r_p: Option<Vec<RobustShare<G>>>, // PrandInt output
@@ -222,8 +222,8 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
 
 pub fn build_all_f_polys<H: PrimeField>(
     n: usize,
-    tsets: Vec<Vec<usize>>,
-) -> Result<HashMap<Vec<usize>, DensePolynomial<H>>, ShareError> {
+    tsets: Vec<Vec<PartyId>>,
+) -> Result<HashMap<Vec<PartyId>, DensePolynomial<H>>, ShareError> {
     let domain =
         GeneralEvaluationDomain::<H>::new(n).ok_or_else(|| ShareError::NoSuitableDomain(n))?;
     tsets
@@ -231,7 +231,7 @@ pub fn build_all_f_polys<H: PrimeField>(
         .map(|tset| {
             // Construct interpolation points
             let xs = std::iter::once(H::zero())
-                .chain(tset.iter().map(|j| domain.element(*j)))
+                .chain(tset.iter().map(|j| domain.element(j.raw())))
                 .collect::<Vec<_>>();
             let ys = std::iter::once(H::one())
                 .chain(std::iter::repeat(H::zero()).take(tset.len()))
@@ -276,13 +276,13 @@ pub enum TruncPrError {
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct TruncPrMessage {
-    pub sender_id: usize,
+    pub sender_id: PartyId,
     pub session_id: SessionId,
     pub payload: Vec<u8>,
 }
 
 impl TruncPrMessage {
-    pub fn new(sender_id: usize, session_id: SessionId, share_bytes: Vec<u8>) -> Self {
+    pub fn new(sender_id: PartyId, session_id: SessionId, share_bytes: Vec<u8>) -> Self {
         Self {
             sender_id,
             session_id,
@@ -297,8 +297,8 @@ pub struct TruncPrStore<F: PrimeField> {
     pub k: usize,
     pub r_dash: Option<RobustShare<F>>, // [r'] = sum 2^i [r_i]
     pub share_a: Option<RobustShare<F>>,
-    pub open_buf: HashMap<usize, RobustShare<F>>, // sender_id -> share of (b + r)
-    pub share_d: Option<RobustShare<F>>,          // [d]
+    pub open_buf: HashMap<PartyId, RobustShare<F>>, // sender_id -> share of (b + r)
+    pub share_d: Option<RobustShare<F>>,            // [d]
 }
 
 impl<F: PrimeField> TruncPrStore<F> {

@@ -1,4 +1,5 @@
 use ark_bls12_381::Fr;
+use stoffelnet::network_utils::{PartyId, SenderId};
 use std::sync::Arc;
 use stoffelmpc_mpc::honeybadger::SessionId;
 use stoffelmpc_mpc::honeybadger::{
@@ -22,7 +23,7 @@ pub fn create_nodes(
         .zip(senders.into_iter())
         .map(|(id, sender)| {
             Arc::new(Mutex::new(DoubleShareNode::new(
-                id, n_parties, threshold, sender,
+                SenderId::new(id), n_parties, threshold, sender,
             )))
         })
         .collect()
@@ -36,7 +37,7 @@ pub fn create_nodes(
 pub fn spawn_receiver_tasks(
     nodes: &[Arc<Mutex<DoubleShareNode<Fr>>>],
     mut receivers: Vec<Receiver<Vec<u8>>>,
-    final_result_data_chan: Sender<(usize, Vec<DoubleShamirShare<Fr>>)>,
+    final_result_data_chan: Sender<(PartyId, Vec<DoubleShamirShare<Fr>>)>,
 ) {
     for node in nodes {
         let dousha_node = Arc::clone(&node);

@@ -36,7 +36,7 @@ use stoffelmpc_mpc::{
     },
 };
 use stoffelmpc_network::{bad_fake_network::BadFakeNetwork, fake_network::FakeNetwork};
-use stoffelnet::network_utils::ClientId;
+use stoffelnet::network_utils::{ClientId, SenderId};
 use tokio::{
     sync::mpsc,
     time::{sleep, timeout, Duration},
@@ -112,8 +112,8 @@ async fn randousha_e2e() {
                     .for_each(|(s_t, s_2t)| {
                         assert_eq!(s_t.degree, t);
                         assert_eq!(s_2t.degree, 2 * t);
-                        assert_eq!(s_t.id, node.id);
-                        assert_eq!(s_2t.id, node.id);
+                        assert_eq!(s_t.id, node.id.raw());
+                        assert_eq!(s_2t.id, node.id.raw());
                     });
                 sleep(Duration::from_millis(10)).await;
             }
@@ -181,7 +181,7 @@ async fn ransha_e2e() {
                 }
                 store.computed_r_shares.iter().for_each(|s_t| {
                     assert_eq!(s_t.degree, t);
-                    assert_eq!(s_t.id, node.id);
+                    assert_eq!(s_t.id, node.id.raw());
                 });
                 assert_eq!(store.computed_r_shares.len(), n_parties);
                 sleep(Duration::from_millis(10)).await;
@@ -198,7 +198,7 @@ async fn test_input_protocol_e2e() {
     setup_tracing();
     let n = 4;
     let t = 1;
-    let clientid: Vec<ClientId> = vec![100];
+    let clientid: Vec<ClientId> = vec![SenderId::new(100)];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     let mask_values: Vec<Fr> = vec![Fr::from(11), Fr::from(21)];
 
@@ -292,7 +292,7 @@ async fn gen_masks_for_input_e2e() {
     let n_parties = 4;
     let t = 1;
     let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
-    let clientid: Vec<ClientId> = vec![100];
+    let clientid: Vec<ClientId> = vec![SenderId::new(100)];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     //Setup the network for servers and client
     let (network, receivers, mut client_recv) = test_setup(n_parties, clientid.clone());
@@ -696,7 +696,7 @@ async fn mul_e2e_with_preprocessing_bad_net() {
     let n_parties = 5;
     let t = 1;
     let no_of_triples = 2 * t + 1;
-    let clientid: Vec<ClientId> = vec![100, 200];
+    let clientid: Vec<ClientId> = vec![SenderId::new(100), SenderId::new(200)];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     let no_of_multiplications = 2; // 10*10, 20*20
 
@@ -838,7 +838,7 @@ async fn mul_e2e_with_preprocessing_bad_net() {
 
     //----------------------------------------VALIDATE VALUES----------------------------------------
 
-    let output_clientid: ClientId = 200;
+    let output_clientid: ClientId = SenderId::new(200);
     // Each server sends its output shares
     for (i, server) in nodes.iter().enumerate() {
         let net = network.clone();
@@ -887,7 +887,7 @@ async fn mul_e2e_with_preprocessing() {
     let n_parties = 5;
     let t = 1;
     let no_of_triples = 2 * t + 1;
-    let clientid: Vec<ClientId> = vec![100, 200];
+    let clientid: Vec<ClientId> = vec![SenderId::new(100), SenderId::new(200)];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     let no_of_multiplications = 2; // 10*10, 20*20
 
@@ -1020,7 +1020,7 @@ async fn mul_e2e_with_preprocessing() {
 
     //----------------------------------------VALIDATE VALUES----------------------------------------
 
-    let output_clientid: ClientId = 200;
+    let output_clientid: ClientId = SenderId::new(200);
     // Each server sends its output shares
     for (i, server) in nodes.iter().enumerate() {
         let net = network.clone();
@@ -1300,7 +1300,7 @@ async fn test_output_protocol_e2e() {
     setup_tracing();
     let n = 4;
     let t = 1;
-    let clientid: usize = 200;
+    let clientid = SenderId::new(200);
     let output_values: Vec<Fr> = vec![Fr::from(123), Fr::from(456)];
 
     // Setup network
@@ -1311,7 +1311,9 @@ async fn test_output_protocol_e2e() {
 
     // Set up OutputServers and OutputClient
     let mut client = OutputClient::<Fr>::new(clientid, n, t, output_values.len()).unwrap();
-    let servers: Vec<OutputServer> = (0..n).map(|i| OutputServer::new(i, n).unwrap()).collect();
+    let servers: Vec<OutputServer> = (0..n)
+        .map(|i| OutputServer::new(SenderId::new(i), n).unwrap())
+        .collect();
 
     // Spawn receiver task for client
     let mut recv = client_recv.remove(&clientid).unwrap();

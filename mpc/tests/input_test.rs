@@ -13,6 +13,7 @@ use stoffelmpc_mpc::{
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
+use stoffelnet::network_utils::SenderId;
 use tokio::time::Duration;
 
 pub mod utils;
@@ -21,7 +22,7 @@ async fn test_multiple_clients_parallel_input() {
     setup_tracing();
     let n = 4;
     let t = 1;
-    let client_ids = vec![100, 101];
+    let client_ids = vec![SenderId::new(100), SenderId::new(101)];
     let inputs = vec![
         vec![Fr::from(10), Fr::from(20)],
         vec![Fr::from(30), Fr::from(40)],
@@ -109,7 +110,7 @@ async fn test_input_recovery_with_missing_server() {
     setup_tracing();
     let n = 4;
     let t = 1;
-    let clientid = 100;
+    let clientid = SenderId::new(100);
     let input_values = vec![Fr::from(10)];
     let mask_values = vec![Fr::from(11)];
 
@@ -178,7 +179,7 @@ async fn test_input_with_too_many_faulty_shares() {
     setup_tracing();
     let n = 10;
     let t = 3;
-    let client_id = 103;
+    let client_id = SenderId::new(103);
     let input_value = Fr::from(33);
     let mask_value = Fr::from(88);
 

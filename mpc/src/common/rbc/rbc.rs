@@ -5,7 +5,7 @@ use crate::common::{ProtocolSessionId, RbcWrapFn, RBC};
 use async_trait::async_trait;
 use bincode;
 use std::{collections::HashMap, sync::Arc};
-use stoffelnet::network_utils::Network;
+use stoffelnet::network_utils::{Network, Node, PartyId};
 use threshold_crypto::{
     serde_impl::SerdeSecret, PublicKeySet, SecretKeySet, SecretKeyShare, SignatureShare,
 };
@@ -29,10 +29,10 @@ use tracing::{debug, error, info, warn};
 /// 4. Party on recieving 2t+1 (READY, m) output m and terminate
 #[derive(Clone)]
 pub struct Bracha<Id: ProtocolSessionId + 'static> {
-    pub id: usize, // The ID of the initiator
-    pub n: usize,  // Total number of parties in the network
-    pub t: usize,  // Number of allowed malicious parties
-    pub k: usize,  //threshold (Not really used in Bracha)
+    pub id: PartyId, // The ID of the initiator
+    pub n: usize,    // Total number of parties in the network
+    pub t: usize,    // Number of allowed malicious parties
+    pub k: usize,    //threshold (Not really used in Bracha)
     pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<BrachaStore>>>>>,
     pub wrapper: RbcWrapFn<Id>,
 }
@@ -45,7 +45,7 @@ where
     type Id = Id;
     /// Creates a new Bracha instance with the given parameters.
     fn new(
-        id: usize,
+        id: PartyId,
         n: usize,
         t: usize,
         k: usize,
@@ -65,7 +65,7 @@ where
         })
     }
     /// Returns the unique identifier of the current party.
-    fn id(&self) -> usize {
+    fn id(&self) -> PartyId {
         self.id
     }
     async fn clear_store(&self) {
@@ -90,7 +90,7 @@ where
             payload.len(),
         );
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = session_id.as_u64(),
             msg_type = "INIT",
             "Broadcasting INIT message"
@@ -131,7 +131,7 @@ where
         &self,
         msg: Msg<Id>,
         net: Arc<N>,
-        recv: usize,
+        recv: PartyId,
     ) -> Result<(), RbcError> {
         let encoded = (self.wrapper)(msg)?;
         net.send(recv, &encoded).await?;
@@ -151,9 +151,9 @@ where
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = msg.session_id.as_u64(),
-            sender = msg.sender_id,
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "Handling INIT message"
         );
@@ -176,7 +176,7 @@ where
             );
             store.mark_echo(); // Mark that ECHO has been sent.
             info!(
-                id = self.id,
+                id = self.id.raw(),
                 session_id = msg.session_id.as_u64(),
                 msg_type = "ECHO",
                 "Broadcasting ECHO in response to INIT"
@@ -193,9 +193,9 @@ where
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = msg.session_id.as_u64(),
-            sender = msg.sender_id,
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "Handling ECHO message"
         );
@@ -207,7 +207,7 @@ where
         // Ignore the message if the session has already ended.
         if store.ended {
             debug!(
-                id = self.id,
+                id = self.id.raw(),
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring ECHO"
             );
@@ -233,7 +233,7 @@ where
                         msg.payload.clone().len(),
                     );
                     info!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
                         msg_type = "READY",
                         "Broadcasting READY after ECHO threshold met"
@@ -253,7 +253,7 @@ where
                         msg.payload.len(),
                     );
                     info!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
                         msg_type = "ECHO",
                         "Re-broadcasting ECHO due to threshold"
@@ -272,9 +272,9 @@ where
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = msg.session_id.as_u64(),
-            sender = msg.sender_id,
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "Handling READY message"
         );
@@ -287,7 +287,7 @@ where
         // Ignore the message if the session has already ended.
         if store.ended {
             debug!(
-                id = self.id,
+                id = self.id.raw(),
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring READY"
             );
@@ -314,7 +314,7 @@ where
                         msg.payload.clone().len(),
                     );
                     info!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
                         msg_type = "READY",
                         "Broadcasting READY after t+1 threshold"
@@ -334,7 +334,7 @@ where
                         msg.payload.len(),
                     );
                     info!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
                         msg_type = "ECHO",
                         "Broadcasting ECHO along with READY"
@@ -346,7 +346,7 @@ where
                 store.mark_ended();
                 store.set_output(msg.payload.clone());
                 info!(
-                    id = self.id,
+                    id = self.id.raw(),
                     session_id = msg.session_id.as_u64(),
                     output = ?msg.payload,
                     "Consensus achieved; RBC instance ended"
@@ -439,7 +439,7 @@ where
 
 #[derive(Clone)]
 pub struct Avid<Id: ProtocolSessionId> {
-    pub id: usize,                                             //Initiators ID
+    pub id: PartyId,                                           //Initiators ID
     pub n: usize,                                              //Network size
     pub t: usize,                                              //No. of malicious parties
     pub k: usize,                                              //Threshold
@@ -451,7 +451,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
     type Id = Id;
     /// Creates a new Avid instance with the given parameters.
     fn new(
-        id: usize,
+        id: PartyId,
         n: usize,
         t: usize,
         k: usize,
@@ -477,7 +477,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
             wrapper,
         })
     }
-    fn id(&self) -> usize {
+    fn id(&self) -> PartyId {
         self.id
     }
     async fn clear_store(&self) {
@@ -492,7 +492,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = session_id.as_u64(),
             msg_type = "SEND",
             "Sending SEND message for AVID to all parties"
@@ -510,13 +510,13 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         })?;
 
         // Generating fingerprint for each server and sending it to them along with root and respective shard
-        for i in 0..self.n {
-            let fingerprint = tree.proof(&[i]).to_bytes();
+        for i in net.parties().iter().map(|i| i.id()) {
+            let fingerprint = tree.proof(&[i.raw()]).to_bytes();
             let mut fp = Vec::with_capacity(root.len() + fingerprint.len());
             fp.extend_from_slice(&root);
             fp.extend_from_slice(&fingerprint);
 
-            let shard = shards[i].clone();
+            let shard = shards[i.raw()].clone();
             // Create an SEND message with the given fingerprint,root,shard and session ID.
             let msg = Msg::new(
                 self.id,
@@ -567,7 +567,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         &self,
         msg: Msg<Id>,
         net: Arc<N>,
-        recv: usize,
+        recv: PartyId,
     ) -> Result<(), RbcError> {
         let encoded = (self.wrapper)(msg)?;
         net.send(recv, &encoded).await?;
@@ -585,9 +585,9 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = msg.session_id.as_u64(),
-            sender = msg.sender_id,
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "Handling SEND message"
         );
@@ -616,7 +616,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                     );
                     store.mark_echo(); // Mark that ECHO has been sent to avoid resending it
                     info!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
                         msg_type = "ECHO",
                         "Broadcasting ECHO in response to SEND"
@@ -627,18 +627,18 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 }
                 Ok(false) => {
                     error!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
-                        sender = msg.sender_id,
+                        sender = msg.sender_id.raw(),
                         "Merkle proof verification failed on SEND message"
                     );
                     return Err(RbcError::Internal("Merkle proof failed in SEND".into()));
                 }
                 Err(e) => {
                     error!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
-                        sender = msg.sender_id,
+                        sender = msg.sender_id.raw(),
                         error = %e,
                         "Error during Merkle proof verification"
                     );
@@ -655,9 +655,9 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = msg.session_id.as_u64(),
-            sender = msg.sender_id,
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "Handling ECHO message"
         );
@@ -672,7 +672,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         // Ignore the message if the session has already ended.
         if store.ended {
             debug!(
-                id = self.id,
+                id = self.id.raw(),
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring ECHO"
             );
@@ -713,9 +713,9 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 }
                 Ok(false) => {
                     warn!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
-                        sender = msg.sender_id,
+                        sender = msg.sender_id.raw(),
                         "Merkle verification failed for ECHO"
                     );
                     return Err(RbcError::Internal(
@@ -724,9 +724,9 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 }
                 Err(e) => {
                     warn!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
-                        sender = msg.sender_id,
+                        sender = msg.sender_id.raw(),
                         error = %e,
                         "Merkle verification threw error"
                     );
@@ -743,9 +743,9 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = msg.session_id.as_u64(),
-            sender = msg.sender_id,
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "Handling READY message"
         );
@@ -760,7 +760,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         // Ignore the message if the session has already ended.
         if store.ended {
             debug!(
-                id = self.id,
+                id = self.id.raw(),
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring READY"
             );
@@ -817,7 +817,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                         store.set_output(output.clone()); //store the output
 
                         info!(
-                            id = self.id,
+                            id = self.id.raw(),
                             session_id = msg.session_id.as_u64(),
                             output = ?output,
                             "Consensus achieved; AVID instance ended"
@@ -827,9 +827,9 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 }
                 Ok(false) => {
                     warn!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
-                        sender = msg.sender_id,
+                        sender = msg.sender_id.raw(),
                         "Merkle verification failed in READY handler"
                     );
                     return Err(RbcError::Internal(
@@ -838,9 +838,9 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 }
                 Err(e) => {
                     warn!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
-                        sender = msg.sender_id,
+                        sender = msg.sender_id.raw(),
                         error = %e,
                         "Error during Merkle verification in READY handler"
                     );
@@ -854,7 +854,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
     async fn send_ready<N: Network + Send + Sync>(
         &self,
         msg: Msg<Id>,
-        shards_map: HashMap<usize, Vec<u8>>,
+        shards_map: HashMap<PartyId, Vec<u8>>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         let root = &msg.metadata[0..32];
@@ -862,7 +862,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         // Reconstruct all shards from existing shards
         let shards = decode_rs(shards_map, self.k, self.n - self.k)?;
         //Setting up payload and fingerprint for creating a message later
-        let payload = shards[self.id].clone();
+        let payload = shards[self.id.raw()].clone();
         let mut fingerprint = root.to_vec();
 
         // When a server reconstructs a shard, it also reconstructs the corresponding
@@ -871,7 +871,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             Ok(proof_map) => {
                 // Get fingerprint for self, for creating message later
                 let self_proof = proof_map.get(&(self.id)).cloned().unwrap_or_else(|| {
-                    tracing::warn!(index = self.id, "Missing Merkle proof");
+                    tracing::warn!(index = self.id.raw(), "Missing Merkle proof");
                     Vec::new()
                 });
                 fingerprint.extend(self_proof);
@@ -881,11 +881,11 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                     let mut fp = root.to_vec();
                     fp.extend(proof);
 
-                    match verify_merkle(id, self.n, fp, shards[id].clone()) {
+                    match verify_merkle(id, self.n, fp, shards[id.raw()].clone()) {
                         Ok(true) => {}
                         Ok(false) => {
                             error!(
-                                id = self.id,
+                                id = self.id.raw(),
                                 session_id = msg.session_id.as_u64(),
                                 "Merkle proof generation failed in {handler_type} handler. Aborting."
                             );
@@ -896,7 +896,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                         }
                         Err(e) => {
                             error!(
-                                id = self.id,
+                                id = self.id.raw(),
                                 session_id = msg.session_id.as_u64(),
                                 error = %e,
                                 "Error during Merkle verification in {handler_type} handler"
@@ -908,7 +908,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             }
             Err(e) => {
                 error!(
-                    id = self.id,
+                    id = self.id.raw(),
                     session_id = msg.session_id.as_u64(),
                     error = %e,
                     "Failed to generate Merkle proof map in {handler_type} handler"
@@ -928,7 +928,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             msg.msg_len,
         );
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = msg.session_id.as_u64(),
             msg_type = "READY",
             "Broadcasting READY in response to a {handler_type}"
@@ -983,7 +983,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
 
 #[derive(Clone)]
 pub struct ABA<Id: ProtocolSessionId> {
-    pub id: usize,                                            // The ID of the initiator
+    pub id: PartyId,                                          // The ID of the initiator
     pub n: usize,                        // Total number of parties in the network
     pub t: usize,                        // Number of allowed malicious parties
     pub k: usize,                        //threshold
@@ -998,7 +998,7 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
     type Id = Id;
     /// Creates a new ABA instance with the given parameters.
     fn new(
-        id: usize,
+        id: PartyId,
         n: usize,
         t: usize,
         k: usize,
@@ -1020,7 +1020,7 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
             wrapper,
         })
     }
-    fn id(&self) -> usize {
+    fn id(&self) -> PartyId {
         self.id
     }
     async fn clear_store(&self) {
@@ -1038,7 +1038,7 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = session_id.as_u64(),
             msg_type = "EST",
             "Broadcasting EST message"
@@ -1047,7 +1047,7 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
             Some(r) => r,
             None => {
                 error!(
-                    id = self.id,
+                    id = self.id.raw(),
                     session_id = session_id.as_u64(),
                     "Error while getting roundid at init"
                 );
@@ -1110,7 +1110,7 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
         &self,
         msg: Msg<Id>,
         net: Arc<N>,
-        recv: usize,
+        recv: PartyId,
     ) -> Result<(), RbcError> {
         let encoded = (self.wrapper)(msg)?;
         net.send(recv, &encoded).await?;
@@ -1128,8 +1128,8 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
     ) -> Result<(), RbcError> {
         info!(
             session_id = ?msg.session_id.as_u64(),
-            id = self.id,
-            sender = msg.sender_id,
+            id = self.id.raw(),
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "Handling EST message for round {}",msg.round_id,
         );
@@ -1142,7 +1142,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
         // Ignore the message if the session has already ended.
         if store.ended {
             debug!(
-                id = self.id,
+                id = self.id.raw(),
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring est"
             );
@@ -1154,7 +1154,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
             Some(v) => v,
             None => {
                 warn!(
-                    id = self.id,
+                    id = self.id.raw(),
                     session_id = msg.session_id.as_u64(),
                     "Error while getting value at est handler"
                 );
@@ -1213,9 +1213,9 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = msg.session_id.as_u64(),
-            sender = msg.sender_id,
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "Handling AUX message for round {}",msg.round_id
         );
@@ -1230,7 +1230,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
             Some(v) => v,
             None => {
                 warn!(
-                    id = self.id,
+                    id = self.id.raw(),
                     session_id = msg.session_id.as_u64(),
                     "Error while getting value at aux handler"
                 );
@@ -1243,7 +1243,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
         // Ignore the message if the session has already ended.
         if store.ended {
             debug!(
-                id = self.id,
+                id = self.id.raw(),
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring aux"
             );
@@ -1297,7 +1297,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                         Some(coin) => coin,
                         None => {
                             error!(
-                                id = cloned_self.id,
+                                id = cloned_self.id.raw(),
                                 session_id = cloned_msg.session_id.as_u64(),
                                 round = cloned_msg.round_id,
                                 "Failed to get coin value in time"
@@ -1313,7 +1313,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
 
                     if store.ended {
                         debug!(
-                            id = cloned_self.id,
+                            id = cloned_self.id.raw(),
                             session_id = cloned_msg.session_id.as_u64(),
                             "Session already ended, ignoring coin result"
                         );
@@ -1325,7 +1325,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                             Some(v) => v,
                             None => {
                                 error!(
-                                    id = cloned_self.id,
+                                    id = cloned_self.id.raw(),
                                     session_id = cloned_msg.session_id.as_u64(),
                                     round = cloned_msg.round_id,
                                     "Could not get the value from values set"
@@ -1337,7 +1337,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                             store.mark_ended();
                             store.set_output(v);
                             info!(
-                                id = cloned_self.id,
+                                id = cloned_self.id.raw(),
                                 session_id = cloned_msg.session_id.as_u64(),
                                 output = ?cloned_msg.payload,
                                 "Binary agreement achieved; ABA instance ended at round {}",msg.round_id
@@ -1345,7 +1345,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                         } else {
                             //adopts v as its new estimate
                             info!(
-                                id = cloned_self.id,
+                                id = cloned_self.id.raw(),
                                 session_id = cloned_msg.session_id.as_u64(),
                                 "Entering round {} with value",
                                 msg.round_id + 1
@@ -1360,7 +1360,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                                 .await
                                 .map_err(|err| {
                                     error!(
-                                        id = cloned_self.id,
+                                        id = cloned_self.id.raw(),
                                         session_id = cloned_msg.session_id.as_u64(),
                                         error = ?err,
                                         "Starting next round failed"
@@ -1371,7 +1371,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                         //If |values| = 2, both the value 0 and the value 1 are estimate values of correct processes.
                         //In this cases, pi adopts the value s of the common coin
                         info!(
-                            id = cloned_self.id,
+                            id = cloned_self.id.raw(),
                             session_id = cloned_msg.session_id.as_u64(),
                             "Entering round {} with coin",
                             msg.round_id + 1
@@ -1386,7 +1386,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                             .await
                             .map_err(|err| {
                                 error!(
-                                    id = cloned_self.id,
+                                    id = cloned_self.id.raw(),
                                     session_id = cloned_msg.session_id.as_u64(),
                                     error = ?err,
                                     "Starting next round failed"
@@ -1483,9 +1483,9 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
     //Store secret key shares and public keyshare set
     fn key_handler(&self, msg: Msg<Id>) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = msg.session_id.as_u64(),
-            sender = msg.sender_id,
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "Handling Key setup message"
         );
@@ -1508,9 +1508,9 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = msg.session_id.as_u64(),
-            sender = msg.sender_id,
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             round = msg.round_id,
             "Initialising common coin"
@@ -1520,7 +1520,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
             Some(sk) => sk,
             None => {
                 error!(
-                    id = self.id,
+                    id = self.id.raw(),
                     session_id = msg.session_id.as_u64(),
                     "Error while getting secret key share"
                 );
@@ -1548,8 +1548,8 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
         );
         info!(
             session_id = msg.session_id.as_u64(),
-            id = self.id,
-            sender = msg.sender_id,
+            id = self.id.raw(),
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "Broadcasting signature shares"
         );
@@ -1561,8 +1561,8 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
     async fn coin_handler(&self, msg: Msg<Id>) -> Result<(), RbcError> {
         info!(
             session_id = msg.session_id.as_u64(),
-            id = self.id,
-            sender = msg.sender_id,
+            id = self.id.raw(),
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "At coin handler"
         );
@@ -1604,7 +1604,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                 Some(pk) => pk,
                 None => {
                     error!(
-                        id = self.id,
+                        id = self.id.raw(),
                         session_id = msg.session_id.as_u64(),
                         "Error while getting pk key set"
                     );
@@ -1624,7 +1624,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
 
             //Verfiy the signature share
             if !pkset
-                .public_key_share(msg.sender_id as i32)
+                .public_key_share(msg.sender_id.raw() as i32)
                 .verify(&sigshare, msg.round_id.to_be_bytes())
             {
                 warn!("Invalid signature share from {}", msg.sender_id);
@@ -1644,7 +1644,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
             if count == self.t + 1 {
                 let shares = store.get_shares_map(msg.round_id);
                 if let Some(shares_map) = shares {
-                    let sig_shares: Vec<(usize, SignatureShare)> = shares_map
+                    let sig_shares: Vec<(PartyId, SignatureShare)> = shares_map
                         .iter()
                         .filter_map(|(&sender_id, bytes)| {
                             let array: &[u8; 96] = bytes.as_slice().try_into().ok()?;
@@ -1654,7 +1654,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                         })
                         .collect();
 
-                    match pkset.combine_signatures(sig_shares.iter().map(|(i, s)| (*i, s))) {
+                    match pkset.combine_signatures(sig_shares.iter().map(|(i, s)| (i.raw(), s))) {
                         Ok(signature) => {
                             if pkset
                                 .public_key()
@@ -1666,7 +1666,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                                 store.set_coin(msg.round_id, coin_bit);
                                 info!(
                                     session_id = msg.session_id.as_u64(),
-                                    id = self.id,
+                                    id = self.id.raw(),
                                     "Successfully combined and verified signature for round {} with coin = {}",
                                     msg.round_id,
                                     coin_bit
@@ -1697,12 +1697,11 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
 /// Might replace with a DKG.
 ///To do: Replace threshold signature crate with a more reliable option or build from scratch
 pub struct Dealer {
-    n: usize,
     t: usize,
 }
 impl Dealer {
-    pub fn new(n: usize, t: usize) -> Self {
-        Dealer { n, t }
+    pub fn new(t: usize) -> Self {
+        Dealer { t }
     }
 
     /// Perform key generation and send shares to all parties
@@ -1718,8 +1717,8 @@ impl Dealer {
 
         let pkset_serial = bincode::serialize(&pkset).expect("Failed to serialize pkset");
 
-        for i in 0..self.n {
-            let skshare = SerdeSecret(skset.secret_key_share(i as i32));
+        for i in net.parties().iter().map(|i| i.id()) {
+            let skshare = SerdeSecret(skset.secret_key_share(i.raw()));
             let serialized_share =
                 bincode::serialize(&skshare).map_err(|e| RbcError::SerializationError(e))?;
 
@@ -1749,7 +1748,7 @@ impl Dealer {
 /// the common subset
 #[derive(Clone)]
 pub struct ACS<Id: ProtocolSessionId> {
-    pub id: usize,                   // The ID of the initiator
+    pub id: PartyId,                 // The ID of the initiator
     pub n: usize,                    // Total number of parties in the network
     pub t: usize,                    // Number of allowed malicious parties
     pub k: usize,                    // threshold
@@ -1760,7 +1759,7 @@ pub struct ACS<Id: ProtocolSessionId> {
 impl<Id: ProtocolSessionId + 'static> ACS<Id> {
     /// Creates a new ACS instance with the given parameters.
     pub fn new(
-        id: usize,
+        id: PartyId,
         n: usize,
         t: usize,
         k: usize,
@@ -1788,9 +1787,9 @@ impl<Id: ProtocolSessionId + 'static> ACS<Id> {
         net: Arc<N>,
     ) -> Result<(), RbcError> {
         info!(
-            id = self.id,
+            id = self.id.raw(),
             session_id = msg.session_id.as_u64(),
-            sender = msg.sender_id,
+            sender = msg.sender_id.raw(),
             msg_type = %msg.msg_type,
             "Initiating common subset"
         );
@@ -1864,7 +1863,7 @@ impl<Id: ProtocolSessionId + 'static> ACS<Id> {
                                 .await
                                 .map_err(|err| {
                                     error!(
-                                        id = self_clone.id,
+                                        id = self_clone.id.raw(),
                                         session_id = sid,
                                         error = ?err,
                                         "ABA init failed"
@@ -1913,7 +1912,7 @@ impl<Id: ProtocolSessionId + 'static> ACS<Id> {
             let store_clone = self.store.clone();
             let self_clone = self.clone();
             drop(store);
-            info!(id = self.id, "Collect rbc");
+            info!(id = self.id.raw(), "Collect rbc");
             tokio::spawn(async move {
                 self_clone.check_and_finalize_output(store_clone).await;
             });
@@ -1950,7 +1949,7 @@ impl<Id: ProtocolSessionId + 'static> ACS<Id> {
 
         // Output the union of all values from parties in C
         info!(
-            id = self.id,
+            id = self.id.raw(),
             "ACS output finalized with {} values from {:?}",
             values.len(),
             consensus_indices
@@ -1963,6 +1962,8 @@ impl<Id: ProtocolSessionId + 'static> ACS<Id> {
 
 #[cfg(test)]
 mod tests {
+    use stoffelnet::network_utils::SenderId;
+
     use super::*;
     use crate::honeybadger::{SessionId, WrappedMessage};
     fn default_hb_rbc_wrap(msg: Msg<SessionId>) -> Result<Vec<u8>, RbcError> {
@@ -1973,20 +1974,20 @@ mod tests {
     #[test]
     fn test_bracha_avid_valid_params() {
         // Test for Bracha
-        let bracha = Bracha::new(0, 4, 1, 2, Arc::new(default_hb_rbc_wrap));
+        let bracha = Bracha::new(SenderId::new(0), 4, 1, 2, Arc::new(default_hb_rbc_wrap));
         assert!(
             bracha.is_ok(),
             "Expected valid parameters for Bracha to succeed"
         );
 
         // Test for Avid
-        let avid = Avid::new(0, 6, 1, 2, Arc::new(default_hb_rbc_wrap));
+        let avid = Avid::new(SenderId::new(0), 6, 1, 2, Arc::new(default_hb_rbc_wrap));
         assert!(
             avid.is_ok(),
             "Expected valid parameters for Avid to succeed"
         );
 
-        let avid = Avid::new(1, 9, 2, 4, Arc::new(default_hb_rbc_wrap));
+        let avid = Avid::new(SenderId::new(1), 9, 2, 4, Arc::new(default_hb_rbc_wrap));
         assert!(
             avid.is_ok(),
             "Expected valid parameters for Avid to succeed"
@@ -1996,7 +1997,7 @@ mod tests {
     #[test]
     fn test_bracha_avid_invalid_t() {
         // Test for Bracha
-        let bracha = Bracha::new(0, 4, 2, 2, Arc::new(default_hb_rbc_wrap)); // Invalid t
+        let bracha = Bracha::new(SenderId::new(0), 4, 2, 2, Arc::new(default_hb_rbc_wrap)); // Invalid t
         assert!(bracha.is_err(), "Expected invalid t to fail for Bracha");
         if let Err(msg) = bracha {
             assert!(
@@ -2006,7 +2007,7 @@ mod tests {
         }
 
         // Test for Avid
-        let avid = Avid::new(0, 6, 2, 2, Arc::new(default_hb_rbc_wrap)); // Invalid t (t >= ceil(n / 3))
+        let avid = Avid::new(SenderId::new(0), 6, 2, 2, Arc::new(default_hb_rbc_wrap)); // Invalid t (t >= ceil(n / 3))
         assert!(avid.is_err(), "Expected invalid t to fail for Avid");
         if let Err(msg) = avid {
             assert!(
@@ -2015,14 +2016,14 @@ mod tests {
             );
         }
 
-        let avid = Avid::new(1, 9, 4, 4, Arc::new(default_hb_rbc_wrap)); // Invalid t (t >= ceil(n / 3))
+        let avid = Avid::new(SenderId::new(1), 9, 4, 4, Arc::new(default_hb_rbc_wrap)); // Invalid t (t >= ceil(n / 3))
         assert!(avid.is_err(), "Expected invalid t to fail for Avid");
     }
 
     #[test]
     fn test_bracha_avid_invalid_k() {
         // Test for Avid with invalid k
-        let avid = Avid::new(0, 6, 1, 0, Arc::new(default_hb_rbc_wrap)); // Invalid k (k < t + 1)
+        let avid = Avid::new(SenderId::new(0), 6, 1, 0, Arc::new(default_hb_rbc_wrap)); // Invalid k (k < t + 1)
         assert!(avid.is_err(), "Expected invalid k to fail for Avid");
         if let Err(msg) = avid {
             assert!(
@@ -2031,28 +2032,28 @@ mod tests {
             );
         }
 
-        let avid = Avid::new(1, 9, 2, 7, Arc::new(default_hb_rbc_wrap)); // Invalid k (k > n - 2t)
+        let avid = Avid::new(SenderId::new(1), 9, 2, 7, Arc::new(default_hb_rbc_wrap)); // Invalid k (k > n - 2t)
         assert!(avid.is_err(), "Expected invalid k to fail for Avid");
 
         // Test for Bracha with valid parameters
-        let bracha = Bracha::new(0, 5, 1, 3, Arc::new(default_hb_rbc_wrap)); // Valid k for Bracha
+        let bracha = Bracha::new(SenderId::new(0), 5, 1, 3, Arc::new(default_hb_rbc_wrap)); // Valid k for Bracha
         assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
     }
 
     #[test]
     fn test_bracha_avid_edge_cases() {
         // n = 5, t = 1, k = 2: valid case for both Bracha and Avid
-        let bracha = Bracha::new(0, 5, 1, 2, Arc::new(default_hb_rbc_wrap));
+        let bracha = Bracha::new(SenderId::new(0), 5, 1, 2, Arc::new(default_hb_rbc_wrap));
         assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
-        let avid = Avid::new(0, 5, 1, 2, Arc::new(default_hb_rbc_wrap));
+        let avid = Avid::new(SenderId::new(0), 5, 1, 2, Arc::new(default_hb_rbc_wrap));
         assert!(avid.is_ok(), "Expected valid parameters for Avid");
 
         // n = 5, t = 2, k = 2: invalid for Avid as k cannot be n - 2 * t
-        let avid_invalid = Avid::new(0, 5, 2, 2, Arc::new(default_hb_rbc_wrap));
+        let avid_invalid = Avid::new(SenderId::new(0), 5, 2, 2, Arc::new(default_hb_rbc_wrap));
         assert!(avid_invalid.is_err(), "Expected invalid k to fail for Avid");
 
         // n = 5, t = 2: invalid as t cannot be >= ceil(n / 3)
-        let bracha_invalid = Bracha::new(0, 5, 2, 2, Arc::new(default_hb_rbc_wrap));
+        let bracha_invalid = Bracha::new(SenderId::new(0), 5, 2, 2, Arc::new(default_hb_rbc_wrap));
         assert!(
             bracha_invalid.is_err(),
             "Expected invalid t to fail for Bracha"
@@ -2062,17 +2063,17 @@ mod tests {
     #[test]
     fn test_bracha_avid_zero_t() {
         // t = 0 should always be valid for both Bracha and Avid as long as k >= 1
-        let bracha = Bracha::new(2, 3, 0, 1, Arc::new(default_hb_rbc_wrap));
+        let bracha = Bracha::new(SenderId::new(2), 3, 0, 1, Arc::new(default_hb_rbc_wrap));
         assert!(bracha.is_ok(), "Expected t = 0 to be valid for Bracha");
 
-        let avid = Avid::new(2, 5, 0, 1, Arc::new(default_hb_rbc_wrap));
+        let avid = Avid::new(SenderId::new(2), 5, 0, 1, Arc::new(default_hb_rbc_wrap));
         assert!(avid.is_ok(), "Expected t = 0 to be valid for Avid");
 
         // n = 3, t = 0, k = 2: valid for both Bracha and Avid
-        let bracha = Bracha::new(2, 3, 0, 2, Arc::new(default_hb_rbc_wrap));
+        let bracha = Bracha::new(SenderId::new(2), 3, 0, 2, Arc::new(default_hb_rbc_wrap));
         assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
 
-        let avid = Avid::new(3, 3, 0, 2, Arc::new(default_hb_rbc_wrap));
+        let avid = Avid::new(SenderId::new(3), 3, 0, 2, Arc::new(default_hb_rbc_wrap));
         assert!(avid.is_ok(), "Expected valid parameters for Avid");
     }
 }

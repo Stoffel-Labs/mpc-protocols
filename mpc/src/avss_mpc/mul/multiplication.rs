@@ -18,7 +18,7 @@ use tracing::{info, warn};
 
 #[derive(Clone, Debug)]
 pub struct Multiply<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
-    pub id: usize,
+    pub id: PartyId,
     pub n: usize,
     pub t: usize,
     pub mult_storage: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<MultStorage<F, G>>>>>>,
@@ -56,7 +56,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         beaver_triples: Vec<BeaverTriple<F, G>>,
         network: Arc<N>,
     ) -> Result<(), MulError> {
-        info!(party = self.id, "Initializing multiplication");
+        info!(party = self.id.raw(), "Initializing multiplication");
         if x.len() != y.len() || x.len() != beaver_triples.len() {
             return Err(MulError::InvalidInput(
                 "Length of x and y vectors and Beaver triples must match".to_string(),
@@ -96,7 +96,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
 
         let rbc_sessionid = AvssSessionId::new(
             session_id.calling_protocol().unwrap(),
-            AvssSessionId::pack_slot24(session_id.exec_id(), 0, self.id as u8),
+            AvssSessionId::pack_slot24(session_id.exec_id(), 0, self.id.raw() as u8),
             session_id.instance_id(),
         );
 
@@ -118,7 +118,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             return Ok(());
         }
         info!(
-            self_id = self.id,
+            self_id = self.id.raw(),
             "Received shares for reconstruction using RBC for session_id: {:?}", msg.session_id
         );
         if storage.received_shares.contains_key(&msg.sender) {

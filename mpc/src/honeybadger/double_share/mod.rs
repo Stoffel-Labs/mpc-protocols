@@ -94,7 +94,7 @@ where
 {
     /// Double shares resulting from the execution of the protocol.
     pub protocol_output: Vec<DoubleShamirShare<F>>,
-    pub share: BTreeMap<usize, DoubleShamirShare<F>>,
+    pub share: BTreeMap<PartyId, DoubleShamirShare<F>>,
 
     /// Current state of the protocol.
     pub state: ProtocolState,

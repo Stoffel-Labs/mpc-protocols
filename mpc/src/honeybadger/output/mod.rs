@@ -3,7 +3,7 @@ pub mod output;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::NetworkError;
+use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 use tokio::{sync::watch::error::RecvError, time::error::Elapsed};
 
@@ -37,12 +37,12 @@ pub enum OutputError {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct OutputMessage {
     /// ID of the sender of the message or the client
-    pub sender_id: usize,
+    pub sender_id: PartyId,
     pub payload: Vec<u8>,
 }
 
 impl OutputMessage {
-    pub fn new(sender_id: usize, payload: Vec<u8>) -> OutputMessage {
+    pub fn new(sender_id: PartyId, payload: Vec<u8>) -> OutputMessage {
         Self { sender_id, payload }
     }
 }

@@ -6,7 +6,7 @@ use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use stoffelnet::network_utils::Network;
+use stoffelnet::network_utils::{ClientId, Network, PartyId};
 use tokio::sync::watch::{channel, Receiver, Sender};
 use tokio::time::{timeout, Duration};
 use tracing::info;
@@ -24,19 +24,19 @@ use tracing::info;
 
 #[derive(Clone, Debug)]
 pub struct OutputServer {
-    pub id: usize,
+    pub id: PartyId,
     pub n: usize,
 }
 
 impl OutputServer {
-    pub fn new(id: usize, n: usize) -> Result<Self, OutputError> {
+    pub fn new(id: PartyId, n: usize) -> Result<Self, OutputError> {
         Ok(Self { id, n })
     }
 
     /// Called by each server to send its output shares to the client.
     pub async fn init<N: Network, F: FftField>(
         &self,
-        client_id: usize,
+        client_id: ClientId,
         shares: Vec<RobustShare<F>>,
         input_len: usize,
         net: Arc<N>,
@@ -65,12 +65,12 @@ impl OutputServer {
 
 pub struct OutputClientData<F: FftField> {
     pub output: Option<Vec<F>>,
-    pub output_shares: HashMap<usize, Vec<RobustShare<F>>>,
+    pub output_shares: HashMap<PartyId, Vec<RobustShare<F>>>,
 }
 
 #[derive(Clone)]
 pub struct OutputClient<F: FftField> {
-    pub client_id: usize,
+    pub client_id: ClientId,
     pub n: usize,
     pub t: usize,
     pub input_len: usize,
@@ -79,7 +79,7 @@ pub struct OutputClient<F: FftField> {
 }
 
 impl<F: FftField> OutputClient<F> {
-    pub fn new(id: usize, n: usize, t: usize, input_len: usize) -> Result<Self, OutputError> {
+    pub fn new(id: ClientId, n: usize, t: usize, input_len: usize) -> Result<Self, OutputError> {
         let (output_sender, output_receiver) = channel(OutputClientData::<F> {
             output: None,
             output_shares: HashMap::new(),
@@ -207,6 +207,7 @@ mod tests {
     use ark_bls12_381::Fr;
     use ark_ff::UniformRand;
     use ark_std::test_rng;
+    use stoffelnet::network_utils::SenderId;
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -214,7 +215,7 @@ mod tests {
         let n = 5;
         let t = 1;
         let input_len = 1;
-        let client_id = 7;
+        let client_id = SenderId::new(7);
         let mut rng = test_rng();
 
         let mut client = OutputClient::<Fr>::new(client_id, n, t, input_len).unwrap();
@@ -229,7 +230,7 @@ mod tests {
             vec![shares_vec[i].clone()]
                 .serialize_compressed(&mut payload)
                 .unwrap();
-            let msg = OutputMessage::new(i, payload);
+            let msg = OutputMessage::new(SenderId::new(i), payload);
             client.output_handler(msg).await.unwrap();
         }
 
@@ -241,7 +242,7 @@ mod tests {
         vec![shares_vec[2].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = OutputMessage::new(2, payload);
+        let msg = OutputMessage::new(SenderId::new(2), payload);
         client.output_handler(msg).await.unwrap();
 
         // get_output should now return Some(secret)
@@ -253,7 +254,7 @@ mod tests {
         let n = 5;
         let t = 1;
         let input_len = 1;
-        let client_id = 7;
+        let client_id = SenderId::new(7);
         let mut rng = test_rng();
 
         let mut client = OutputClient::<Fr>::new(client_id, n, t, input_len).unwrap();
@@ -268,7 +269,7 @@ mod tests {
             vec![shares_vec[i].clone()]
                 .serialize_compressed(&mut payload)
                 .unwrap();
-            let msg = OutputMessage::new(i, payload);
+            let msg = OutputMessage::new(SenderId::new(i), payload);
             client.output_handler(msg).await.unwrap();
         }
 
@@ -284,7 +285,7 @@ mod tests {
         vec![shares_vec[2].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = OutputMessage::new(2, payload);
+        let msg = OutputMessage::new(SenderId::new(2), payload);
         client.output_handler(msg).await.unwrap();
 
         // Now, call wait_for_output again (should succeed)

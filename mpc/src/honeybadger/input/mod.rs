@@ -2,7 +2,7 @@ use crate::{common::rbc::RbcError, honeybadger::robust_interpolate::InterpolateE
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::NetworkError;
+use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 use tokio::{sync::watch::error::RecvError, time::error::Elapsed};
 
@@ -41,7 +41,7 @@ pub enum InputMessageType {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct InputMessage {
     /// ID of the sender of the message or the client
-    pub sender_id: usize,
+    pub sender_id: PartyId,
     /// Type of the message according to the handler.
     pub msg_type: InputMessageType,
 
@@ -49,7 +49,7 @@ pub struct InputMessage {
 }
 
 impl InputMessage {
-    pub fn new(sender_id: usize, msg_type: InputMessageType, payload: Vec<u8>) -> InputMessage {
+    pub fn new(sender_id: PartyId, msg_type: InputMessageType, payload: Vec<u8>) -> InputMessage {
         Self {
             sender_id,
             msg_type,

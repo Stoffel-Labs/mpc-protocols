@@ -3,6 +3,7 @@ use std::{
     ops::{Add, Mul, Sub},
 };
 
+use stoffelnet::network_utils::PartyId;
 use thiserror::Error;
 
 /// Error type for GF(2^8) field and domain operations.
@@ -221,15 +222,15 @@ pub fn lagrange_interpolate_f2_8(x_vals: &[F2_8], y_vals: &[F2_8]) -> Poly {
 }
 pub fn build_all_f_polys_2_8(
     n: usize,
-    tsets: Vec<Vec<usize>>,
-) -> Result<HashMap<Vec<usize>, Poly>, F2_8Error> {
+    tsets: Vec<Vec<PartyId>>,
+) -> Result<HashMap<Vec<PartyId>, Poly>, F2_8Error> {
     let domain_2 = F2_8Domain::new(n)?;
     Ok(tsets
         .into_iter()
         .map(|tset| {
             // Construct interpolation points
             let xs = std::iter::once(F2_8::zero())
-                .chain(tset.iter().map(|&j| domain_2.element(j)))
+                .chain(tset.iter().map(|&j| domain_2.element(j.raw())))
                 .collect::<Vec<_>>();
             let ys = std::iter::once(F2_8::one())
                 .chain(std::iter::repeat(F2_8::zero()).take(tset.len()))

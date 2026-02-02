@@ -11,7 +11,7 @@ use ark_ff::FftField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::NetworkError;
+use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 
 /// Represents message type exchanged between network nodes during the batch reconstruction protocol.
@@ -25,13 +25,13 @@ pub enum BatchReconMsgType {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct BatchReconMsg {
     pub session_id: SessionId,
-    pub sender_id: usize,            //Sender id
+    pub sender_id: PartyId,            //Sender id
     pub msg_type: BatchReconMsgType, //Message type
     pub payload: Vec<u8>,            //field element
 }
 impl BatchReconMsg {
     pub fn new(
-        sender_id: usize,
+        sender_id: PartyId,
         session_id: SessionId,
         msg_type: BatchReconMsgType,
         payload: Vec<u8>,

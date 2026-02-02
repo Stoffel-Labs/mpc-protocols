@@ -21,6 +21,7 @@ use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
 };
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
+use stoffelnet::network_utils::{PartyId, SenderId};
 use tokio::sync::mpsc::{self};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
@@ -54,7 +55,7 @@ async fn test_init_reconstruct_flow() {
     let mut randousha_nodes = vec![];
     for (i, sender_ch) in (0..n_parties).zip(sender_channels) {
         randousha_nodes.push(initialize_node(
-            i,
+            SenderId::new(i),
             n_parties,
             degree_t,
             threshold + 1,
@@ -151,7 +152,7 @@ async fn test_reconstruct_handler() {
     let mut randousha_nodes = vec![];
     for (i, sender_ch) in (0..n_parties).zip(sender_channels) {
         randousha_nodes.push(initialize_node(
-            i,
+            SenderId::new(i),
             n_parties,
             threshold,
             threshold + 1,
@@ -174,7 +175,7 @@ async fn test_reconstruct_handler() {
             .map_err(RanDouShaError::ArkSerialization)
             .unwrap();
         let rds_message = RanDouShaMessage::new(
-            i,
+            SenderId::new(i),
             RanDouShaMessageType::ReconstructMessage,
             session_id,
             RanDouShaPayload::Reconstruct(bytes_rec_message),
@@ -203,7 +204,7 @@ async fn test_reconstruct_handler() {
                 match wrapped {
                     WrappedMessage::RanDouSha(msg) => {
                         if msg.msg_type == RanDouShaMessageType::OutputMessage {
-                            assert_eq!(msg.sender_id, receiver_id);
+                            assert_eq!(msg.sender_id.raw(), receiver_id);
                             assert!(matches!(msg.payload, RanDouShaPayload::Output(true)));
                             return; // we're done for this party
                         }
@@ -265,7 +266,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let mut randousha_nodes = vec![];
     for i in 0..n_parties {
         randousha_nodes.push(initialize_node(
-            i,
+            SenderId::new(i),
             n_parties,
             threshold,
             threshold + 1,
@@ -285,7 +286,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
             .map_err(RanDouShaError::ArkSerialization)
             .unwrap();
         let rds_message = RanDouShaMessage::new(
-            i,
+            SenderId::new(i),
             RanDouShaMessageType::ReconstructMessage,
             session_id,
             RanDouShaPayload::Reconstruct(bytes_rec_message),
@@ -314,7 +315,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
                 match wrapped {
                     WrappedMessage::RanDouSha(msg) => {
                         if msg.msg_type == RanDouShaMessageType::OutputMessage {
-                            assert_eq!(msg.sender_id, receiver_id);
+                            assert_eq!(msg.sender_id.raw(), receiver_id);
                             assert!(matches!(msg.payload, RanDouShaPayload::Output(false)));
                             return;
                         }
@@ -366,8 +367,14 @@ async fn test_output_handler() {
     let (sender_ch, _receiver_ch) = mpsc::channel(128);
 
     // create receiver randousha node
-    let mut randousha_node: RanDouShaNode<Fr, Avid<SessionId>> =
-        RanDouShaNode::new(receiver_id, sender_ch, n_parties, threshold, threshold + 1).unwrap();
+    let mut randousha_node: RanDouShaNode<Fr, Avid<SessionId>> = RanDouShaNode::new(
+        SenderId::new(receiver_id),
+        sender_ch,
+        n_parties,
+        threshold,
+        threshold + 1,
+    )
+    .unwrap();
     // call init_handler to create random share
     randousha_node
         .init(
@@ -387,7 +394,7 @@ async fn test_output_handler() {
     // first n-(t+1)-1 message should return error
     for i in 0..n_parties - (threshold + 2) {
         let output_message = RanDouShaMessage::new(
-            i,
+            SenderId::new(i),
             RanDouShaMessageType::OutputMessage,
             session_id,
             RanDouShaPayload::Output(true),
@@ -401,7 +408,7 @@ async fn test_output_handler() {
 
     // existed id should not be counted
     let output_message = RanDouShaMessage::new(
-        1,
+        SenderId::new(1),
         RanDouShaMessageType::OutputMessage,
         session_id,
         RanDouShaPayload::Output(true),
@@ -416,7 +423,7 @@ async fn test_output_handler() {
 
     // should return abort once received false outputMessage
     let output_message = RanDouShaMessage::new(
-        1,
+        SenderId::new(1),
         RanDouShaMessageType::OutputMessage,
         session_id,
         RanDouShaPayload::Output(false),
@@ -431,7 +438,7 @@ async fn test_output_handler() {
 
     // should return two t+1 shares once received n-(t+1) Ok message
     let output_message = RanDouShaMessage::new(
-        n_parties,
+        SenderId::new(n_parties),
         RanDouShaMessageType::OutputMessage,
         session_id,
         RanDouShaPayload::Output(true),
@@ -486,7 +493,7 @@ async fn randousha_e2e() {
 
     // create randousha nodes
     let randousha_nodes = create_nodes(n_parties, sender_channels, threshold, threshold + 1);
-    let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<DoubleShamirShare<Fr>>)>(100);
+    let (fin_send, mut fin_recv) = mpsc::channel::<(PartyId, Vec<DoubleShamirShare<Fr>>)>(100);
     // spawn tasks to process received messages
     let _set = spawn_receiver_tasks(
         randousha_nodes.clone(),
@@ -510,7 +517,7 @@ async fn randousha_e2e() {
 
     info!("nodes initialized");
 
-    let mut final_results = HashMap::<usize, Vec<DoubleShamirShare<Fr>>>::new();
+    let mut final_results = HashMap::<PartyId, Vec<DoubleShamirShare<Fr>>>::new();
     while let Some((id, final_shares)) = fin_recv.recv().await {
         final_results.insert(id, final_shares);
         if final_results.len() == 10 {
@@ -520,8 +527,8 @@ async fn randousha_e2e() {
                 let _ = double_shares.iter().map(|double_share| {
                     assert_eq!(double_share.degree_t.degree, threshold);
                     assert_eq!(double_share.degree_2t.degree, 2 * threshold);
-                    assert_eq!(double_share.degree_t.id, id);
-                    assert_eq!(double_share.degree_2t.id, id);
+                    assert_eq!(double_share.degree_t.id, id.raw());
+                    assert_eq!(double_share.degree_2t.id, id.raw());
                 });
             }
             break;
@@ -570,7 +577,7 @@ async fn test_e2e_reconstruct_mismatch() {
     // create randousha nodes
     let randousha_nodes = create_nodes(n_parties, sender_channels, threshold, threshold + 1);
 
-    let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<DoubleShamirShare<Fr>>)>(100);
+    let (fin_send, mut fin_recv) = mpsc::channel::<(PartyId, Vec<DoubleShamirShare<Fr>>)>(100);
 
     // Keep track of aborts
     let abort_count = Arc::new(AtomicUsize::new(0));
@@ -649,7 +656,7 @@ async fn test_e2e_wrong_degree() {
         receiver_channels.push(receiver);
     }
     let randousha_nodes = create_nodes(n_parties, sender_channels, threshold, threshold + 1);
-    let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<DoubleShamirShare<Fr>>)>(100);
+    let (fin_send, mut fin_recv) = mpsc::channel::<(PartyId, Vec<DoubleShamirShare<Fr>>)>(100);
 
     // Keep track of aborts
     let abort_count = Arc::new(AtomicUsize::new(0));

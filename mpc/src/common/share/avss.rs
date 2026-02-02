@@ -277,7 +277,7 @@ where
         };
 
         let pk_d: G = CanonicalDeserialize::deserialize_compressed(&msg.dealer_pk[..])?;
-        let cts: &Vec<Vec<u8>> = &msg.encrypted_shares[self.id];
+        let cts: &Vec<Vec<u8>> = &msg.encrypted_shares[self.id.raw()];
 
         let ss = pk_d.mul(self.sk_i);
         let key = kdf_from_point(&ss);

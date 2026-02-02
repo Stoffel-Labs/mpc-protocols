@@ -62,8 +62,8 @@ async fn generate_faulty_double_shares_e2e() {
             for (id, final_double_shares) in &resulting_shares {
                 assert_eq!(final_double_shares.len(), n_parties);
                 for double_share in final_double_shares {
-                    assert_eq!(*id, double_share.degree_t.id);
-                    assert_eq!(*id, double_share.degree_2t.id);
+                    assert_eq!(id.raw(), double_share.degree_t.id);
+                    assert_eq!(id.raw(), double_share.degree_2t.id);
                     assert_eq!(double_share.degree_t.degree, threshold);
                     assert_eq!(double_share.degree_2t.degree, 2 * threshold);
                 }

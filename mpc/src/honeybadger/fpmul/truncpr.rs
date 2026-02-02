@@ -9,13 +9,13 @@ use crate::{
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::{collections::HashMap, sync::Arc};
-use stoffelnet::network_utils::Network;
+use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;
 
 #[derive(Debug, Clone)]
 pub struct TruncPrNode<F: PrimeField, R: RBC> {
-    pub id: usize,
+    pub id: PartyId,
     pub n: usize,
     pub t: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TruncPrStore<F>>>>>>,
@@ -25,7 +25,7 @@ pub struct TruncPrNode<F: PrimeField, R: RBC> {
 
 impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     pub fn new(
-        id: usize,
+        id: PartyId,
         n: usize,
         t: usize,
         output_channel: Sender<SessionId>,
@@ -71,7 +71,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         session: SessionId,
         network: Arc<N>,
     ) -> Result<(), TruncPrError> {
-        info!(node_id = self.id, "TruncPr start");
+        info!(node_id = self.id.raw(), "TruncPr start");
 
         let calling_proto = match session.calling_protocol() {
             Some(proto) => proto,
@@ -90,7 +90,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         let b = (a + pow2_f::<F>(k - 1))?;
 
         // [r'] = sum_{i=0}^{m-1} 2^i [r_i]
-        let mut r_dash = RobustShare::new(F::zero(), self.id, self.t);
+        let mut r_dash = RobustShare::new(F::zero(), self.id.raw(), self.t);
         for (i, bit_share) in r_bits.iter().take(m).enumerate() {
             r_dash = (r_dash + (bit_share.clone() * pow2_f::<F>(i))?)?;
         }
@@ -110,7 +110,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
         let sessionid = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(session.exec_id(), 0, self.id as u8),
+            SessionId::pack_slot24(session.exec_id(), 0, self.id.raw() as u8),
             session.instance_id(),
         );
         self.rbc
@@ -125,8 +125,8 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
     async fn handle_open(&mut self, msg: TruncPrMessage) -> Result<(), TruncPrError> {
         info!(
-            node_id = self.id,
-            sender = msg.sender_id,
+            node_id = self.id.raw(),
+            sender = msg.sender_id.raw(),
             "TruncPr open handler"
         );
 
@@ -143,7 +143,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
         // dedup
         if s.open_buf.contains_key(&msg.sender_id) {
-            return Err(TruncPrError::Duplicate(msg.sender_id));
+            return Err(TruncPrError::Duplicate(msg.sender_id.raw()));
         }
         s.open_buf.insert(msg.sender_id, share_i);
 
@@ -199,12 +199,13 @@ mod tests {
     use crate::honeybadger::SessionId;
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
+    use stoffelnet::network_utils::SenderId;
     use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_truncpr_handle_open_invalid_sub_id() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut node = TruncPrNode::<Fr, Avid<SessionId>>::new(0, 5, 1, tx).unwrap();
+        let mut node = TruncPrNode::<Fr, Avid<SessionId>>::new(SenderId::new(0), 5, 1, tx).unwrap();
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(
@@ -218,7 +219,7 @@ mod tests {
         let mut payload = Vec::new();
         dummy_share.serialize_compressed(&mut payload).unwrap();
 
-        let msg = TruncPrMessage::new(0, session_id, payload);
+        let msg = TruncPrMessage::new(SenderId::new(0), session_id, payload);
 
         // Should return a SessionIdError due to sub_id != 0
         let result = node.handle_open(msg).await;

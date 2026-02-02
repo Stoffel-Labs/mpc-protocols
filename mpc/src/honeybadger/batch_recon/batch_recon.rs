@@ -17,7 +17,7 @@ use ark_serialize::CanonicalSerialize;
 use futures::lock::Mutex;
 use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
-use stoffelnet::network_utils::Network;
+use stoffelnet::network_utils::{Network, Node, PartyId};
 use tracing::{debug, error, info, warn};
 /// --------------------------BatchRecPub--------------------------
 ///
@@ -37,15 +37,15 @@ use tracing::{debug, error, info, warn};
 
 #[derive(Clone, Debug)]
 pub struct BatchReconNode<F: FftField> {
-    pub id: usize, // This node's unique identifier
-    pub n: usize,  // Total number of nodes/shares
+    pub id: PartyId, // This node's unique identifier
+    pub n: usize,    // Total number of nodes/shares
     pub t: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BatchReconStore<F>>>>>>, // Number of malicious parties
 }
 
 impl<F: FftField> BatchReconNode<F> {
     /// Creates a new `Node` instance.
-    pub fn new(id: usize, n: usize, t: usize) -> Result<Self, BatchReconError> {
+    pub fn new(id: PartyId, n: usize, t: usize) -> Result<Self, BatchReconError> {
         let store = Arc::new(Mutex::new(HashMap::new()));
         Ok(Self { id, n, t, store })
     }
@@ -78,13 +78,12 @@ impl<F: FftField> BatchReconNode<F> {
         let y_shares = apply_vandermonde(&vandermonde, &shares[..(self.t + 1)])?;
 
         info!(
-            id = self.id,
+            id = self.id.raw(),
             "initialized batch reconstruction with Vandermonde transform"
         );
 
-        for (j, y_j_share) in y_shares.into_iter().enumerate() {
-            info!(from = self.id, to = j, "Sending y_j shares ");
-
+        for (j, y_j_share) in net.parties().iter().zip(y_shares).map(|(i, s)| (i.id(), s)) {
+            info!(from = self.id.raw(), to = j.raw(), "Sending y_j shares ");
             let mut payload = Vec::new();
             y_j_share.share[0].serialize_compressed(&mut payload)?;
             let msg = BatchReconMsg::new(self.id, session_id, BatchReconMsgType::Eval, payload);
@@ -120,8 +119,8 @@ impl<F: FftField> BatchReconNode<F> {
         match msg.msg_type {
             BatchReconMsgType::Eval => {
                 debug!(
-                    self_id = self.id,
-                    from = msg.sender_id,
+                    self_id = self.id.raw(),
+                    from = msg.sender_id.raw(),
                     "Received Eval message"
                 );
                 let sender_id = msg.sender_id;
@@ -134,15 +133,15 @@ impl<F: FftField> BatchReconNode<F> {
                 let mut store = session_store.lock().await;
 
                 // Store the received evaluation share if it's from a new sender.
-                if !store.evals_received.iter().any(|s| s.id == sender_id) {
+                if !store.evals_received.iter().any(|s| s.id == sender_id.raw()) {
                     store
                         .evals_received
-                        .push(RobustShare::new(val, sender_id, self.t));
+                        .push(RobustShare::new(val, sender_id.raw(), self.t));
                 }
                 // Check if we have enough evaluation shares and haven't already computed our `y_j`.
                 if store.evals_received.len() >= 2 * self.t + 1 && store.y_j.is_none() {
                     info!(
-                        self_id = self.id,
+                        self_id = self.id.raw(),
                         "Enough Evals collected, interpolating y_j"
                     );
 
@@ -151,12 +150,12 @@ impl<F: FftField> BatchReconNode<F> {
                         Ok((_, value)) => {
                             store.y_j = Some(RobustShare {
                                 share: [value],
-                                id: self.id,
+                                id: self.id.raw(),
                                 degree: self.t,
                                 _sharetype: PhantomData,
                             });
                             drop(store);
-                            info!(node = self.id, "Broadcasting y_j value: {:?}", value);
+                            info!(node = self.id.raw(), "Broadcasting y_j value: {:?}", value);
 
                             let mut payload = Vec::new();
                             value
@@ -180,7 +179,10 @@ impl<F: FftField> BatchReconNode<F> {
                                 .map_err(|e| BatchReconError::NetworkError(e))?;
                         }
                         Err(e) => {
-                            warn!(self_id = self.id, "Interpolation of y_j failed: {:?}", e);
+                            warn!(
+                                self_id = self.id.raw(),
+                                "Interpolation of y_j failed: {:?}", e
+                            );
                             return Err(BatchReconError::InterpolateError(e));
                         }
                     }
@@ -189,8 +191,8 @@ impl<F: FftField> BatchReconNode<F> {
             }
             BatchReconMsgType::Reveal => {
                 debug!(
-                    self_id = self.id,
-                    from = msg.sender_id,
+                    self_id = self.id.raw(),
+                    from = msg.sender_id.raw(),
                     "Received Reveal message"
                 );
                 let sender_id = msg.sender_id;
@@ -203,15 +205,19 @@ impl<F: FftField> BatchReconNode<F> {
                 let mut store = session_store.lock().await;
 
                 // Store the received revealed `y_j` value if it's from a new sender.
-                if !store.reveals_received.iter().any(|s| s.id == sender_id) {
+                if !store
+                    .reveals_received
+                    .iter()
+                    .any(|s| s.id == sender_id.raw())
+                {
                     store
                         .reveals_received
-                        .push(RobustShare::new(y_j, sender_id, self.t));
+                        .push(RobustShare::new(y_j, sender_id.raw(), self.t));
                 }
                 // Check if we have enough revealed `y_j` values and haven't already reconstructed the secrets.
                 if store.reveals_received.len() >= 2 * self.t + 1 && store.secrets.is_none() {
                     info!(
-                        self_id = self.id,
+                        self_id = self.id.raw(),
                         "Enough Reveals collected, interpolating secrets"
                     );
                     // Attempt to interpolate the polynomial whose coefficients are the original secrets.
@@ -221,7 +227,10 @@ impl<F: FftField> BatchReconNode<F> {
                             // Resize the coefficient vector to `t + 1` to get all secrets.
                             result.resize(self.t + 1, F::zero());
                             store.secrets = Some(result.clone());
-                            info!(self_id = self.id, "Secrets successfully reconstructed");
+                            info!(
+                                self_id = self.id.raw(),
+                                "Secrets successfully reconstructed"
+                            );
 
                             // Send the finalization message back to the triple generation or the
                             // multiplication protocol.
@@ -295,7 +304,7 @@ impl<F: FftField> BatchReconNode<F> {
                         }
                         Err(e) => {
                             error!(
-                                self_id = self.id, error = ?e,
+                                self_id = self.id.raw(), error = ?e,
                                 "Final secrets interpolation failed "
                             );
                             return Err(BatchReconError::InterpolateError(e));

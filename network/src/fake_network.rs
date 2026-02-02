@@ -3,7 +3,7 @@ use futures::future::join_all;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
-use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
+use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId, SenderId};
 
 /// Simulates a network for testing purposes. The channels for the network are simulated as `tokio`
 /// channels.
@@ -33,7 +33,7 @@ impl FakeNetwork {
         let mut node_channels = Vec::new();
         let mut nodes = Vec::new();
         let mut receivers = Vec::new();
-        for id in 0..n_nodes {
+        for id in (0..n_nodes).map(|i| SenderId::from(i)) {
             let (sender, receiver) = mpsc::channel(config.channel_buff_size);
             node_channels.push(sender);
             nodes.push(FakeNode::new(id));
@@ -69,7 +69,7 @@ impl Network for FakeNetwork {
     type NetworkConfig = FakeNetworkConfig;
 
     async fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
-        if let Some(sender) = self.node_channels.get(recipient) {
+        if let Some(sender) = self.node_channels.get(recipient.raw()) {
             sender
                 .send(message.to_vec())
                 .await
@@ -168,7 +168,7 @@ impl Node for FakeNode {
     }
 
     fn scalar_id<F: ark_ff::Field>(&self) -> F {
-        F::from(self.id as u64)
+        F::from(self.id.raw() as u64)
     }
 }
 
@@ -204,8 +204,8 @@ mod tests {
         assert_eq!(network.nodes.len(), n_nodes);
         assert_eq!(channels.len(), n_nodes);
 
-        for i in 0..n_nodes {
-            assert!(channels.get(i).is_some());
+        for i in (0..n_nodes).map(|i| SenderId::from(i)) {
+            assert!(channels.get(i.raw()).is_some());
             assert!(network.node(i).is_some());
             assert_eq!(network.node(i).unwrap().id(), i);
         }
@@ -218,7 +218,7 @@ mod tests {
         let (network, mut receivers, _) = FakeNetwork::new(n_nodes, None, config);
 
         let sender_id = 1;
-        let recipient_id = 2;
+        let recipient_id = SenderId::from(2);
         let message = b"hello";
 
         // Send a message from the perspective of the network
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(send_result.unwrap(), message.len());
 
         // Get the recipient node and try to receive the message
-        let recipient_node = &mut receivers[recipient_id];
+        let recipient_node = &mut receivers[recipient_id.raw()];
         let received_message_result = recipient_node.try_recv();
 
         assert!(received_message_result.is_ok());
@@ -270,12 +270,12 @@ mod tests {
         use ark_bls12_381::Fr;
 
         //let (sender, receiver) = mpsc::channel(100);
-        let node_id = 123;
+        let node_id = SenderId::new(123);
         let node = FakeNode::new(node_id);
 
         assert_eq!(node.id(), node_id);
         let scalar_id: Fr = node.scalar_id();
-        assert_eq!(scalar_id, Fr::from(node_id as u64));
+        assert_eq!(scalar_id, Fr::from(node_id.raw() as u64));
         //drop(sender);
     }
 
@@ -302,7 +302,7 @@ mod tests {
         };
 
         // Now, sending should fail
-        let send_result = network.send(recipient_id, message).await;
+        let send_result = network.send(SenderId::new(recipient_id), message).await;
         assert!(
             send_result.is_err(),
             "Send should fail after sender is closed."

@@ -5,6 +5,7 @@ use ark_bls12_381::{Fr, G1Projective as G};
 use ark_ec::PrimeGroup;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
+use stoffelnet::network_utils::SenderId;
 use std::sync::Arc;
 use stoffelmpc_mpc::avss_mpc::{AvssSessionId, AvssWrappedMessage, ProtocolType};
 use stoffelmpc_mpc::common::ProtocolSessionId;
@@ -52,7 +53,7 @@ async fn test_avss_end_to_end() {
     let mut nodes: Vec<AvssNode<Fr, Avid<AvssSessionId>, G, AvssSessionId>> = (0..n)
         .map(|i| {
             AvssNode::new(
-                i,
+                SenderId::new(i),
                 n,
                 t,
                 sks[i],

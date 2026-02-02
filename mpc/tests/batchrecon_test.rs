@@ -5,6 +5,7 @@ mod tests {
     use ark_bls12_381::Fr;
     use ark_ff::Zero;
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+    use stoffelnet::network_utils::SenderId;
     use std::time::Duration;
     use stoffelmpc_mpc::{
         common::{
@@ -52,7 +53,7 @@ mod tests {
                     .share
                     .serialize_compressed(&mut payload)
                     .expect("serialization should not fail");
-                let msg = BatchReconMsg::new(i, session_id, BatchReconMsgType::Eval, payload);
+                let msg = BatchReconMsg::new(SenderId::new(i), session_id, BatchReconMsgType::Eval, payload);
 
                 inboxes[j].push(msg);
             }
@@ -71,7 +72,7 @@ mod tests {
                         .expect("deserialization should not fail");
 
                     if seen.insert(i) {
-                        received.push(RobustShare::new(val, i, t));
+                        received.push(RobustShare::new(val, i.raw(), t));
                         if received.len() == 2 * t + 1 {
                             break;
                         }
@@ -137,7 +138,7 @@ mod tests {
 
         let mut handles = vec![];
         for i in 0..n {
-            let mut node = BatchReconNode::new(i, n, t).unwrap();
+            let mut node = BatchReconNode::new(SenderId::new(i), n, t).unwrap();
             let shares = all_shares[i].clone();
             let net_clone = Arc::clone(&net);
             let mut recv = receivers.remove(0);

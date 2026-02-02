@@ -4,6 +4,7 @@ use crate::utils::test_utils::{
 use ark_bls12_381::Fr;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
+use stoffelnet::network_utils::SenderId;
 use std::sync::Arc;
 use stoffelmpc_mpc::{
     common::{rbc::rbc::Avid, ProtocolSessionId, SecretSharingScheme, RBC},
@@ -76,7 +77,7 @@ async fn test_reconstruct_handler_incorrect_share() {
             .map_err(RanShaError::ArkSerialization)
             .unwrap();
         let message = RanShaMessage::new(
-            i,
+            SenderId::new(i),
             RanShaMessageType::ReconstructMessage,
             session_id,
             RanShaPayload::Reconstruct(bytes_rec_message),
@@ -108,7 +109,7 @@ async fn test_reconstruct_handler_incorrect_share() {
                 match wrapped {
                     WrappedMessage::RanSha(msg) => {
                         if msg.msg_type == RanShaMessageType::OutputMessage {
-                            assert_eq!(msg.sender_id, receiver_id);
+                            assert_eq!(msg.sender_id.raw(), receiver_id);
                             assert!(matches!(msg.payload, RanShaPayload::Output(false)));
                             barrier_i.wait().await;
                             return;
@@ -160,7 +161,7 @@ async fn test_output_handler() {
 
     let (network, _receivers, _) = test_setup(n_parties, vec![]);
     let (_, shares_si_t) = construct_e2e_input_ransha(n_parties, degree_t);
-    let receiver_id = 1;
+    let receiver_id = SenderId::new(1);
     let (sender, _receiver_ch) = mpsc::channel(128);
 
     // create receiver randousha node
@@ -169,7 +170,7 @@ async fn test_output_handler() {
     // call init_handler to create random share
     ransha_node
         .init_ransha(
-            shares_si_t[receiver_id].clone(),
+            shares_si_t[receiver_id.raw()].clone(),
             session_id,
             Arc::clone(&network),
         )
@@ -181,7 +182,7 @@ async fn test_output_handler() {
     // first 2t-1 message should return error
     for i in 0..(2 * threshold - 1) {
         let output_message = RanShaMessage::new(
-            i,
+            SenderId::new(i),
             RanShaMessageType::OutputMessage,
             session_id,
             RanShaPayload::Output(true),
@@ -195,7 +196,7 @@ async fn test_output_handler() {
 
     // existed id should not be counted
     let output_message = RanShaMessage::new(
-        1,
+        SenderId::new(1),
         RanShaMessageType::OutputMessage,
         session_id,
         RanShaPayload::Output(true),
@@ -209,7 +210,7 @@ async fn test_output_handler() {
 
     // should return abort once received false outputMessage
     let output_message = RanShaMessage::new(
-        1,
+        SenderId::new(1),
         RanShaMessageType::OutputMessage,
         session_id,
         RanShaPayload::Output(false),
@@ -222,7 +223,7 @@ async fn test_output_handler() {
     assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold - 1));
 
     let output_message = RanShaMessage::new(
-        n_parties,
+        SenderId::new(n_parties),
         RanShaMessageType::OutputMessage,
         session_id,
         RanShaPayload::Output(true),

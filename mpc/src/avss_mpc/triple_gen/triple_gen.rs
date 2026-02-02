@@ -21,7 +21,7 @@ use tracing::info;
 
 #[derive(Clone, Debug)]
 pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
-    pub id: usize,
+    pub id: PartyId,
     pub n_parties: usize,
     pub threshold: usize,
     pub avss: AvssNode<F, R, C, AvssSessionId>,
@@ -109,13 +109,13 @@ where
             .map(|(s1, s2)| s1.feldmanshare.share[0] * s2.feldmanshare.share[0])
             .collect();
         // === Step 2: dealers AVSS-share the batch vector ===
-        let is_dealer = self.id < m;
+        let is_dealer = self.id.raw() < m;
         if is_dealer {
             let avss_sid = AvssSessionId::new(
                 session_id.calling_protocol().unwrap(),
                 AvssSessionId::pack_slot24(
                     session_id.exec_id(),
-                    self.id as u8,
+                    self.id.raw() as u8,
                     session_id.round_id(),
                 ),
                 session_id.instance_id(),
@@ -192,7 +192,12 @@ where
                         }
                     }
 
-                    c_out.push(FeldmanShamirShare::new(c_val_j, self.id, t, c_comms_j)?);
+                    c_out.push(FeldmanShamirShare::new(
+                        c_val_j,
+                        self.id.raw(),
+                        t,
+                        c_comms_j,
+                    )?);
                 }
                 let triples: Vec<BeaverTriple<F, C>> = c_out
                     .iter()

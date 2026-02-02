@@ -56,7 +56,7 @@ pub fn setup_tracing() {
 #[cfg(debug_assertions)]
 static MAX: Mutex<Duration> = Mutex::const_new(Duration::ZERO);
 
-use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
+use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId, SenderId};
 
 /// 1. Check if there are any messages whose delay has not yet expired. If not, go to step 5.
 /// 2. Get the next message with the smallest delay.
@@ -97,7 +97,7 @@ async fn send_next_msgs(
             }
 
             // 3.
-            let result = node_channels[msg.1 .0].send(msg.1 .1.to_vec()).await;
+            let result = node_channels[msg.1 .0.raw()].send(msg.1 .1.to_vec()).await;
             if let Err(e) = result {
                 panic!("network thread encountered error {}", e);
             }
@@ -192,7 +192,7 @@ impl BadFakeNetwork {
         let mut node_channels = Vec::new();
         let mut nodes = Vec::new();
         let mut receivers = Vec::new();
-        for id in 0..n_nodes {
+        for id in (0..n_nodes).map(|i| SenderId::from(i)) {
             let (sender, receiver) = mpsc::channel(config.channel_buff_size);
             node_channels.push(sender);
             nodes.push(FakeBadNode::new(id));
@@ -310,8 +310,8 @@ impl Network for BadFakeNetwork {
     // Sends a message from a node to the delaying thread, which later forwards it to the right
     // node.
     async fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
-        if self.net_channels.get(recipient).is_some() {
-            self.net_channels[recipient]
+        if self.net_channels.get(recipient.raw()).is_some() {
+            self.net_channels[recipient.raw()]
                 .send((recipient, message.to_vec()))
                 .await
                 .map_err(|_| NetworkError::SendError)?;
@@ -336,7 +336,7 @@ impl Network for BadFakeNetwork {
             .net_channels
             .iter()
             .enumerate()
-            .map(|(i, sender)| sender.send((i, msg.clone())));
+            .map(|(i, sender)| sender.send((SenderId::new(i), msg.clone())));
 
         let results = join_all(futures).await;
 
@@ -412,7 +412,7 @@ impl Node for FakeBadNode {
     }
 
     fn scalar_id<F: ark_ff::Field>(&self) -> F {
-        F::from(self.id as u64)
+        F::from(self.id.raw() as u64)
     }
 }
 
@@ -451,8 +451,8 @@ mod tests {
         assert_eq!(network.nodes.len(), n_nodes);
         assert_eq!(channels.len(), n_nodes);
 
-        for i in 0..n_nodes {
-            assert!(channels.get(i).is_some());
+        for i in (0..n_nodes).map(|i| SenderId::from(i)) {
+            assert!(channels.get(i.raw()).is_some());
             assert!(network.node(i).is_some());
             assert_eq!(network.node(i).unwrap().id(), i);
         }
@@ -475,7 +475,7 @@ mod tests {
         );
 
         let sender_id = 1;
-        let recipient_id = 2;
+        let recipient_id = SenderId::new(2);
         let message = b"hello";
 
         // Send a message from the perspective of the network
@@ -486,7 +486,7 @@ mod tests {
         assert_eq!(send_result.unwrap(), message.len());
 
         // Get the recipient node and try to receive the message
-        let recipient_node = &mut receivers[recipient_id];
+        let recipient_node = &mut receivers[recipient_id.raw()];
         let received_message_result = recipient_node.try_recv();
 
         assert!(received_message_result.is_ok());
@@ -543,12 +543,12 @@ mod tests {
         use ark_bls12_381::Fr;
 
         //let (sender, receiver) = mpsc::channel(100);
-        let node_id = 123;
+        let node_id = SenderId::new(123);
         let node = FakeBadNode::new(node_id);
 
         assert_eq!(node.id(), node_id);
         let scalar_id: Fr = node.scalar_id();
-        assert_eq!(scalar_id, Fr::from(node_id as u64));
+        assert_eq!(scalar_id, Fr::from(node_id.raw() as u64));
         //drop(sender);
     }
 
@@ -584,7 +584,7 @@ mod tests {
         };
 
         // Now, sending should fail
-        let send_result = network.send(recipient_id, message).await;
+        let send_result = network.send(SenderId::new(recipient_id), message).await;
         assert!(
             send_result.is_err(),
             "Send should fail after sender is closed."
@@ -617,7 +617,9 @@ mod tests {
             let message = i.to_be_bytes();
 
             // Send a message from the perspective of the network
-            let send_result = network.send(recipient_id, &message[..]).await;
+            let send_result = network
+                .send(SenderId::new(recipient_id), &message[..])
+                .await;
 
             assert!(send_result.is_ok());
             assert_eq!(send_result.unwrap(), message.len());

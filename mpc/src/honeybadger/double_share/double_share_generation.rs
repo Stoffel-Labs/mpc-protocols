@@ -10,7 +10,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use itertools::izip;
 use std::{collections::BTreeMap, sync::Arc};
-use stoffelnet::network_utils::{Network, PartyId};
+use stoffelnet::network_utils::{Network, Node, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::{info, warn};
 
@@ -119,7 +119,11 @@ where
         let shares_deg_2t =
             NonRobustShare::compute_shares(secret, self.n_parties, 2 * self.threshold, None, rng)?;
 
-        for (recipient_id, (share_t, share_2t)) in izip!(shares_deg_t, shares_deg_2t).enumerate() {
+        for (recipient_id, share_t, share_2t) in izip!(
+            network.parties().into_iter().map(|i| i.id()),
+            shares_deg_t,
+            shares_deg_2t
+        ) {
             // Create and serialize the payload.
             let double_share = DoubleShamirShare::new(share_t, share_2t);
             let mut payload = Vec::new();
@@ -169,7 +173,7 @@ where
             session_id = recv_message.session_id.as_u64(),
             "party {:?} received double shares from {:?}", self.id, recv_message.sender_id,
         );
-        dousha_storage.reception_tracker[recv_message.sender_id] = true;
+        dousha_storage.reception_tracker[recv_message.sender_id.raw()] = true;
 
         // Check if the protocol has reached an end
         if dousha_storage

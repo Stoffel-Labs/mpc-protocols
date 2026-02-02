@@ -12,6 +12,7 @@ use stoffelmpc_mpc::honeybadger::{
     robust_interpolate::robust_interpolate::RobustShare,
     ProtocolType, SessionId, WrappedMessage,
 };
+use stoffelnet::network_utils::{PartyId, SenderId};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
@@ -91,7 +92,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
 
     // 4. Create nodes
     let mut mul_nodes: Vec<_> = (0..n_parties)
-        .map(|id| Multiply::<Fr, Avid<SessionId>>::new(id, n_parties, t).unwrap())
+        .map(|id| Multiply::<Fr, Avid<SessionId>>::new(SenderId::new(id), n_parties, t).unwrap())
         .collect();
 
     // 5. Init multiplication at each node
@@ -184,7 +185,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
     info!("receiver task spawned");
 
     // 7. Collect results
-    let mut final_results = HashMap::<usize, Vec<RobustShare<Fr>>>::new();
+    let mut final_results = HashMap::<PartyId, Vec<RobustShare<Fr>>>::new();
     for i in 0..n_parties {
         let node = &mul_nodes[i];
         let final_shares = node
@@ -199,7 +200,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
                 assert_eq!(mul_shares.len(), no_of_mul);
                 let _ = mul_shares.iter().map(|mul_share| {
                     assert_eq!(mul_share.degree, t);
-                    assert_eq!(mul_share.id, node.id);
+                    assert_eq!(mul_share.id, node.id.raw());
                 });
             }
             break;
@@ -211,7 +212,8 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
 
     for pid in 0..n_parties {
         for i in 0..no_of_mul {
-            per_multiplication_shares[i].push(final_results.get(&pid).unwrap()[i].clone());
+            per_multiplication_shares[i]
+                .push(final_results.get(&SenderId::new(pid)).unwrap()[i].clone());
         }
     }
 

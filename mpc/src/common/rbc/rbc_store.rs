@@ -3,13 +3,14 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
+use stoffelnet::network_utils::PartyId;
 use tokio::sync::Notify;
 
 use crate::common::ProtocolSessionId;
 /// Generic message type used in Reliable Broadcast (RBC) communication.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Msg<Id: ProtocolSessionId> {
-    pub sender_id: usize,         // ID of the sender node
+    pub sender_id: PartyId,       // ID of the sender node
     pub session_id: Id,           // Unique session ID for each broadcast instance
     pub round_id: usize,          //Round ID
     pub payload: Vec<u8>, // Actual data being broadcasted (e.g., bytes of a secret or message)
@@ -25,7 +26,7 @@ fn hash_message(message: &[u8]) -> Vec<u8> {
 impl<Id: ProtocolSessionId> Msg<Id> {
     /// Constructor to create a new message.
     pub fn new(
-        sender_id: usize,
+        sender_id: PartyId,
         session_id: Id,
         round_id: usize,
         payload: Vec<u8>,
@@ -88,14 +89,14 @@ impl fmt::Display for MsgType {
 /// Bracha's RBC involves thresholds for ECHO and READY messages to achieve consensus.
 #[derive(Default)]
 pub struct BrachaStore {
-    pub echo_senders: HashMap<usize, bool>, // Which parties sent ECHO (sender_id -> true)
-    pub ready_senders: HashMap<usize, bool>, // Which parties sent READY (sender_id -> true)
-    pub echo_count: HashMap<Vec<u8>, usize>, // Count of ECHO messages per payload
+    pub echo_senders: HashMap<PartyId, bool>, // Which parties sent ECHO (sender_id -> true)
+    pub ready_senders: HashMap<PartyId, bool>, // Which parties sent READY (sender_id -> true)
+    pub echo_count: HashMap<Vec<u8>, usize>,  // Count of ECHO messages per payload
     pub ready_count: HashMap<Vec<u8>, usize>, // Count of READY messages per payload
-    pub ended: bool,                        // True if consensus is reached and protocol ended
-    pub echo: bool,                         // True if this party already sent an ECHO
-    pub ready: bool,                        // True if this party already sent a READY
-    pub output: Vec<u8>,                    // Agreed value after consensus
+    pub ended: bool,                          // True if consensus is reached and protocol ended
+    pub echo: bool,                           // True if this party already sent an ECHO
+    pub ready: bool,                          // True if this party already sent a READY
+    pub output: Vec<u8>,                      // Agreed value after consensus
 }
 
 impl BrachaStore {
@@ -113,21 +114,21 @@ impl BrachaStore {
         }
     }
     /// Returns true if the given sender_id has sent an echo (i.e., is set to true in echo_senders).
-    pub fn has_echo(&self, sender_id: usize) -> bool {
+    pub fn has_echo(&self, sender_id: PartyId) -> bool {
         self.echo_senders.get(&sender_id).copied().unwrap_or(false)
     }
     /// Returns true if the given sender_id has sent a ready (i.e., is set to true in ready_senders).
-    pub fn has_ready(&self, sender_id: usize) -> bool {
+    pub fn has_ready(&self, sender_id: PartyId) -> bool {
         self.ready_senders.get(&sender_id).copied().unwrap_or(false)
     }
 
     /// Marks that an echo was sent by a given node
-    pub fn set_echo_sent(&mut self, node_id: usize) {
+    pub fn set_echo_sent(&mut self, node_id: PartyId) {
         self.echo_senders.insert(node_id, true);
     }
 
     /// Marks that a ready was sent by a given node
-    pub fn set_ready_sent(&mut self, node_id: usize) {
+    pub fn set_ready_sent(&mut self, node_id: PartyId) {
         self.ready_senders.insert(node_id, true);
     }
 
@@ -198,15 +199,15 @@ impl fmt::Display for MsgTypeAvid {
 /// Stores the internal state for each RBC session at a party.
 #[derive(Default)]
 pub struct AvidStore {
-    pub shards: HashMap<Vec<u8>, HashMap<usize, Vec<u8>>>, // Merkle root → (shard ID → shard data).
-    pub fingerprint: HashMap<Vec<u8>, HashMap<usize, Vec<u8>>>, // Merkle root → (shard ID → Merkle proof/fingerprint).
-    pub echo_senders: HashMap<usize, bool>, // Which parties sent ECHO (sender_id -> true)
-    pub ready_senders: HashMap<usize, bool>, // Which parties sent READY (sender_id -> true)
-    pub echo_count: HashMap<Vec<u8>, usize>, // Count of ECHO messages per root
+    pub shards: HashMap<Vec<u8>, HashMap<PartyId, Vec<u8>>>, // Merkle root → (shard ID → shard data).
+    pub fingerprint: HashMap<Vec<u8>, HashMap<PartyId, Vec<u8>>>, // Merkle root → (shard ID → Merkle proof/fingerprint).
+    pub echo_senders: HashMap<PartyId, bool>, // Which parties sent ECHO (sender_id -> true)
+    pub ready_senders: HashMap<PartyId, bool>, // Which parties sent READY (sender_id -> true)
+    pub echo_count: HashMap<Vec<u8>, usize>,  // Count of ECHO messages per root
     pub ready_count: HashMap<Vec<u8>, usize>, // Count of READY messages per root
-    pub ended: bool,                        // True if consensus is reached and protocol ended
-    pub echo: bool,                         // True if this party already sent an ECHO
-    pub output: Vec<u8>,                    // Agreed value after consensus
+    pub ended: bool,                          // True if consensus is reached and protocol ended
+    pub echo: bool,                           // True if this party already sent an ECHO
+    pub output: Vec<u8>,                      // Agreed value after consensus
 }
 impl AvidStore {
     /// Initializes an empty session store.
@@ -224,19 +225,19 @@ impl AvidStore {
         }
     }
     /// Returns true if the given sender_id has sent an echo (i.e., is set to true in echo_senders).
-    pub fn has_echo(&self, sender_id: usize) -> bool {
+    pub fn has_echo(&self, sender_id: PartyId) -> bool {
         self.echo_senders.get(&sender_id).copied().unwrap_or(false)
     }
     /// Returns true if the given sender_id has sent an ready (i.e., is set to true in ready_senders).
-    pub fn has_ready(&self, sender_id: usize) -> bool {
+    pub fn has_ready(&self, sender_id: PartyId) -> bool {
         self.ready_senders.get(&sender_id).copied().unwrap_or(false)
     }
     /// Marks that an echo was sent by a given node
-    pub fn set_echo_sent(&mut self, node_id: usize) {
+    pub fn set_echo_sent(&mut self, node_id: PartyId) {
         self.echo_senders.insert(node_id, true);
     }
     /// Marks that an ready was sent by a given node
-    pub fn set_ready_sent(&mut self, node_id: usize) {
+    pub fn set_ready_sent(&mut self, node_id: PartyId) {
         self.ready_senders.insert(node_id, true);
     }
     /// Increments echo count for a given root
@@ -269,7 +270,7 @@ impl AvidStore {
     }
 
     /// Inserts a shard for a given root and sender ID
-    pub fn insert_shard(&mut self, root: Vec<u8>, sender_id: usize, shard: Vec<u8>) {
+    pub fn insert_shard(&mut self, root: Vec<u8>, sender_id: PartyId, shard: Vec<u8>) {
         self.shards
             .entry(root)
             .or_default()
@@ -277,14 +278,14 @@ impl AvidStore {
     }
 
     /// Inserts fingerprint/merkle proof  for a given root and sender ID
-    pub fn insert_fingerprint(&mut self, root: Vec<u8>, sender_id: usize, proof: Vec<u8>) {
+    pub fn insert_fingerprint(&mut self, root: Vec<u8>, sender_id: PartyId, proof: Vec<u8>) {
         self.fingerprint
             .entry(root)
             .or_default()
             .insert(sender_id, proof);
     }
     /// Returns the set of shards associated with a given Merkle root.
-    pub fn get_shards_for_root(&self, root: &Vec<u8>) -> HashMap<usize, Vec<u8>> {
+    pub fn get_shards_for_root(&self, root: &Vec<u8>) -> HashMap<PartyId, Vec<u8>> {
         self.shards.get(root).cloned().unwrap_or_else(HashMap::new)
     }
 }
@@ -316,14 +317,14 @@ impl fmt::Display for MsgTypeAba {
 #[derive(Default)]
 pub struct AbaStore {
     //  roundid => Sender => [bool,bool] , to check if a sender has sent an est value either 0 or 1
-    pub est_senders: HashMap<usize, HashMap<usize, [bool; 2]>>,
+    pub est_senders: HashMap<usize, HashMap<PartyId, [bool; 2]>>,
     //  roundid => Sender => [bool,bool], to check if a sender has sent an aux value either 0 or 1
-    pub aux_senders: HashMap<usize, HashMap<usize, [bool; 2]>>,
+    pub aux_senders: HashMap<usize, HashMap<PartyId, [bool; 2]>>,
     pub est_count: HashMap<usize, [usize; 2]>, // roundid => est value count[0 count ,1 count]
     pub est: HashMap<usize, [bool; 2]>,        // roundid => [sent 0 value , sent 1 value]
     pub aux: HashMap<usize, [bool; 2]>,        // roundid => aux value
     // roundid => Sender => [bool,bool] , set of values shared by sender
-    pub values: HashMap<usize, HashMap<usize, HashSet<bool>>>,
+    pub values: HashMap<usize, HashMap<PartyId, HashSet<bool>>>,
     pub bin_values: HashMap<usize, HashSet<bool>>, // roundid => {bool}
     pub ended: bool,                               //ABA session ended or not
     pub output: bool,                              // Agreed value after consensus
@@ -358,7 +359,7 @@ impl AbaStore {
     }
 
     /// Check if a sender has already sent an estimate(0 or 1) in a given round
-    pub fn has_sent_est(&self, round: usize, sender: usize, value: bool) -> bool {
+    pub fn has_sent_est(&self, round: usize, sender: PartyId, value: bool) -> bool {
         self.est_senders
             .get(&round)
             .and_then(|senders| senders.get(&sender))
@@ -367,7 +368,7 @@ impl AbaStore {
     }
 
     /// Mark a sender as having sent an estimate(0 or 1) in a given round
-    pub fn set_est_sent(&mut self, round: usize, sender: usize, value: bool) {
+    pub fn set_est_sent(&mut self, round: usize, sender: PartyId, value: bool) {
         self.est_senders
             .entry(round)
             .or_default()
@@ -403,7 +404,7 @@ impl AbaStore {
     }
 
     /// Check if a sender has already sent an aux value either 0 or 1 in a given round
-    pub fn has_sent_aux(&self, round: usize, sender: usize, value: bool) -> bool {
+    pub fn has_sent_aux(&self, round: usize, sender: PartyId, value: bool) -> bool {
         self.aux_senders
             .get(&round)
             .and_then(|senders| senders.get(&sender))
@@ -412,7 +413,7 @@ impl AbaStore {
     }
 
     /// Mark a sender as having sent an value either 0 or 1 in a given round
-    pub fn set_aux_sent(&mut self, round: usize, sender: usize, value: bool) {
+    pub fn set_aux_sent(&mut self, round: usize, sender: PartyId, value: bool) {
         self.aux_senders
             .entry(round)
             .or_default()
@@ -421,7 +422,7 @@ impl AbaStore {
     }
 
     /// Insert a binary value into the values set for a given round ID and given sender
-    pub fn insert_values(&mut self, round: usize, sender: usize, value: bool) {
+    pub fn insert_values(&mut self, round: usize, sender: PartyId, value: bool) {
         self.values
             .entry(round)
             .or_insert_with(HashMap::new)
@@ -465,16 +466,16 @@ impl AbaStore {
 /// Stores the internal state for each Common coin session at a party.
 #[derive(Default)]
 pub struct CoinStore {
-    pub sign_senders: HashMap<usize, HashMap<usize, bool>>, //roundid => Sender => bool, check if signature shares were sent
+    pub sign_senders: HashMap<usize, HashMap<PartyId, bool>>, //roundid => Sender => bool, check if signature shares were sent
     pub sign_count: HashMap<usize, usize>,                  // roundid => signature share count
-    pub sign_shares: HashMap<usize, HashMap<usize, Vec<u8>>>, // roundid => sender_id => Signature share
+    pub sign_shares: HashMap<usize, HashMap<PartyId, Vec<u8>>>, // roundid => sender_id => Signature share
     pub coins: HashMap<usize, bool>,                          //roundid => Coin
     pub start: HashMap<usize, bool>, //roundid => yes or no , checks if common coin has been initiated yet
     pub notifiers: HashMap<usize, Arc<Notify>>, // round_id => Notify ,Checks if common coin is ready to be used
 }
 impl CoinStore {
     /// Check if a sender has already sent a signature share in a given round
-    pub fn has_sent_sign(&self, round: usize, sender: usize) -> bool {
+    pub fn has_sent_sign(&self, round: usize, sender: PartyId) -> bool {
         self.sign_senders
             .get(&round)
             .and_then(|senders| senders.get(&sender))
@@ -488,7 +489,7 @@ impl CoinStore {
     }
 
     /// Mark a sender as having sent a signature share in a given round
-    pub fn set_sign_sent(&mut self, round: usize, sender: usize) {
+    pub fn set_sign_sent(&mut self, round: usize, sender: PartyId) {
         self.sign_senders
             .entry(round)
             .or_default()
@@ -501,7 +502,7 @@ impl CoinStore {
     }
 
     /// Insert a signature share for a given round
-    pub fn insert_share(&mut self, round_id: usize, sender_id: usize, share: Vec<u8>) {
+    pub fn insert_share(&mut self, round_id: usize, sender_id: PartyId, share: Vec<u8>) {
         self.sign_shares
             .entry(round_id)
             .or_insert_with(HashMap::new)
@@ -509,7 +510,7 @@ impl CoinStore {
     }
 
     //Get the signature share map for a given round
-    pub fn get_shares_map(&self, round_id: usize) -> Option<&HashMap<usize, Vec<u8>>> {
+    pub fn get_shares_map(&self, round_id: usize) -> Option<&HashMap<PartyId, Vec<u8>>> {
         self.sign_shares.get(&round_id)
     }
 

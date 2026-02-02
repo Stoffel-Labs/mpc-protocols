@@ -1,6 +1,7 @@
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
+use stoffelnet::network_utils::SenderId;
 use std::sync::Arc;
 use stoffelmpc_mpc::{
     common::{share::shamir::NonRobustShare, SecretSharingScheme},
@@ -23,7 +24,7 @@ pub fn create_nodes(
         .map(|id| {
             let (triple_sender, triple_receiver) = mpsc::channel(128);
             let triple_gen_node =
-                TripleGenNode::new(id, n_parties, threshold, triple_sender).unwrap();
+                TripleGenNode::new(SenderId::new(id), n_parties, threshold, triple_sender).unwrap();
             receivers.push(triple_receiver);
             Arc::new(Mutex::new(triple_gen_node))
         })

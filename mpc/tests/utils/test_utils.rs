@@ -21,7 +21,7 @@ use stoffelmpc_mpc::honeybadger::{
 };
 use stoffelmpc_network::bad_fake_network::{BadFakeNetwork, BadFakeNetworkConfig};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
+use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId, SenderId};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -44,7 +44,13 @@ pub async fn setup_network_and_parties<T: RBC<Id = SessionId>, N: Network>(
 
     let mut parties = Vec::with_capacity(n as usize);
     for i in 0..n {
-        let rbc = T::new(i, n, t, k, Arc::new(WrappedMessage::rbc_wrap))?; // Create a new RBC instance for each party
+        let rbc = T::new(
+            SenderId::new(i),
+            n,
+            t,
+            k,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?; // Create a new RBC instance for each party
         parties.push(rbc);
     }
     Ok((parties, net, receivers))
@@ -93,7 +99,7 @@ pub fn test_setup(
 ) -> (
     Arc<FakeNetwork>,
     Vec<Receiver<Vec<u8>>>,
-    HashMap<usize, Receiver<Vec<u8>>>,
+    HashMap<ClientId, Receiver<Vec<u8>>>,
 ) {
     let config = FakeNetworkConfig::new(500);
     let (network, receivers, client_recv) = FakeNetwork::new(n, Some(clientid), config);
@@ -161,7 +167,7 @@ pub fn construct_e2e_input(
 }
 
 pub fn initialize_node(
-    node_id: usize,
+    node_id: PartyId,
     n: usize,
     t: usize,
     k: usize,
@@ -179,7 +185,15 @@ pub fn create_nodes(
 ) -> Vec<Arc<Mutex<RanDouShaNode<Fr, Avid<SessionId>>>>> {
     (0..n_parties)
         .zip(senders)
-        .map(|(id, sender)| Arc::new(Mutex::new(initialize_node(id, n_parties, t, k, sender))))
+        .map(|(id, sender)| {
+            Arc::new(Mutex::new(initialize_node(
+                SenderId::new(id),
+                n_parties,
+                t,
+                k,
+                sender,
+            )))
+        })
         .collect()
 }
 
@@ -199,8 +213,8 @@ pub async fn initialize_all_nodes(
         let node_id = node_locked.id;
         match node_locked
             .init(
-                n_shares_t[node_id].clone(),
-                n_shares_2t[node_id].clone(),
+                n_shares_t[node_id.raw()].clone(),
+                n_shares_2t[node_id.raw()].clone(),
                 session_id,
                 Arc::clone(&network),
             )
@@ -233,7 +247,7 @@ pub fn spawn_receiver_tasks(
     nodes: Vec<Arc<Mutex<RanDouShaNode<Fr, Avid<SessionId>>>>>,
     mut receivers: Vec<Receiver<Vec<u8>>>,
     network: Arc<FakeNetwork>,
-    fin_send: mpsc::Sender<(usize, Vec<DoubleShamirShare<Fr>>)>,
+    fin_send: mpsc::Sender<(PartyId, Vec<DoubleShamirShare<Fr>>)>,
     abort_counter: Option<Arc<AtomicUsize>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -434,7 +448,10 @@ where
         k,
     );
     (0..n_parties)
-        .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), input_ids.clone()).unwrap())
+        .map(|id| {
+            HoneyBadgerMPCNode::setup(SenderId::new(id), parameters.clone(), input_ids.clone())
+                .unwrap()
+        })
         .collect()
 }
 
@@ -458,8 +475,8 @@ pub async fn initialize_global_nodes_randousha<F, R, N>(
         let node_id = node_rds.id;
         match node_rds
             .init(
-                n_shares_t[node_id].clone(),
-                n_shares_2t[node_id].clone(),
+                n_shares_t[node_id.raw()].clone(),
+                n_shares_2t[node_id.raw()].clone(),
                 session_id,
                 Arc::clone(&network),
             )

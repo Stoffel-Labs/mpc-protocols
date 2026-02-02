@@ -4,7 +4,7 @@ use crate::ffi::c_bindings::{
 };
 use std::{collections::HashMap, mem::ManuallyDrop, sync::Arc};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-use stoffelnet::network_utils::ClientId;
+use stoffelnet::network_utils::{ClientId, SenderId};
 use tokio::sync::mpsc::Receiver;
 
 // struct that includes receivers of the FakeNetwork
@@ -36,7 +36,8 @@ pub extern "C" fn new_fake_network(
             let r_vec = c_vec.clone();
             // prevent rust from dropping the pointer from C
             std::mem::forget(c_vec);
-            Some(r_vec)
+            let ids = r_vec.iter().map(|i| SenderId::new(*i)).collect();
+            Some(ids)
         }
     };
 

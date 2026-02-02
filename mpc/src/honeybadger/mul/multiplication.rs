@@ -115,7 +115,7 @@ fn reconstruct_rbc<F: FftField>(
 
 #[derive(Clone, Debug)]
 pub struct Multiply<F: FftField, R: RBC> {
-    pub id: usize,
+    pub id: PartyId,
     pub n: usize,
     pub t: usize,
     pub mult_storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<MultStorage<F>>>>>>,
@@ -180,7 +180,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         beaver_triples: Vec<ShamirBeaverTriple<F>>,
         network: Arc<N>,
     ) -> Result<(), MulError> {
-        info!(party = self.id, "Initializing multiplication");
+        info!(party = self.id.raw(), "Initializing multiplication");
         if x.len() != y.len() || x.len() != beaver_triples.len() {
             return Err(MulError::InvalidInput(
                 "Length of x and y vectors and Beaver triples must match".to_string(),
@@ -313,7 +313,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
             let sessionid = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot24(session_id.exec_id(), 2, self.id as u8),
+                SessionId::pack_slot24(session_id.exec_id(), 2, self.id.raw() as u8),
                 session_id.instance_id(),
             );
 
@@ -384,7 +384,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             }
 
             info!(
-                self_id = self.id,
+                self_id = self.id.raw(),
                 "Received opened {} values for session_id: {:?} and round {:?}",
                 label,
                 session_id,
@@ -394,7 +394,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             target_map.insert(round_id, open);
         } else if msg.session_id.sub_id() == 2 {
             info!(
-                self_id = self.id,
+                self_id = self.id.raw(),
                 "Received shares for reconstruction using RBC for session_id: {:?}", session_id
             );
             if storage.received_shares.contains_key(&msg.sender) {
@@ -518,6 +518,7 @@ pub mod tests {
     use ark_std::test_rng;
     use rand::{prelude::SliceRandom, thread_rng};
     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+    use stoffelnet::network_utils::SenderId;
     use tokio::time::{sleep, Duration, Instant};
 
     async fn construct_input_mul(
@@ -659,8 +660,10 @@ pub mod tests {
         let (network, mut receivers, _) = FakeNetwork::new(n, None, config);
         let network = Arc::new(network);
 
-        let mut nodes: Vec<_> = (0..n)
-            .map(|i| Multiply::<Fr, Avid<SessionId>>::new(i, n, t).unwrap())
+        let mut nodes: Vec<_> = network
+            .parties()
+            .into_iter()
+            .map(|i| Multiply::<Fr, Avid<SessionId>>::new(i.id, n, t).unwrap())
             .collect();
 
         // all but one node call init
@@ -898,7 +901,8 @@ pub mod tests {
         }
 
         // 4. Create node
-        let mut mul_node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n_parties, t).unwrap();
+        let mut mul_node =
+            Multiply::<Fr, Avid<SessionId>>::new(SenderId::new(node_id), n_parties, t).unwrap();
 
         let storage_bind = mul_node.get_or_create_mult_storage(session_id).await;
         let mut storage = storage_bind.lock().await;
@@ -940,13 +944,13 @@ pub mod tests {
             chunk_a
                 .serialize_compressed(&mut chunk_a_bytes)
                 .expect("serialization failed");
-            let chunk_a_msg = MultMessage::new(node_id, session_id_a, chunk_a_bytes);
+            let chunk_a_msg = MultMessage::new(SenderId::new(node_id), session_id_a, chunk_a_bytes);
 
             let mut chunk_b_bytes = Vec::new();
             chunk_b
                 .serialize_compressed(&mut chunk_b_bytes)
                 .expect("serialization failed");
-            let chunk_b_msg = MultMessage::new(node_id, session_id_b, chunk_b_bytes);
+            let chunk_b_msg = MultMessage::new(SenderId::new(node_id), session_id_b, chunk_b_bytes);
 
             mul_msgs.push(chunk_a_msg);
             mul_msgs.push(chunk_b_msg);
@@ -981,11 +985,15 @@ pub mod tests {
 
                 let shared_session_id = SessionId::new(
                     ProtocolType::Mul,
-                    SessionId::pack_slot24(session_id.exec_id(), 2, mul_node.id as u8),
+                    SessionId::pack_slot24(session_id.exec_id(), 2, mul_node.id.raw() as u8),
                     session_id.instance_id(),
                 );
 
-                mul_msgs.push(MultMessage::new(i, shared_session_id, bytes_rec_msg));
+                mul_msgs.push(MultMessage::new(
+                    SenderId::new(i),
+                    shared_session_id,
+                    bytes_rec_msg,
+                ));
             }
         }
 

@@ -7,7 +7,7 @@ use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use stoffelnet::network_utils::{ClientId, Network};
+use stoffelnet::network_utils::{ClientId, Network, PartyId};
 use tokio::{
     sync::{
         watch::{channel, Receiver, Sender},
@@ -71,7 +71,7 @@ enum InputType {
 
 #[derive(Clone, Debug)]
 pub struct InputServer<F: FftField, R: RBC> {
-    pub id: usize,
+    pub id: PartyId,
     pub n: usize,
     pub rbc: R,
     status_sender: Sender<HashMap<ClientId, (InputType, Vec<RobustShare<F>>)>>,
@@ -98,7 +98,7 @@ fn calculate_input_shares<F: FftField>(
 
 impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
     pub fn new(
-        id: usize,
+        id: PartyId,
         n: usize,
         t: usize,
         input_ids: Vec<ClientId>,
@@ -123,7 +123,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
     /// Called by each server to send its share of `r_i` to the client.
     pub async fn init<N: Network>(
         &mut self,
-        client_id: usize,
+        client_id: PartyId,
         shares: Vec<RobustShare<F>>,
         input_len: usize,
         net: Arc<N>,
@@ -307,11 +307,11 @@ struct InputClientData<F: FftField, R: RBC> {
     pub rbc: R,
     pub inputs: Vec<F>,
     pub rbc_done: bool,
-    pub received_shares: HashMap<usize, Vec<RobustShare<F>>>,
+    pub received_shares: HashMap<PartyId, Vec<RobustShare<F>>>,
 }
 
 pub struct InputClient<F: FftField, R: RBC> {
-    pub client_id: usize,
+    pub client_id: ClientId,
     pub n: usize,
     pub t: usize,
     pub instance_id: u32,
@@ -333,7 +333,7 @@ impl<F: FftField, R: RBC> Clone for InputClient<F, R> {
 
 impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
     pub fn new(
-        id: usize,
+        id: ClientId,
         n: usize,
         t: usize,
         instance_id: u32,
@@ -425,7 +425,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
                 ProtocolType::Input,
                 SessionId::pack_slot24(
                     0, // subprotocol ID not needed because only called once
-                    self.client_id as u8,
+                    self.client_id.raw() as u8,
                     0,
                 ),
                 self.instance_id,
@@ -467,6 +467,7 @@ pub mod tests {
     use ark_bls12_381::Fr;
     use ark_std::test_rng;
     use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+    use stoffelnet::network_utils::SenderId;
     use tokio::time::{sleep, Duration};
 
     /// `2t+1` nodes send random shares to the client, which reconstructs the random value and
@@ -476,7 +477,7 @@ pub mod tests {
     async fn test_init_before_input_handler() {
         let n = 4;
         let t = 1;
-        let clientid = 100;
+        let clientid = SenderId::new(100);
         let rand_secret = Fr::from(1);
         let input = Fr::from(10);
 
@@ -493,7 +494,10 @@ pub mod tests {
             InputClient::<Fr, Avid<SessionId>>::new(clientid, n, t, 111, vec![input].clone())
                 .unwrap();
         let mut nodes: Vec<_> = (0..n)
-            .map(|i| InputServer::<Fr, Avid<SessionId>>::new(i, n, t, vec![clientid]).unwrap())
+            .map(|i| {
+                InputServer::<Fr, Avid<SessionId>>::new(SenderId::new(i), n, t, vec![clientid])
+                    .unwrap()
+            })
             .collect();
 
         // all but one node call init

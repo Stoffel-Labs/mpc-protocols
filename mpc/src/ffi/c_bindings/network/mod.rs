@@ -4,7 +4,7 @@ use std::slice;
 use std::sync::Arc;
 
 use stoffelmpc_network::fake_network::FakeNetwork;
-use stoffelnet::network_utils::{Network, NetworkError};
+use stoffelnet::network_utils::{Network, NetworkError, SenderId};
 use stoffelnet::transports::quic::QuicNetworkManager;
 
 use crate::ffi::c_bindings::ByteSlice;
@@ -79,10 +79,10 @@ pub extern "C" fn network_send(
     let res = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(n.send(recipient_id, message)),
+            .block_on(n.send(SenderId::new(recipient_id), message)),
         GenericNetwork::QuicNetworkManager(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(n.send(recipient_id, message)),
+            .block_on(n.send(SenderId::new(recipient_id), message)),
     };
     match res {
         Ok(u) => {

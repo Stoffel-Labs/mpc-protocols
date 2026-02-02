@@ -17,14 +17,14 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
 use itertools::Itertools;
 use rand::Rng;
 use std::{collections::HashMap, sync::Arc, vec};
-use stoffelnet::network_utils::Network;
+use stoffelnet::network_utils::{Network, Node, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::{debug, info};
 
 /// Represents the shares stored by a player
 #[derive(Debug, Clone)]
 pub struct PRandBitNode<F: PrimeField, G: PrimeField> {
-    pub id: usize,
+    pub id: PartyId,
     pub n: usize,
     pub t: usize,
     pub l: usize,
@@ -38,7 +38,7 @@ pub struct PRandBitNode<F: PrimeField, G: PrimeField> {
 impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     /// Creates a new PRandBitDNode with empty shares.
     pub fn new(
-        id: usize,
+        id: PartyId,
         n: usize,
         t: usize,
         output_bit_channel: Sender<SessionId>,
@@ -75,7 +75,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         batch_size: usize,
         network: Arc<N>,
     ) -> Result<(), PRandError> {
-        info!(node_id = self.id, "RISS started");
+        info!(node_id = self.id.raw(), "RISS started");
 
         assert_eq!(session_id.sub_id(), 0);
         assert_eq!(session_id.round_id(), 0);
@@ -88,11 +88,16 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         self.l = l;
         self.k = k;
         // Step 1: compute all maximal unqualified sets
-        let tsets: Vec<Vec<usize>> = (0..self.n).combinations(self.t).collect();
+        let tsets: Vec<Vec<PartyId>> = network
+            .parties()
+            .iter_mut()
+            .map(|i| i.id())
+            .combinations(self.t)
+            .collect();
 
         let binding = self.get_or_create_store(session_id).await;
         let mut store = binding.lock().await;
-        let my_tsets: Vec<Vec<usize>> = tsets
+        let my_tsets: Vec<Vec<PartyId>> = tsets
             .clone()
             .into_iter()
             .filter(|ts| !ts.contains(&self.id))
@@ -117,7 +122,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 .collect();
 
             // send to all players not in T
-            for j in 0..self.n {
+            for j in network.parties().iter_mut().map(|i| i.id()) {
                 if !tset.contains(&j) {
                     let msg = WrappedMessage::PRandBit(PRandBitDMessage::new(
                         self.id,
@@ -140,7 +145,11 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         msg: PRandBitDMessage,
         network: Arc<N>,
     ) -> Result<(), PRandError> {
-        info!(node_id = self.id, sender = msg.sender_id, "At RISS handler");
+        info!(
+            node_id = self.id.raw(),
+            sender = msg.sender_id.raw(),
+            "At RISS handler"
+        );
 
         let calling_proto = match msg.session_id.calling_protocol() {
             Some(proto) => proto,
@@ -195,10 +204,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             PRandError::NotSet(format!("No of tsets not set {:?}", calling_proto))
         })?;
         if store.r_t.len() == total_tsets {
-            info!(node_id = self.id, "Constructing Polynomials");
+            info!(node_id = self.id.raw(), "Constructing Polynomials");
 
             // Ready to do the conversions of shares
-            let tsets: Vec<Vec<usize>> = store.r_t.keys().cloned().collect();
+            let tsets: Vec<Vec<PartyId>> = store.r_t.keys().cloned().collect();
             let poly_fq = build_all_f_polys::<F>(self.n, tsets.clone())?;
             let poly_fp = build_all_f_polys::<G>(self.n, tsets.clone())?;
             //build f polys for Fq and F_2^8
@@ -210,12 +219,12 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             let domain_g = GeneralEvaluationDomain::<G>::new(self.n)
                 .ok_or_else(|| ShareError::NoSuitableDomain(self.n))?;
             let domain_2 = F2_8Domain::new(self.n)?;
-            let xi_q = domain_f.element(self.id);
-            let xi_p = domain_g.element(self.id);
-            let xi_2 = domain_2.element(self.id);
+            let xi_q = domain_f.element(self.id.raw());
+            let xi_p = domain_g.element(self.id.raw());
+            let xi_2 = domain_2.element(self.id.raw());
 
-            let mut share_q = vec![RobustShare::new(F::zero(), self.id, self.t); batch_size];
-            let mut share_p = vec![RobustShare::new(G::zero(), self.id, self.t); batch_size];
+            let mut share_q = vec![RobustShare::new(F::zero(), self.id.raw(), self.t); batch_size];
+            let mut share_p = vec![RobustShare::new(G::zero(), self.id.raw(), self.t); batch_size];
             let mut share_2 = vec![F2_8::zero(); batch_size];
 
             for (tset, r_t) in store.r_t.clone() {
@@ -249,7 +258,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             if msg.session_id.calling_protocol() == Some(ProtocolType::PRandInt) {
                 //output the shared random integer,r_t that is converted to r_p
                 //stored in share_r_p
-                info!(node_id = self.id, "Output for PRandInt");
+                info!(node_id = self.id.raw(), "Output for PRandInt");
                 self.output_int_channel.send(msg.session_id).await?;
                 return Ok(());
             }
@@ -291,7 +300,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     }
 
     pub async fn output_handler(&mut self, msg: PRandBitDMessage) -> Result<(), PRandError> {
-        info!(node_id = self.id, "At output handler");
+        info!(node_id = self.id.raw(), "At output handler");
 
         let calling_proto = match msg.session_id.calling_protocol() {
             Some(proto) => proto,
@@ -364,11 +373,11 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                     my_r0_share_g[i].degree,
                 );
 
-                info!(node_id = self.id, "Generated [b] shares");
+                info!(node_id = self.id.raw(), "Generated [b] shares");
                 store.share_b_2.push(my_b2_share);
                 store.share_b_p.push(my_b_p_share);
             }
-            info!(id = self.id, "Prandbit finished");
+            info!(id = self.id.raw(), "Prandbit finished");
             self.output_bit_channel.send(session_id).await?;
             return Ok(());
         }

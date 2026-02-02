@@ -11,7 +11,7 @@ use crate::{
 use ark_ff::PrimeField;
 use std::ops::Mul;
 use std::sync::Arc;
-use stoffelnet::network_utils::Network;
+use stoffelnet::network_utils::{Network, PartyId};
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{
@@ -41,7 +41,7 @@ where
     F: PrimeField,
     R: RBC,
 {
-    pub id: usize,
+    pub id: PartyId,
     pub n_parties: usize,
     pub threshold: usize,
     pub trunc_node: TruncPrNode<F, R>,
@@ -56,7 +56,7 @@ where
     R: RBC<Id = SessionId>,
 {
     pub fn new(
-        id: usize,
+        id: PartyId,
         n_parties: usize,
         threshold: usize,
         output_channel: Sender<SessionId>,

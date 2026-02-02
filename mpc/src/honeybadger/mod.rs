@@ -140,7 +140,7 @@ pub enum HoneyBadgerError {
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
-    pub id: usize,
+    pub id: PartyId,
     pub input: InputClient<F, R>,
     pub output: OutputClient<F>,
 }
@@ -162,7 +162,7 @@ where
 
 impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
     pub fn new(
-        id: usize,
+        id: PartyId,
         n: usize,
         t: usize,
         instance_id: u32,

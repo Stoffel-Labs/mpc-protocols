@@ -18,7 +18,7 @@ use stoffelmpc_mpc::{
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
-use stoffelnet::network_utils::Network;
+use stoffelnet::network_utils::{Network, SenderId};
 use tokio::sync::mpsc::{self, Receiver};
 
 pub mod utils;
@@ -97,7 +97,7 @@ where
         .collect();
 
     (0..n_parties)
-        .map(|id| AdkgNode::setup(id, parameters[id].clone(), vec![]).unwrap())
+        .map(|id| AdkgNode::setup(SenderId::new(id), parameters[id].clone(), vec![]).unwrap())
         .collect()
 }
 

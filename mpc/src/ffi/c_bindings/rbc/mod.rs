@@ -1,5 +1,7 @@
 use std::{mem::ManuallyDrop, slice, sync::Arc};
 
+use stoffelnet::network_utils::SenderId;
+
 use crate::{
     common::{
         rbc::{
@@ -132,7 +134,7 @@ impl<Id: ProtocolSessionId> From<Msg<Id>> for RbcMsg {
             len: metadata_bind.len(),
         };
         RbcMsg {
-            sender_id: value.sender_id,
+            sender_id: value.sender_id.raw(),
             session_id: value.session_id.as_u64(),
             round_id: value.round_id,
             payload,
@@ -304,7 +306,7 @@ pub extern "C" fn bracha_new(
     });
 
     // k is unused in Bracha, pass 0
-    let res = Bracha::new(id, n, t, 0, rust_wrapper);
+    let res = Bracha::new(SenderId::new(id), n, t, 0, rust_wrapper);
 
     match res {
         Ok(b) => {
@@ -329,7 +331,7 @@ pub extern "C" fn free_bracha(bracha_pointer: *mut BrachaOpaque) {
 #[no_mangle]
 pub extern "C" fn get_bracha_id(bracha_pointer: *mut BrachaOpaque) -> usize {
     let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha<SessionId>) };
-    bracha.id
+    bracha.id.raw()
 }
 
 #[no_mangle]
@@ -463,7 +465,7 @@ pub extern "C" fn sync_bracha_process(
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
-        sender_id: msg.sender_id,
+        sender_id: SenderId::new(msg.sender_id),
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
         payload: payload.to_vec(),
@@ -498,7 +500,7 @@ pub extern "C" fn sync_bracha_broadcast(
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
-        sender_id: msg.sender_id,
+        sender_id: SenderId::new(msg.sender_id),
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
         payload: payload.to_vec(),
@@ -534,7 +536,7 @@ pub extern "C" fn sync_bracha_send(
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
-        sender_id: msg.sender_id,
+        sender_id: SenderId::new(msg.sender_id),
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
         payload: payload.to_vec(),
@@ -545,10 +547,10 @@ pub extern "C" fn sync_bracha_send(
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(bracha.send(rbc_msg, Arc::clone(n), recv)),
+            .block_on(bracha.send(rbc_msg, Arc::clone(n), SenderId::new(recv))),
         GenericNetwork::QuicNetworkManager(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(bracha.send(rbc_msg, Arc::clone(n), recv)),
+            .block_on(bracha.send(rbc_msg, Arc::clone(n), SenderId::new(recv))),
     };
 
     match result {
@@ -595,7 +597,7 @@ pub extern "C" fn avid_new(
         unsafe { Ok(Vec::from_raw_parts(out_ptr, out_len, out_len)) }
     });
 
-    let res = Avid::new(id, n, t, k, rust_wrapper);
+    let res = Avid::new(SenderId::new(id), n, t, k, rust_wrapper);
 
     match res {
         Ok(a) => {
@@ -620,7 +622,7 @@ pub extern "C" fn free_avid(avid_pointer: *mut AvidOpaque) {
 #[no_mangle]
 pub extern "C" fn get_avid_id(avid_pointer: *mut AvidOpaque) -> usize {
     let avid = unsafe { &mut *(avid_pointer as *mut Avid<SessionId>) };
-    avid.id
+    avid.id.raw()
 }
 
 #[no_mangle]
@@ -750,7 +752,7 @@ pub extern "C" fn sync_avid_process(
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
-        sender_id: msg.sender_id,
+        sender_id: SenderId::new(msg.sender_id),
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
         payload: payload.to_vec(),
@@ -785,7 +787,7 @@ pub extern "C" fn sync_avid_broadcast(
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
-        sender_id: msg.sender_id,
+        sender_id: SenderId::new(msg.sender_id),
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
         payload: payload.to_vec(),
@@ -821,7 +823,7 @@ pub extern "C" fn sync_avid_send(
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
-        sender_id: msg.sender_id,
+        sender_id: SenderId::new(msg.sender_id),
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
         payload: payload.to_vec(),
@@ -832,10 +834,10 @@ pub extern "C" fn sync_avid_send(
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(avid.send(rbc_msg, Arc::clone(n), recv)),
+            .block_on(avid.send(rbc_msg, Arc::clone(n), SenderId::new(recv))),
         GenericNetwork::QuicNetworkManager(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(avid.send(rbc_msg, Arc::clone(n), recv)),
+            .block_on(avid.send(rbc_msg, Arc::clone(n), SenderId::new(recv))),
     };
 
     match result {
@@ -887,7 +889,7 @@ pub extern "C" fn aba_new(
         unsafe { Ok(Vec::from_raw_parts(out_ptr, out_len, out_len)) }
     });
 
-    let res = ABA::new(id, n, t, k, rust_wrapper);
+    let res = ABA::new(SenderId::new(id), n, t, k, rust_wrapper);
 
     match res {
         Ok(a) => {
@@ -912,7 +914,7 @@ pub extern "C" fn free_aba(aba_pointer: *mut AbaOpaque) {
 #[no_mangle]
 pub extern "C" fn get_aba_id(aba_pointer: *mut AbaOpaque) -> usize {
     let aba = unsafe { &mut *(aba_pointer as *mut ABA<SessionId>) };
-    aba.id
+    aba.id.raw()
 }
 
 #[no_mangle]
@@ -1038,7 +1040,7 @@ pub extern "C" fn sync_aba_process(
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
-        sender_id: msg.sender_id,
+        sender_id: SenderId::new(msg.sender_id),
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
         payload: payload.to_vec(),
@@ -1073,7 +1075,7 @@ pub extern "C" fn sync_aba_broadcast(
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
-        sender_id: msg.sender_id,
+        sender_id: SenderId::new(msg.sender_id),
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
         payload: payload.to_vec(),
@@ -1109,7 +1111,7 @@ pub extern "C" fn sync_aba_send(
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
     let rbc_msg = Msg {
-        sender_id: msg.sender_id,
+        sender_id: SenderId::new(msg.sender_id),
         session_id: unsafe { SessionId::from_u64(msg.session_id) },
         round_id: msg.round_id,
         payload: payload.to_vec(),
@@ -1120,10 +1122,10 @@ pub extern "C" fn sync_aba_send(
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(aba.send(rbc_msg, Arc::clone(n), recv)),
+            .block_on(aba.send(rbc_msg, Arc::clone(n), SenderId::new(recv))),
         GenericNetwork::QuicNetworkManager(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(aba.send(rbc_msg, Arc::clone(n), recv)),
+            .block_on(aba.send(rbc_msg, Arc::clone(n), SenderId::new(recv))),
     };
 
     match result {

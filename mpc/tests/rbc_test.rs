@@ -15,6 +15,7 @@ mod tests {
         honeybadger::{ProtocolType, SessionId, WrappedMessage},
     };
     use stoffelmpc_network::fake_network::FakeNetwork;
+    use stoffelnet::network_utils::SenderId;
     use tokio::sync::Mutex;
     use tokio::time::timeout;
     use tracing::warn;
@@ -189,7 +190,7 @@ mod tests {
         spawn_parties(&parties, receivers, net.clone()).await;
 
         // Simulate sending READY before ECHO and INIT
-        let sender_id = 1;
+        let sender_id = SenderId::new(1);
         let ready_msg = Msg::new(
             sender_id,
             session_id,
@@ -210,14 +211,14 @@ mod tests {
         );
 
         // Send READY first
-        let _ = parties[sender_id as usize]
-            .send(ready_msg, net.clone(), 2)
+        let _ = parties[sender_id.raw() as usize]
+            .send(ready_msg, net.clone(), SenderId::new(2))
             .await
             .expect("Sending ready failed");
 
         // Then ECHO
-        let _ = parties[sender_id as usize]
-            .send(echo_msg, net.clone(), 3)
+        let _ = parties[sender_id.raw() as usize]
+            .send(echo_msg, net.clone(), SenderId::new(3))
             .await
             .expect("Sending Echo failed");
 
@@ -391,7 +392,7 @@ mod tests {
         spawn_parties(&parties, receivers, net.clone()).await;
 
         // Simulate sending READY before ECHO and INIT
-        let sender_id = 1;
+        let sender_id = SenderId::new(1);
         let ready_msg = Msg::new(
             sender_id,
             session_id,
@@ -412,14 +413,14 @@ mod tests {
         );
 
         // Send READY first
-        let _ = parties[sender_id as usize]
-            .send(ready_msg, net.clone(), 2)
+        let _ = parties[sender_id.raw() as usize]
+            .send(ready_msg, net.clone(), SenderId::new(2))
             .await
             .expect("Sending ready failed");
 
         // Then ECHO
-        let _ = parties[sender_id as usize]
-            .send(echo_msg, net.clone(), 3)
+        let _ = parties[sender_id.raw() as usize]
+            .send(echo_msg, net.clone(), SenderId::new(3))
             .await
             .expect("Sending ready failed");
 
@@ -592,9 +593,9 @@ mod tests {
         spawn_parties(&parties, receivers, net.clone()).await;
 
         // Setup dealer and run key distribution
-        let dealer = Dealer::new(n, t);
+        let dealer = Dealer::new(t);
         let dealer_msg = Msg::new(
-            0,
+            SenderId::new(0),
             session_id,
             round_id,
             vec![],
@@ -674,9 +675,9 @@ mod tests {
         spawn_parties(&parties, receivers, net.clone()).await;
 
         // === Dealer Distributes Keys ===
-        let dealer = Dealer::new(n, t);
+        let dealer = Dealer::new(t);
         let key_dist_msg = Msg::new(
-            0,
+            SenderId::new(0),
             session_id,
             round_id,
             vec![],
@@ -716,7 +717,7 @@ mod tests {
         let result = timeout(timeout_duration, async {
             loop {
                 for aba in &parties {
-                    if session_results.contains_key(&(aba.id as usize)) {
+                    if session_results.contains_key(&(aba.id.raw() as usize)) {
                         continue;
                     }
 
@@ -748,7 +749,7 @@ mod tests {
         let mut agreed_value: Option<bool> = None;
         for aba in &parties {
             let store = session_results
-                .get(&(aba.id as usize))
+                .get(&(aba.id.raw() as usize))
                 .expect("Missing completed session")
                 .lock()
                 .await;
@@ -789,9 +790,9 @@ mod tests {
         spawn_parties(&parties, receivers, net.clone()).await;
 
         // === Dealer Distributes Keys ===
-        let dealer = Dealer::new(n, t);
+        let dealer = Dealer::new(t);
         let key_dist_msg = Msg::new(
-            0,
+            SenderId::new(0),
             SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 0),
             0,
             vec![],
@@ -836,7 +837,7 @@ mod tests {
                     let entry = all_results.entry(session_id).or_default();
 
                     for aba in &parties {
-                        if entry.contains_key(&(aba.id as usize)) {
+                        if entry.contains_key(&(aba.id.raw() as usize)) {
                             continue;
                         }
 
@@ -880,7 +881,7 @@ mod tests {
 
             for aba in &parties {
                 let store = results
-                    .get(&(aba.id as usize))
+                    .get(&(aba.id.raw() as usize))
                     .expect("Missing session store")
                     .lock()
                     .await;

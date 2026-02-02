@@ -3,6 +3,7 @@ use reed_solomon_erasure::galois_8::ReedSolomon;
 use rs_merkle::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use stoffelnet::network_utils::{PartyId, SenderId};
 
 /// Encodes a given payload using Reed-Solomon erasure coding
 pub fn encode_rs(
@@ -51,7 +52,7 @@ pub fn encode_rs(
 }
 /// Decodes and reconstructs original shards using Reed-Solomon
 pub fn decode_rs(
-    shards_map: HashMap<usize, Vec<u8>>,
+    shards_map: HashMap<PartyId, Vec<u8>>,
     data_shards: usize,
     parity_shards: usize,
 ) -> Result<Vec<Vec<u8>>, ShardError> {
@@ -64,10 +65,10 @@ pub fn decode_rs(
     let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
     // Fill known shard positions
     for (&idx, shard) in &shards_map {
-        if idx < total_shards {
-            shards[idx] = Some(shard.clone());
+        if idx.raw() < total_shards {
+            shards[idx.raw()] = Some(shard.clone());
         } else {
-            return Err(ShardError::OutOfBounds(idx, total_shards - 1));
+            return Err(ShardError::OutOfBounds(idx.raw(), total_shards - 1));
         }
     }
     // Attempt to reconstruct missing shards
@@ -137,7 +138,7 @@ pub fn get_merkle_proof(proof: Vec<u8>) -> Result<MerkleProof<Sha256Algorithm>, 
 }
 /// Verify a Merkle proof for a given shard and index.
 pub fn verify_merkle(
-    id: usize,
+    id: PartyId,
     n: usize,
     proof: Vec<u8>,
     shard: Vec<u8>,
@@ -151,14 +152,14 @@ pub fn verify_merkle(
     let proof = get_merkle_proof(proof)?;
     let leaf_hash = Sha256Algorithm::hash(&shard);
 
-    Ok(proof.verify(root, &vec![id], &[leaf_hash], n))
+    Ok(proof.verify(root, &vec![id.raw()], &[leaf_hash], n))
 }
 
 /// Generate Merkle proofs for all leaves and return them as a map.
 pub fn generate_merkle_proofs_map(
     shards: Vec<Vec<u8>>,
     n: usize,
-) -> Result<HashMap<usize, Vec<u8>>, ShardError> {
+) -> Result<HashMap<PartyId, Vec<u8>>, ShardError> {
     let tree = gen_merkletree(shards);
 
     // ensure tree is valid
@@ -171,7 +172,7 @@ pub fn generate_merkle_proofs_map(
     let mut proofs_map = HashMap::with_capacity(n);
     for i in 0..n {
         let proof_bytes = tree.proof(&[i]).to_bytes();
-        proofs_map.insert(i, proof_bytes);
+        proofs_map.insert(SenderId::new(i), proof_bytes);
     }
 
     Ok(proofs_map)
@@ -210,6 +211,8 @@ pub fn get_value(data: &[u8]) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    use stoffelnet::network_utils::SenderId;
+
     use super::*;
     #[test]
     fn test_reed_solomon_encode_decode_roundtrip() {
@@ -226,7 +229,7 @@ mod tests {
         for (i, shard) in shards.iter().enumerate() {
             if i != 1 {
                 // Drop shard 1
-                shards_map.insert(i, shard.clone());
+                shards_map.insert(SenderId::new(i), shard.clone());
             }
         }
 
@@ -259,10 +262,15 @@ mod tests {
         for (i, shard) in shards.iter().enumerate() {
             let mut proof_with_root = vec![];
             proof_with_root.extend_from_slice(&tree.root().unwrap()); // prepend root
-            proof_with_root.extend_from_slice(&proofs_map[&i]);
+            proof_with_root.extend_from_slice(&proofs_map[&SenderId::new(i)]);
 
-            let verified = verify_merkle(i, shards.len(), proof_with_root, shard.clone())
-                .expect("Verification should succeed");
+            let verified = verify_merkle(
+                SenderId::new(i),
+                shards.len(),
+                proof_with_root,
+                shard.clone(),
+            )
+            .expect("Verification should succeed");
 
             assert!(verified, "Merkle proof for shard {} failed", i);
         }
@@ -279,8 +287,8 @@ mod tests {
 
         // Only provide 2 shards (less than data_shards)
         let mut shards_map = HashMap::new();
-        shards_map.insert(0, shards[0].clone());
-        shards_map.insert(1, shards[1].clone());
+        shards_map.insert(SenderId::new(0), shards[0].clone());
+        shards_map.insert(SenderId::new(1), shards[1].clone());
 
         let result = decode_rs(shards_map, data_shards, parity_shards);
         assert!(

@@ -16,6 +16,7 @@ use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitNode;
 use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::{Robust, RobustShare};
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
+use stoffelnet::network_utils::{PartyId, SenderId};
 use tokio::sync::mpsc::{self, Sender};
 use tokio::task::JoinSet;
 
@@ -47,7 +48,7 @@ async fn test_prandbitd_end_to_end() {
     let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
         .map(|i| {
             PRandBitNode::new(
-                i,
+                SenderId::new(i),
                 n,
                 t,
                 sender_channels[i].clone(),
@@ -118,7 +119,7 @@ async fn test_prandbitd_end_to_end() {
             "Node {:?} missing share_b_2",
             node.id
         );
-        x_vals_2.push(domain_2.element(node.id));
+        x_vals_2.push(domain_2.element(node.id.raw()));
         for (i, y) in store.share_b_2.iter().enumerate() {
             y_vals_2[i].push(*y);
         }
@@ -189,7 +190,7 @@ async fn test_prandbitd_r_reconstruction() {
     let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
         .map(|i| {
             PRandBitNode::new(
-                i,
+                SenderId::new(i),
                 n,
                 t,
                 sender_channels[i].clone(),
@@ -211,7 +212,7 @@ async fn test_prandbitd_r_reconstruction() {
     for node in &mut nodes {
         node.generate_riss(
             session_id,
-            node_shares[node.id].clone(),
+            node_shares[node.id.raw()].clone(),
             l,
             k,
             batch_size,
@@ -248,7 +249,7 @@ async fn test_prandbitd_r_reconstruction() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // === Step 1: Collect all r_T values from all nodes ===
-    let mut all_r_t: HashMap<Vec<usize>, Vec<i64>> = HashMap::new();
+    let mut all_r_t: HashMap<Vec<PartyId>, Vec<i64>> = HashMap::new();
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
         let store = binding.lock().await;
@@ -325,7 +326,12 @@ async fn test_prandbitd_r_reconstruction() {
         let mut ys = vec![Vec::new(); batch_size];
         for &id in &combo {
             xs.push(domain_2.element(id));
-            let val = shares_r2.iter().find(|(i, _)| *i == id).unwrap().1.clone();
+            let val = shares_r2
+                .iter()
+                .find(|(i, _)| i.raw() == id)
+                .unwrap()
+                .1
+                .clone();
             for (i, y) in val.iter().enumerate() {
                 ys[i].push(*y);
             }
@@ -346,9 +352,9 @@ async fn test_prandbitd_r_reconstruction() {
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
         let store = binding.lock().await;
-        let tsets: Vec<Vec<usize>> = store.r_t.keys().cloned().collect();
+        let tsets: Vec<Vec<PartyId>> = store.r_t.keys().cloned().collect();
         let poly_f2 = build_all_f_polys_2_8(n, tsets).unwrap();
-        let xi2 = domain_2.element(node.id);
+        let xi2 = domain_2.element(node.id.raw());
         let mut recomputed = vec![F2_8::zero(); batch_size];
         for (tset, r_t) in store.r_t.iter() {
             let coeff = poly_f2[tset].evaluate(xi2);
@@ -378,7 +384,7 @@ async fn test_truncpr_end_to_end() {
     // === Initialize nodes ===
     let (trunc_sender, _) = mpsc::channel(128);
     let mut nodes: Vec<TruncPrNode<F, Avid<SessionId>>> = (0..n)
-        .map(|i| TruncPrNode::new(i, n, t, trunc_sender.clone()).unwrap())
+        .map(|i| TruncPrNode::new(SenderId::new(i), n, t, trunc_sender.clone()).unwrap())
         .collect();
 
     // === Input secret [a] (same across parties for test) ===
@@ -395,11 +401,11 @@ async fn test_truncpr_end_to_end() {
     // === Run init() for each node ===
     for node in &mut nodes {
         node.init(
-            a_val[node.id].clone(),
+            a_val[node.id.raw()].clone(),
             k,
             m,
-            r_bits[node.id].clone(),
-            r_int[node.id].clone(),
+            r_bits[node.id.raw()].clone(),
+            r_int[node.id.raw()].clone(),
             session_id,
             network.clone(),
         )
