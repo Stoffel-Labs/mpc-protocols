@@ -66,6 +66,19 @@ A node capable of:
 - Handling RBC-based input and output
 - Routing messages using compact `SessionId` fields
 
+### ⏱️ Offline Phase, Abort Semantics, and Timeouts
+
+The **offline (preprocessing) phase** of HoneyBadgerMPC is intentionally designed to be **non-robust**. In line with the original HoneyBadgerMPC design, preprocessing protocols (e.g., random sharing, batch reconstruction, Beaver triple generation) are expected to **abort on failure** and be **restarted by the caller** until sufficient preprocessing material has been generated.
+
+Typical failure conditions include:
+- A node going offline
+- Network message loss or delays
+- RBC or subprotocols failing to terminate
+
+⚠️ **Important:**  
+The preprocessing protocols **do not internally enforce timeouts**.  If a required message or share never arrives, the protocol may wait indefinitely. As a result, **timeout handling is the responsibility of the caller**. Preprocessing should always be wrapped in **external timeout logic**, with retry or abort behavior defined by the application.
+
+
 ---
 
 ### 🏃 How to Run
