@@ -132,6 +132,12 @@ pub enum HoneyBadgerError {
     JoinError,
     #[error("output channel closed before result was received")]
     ChannelClosed,
+    #[error("Invalid threshold t={0} for n={1}, must satisfy t < ceil(n / 3)")]
+    InvalidThreshold(usize, usize),
+    #[error("Party size is too large")]
+    InvalidPartySize,
+    #[error("Party Id is out of bounds")]
+    InvalidPartyId,
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -324,8 +330,16 @@ impl HoneyBadgerMPCNodeOpts {
         n_prandint: usize,
         l: usize,
         k: usize,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, HoneyBadgerError> {
+        //No of parties should not exceed 255
+        if n_parties > 255{
+            return Err(HoneyBadgerError::InvalidPartySize);
+        }
+        if !(threshold < (n_parties + 2) / 3) {
+            // ceil(n / 3)
+            return Err(HoneyBadgerError::InvalidThreshold(threshold, n_parties));
+        }
+        Ok(Self {
             n_parties,
             threshold,
             n_triples,
@@ -335,7 +349,7 @@ impl HoneyBadgerMPCNodeOpts {
             n_prandint,
             k,
             l,
-        }
+        })
     }
 }
 
@@ -350,6 +364,11 @@ where
     type Error = HoneyBadgerError;
 
     fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, HoneyBadgerError> {
+
+        if id >= params.n_parties {
+            return Err(HoneyBadgerError::InvalidPartyId);
+        }
+
         // Create channels for sub protocol output.
         let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
         let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);

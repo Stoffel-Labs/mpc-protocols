@@ -429,7 +429,7 @@ where
         n_prandint,
         l,
         k,
-    );
+    ).unwrap();
     (0..n_parties)
         .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), input_ids.clone()).unwrap())
         .collect()
