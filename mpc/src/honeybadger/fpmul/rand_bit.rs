@@ -67,9 +67,9 @@ where
         threshold: usize,
         protocol_output: Sender<SessionId>,
     ) -> Result<Self, RandBitError> {
-        let batch_recon_node = BatchReconNode::new(id, n_parties, threshold)?;
+        let batch_recon_node = BatchReconNode::new(id.into(), n_parties, threshold)?;
         let (mul_sender, mul_receiver) = mpsc::channel(128);
-        let mult_node = Multiply::new(id, n_parties, threshold, mul_sender)?;
+        let mult_node = Multiply::new(id.into(), n_parties, threshold, mul_sender)?;
         Ok(Self {
             id,
             n_parties,

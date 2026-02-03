@@ -134,7 +134,7 @@ where
                 "sending double shares from {:?} to {:?}",
                 self.id, recipient_id
             );
-            network.send(recipient_id, &bytes_generic_msg).await?;
+            network.send(recipient_id.into(), &bytes_generic_msg).await?;
         }
 
         // Update the state of the protocol to Initialized.
@@ -152,7 +152,7 @@ where
             CanonicalDeserialize::deserialize_compressed(recv_message.payload.as_slice())?;
         let binding = self.get_or_create_store(recv_message.session_id).await;
         let mut dousha_storage = binding.lock().await;
-        if dousha_storage.share.contains_key(&recv_message.sender_id) {
+        if dousha_storage.share.contains_key(&(recv_message.sender_id)) {
             warn!(
                 session_id = recv_message.session_id.as_u64(),
                 "Duplicate double share received from party {:?}, ignoring.",
@@ -168,7 +168,7 @@ where
             session_id = recv_message.session_id.as_u64(),
             "party {:?} received double shares from {:?}", self.id, recv_message.sender_id,
         );
-        dousha_storage.reception_tracker[recv_message.sender_id] = true;
+        dousha_storage.reception_tracker[usize::from(recv_message.sender_id)] = true;
 
         // Check if the protocol has reached an end
         if dousha_storage

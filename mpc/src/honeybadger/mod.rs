@@ -300,7 +300,7 @@ where
             DoubleShareNode::new(id, params.n_parties, params.threshold, dou_sha_sender);
         let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold, rand_bit_sender)?;
         let prand_bit_node = PRandBitNode::new(
-            id,
+            id.into(),
             params.n_parties,
             params.threshold,
             prand_bit_sender,
@@ -316,7 +316,7 @@ where
 
         let triple_gen_node =
             TripleGenNode::new(id, params.n_parties, params.threshold, triple_sender)?;
-        let mul_node = Multiply::new(id, params.n_parties, params.threshold, mul_sender)?;
+        let mul_node = Multiply::new(id.into(), params.n_parties, params.threshold, mul_sender)?;
         let share_gen = RanShaNode::new(
             id,
             params.n_parties,
@@ -324,11 +324,11 @@ where
             params.threshold + 1,
             share_gen_sender,
         )?;
-        let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold, fpmul_sender)?;
+        let fpmul_node = FPMulNode::new(id.into(), params.n_parties, params.threshold, fpmul_sender)?;
         let fpdiv_const_node =
-            FPDivConstNode::new(id, params.n_parties, params.threshold, fpdiv_const_sender)?;
-        let input = InputServer::new(id, params.n_parties, params.threshold)?;
-        let output = OutputServer::new(id, params.n_parties)?;
+            FPDivConstNode::new(id.into(), params.n_parties, params.threshold, fpdiv_const_sender)?;
+        let input = InputServer::new(id.into(), params.n_parties, params.threshold)?;
+        let output = OutputServer::new(id.into(), params.n_parties)?;
         Ok(Self {
             id,
             preprocessing_material: Arc::new(

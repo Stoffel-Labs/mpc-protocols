@@ -50,7 +50,7 @@ impl<F: FftField, R: RBC> InputServer<F, R> {
         //Store the local shares
         {
             let mut share_store = self.local_mask_shares.lock().await;
-            share_store.insert(client_id, shares.clone());
+            share_store.insert(client_id.into(), shares.clone());
             info!("Stored local mask shares for client {}", client_id);
         }
         let mut payload = Vec::new();
@@ -60,7 +60,7 @@ impl<F: FftField, R: RBC> InputServer<F, R> {
         let wrapped = WrappedMessage::Input(msg);
         let bytes = bincode::serialize(&wrapped)?;
         //Send to the client
-        net.send_to_client(client_id, &bytes).await?;
+        net.send_to_client(client_id.into(), &bytes).await?;
         info!("Server {} sent MaskShare to client {}", self.id, client_id);
 
         Ok(())
@@ -75,7 +75,7 @@ impl<F: FftField, R: RBC> InputServer<F, R> {
         let masked_input: Vec<F> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
         let local_share_store = self.local_mask_shares.lock().await;
-        let local_shares = match local_share_store.get(&msg.sender_id) {
+        let local_shares = match local_share_store.get(&(msg.sender_id.into())) {
             Some(s) => s,
             None => {
                 return Err(InputError::InvalidInput(format!(
@@ -91,7 +91,7 @@ impl<F: FftField, R: RBC> InputServer<F, R> {
             .collect();
         drop(local_share_store); // release lock early
         let mut input_store = self.input_shares.lock().await;
-        input_store.insert(msg.sender_id, input_shares);
+        input_store.insert(msg.sender_id.into(), input_shares);
         info!(
             "Server {} stored input share from client {}",
             self.id, msg.sender_id

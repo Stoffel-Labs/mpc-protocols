@@ -42,7 +42,7 @@ impl OutputServer {
         let bytes = bincode::serialize(&wrapped)?;
 
         //Send to the client
-        net.send_to_client(client_id, &bytes).await?;
+        net.send_to_client(client_id.into(), &bytes).await?;
         info!(
             "Server {} sent output share to client {}",
             self.id, client_id

@@ -41,10 +41,10 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         threshold: usize,
         output_sender: Sender<SessionId>,
     ) -> Result<Self, MulError> {
-        let batch_recon = BatchReconNode::<F>::new(id, n, threshold)?;
-        let rbc = R::new(id, n, threshold, threshold + 1)?;
+        let batch_recon = BatchReconNode::<F>::new(id.into(), n, threshold)?;
+        let rbc = R::new(id.into(), n, threshold, threshold + 1)?;
         Ok(Self {
-            id,
+            id: id.into(),
             n,
             threshold,
             mult_storage: Arc::new(Mutex::new(HashMap::new())),
@@ -141,7 +141,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             );
 
             let wrapped =
-                WrappedMessage::Mul(MultMessage::new(self.id, sessionid, bytes_rec_message));
+                WrappedMessage::Mul(MultMessage::new(self.id.into(), sessionid, bytes_rec_message));
             let bytes_wrapped = bincode::serialize(&wrapped)?;
 
             self.rbc

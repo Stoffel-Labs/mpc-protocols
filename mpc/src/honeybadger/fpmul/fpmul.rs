@@ -63,7 +63,7 @@ where
         let (trunc_sender, trunc_receiver) = mpsc::channel(128);
 
         let trunc_node = TruncPrNode::new(id, n_parties, threshold, trunc_sender)?;
-        let mult_node = Multiply::new(id, n_parties, threshold, mul_sender)?;
+        let mult_node = Multiply::new(id.into(), n_parties, threshold, mul_sender)?;
         Ok(Self {
             id,
             n_parties,

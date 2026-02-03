@@ -124,7 +124,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                         vec![],
                     ));
                     let bytes_msg = bincode::serialize(&msg)?;
-                    network.send(j, &bytes_msg).await?;
+                    network.send(j.into(), &bytes_msg).await?;
                 }
             }
         }

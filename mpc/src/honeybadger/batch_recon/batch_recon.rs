@@ -94,7 +94,7 @@ impl<F: FftField> BatchReconNode<F> {
             let encoded_msg =
                 bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
 
-            let _ = net.send(j, &encoded_msg).await?;
+            let _ = net.send(j.into(), &encoded_msg).await?;
         }
         Ok(())
     }
@@ -222,24 +222,24 @@ impl<F: FftField> BatchReconNode<F> {
                                     result.serialize_compressed(&mut bytes_message)?;
                                     let triple_gen_generic_msg =
                                         WrappedMessage::Triple(TripleGenMessage::new(
-                                            self.id,
+                                            self.id.into(),
                                             msg.session_id,
                                             bytes_message,
                                         ));
                                     let bytes_generic_msg =
                                         bincode::serialize(&triple_gen_generic_msg)?;
-                                    net.send(self.id, &bytes_generic_msg).await?;
+                                    net.send(self.id.into(), &bytes_generic_msg).await?;
                                 }
                                 ProtocolType::Mul | ProtocolType::FpMul => {
                                     let mut bytes_message = Vec::new();
                                     result.serialize_compressed(&mut bytes_message)?;
                                     let mult_generic_msg = WrappedMessage::Mul(MultMessage::new(
-                                        self.id,
+                                        self.id.into(),
                                         msg.session_id,
                                         bytes_message,
                                     ));
                                     let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
-                                    net.send(self.id, &bytes_generic_msg).await?;
+                                    net.send(self.id.into(), &bytes_generic_msg).await?;
                                 }
                                 ProtocolType::RandBit => {
                                     let mut bytes_message = Vec::new();
@@ -247,23 +247,23 @@ impl<F: FftField> BatchReconNode<F> {
                                     if msg.session_id.sub_id() == 0 {
                                         let rand_generic_msg =
                                             WrappedMessage::RandBit(RandBitMessage::new(
-                                                self.id,
+                                                self.id.into(),
                                                 msg.session_id,
                                                 bytes_message,
                                             ));
                                         let bytes_generic_msg =
                                             bincode::serialize(&rand_generic_msg)?;
-                                        net.send(self.id, &bytes_generic_msg).await?;
+                                        net.send(self.id.into(), &bytes_generic_msg).await?;
                                     } else {
                                         let mult_generic_msg =
                                             WrappedMessage::Mul(MultMessage::new(
-                                                self.id,
+                                                self.id.into(),
                                                 msg.session_id,
                                                 bytes_message,
                                             ));
                                         let bytes_generic_msg =
                                             bincode::serialize(&mult_generic_msg)?;
-                                        net.send(self.id, &bytes_generic_msg).await?;
+                                        net.send(self.id.into(), &bytes_generic_msg).await?;
                                     }
                                 }
                                 ProtocolType::PRandBit => {
@@ -271,7 +271,7 @@ impl<F: FftField> BatchReconNode<F> {
                                     result.serialize_compressed(&mut bytes_message)?;
                                     let mult_generic_msg =
                                         WrappedMessage::PRandBit(PRandBitDMessage::new(
-                                            self.id,
+                                            self.id.into(),
                                             PRandMessageType::OutputMessage,
                                             msg.session_id,
                                             vec![],
@@ -279,7 +279,7 @@ impl<F: FftField> BatchReconNode<F> {
                                             bytes_message,
                                         ));
                                     let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
-                                    net.send(self.id, &bytes_generic_msg).await?;
+                                    net.send(self.id.into(), &bytes_generic_msg).await?;
                                 }
                                 _ => return Ok(()),
                             }

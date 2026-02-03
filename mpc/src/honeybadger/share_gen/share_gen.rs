@@ -43,9 +43,9 @@ where
         k: usize,
         output_sender: Sender<SessionId>,
     ) -> Result<Self, RanShaError> {
-        let rbc = R::new(id, n_parties, threshold, k)?;
+        let rbc = R::new(id.into(), n_parties, threshold, k)?;
         Ok(Self {
-            id,
+            id: id.into(),
             n_parties,
             threshold,
             store: Arc::new(Mutex::new(HashMap::new())),
@@ -97,7 +97,7 @@ where
             let bytes_generic_msg = bincode::serialize(&generic_message)?;
 
             info!("sending shares from {:?} to {:?}", self.id, recipient_id);
-            network.send(recipient_id, &bytes_generic_msg).await?;
+            network.send(recipient_id.into(), &bytes_generic_msg).await?;
         }
 
         // Update the state of the protocol to Initialized.
@@ -191,7 +191,7 @@ where
                 RanShaPayload::Reconstruct(bytes_rec_message),
             ));
             let bytes = bincode::serialize(&message)?;
-            network.send(i, &bytes).await?;
+            network.send(i.into(), &bytes).await?;
         }
         Ok(())
     }

@@ -58,7 +58,7 @@ where
         output_sender: Sender<SessionId>,
     ) -> Result<Self, TripleGenError> {
         // batch_recon_node is for opening degree 2t shares
-        let batch_recon_node = BatchReconNode::<F>::new(id, n_parties, threshold * 2)?;
+        let batch_recon_node = BatchReconNode::<F>::new(id.into(), n_parties, threshold * 2)?;
         Ok(Self {
             id,
             n_parties,
@@ -169,7 +169,7 @@ where
         // First, we mark the protocol as initialized.
         storage.protocol_state = ProtocolState::Finished;
         self.output_sender.send(message.session_id).await?;
-        info!(?message.session_id, id = message.sender_id, "TripleGen protocol finished");
+        info!(?message.session_id, id = ?message.sender_id, "TripleGen protocol finished");
 
         // Store the result in the inner memory of the node.
         storage.protocol_output = result_triples;

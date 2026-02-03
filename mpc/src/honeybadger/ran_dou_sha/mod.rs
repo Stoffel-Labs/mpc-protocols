@@ -71,7 +71,7 @@ pub struct RanDouShaStore<F: FftField> {
     /// with the shares of s.
     pub computed_r_shares_degree_2t: Vec<NonRobustShare<F>>,
     /// Vector that stores the nodes who have sent the output ok msg.
-    pub received_ok_msg: Vec<usize>,
+    pub received_ok_msg: Vec<PartyId>,
     /// Current state of the protocol.
     pub state: RanDouShaState,
     pub protocol_output: Vec<DoubleShamirShare<F>>,
@@ -136,7 +136,7 @@ where
         threshold: usize,
         k: usize, // for RBC init
     ) -> Result<Self, RanDouShaError> {
-        let rbc = R::new(id, n_parties, threshold, k)?;
+        let rbc = R::new(id.into(), n_parties, threshold, k)?;
         Ok(Self {
             id,
             n_parties,
@@ -245,7 +245,7 @@ where
 
                 let bytes_wrapped = bincode::serialize(&wrapped)?;
                 // Sending the generic message to the network.
-                network.send(i, &bytes_wrapped).await?;
+                network.send(i.into(), &bytes_wrapped).await?;
             }
         }
         Ok(())
@@ -301,7 +301,7 @@ where
 
         // (2) Check if this party (self.id) is one of the designated checking parties.
         // Condition from the protocol: `t + 1 < i <= n`
-        if self.id >= self.threshold + 1 && self.id < self.n_parties {
+        if usize::from(self.id) >= self.threshold + 1 && usize::from(self.id) < self.n_parties {
             // (3) Check if enough shares have been received to reconstruct.
             // To reconstruct a (t) degree polynomial, you need t+1 distinct shares.
             // To reconstruct a (2t) degree polynomial, you need 2t+1 distinct shares.
@@ -344,7 +344,7 @@ where
                 // if the verification succeeds, broadcast true (aka. OK)
                 let sessionid = SessionId::new(
                     ProtocolType::Randousha,
-                    self.id as u8,
+                    u8::try_from(usize::from(self.id)).unwrap(),
                     msg.session_id.round_id(),
                     msg.session_id.instance_id(),
                 );

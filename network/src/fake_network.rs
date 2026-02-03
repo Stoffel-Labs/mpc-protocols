@@ -35,7 +35,7 @@ impl FakeNetwork {
         for id in 0..n_nodes {
             let (sender, receiver) = mpsc::channel(config.channel_buff_size);
             node_channels.push(sender);
-            nodes.push(FakeNode::new(id));
+            nodes.push(FakeNode::new(PartyId::from(id)));
             receivers.push(receiver);
         }
         let mut client_channels = HashMap::new();
@@ -68,7 +68,8 @@ impl Network for FakeNetwork {
     type NetworkConfig = FakeNetworkConfig;
 
     async fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
-        if let Some(sender) = self.node_channels.get(recipient) {
+        let recipient_idx: usize = recipient.into();
+        if let Some(sender) = self.node_channels.get(recipient_idx) {
             sender
                 .send(message.to_vec())
                 .await
@@ -167,7 +168,8 @@ impl Node for FakeNode {
     }
 
     fn scalar_id<F: ark_ff::Field>(&self) -> F {
-        F::from(self.id as u64)
+        let id_val: usize = self.id.into();
+        F::from(id_val as u64)
     }
 }
 
@@ -205,8 +207,9 @@ mod tests {
 
         for i in 0..n_nodes {
             assert!(channels.get(i).is_some());
-            assert!(network.node(i).is_some());
-            assert_eq!(network.node(i).unwrap().id(), i);
+            let party_id = PartyId::from(i);
+            assert!(network.node(party_id).is_some());
+            assert_eq!(network.node(party_id).unwrap().id(), party_id);
         }
     }
 
@@ -216,8 +219,9 @@ mod tests {
         let config = FakeNetworkConfig::new(100);
         let (network, mut receivers, _) = FakeNetwork::new(n_nodes, None, config);
 
-        let sender_id = 1;
-        let recipient_id = 2;
+        let sender_idx = 1;
+        let recipient_idx = 2;
+        let recipient_id = PartyId::from(recipient_idx);
         let message = b"hello";
 
         // Send a message from the perspective of the network
@@ -226,14 +230,14 @@ mod tests {
         assert_eq!(send_result.unwrap(), message.len());
 
         // Get the recipient node and try to receive the message
-        let recipient_node = &mut receivers[recipient_id];
+        let recipient_node = &mut receivers[recipient_idx];
         let received_message_result = recipient_node.try_recv();
 
         assert!(received_message_result.is_ok());
         assert_eq!(received_message_result.unwrap(), message.to_vec());
 
         // Ensure the other node didn't receive the message
-        let other_node1 = &mut receivers[sender_id];
+        let other_node1 = &mut receivers[sender_idx];
         let other_received_message_result = other_node1.try_recv();
         assert!(other_received_message_result.is_err()); // Should be empty
 
@@ -270,12 +274,13 @@ mod tests {
         use ark_bls12_381::Fr;
 
         //let (sender, receiver) = mpsc::channel(100);
-        let node_id = 123;
+        let node_id_val = 123usize;
+        let node_id = PartyId::from(node_id_val);
         let node = FakeNode::new(node_id);
 
         assert_eq!(node.id(), node_id);
         let scalar_id: Fr = node.scalar_id();
-        assert_eq!(scalar_id, Fr::from(node_id as u64));
+        assert_eq!(scalar_id, Fr::from(node_id_val as u64));
         //drop(sender);
     }
 
@@ -285,16 +290,17 @@ mod tests {
         let config = FakeNetworkConfig::new(100);
         let (mut network, _, _) = FakeNetwork::new(n_nodes, None, config);
 
-        let recipient_id = 1;
+        let recipient_idx = 1;
+        let recipient_id = PartyId::from(recipient_idx);
         let message = b"test";
 
         // Simulate send failure by removing the recipient's sender
         assert!(
-            recipient_id < network.node_channels.len(),
+            recipient_idx < network.node_channels.len(),
             "Recipient must exist"
         );
 
-        network.node_channels[recipient_id] = {
+        network.node_channels[recipient_idx] = {
             // Drop the sender by replacing it with a closed channel
             let (closed_sender, _): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(1);
             drop(closed_sender); // explicitly drop so that send fails

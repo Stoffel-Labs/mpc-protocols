@@ -126,7 +126,7 @@ impl RBC for Bracha {
     ) -> Result<(), RbcError> {
         let wrap_msg = WrappedMessage::Rbc(msg);
         let encoded = bincode::serialize(&wrap_msg)?;
-        net.send(recv, &encoded).await?;
+        net.send(recv.into(), &encoded).await?;
         Ok(())
     }
 }
@@ -340,7 +340,7 @@ impl Bracha {
                     output = ?msg.payload,
                     "Consensus achieved; RBC instance ended"
                 );
-                net.send(self.id, &msg.payload).await?;
+                net.send(self.id.into(), &msg.payload).await?;
             }
         }
         Ok(())
@@ -552,7 +552,7 @@ impl RBC for Avid {
     ) -> Result<(), RbcError> {
         let wrapped = WrappedMessage::Rbc(msg);
         let encoded = bincode::serialize(&wrapped)?;
-        net.send(recv, &encoded).await?;
+        net.send(recv.into(), &encoded).await?;
         Ok(())
     }
 }
@@ -804,7 +804,7 @@ impl Avid {
                             output = ?output,
                             "Consensus achieved; AVID instance ended"
                         );
-                        net.send(self.id, &output).await?;
+                        net.send(self.id.into(), &output).await?;
                     }
                 }
                 Ok(false) => {
@@ -1088,7 +1088,7 @@ impl RBC for ABA {
     ) -> Result<(), RbcError> {
         let wrapped = WrappedMessage::Rbc(msg);
         let encoded = bincode::serialize(&wrapped)?;
-        net.send(recv, &encoded).await?;
+        net.send(recv.into(), &encoded).await?;
         Ok(())
     }
 }
@@ -1705,7 +1705,7 @@ impl Dealer {
 
             let wrap = WrappedMessage::Rbc(key_msg);
             let encoded = bincode::serialize(&wrap)?;
-            net.send(i, &encoded).await?;
+            net.send(i.into(), &encoded).await?;
         }
         Ok(())
     }
