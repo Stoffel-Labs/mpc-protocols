@@ -374,7 +374,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         // 2.
-        if msg.session_id.sub_id() == 0 {
+        if msg.session_id.sub_id() == 1 {
             let open: Vec<F> =
                 CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
             let round_id = msg.session_id.round_id();
