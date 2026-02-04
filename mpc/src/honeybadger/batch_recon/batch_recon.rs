@@ -270,7 +270,7 @@ impl<F: FftField> BatchReconNode<F> {
                                 ProtocolType::RandBit => {
                                     let mut bytes_message = Vec::new();
                                     result.serialize_compressed(&mut bytes_message)?;
-                                    if msg.session_id.sub_id() == 1 {
+                                    if msg.session_id.sub_id() == 0 {
                                         let rand_generic_msg =
                                             WrappedMessage::RandBit(RandBitMessage::new(
                                                 self.id,
@@ -281,7 +281,7 @@ impl<F: FftField> BatchReconNode<F> {
                                             bincode::serialize(&rand_generic_msg)?;
                                         info!("Finished reconstruction of message within RandBit");
                                         net.send(self.id, &bytes_generic_msg).await?;
-                                    } else if msg.session_id.sub_id() == 0 {
+                                    } else  {
                                         let mult_generic_msg =
                                             WrappedMessage::Mul(MultMessage::new(
                                                 self.id,
@@ -292,11 +292,7 @@ impl<F: FftField> BatchReconNode<F> {
                                             bincode::serialize(&mult_generic_msg)?;
                                         info!("Finished reconstruction of message within RandBit::Multiplication");
                                         net.send(self.id, &bytes_generic_msg).await?;
-                                    } else {
-                                        return Err(BatchReconError::InvalidInput(
-                                            "Invalid sub_id for RandBit".to_string(),
-                                        ));
-                                    }
+                                    } 
                                 }
                                 ProtocolType::PRandBit => {
                                     let mut bytes_message = Vec::new();

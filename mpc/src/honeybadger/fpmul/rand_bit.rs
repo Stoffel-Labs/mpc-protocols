@@ -146,11 +146,6 @@ where
     pub mult_node: Multiply<F, R>,
     /// Batch reconstruction node to reconstruct `a^2 mod p`.
     pub batch_recon: BatchReconNode<F>,
-    /// Original session ID for the execution of RandBit.
-    ///
-    /// The field is [`Option`] because at the beginning of the execution, the session ID is not
-    /// known yet.
-    pub original_session_id: Option<SessionId>,
 }
 
 impl<F, R> RandBit<F, R>
@@ -182,7 +177,6 @@ where
             output_channel: protocol_output,
             mult_node,
             batch_recon: batch_recon_node,
-            original_session_id: None,
         })
     }
 
@@ -228,8 +222,6 @@ where
             return Err(RandBitError::Incompatible);
         }
 
-        self.original_session_id = Some(session_id);
-
         // Mark the protocol as initialized.
         {
             let storage_bind = self.get_or_create_storage(session_id).await;
@@ -238,22 +230,10 @@ where
             storage.a_share = Some(a_shares.clone());
         }
 
-        // Step 2: Execute the multiplication to get a^2 mod p.
-        let mult_session_id = SessionId::new(
-            session_id.calling_protocol().unwrap(),
-            session_id.exec_id(),
-            0,
-            session_id.round_id(),
-            session_id.instance_id(),
-        );
-        info!(
-            mult_session_id = ?mult_session_id,
-            "Initializing multiplication from within RandBit",
-        );
         let a_shares_copy = a_shares.clone();
         self.mult_node
             .init(
-                mult_session_id,
+                session_id,
                 a_shares,
                 a_shares_copy,
                 mult_triples,
@@ -265,7 +245,7 @@ where
 
         let a_square_share = self
             .mult_node
-            .wait_for_result(mult_session_id, Duration::from_millis(10000))
+            .wait_for_result(session_id, Duration::from_millis(10000))
             .await?;
 
         tracing::info!("Multiplication at RandBit done: {0:?}", self.id);
@@ -274,7 +254,7 @@ where
             let session_id_batch_recon = SessionId::new(
                 session_id.calling_protocol().unwrap(),
                 session_id.exec_id(),
-                session_id.sub_id(),
+                0,
                 i as u8,
                 session_id.instance_id(),
             );
@@ -295,13 +275,13 @@ where
             "RandBit reconstruction msg received from node: {0:?}",
             message.sender
         );
-        let session_id = match self.original_session_id {
-            Some(original_session_id) => original_session_id,
-            None => {
-                error!("The session ID is not set. This should not happen.");
-                return Err(RandBitError::SessionIdNotSet);
-            }
-        };
+        let session_id = SessionId::new(
+            message.session_id.calling_protocol().unwrap(),
+            message.session_id.exec_id(),
+            0,
+            0,
+            message.session_id.instance_id(),
+        );
         let storage_bind = self.get_or_create_storage(session_id).await;
         let mut storage = storage_bind.lock().await;
         let a = storage

@@ -275,7 +275,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
                 let session_id1 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
                     session_id.exec_id(),
-                    0,
+                    1,
                     (2 * i) as u8,
                     session_id.instance_id(),
                 );
@@ -291,7 +291,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
                 let session_id2 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
                     session_id.exec_id(),
-                    0,
+                    1,
                     (2 * i + 1) as u8,
                     session_id.instance_id(),
                 );
@@ -314,7 +314,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             reconst_message.serialize_compressed(&mut bytes_rec_message)?;
 
             let sessionid = SessionId::new(
-                ProtocolType::Mul, // session_id.calling_protocol().unwrap(),
+                session_id.calling_protocol().unwrap(),
                 session_id.exec_id(),
                 2,
                 self.id as u8,
@@ -364,7 +364,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         }
 
         // 2.
-        if msg.session_id.sub_id() == 0 {
+        if msg.session_id.sub_id() == 1 {
             let open: Vec<F> =
                 CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
             let round_id = msg.session_id.round_id();
