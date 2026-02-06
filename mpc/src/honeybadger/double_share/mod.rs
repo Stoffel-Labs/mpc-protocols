@@ -67,7 +67,7 @@ impl<F: FftField> DoubleShamirShare<F> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DouShaMessage {
     /// ID of the sender.
-    sender_id: PartyId,
+    pub sender_id: PartyId,
     /// ID of the session.
     pub session_id: SessionId,
     /// Payload of the message.

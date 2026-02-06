@@ -137,7 +137,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
                 // Match the message type and route it appropriately
                 match &wrapped {
                     WrappedMessage::Mul(msg) => {
-                        let result = mul_node.process(msg.clone()).await;
+                        let result = mul_node.process(msg.clone(), msg.sender).await;
 
                         match result {
                             Ok(()) => {}
@@ -165,7 +165,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
                         match batch_msg.session_id.calling_protocol() {
                             Some(ProtocolType::Mul) => mul_node
                                 .batch_recon
-                                .process(batch_msg.clone(), Arc::clone(&net_clone))
+                                .process(batch_msg.clone(), batch_msg.sender_id, Arc::clone(&net_clone))
                                 .await
                                 .expect("batch recon error"),
                             _ => {

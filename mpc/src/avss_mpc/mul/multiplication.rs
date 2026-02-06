@@ -184,7 +184,13 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         Ok(())
     }
 
-    pub async fn process(&mut self, message: MultMessage) -> Result<(), MulError> {
+    pub async fn process(&mut self, message: MultMessage, sender_id: PartyId) -> Result<(), MulError> {
+        if message.sender != sender_id {
+            return Err(MulError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: message.sender,
+            });
+        }
         self.open_mult_handler(message).await?;
         Ok(())
     }

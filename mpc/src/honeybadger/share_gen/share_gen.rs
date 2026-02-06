@@ -125,11 +125,18 @@ where
     pub async fn process<N>(
         &mut self,
         msg: RanShaMessage,
+        sender_id: PartyId,
         network: Arc<N>,
     ) -> Result<(), RanShaError>
     where
         N: Network + Send + Sync,
     {
+        if msg.sender_id != sender_id {
+            return Err(RanShaError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: msg.sender_id,
+            });
+        }
         match msg.msg_type {
             RanShaMessageType::ShareMessage => {
                 self.receive_shares_handler(msg, network).await?;
@@ -364,7 +371,7 @@ mod tests {
     async fn test_sharegen_storage_limit_in_receive_shares_handler() {
         let (tx, _rx) = mpsc::channel(1);
         let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let net = Arc::new(FakeNetwork::new(0, 5, None, FakeNetworkConfig::new(10)).0);
 
         // Fill up the storage to the limit by calling receive_shares_handler with unique session IDs
         let mut exec = 0u8;
@@ -419,7 +426,7 @@ mod tests {
     async fn test_sharegen_storage_limit_in_reconstruction_handler() {
         let (tx, _rx) = mpsc::channel(1);
         let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let net = Arc::new(FakeNetwork::new(0, 5, None, FakeNetworkConfig::new(10)).0);
 
         // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
         let mut exec = 0u8;
@@ -522,7 +529,7 @@ mod tests {
     async fn test_sharegen_receive_shares_handler_invalid_sub_id() {
         let (tx, _rx) = mpsc::channel(1);
         let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let net = Arc::new(FakeNetwork::new(0, 5, None, FakeNetworkConfig::new(10)).0);
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(0, 1, 0), 0);
@@ -547,7 +554,7 @@ mod tests {
     async fn test_sharegen_reconstruction_handler_invalid_sub_id() {
         let (tx, _rx) = mpsc::channel(1);
         let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let net = Arc::new(FakeNetwork::new(0, 5, None, FakeNetworkConfig::new(10)).0);
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(0, 1, 0), 0);

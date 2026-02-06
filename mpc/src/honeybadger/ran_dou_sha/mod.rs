@@ -32,6 +32,12 @@ use tracing::info;
 /// Error that occurs during the execution of the Random Double Share Error.
 #[derive(Debug, Error)]
 pub enum RanDouShaError {
+    /// The sender ID in the message does not match the transport-authenticated sender.
+    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    SenderMismatch {
+        expected_sender: PartyId,
+        actual_sender: PartyId,
+    },
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
@@ -439,11 +445,18 @@ where
     pub async fn process<N>(
         &mut self,
         msg: RanDouShaMessage,
+        sender_id: PartyId,
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
         N: Network + Send + Sync,
     {
+        if msg.sender_id != sender_id {
+            return Err(RanDouShaError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: msg.sender_id,
+            });
+        }
         match msg.msg_type {
             messages::RanDouShaMessageType::OutputMessage => {
                 self.output_handler(msg).await?;
@@ -475,7 +488,7 @@ mod tests {
     async fn test_randousha_storage_limit_in_reconstruction_handler() {
         let (tx, _rx) = mpsc::channel(1);
         let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, tx, 5, 1, 2).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let net = Arc::new(FakeNetwork::new(0, 5, None, FakeNetworkConfig::new(10)).0);
 
         // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
         let mut exec = 0u8;
@@ -534,7 +547,7 @@ mod tests {
     async fn test_randousha_handle_invalid_sub_id() {
         let (tx, _rx) = mpsc::channel(1);
         let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, tx, 5, 1, 2).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let net = Arc::new(FakeNetwork::new(0, 5, None, FakeNetworkConfig::new(10)).0);
 
         // Create a session id with sub_id != 0
         let session_id =

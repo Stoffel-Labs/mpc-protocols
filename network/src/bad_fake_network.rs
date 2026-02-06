@@ -1,6 +1,10 @@
 use ark_std::rand::{distributions::Distribution, rngs::StdRng};
 use async_trait::async_trait;
 use futures::future::join_all;
+use std::future::Future;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::{
     cmp::{Ord, Ordering, PartialEq, PartialOrd, Reverse},
     collections::{BinaryHeap, HashMap},
@@ -18,8 +22,11 @@ use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
 #[cfg(debug_assertions)]
 use tracing::debug;
+use stoffelnet::transports::quic::{NetworkManager, PeerConnection};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::FmtSubscriber;
+
+use crate::peer_connection::FakeConnectionBroker;
 /*
  * This is a fake network with delays. Every sent message is assigned a delay sampled from some
  * distribution. The message is inserted into a min-heap with the delay as its key.
@@ -97,7 +104,8 @@ async fn send_next_msgs(
             }
 
             // 3.
-            let result = node_channels[msg.1 .0].send(msg.1 .1.to_vec()).await;
+            let idx: usize = msg.1 .0.into();
+            let result = node_channels[idx].send(msg.1 .1.to_vec()).await;
             if let Err(e) = result {
                 panic!("network thread encountered error {}", e);
             }
@@ -159,9 +167,22 @@ pub struct BadFakeNetwork {
     nodes: Vec<FakeBadNode>,
     /// Channels to send messages to clients.
     client_channels: HashMap<ClientId, Sender<Vec<u8>>>,
+    /// The sender ID of this network instance (which party this represents)
+    self_id: PartyId,
+    /// Shared connection broker for establishing peer connections
+    broker: Option<Arc<FakeConnectionBroker>>,
+    /// Channel for receiving incoming connections from accept()
+    incoming_rx: Option<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Arc<dyn PeerConnection>>>>,
+    /// Established peer connections, keyed by remote party ID
+    peer_connections: HashMap<PartyId, Arc<dyn PeerConnection>>,
 }
 
 impl BadFakeNetwork {
+    /// Returns a reference to the established peer connections.
+    pub fn get_peer_connections(&self) -> &HashMap<PartyId, Arc<dyn PeerConnection>> {
+        &self.peer_connections
+    }
+
     /// Creates a new bad fake network for testing using the given number of nodes and configuration.
     /// Returns
     ///   1. a receiving endpoint to receive messages sent by nodes at the delaying thread
@@ -173,6 +194,7 @@ impl BadFakeNetwork {
     ///      the `BadFakeNetwork::send` and `BadFakeNetwork::send_to_client` functions.
     #[allow(clippy::type_complexity)]
     pub fn new(
+        self_id: PartyId,
         n_nodes: usize,
         n_clients: Option<Vec<ClientId>>,
         config: BadFakeNetworkConfig,
@@ -195,7 +217,7 @@ impl BadFakeNetwork {
         for id in 0..n_nodes {
             let (sender, receiver) = mpsc::channel(config.channel_buff_size);
             node_channels.push(sender);
-            nodes.push(FakeBadNode::new(id));
+            nodes.push(FakeBadNode::new(PartyId::from(id)));
             receivers.push(receiver);
         }
         let mut client_channels = HashMap::new();
@@ -215,12 +237,60 @@ impl BadFakeNetwork {
                 config,
                 nodes,
                 client_channels: client_channels.clone(),
+                self_id,
+                broker: None,
+                incoming_rx: None,
+                peer_connections: HashMap::new(),
             },
             net_rx,
             node_channels,
             receivers,
             client_receivers,
         )
+    }
+
+    /// Creates a mesh of N BadFakeNetworks, one per node, sharing a connection broker.
+    /// Each network can establish PeerConnections with any other network in the mesh
+    /// via the NetworkManager trait.
+    ///
+    /// Returns a vector of tuples containing each network's components.
+    #[allow(clippy::type_complexity)]
+    pub fn new_mesh(
+        n_nodes: usize,
+        n_clients: Option<Vec<ClientId>>,
+        config: BadFakeNetworkConfig,
+    ) -> Vec<(
+        Self,
+        Receiver<(PartyId, Vec<u8>)>,
+        Vec<Sender<Vec<u8>>>,
+        Vec<Receiver<Vec<u8>>>,
+        HashMap<ClientId, Receiver<Vec<u8>>>,
+    )> {
+        let broker = Arc::new(FakeConnectionBroker::new());
+        let mut results = Vec::with_capacity(n_nodes);
+
+        for i in 0..n_nodes {
+            let node_config = BadFakeNetworkConfig::new(config.channel_buff_size);
+            let self_id = PartyId::from(i);
+            let (mut net, net_rx, node_channels, receivers, client_receivers) =
+                Self::new(self_id, n_nodes, n_clients.clone(), node_config);
+
+            net.broker = Some(Arc::clone(&broker));
+
+            // Create incoming connection channel and register with broker
+            let (incoming_tx, incoming_rx) =
+                tokio::sync::mpsc::channel(config.channel_buff_size);
+            let addr = SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                self_id as u16,
+            );
+            broker.register_listener(addr, incoming_tx);
+            net.incoming_rx = Some(tokio::sync::Mutex::new(incoming_rx));
+
+            results.push((net, net_rx, node_channels, receivers, client_receivers));
+        }
+
+        results
     }
 
     /// Starts the thread, which delays messages and then sends them to the receivers.
@@ -310,8 +380,9 @@ impl Network for BadFakeNetwork {
     // Sends a message from a node to the delaying thread, which later forwards it to the right
     // node.
     async fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
-        if self.net_channels.get(recipient).is_some() {
-            self.net_channels[recipient]
+        let idx: usize = recipient.into();
+        if self.net_channels.get(idx).is_some() {
+            self.net_channels[idx]
                 .send((recipient, message.to_vec()))
                 .await
                 .map_err(|_| NetworkError::SendError)?;
@@ -336,7 +407,7 @@ impl Network for BadFakeNetwork {
             .net_channels
             .iter()
             .enumerate()
-            .map(|(i, sender)| sender.send((i, msg.clone())));
+            .map(|(i, sender)| sender.send((PartyId::from(i), msg.clone())));
 
         let results = join_all(futures).await;
 
@@ -386,6 +457,111 @@ impl Network for BadFakeNetwork {
     fn is_client_connected(&self, client: ClientId) -> bool {
         self.client_channels.contains_key(&client)
     }
+
+    // --- sender_id management (fake network implementations) ---
+
+    fn sender_id(&self) -> PartyId {
+        if self.peer_connections.is_empty() {
+            return self.self_id;
+        }
+        let mut all_ids: Vec<PartyId> = vec![self.self_id];
+        all_ids.extend(self.peer_connections.keys());
+        all_ids.sort();
+        all_ids.iter().position(|&id| id == self.self_id).unwrap_or(self.self_id)
+    }
+
+    fn assign_sender_ids(&self) -> usize {
+        if self.peer_connections.is_empty() {
+            return self.nodes.len();
+        }
+        let mut all_ids: Vec<PartyId> = vec![self.self_id];
+        all_ids.extend(self.peer_connections.keys());
+        all_ids.sort();
+
+        let mut assigned = 0;
+        for (&peer_id, conn) in &self.peer_connections {
+            if let Some(pos) = all_ids.iter().position(|&id| id == peer_id) {
+                conn.set_sender_id(pos);
+                assigned += 1;
+            }
+        }
+        assigned
+    }
+
+    fn party_count(&self) -> usize {
+        if self.peer_connections.is_empty() {
+            return self.nodes.len();
+        }
+        1 + self.peer_connections.len()
+    }
+
+    fn is_fully_connected(&self, expected_count: usize) -> bool {
+        if self.peer_connections.is_empty() {
+            return self.nodes.len() >= expected_count;
+        }
+        self.peer_connections.len() >= expected_count.saturating_sub(1)
+    }
+}
+
+impl NetworkManager for BadFakeNetwork {
+    fn connect<'a>(
+        &'a mut self,
+        address: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn PeerConnection>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let broker = self.broker.as_ref().ok_or_else(|| {
+                "No broker configured. Use new_mesh() to create connected networks.".to_string()
+            })?;
+            let our_addr = SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                self.self_id as u16,
+            );
+            let conn = broker
+                .connect(
+                    address,
+                    our_addr,
+                    Some(self.self_id),
+                    self.config.channel_buff_size,
+                )
+                .await?;
+            let remote_id = address.port() as PartyId;
+            self.peer_connections.insert(remote_id, conn.clone());
+            Ok(conn)
+        })
+    }
+
+    fn accept<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn PeerConnection>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let incoming_rx = self.incoming_rx.as_ref().ok_or_else(|| {
+                "No listener configured. Use new_mesh() or call listen() first.".to_string()
+            })?;
+            let mut rx = incoming_rx.lock().await;
+            let conn = rx.recv()
+                .await
+                .ok_or_else(|| "Listener channel closed".to_string())?;
+            if let Some(remote_id) = conn.sender_id() {
+                self.peer_connections.insert(remote_id, conn.clone());
+            }
+            Ok(conn)
+        })
+    }
+
+    fn listen<'a>(
+        &'a mut self,
+        bind_address: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let broker = self.broker.as_ref().ok_or_else(|| {
+                "No broker configured. Use new_mesh() to create connected networks.".to_string()
+            })?;
+            let (tx, rx) = tokio::sync::mpsc::channel(self.config.channel_buff_size);
+            self.incoming_rx = Some(tokio::sync::Mutex::new(rx));
+            broker.register_listener(bind_address, tx);
+            Ok(())
+        })
+    }
 }
 
 /// Represents a node in the BadFakeNetwork.
@@ -412,7 +588,8 @@ impl Node for FakeBadNode {
     }
 
     fn scalar_id<F: ark_ff::Field>(&self) -> F {
-        F::from(self.id as u64)
+        let id: usize = self.id.into();
+        F::from(id as u64)
     }
 }
 
@@ -444,7 +621,7 @@ mod tests {
 
         let n_nodes = 5;
         let config = BadFakeNetworkConfig::new(100);
-        let (network, _, _, _, _) = BadFakeNetwork::new(n_nodes, None, config);
+        let (network, _, _, _, _) = BadFakeNetwork::new(0, n_nodes, None, config);
 
         let channels = network.net_channels.clone();
 
@@ -453,8 +630,8 @@ mod tests {
 
         for i in 0..n_nodes {
             assert!(channels.get(i).is_some());
-            assert!(network.node(i).is_some());
-            assert_eq!(network.node(i).unwrap().id(), i);
+            assert!(network.node(PartyId::from(i)).is_some());
+            assert_eq!(network.node(PartyId::from(i)).unwrap().id(), PartyId::from(i));
         }
     }
 
@@ -465,7 +642,7 @@ mod tests {
         let n_nodes = 3;
         let config = BadFakeNetworkConfig::new(100);
         let (network, net_rx, node_channels, mut receivers, _) =
-            BadFakeNetwork::new(n_nodes, None, config);
+            BadFakeNetwork::new(0, n_nodes, None, config);
 
         BadFakeNetwork::start(
             net_rx,
@@ -474,8 +651,9 @@ mod tests {
             Uniform::new_inclusive(1, 1),
         );
 
-        let sender_id = 1;
-        let recipient_id = 2;
+        let sender_idx: usize = 1;
+        let recipient_id = PartyId::from(2usize);
+        let recipient_idx: usize = recipient_id.into();
         let message = b"hello";
 
         // Send a message from the perspective of the network
@@ -486,14 +664,14 @@ mod tests {
         assert_eq!(send_result.unwrap(), message.len());
 
         // Get the recipient node and try to receive the message
-        let recipient_node = &mut receivers[recipient_id];
+        let recipient_node = &mut receivers[recipient_idx];
         let received_message_result = recipient_node.try_recv();
 
         assert!(received_message_result.is_ok());
         assert_eq!(received_message_result.unwrap(), message.to_vec());
 
         // Ensure the other node didn't receive the message
-        let other_node1 = &mut receivers[sender_id];
+        let other_node1 = &mut receivers[sender_idx];
         let other_received_message_result = other_node1.try_recv();
         assert!(other_received_message_result.is_err()); // Should be empty
 
@@ -509,7 +687,7 @@ mod tests {
         let n_nodes = 3;
         let config = BadFakeNetworkConfig::new(100);
         let (network, net_rx, node_channels, mut receivers, _) =
-            BadFakeNetwork::new(n_nodes, None, config);
+            BadFakeNetwork::new(0, n_nodes, None, config);
         let network = Arc::new(Mutex::new(network));
 
         BadFakeNetwork::start(
@@ -543,12 +721,13 @@ mod tests {
         use ark_bls12_381::Fr;
 
         //let (sender, receiver) = mpsc::channel(100);
-        let node_id = 123;
+        let node_id = PartyId::from(123usize);
         let node = FakeBadNode::new(node_id);
 
         assert_eq!(node.id(), node_id);
         let scalar_id: Fr = node.scalar_id();
-        assert_eq!(scalar_id, Fr::from(node_id as u64));
+        let expected_id: usize = node_id.into();
+        assert_eq!(scalar_id, Fr::from(expected_id as u64));
         //drop(sender);
     }
 
@@ -558,7 +737,7 @@ mod tests {
 
         let n_nodes = 2;
         let config = BadFakeNetworkConfig::new(100);
-        let (mut network, net_rx, node_channels, _, _) = BadFakeNetwork::new(n_nodes, None, config);
+        let (mut network, net_rx, node_channels, _, _) = BadFakeNetwork::new(0, n_nodes, None, config);
 
         BadFakeNetwork::start(
             net_rx,
@@ -567,18 +746,19 @@ mod tests {
             Uniform::new_inclusive(1, 1),
         );
 
-        let recipient_id = 1;
+        let recipient_id = PartyId::from(1usize);
+        let recipient_idx: usize = recipient_id.into();
         let message = b"test";
 
         // Simulate send failure by removing the recipient's sender
         assert!(
-            recipient_id < network.net_channels.len(),
+            recipient_idx < network.net_channels.len(),
             "Recipient must exist"
         );
 
-        network.net_channels[recipient_id] = {
+        network.net_channels[recipient_idx] = {
             // Drop the sender by replacing it with a closed channel
-            let (closed_sender, _): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(1);
+            let (closed_sender, _): (Sender<(PartyId, Vec<u8>)>, Receiver<(PartyId, Vec<u8>)>) = mpsc::channel(1);
             drop(closed_sender); // explicitly drop so that send fails
             mpsc::channel(1).0 // use a channel with no receiver
         };
@@ -601,7 +781,7 @@ mod tests {
         let n_nodes = 2;
         let config = BadFakeNetworkConfig::new(500);
         let (network, net_rx, node_channels, mut receivers, _) =
-            BadFakeNetwork::new(n_nodes, None, config);
+            BadFakeNetwork::new(0, n_nodes, None, config);
 
         BadFakeNetwork::start(
             net_rx,
@@ -611,7 +791,8 @@ mod tests {
         );
 
         let n_msgs = 3u32;
-        let recipient_id = 1;
+        let recipient_id = PartyId::from(1usize);
+        let recipient_idx: usize = recipient_id.into();
 
         for i in 0u32..n_msgs {
             let message = i.to_be_bytes();
@@ -624,7 +805,7 @@ mod tests {
         }
 
         let mut out_of_order = false;
-        let recipient_node = &mut receivers[recipient_id];
+        let recipient_node = &mut receivers[recipient_idx];
         let mut i_recvd = HashSet::new();
 
         for i in 0..n_msgs {
@@ -651,5 +832,112 @@ mod tests {
 
         // this can theoretically fail, but with enough messages it is very unlikely
         assert!(out_of_order);
+    }
+
+    #[tokio::test]
+    async fn test_network_manager_connect_accept() {
+        setup_tracing();
+
+        let n_nodes = 3;
+        let config = BadFakeNetworkConfig::new(100);
+        let mut mesh = BadFakeNetwork::new_mesh(n_nodes, None, config);
+
+        // Take out two networks (delay threads not needed for NetworkManager test)
+        let (mut net0, _net_rx0, _node_channels0, _receivers0, _) = mesh.remove(0);
+        let (net1, _net_rx1, _node_channels1, _receivers1, _) = mesh.remove(0);
+
+        // net0 connects to net1
+        let addr1 = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            1,
+        );
+
+        // Use a shared wrapper so net1 stays alive
+        let net1 = Arc::new(Mutex::new(net1));
+        let net1_clone = Arc::clone(&net1);
+
+        // Spawn accept on net1 in background
+        let accept_handle = tokio::spawn(async move {
+            let mut net = net1_clone.lock().await;
+            net.accept().await.unwrap()
+        });
+
+        // Give accept a moment to be ready, then connect
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let client_conn = net0.connect(addr1).await.unwrap();
+        let server_conn = accept_handle.await.unwrap();
+
+        // Verify sender_ids
+        assert_eq!(client_conn.sender_id(), Some(1)); // net1's self_id
+        assert_eq!(server_conn.sender_id(), Some(0)); // net0's self_id
+
+        // Test data exchange
+        client_conn.send(b"hello from 0").await.unwrap();
+        let msg = server_conn.receive().await.unwrap();
+        assert_eq!(msg, b"hello from 0");
+    }
+
+    #[tokio::test]
+    async fn test_assign_sender_ids() {
+        setup_tracing();
+
+        let n_nodes = 3;
+        let config = BadFakeNetworkConfig::new(100);
+        let mut mesh = BadFakeNetwork::new_mesh(n_nodes, None, config);
+
+        // Take out all three networks (delay threads not needed)
+        let (mut net0, _rx0, _nc0, _r0, _) = mesh.remove(0);
+        let (mut net1, _rx1, _nc1, _r1, _) = mesh.remove(0);
+        let (mut net2, _rx2, _nc2, _r2, _) = mesh.remove(0);
+
+        // Establish connections: 0->1, 0->2
+        let addr1 = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
+        let addr2 = SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 2);
+
+        // 0 connects to 1: use a channel to return the accepted conn AND the modified net1
+        let (net1_tx, mut net1_rx) = tokio::sync::mpsc::channel::<(Arc<dyn PeerConnection>, BadFakeNetwork)>(1);
+        tokio::spawn(async move {
+            let conn = net1.accept().await.unwrap();
+            net1_tx.send((conn, net1)).await.unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let conn0_to_1 = net0.connect(addr1).await.unwrap();
+        let (conn1_from_0, net1) = net1_rx.recv().await.unwrap();
+
+        // 0 connects to 2
+        let (net2_tx, mut net2_rx) = tokio::sync::mpsc::channel::<(Arc<dyn PeerConnection>, BadFakeNetwork)>(1);
+        tokio::spawn(async move {
+            let conn = net2.accept().await.unwrap();
+            net2_tx.send((conn, net2)).await.unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let conn0_to_2 = net0.connect(addr2).await.unwrap();
+        let (_conn2_from_0, _net2) = net2_rx.recv().await.unwrap();
+
+        // Call assign_sender_ids on net0
+        // all_ids = [0, 1, 2] sorted -> positions: 0->0, 1->1, 2->2
+        let assigned = net0.assign_sender_ids();
+        assert_eq!(assigned, 2);
+
+        // Verify net0's own sender_id is position-based
+        assert_eq!(net0.sender_id(), 0);
+
+        // Verify peer connections got position-based sender_ids
+        assert_eq!(conn0_to_1.sender_id(), Some(1));
+        assert_eq!(conn0_to_2.sender_id(), Some(2));
+
+        // Verify party_count and is_fully_connected
+        assert_eq!(net0.party_count(), 3);
+        assert!(net0.is_fully_connected(3));
+        assert!(!net0.is_fully_connected(4));
+
+        // net1 only accepted from 0, check its state
+        let assigned1 = net1.assign_sender_ids();
+        assert_eq!(assigned1, 1);
+        assert_eq!(net1.sender_id(), 1); // position 1 in [0, 1]
+        assert_eq!(net1.party_count(), 2);
+        assert!(net1.is_fully_connected(2));
+        // conn1_from_0 was reassigned: peer 0 at position 0
+        assert_eq!(conn1_from_0.sender_id(), Some(0));
     }
 }

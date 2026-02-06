@@ -17,7 +17,7 @@ use ark_serialize::CanonicalSerialize;
 use futures::lock::Mutex;
 use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
-use stoffelnet::network_utils::Network;
+use stoffelnet::network_utils::{Network, PartyId};
 use tracing::{debug, error, info, warn};
 /// --------------------------BatchRecPub--------------------------
 ///
@@ -309,8 +309,15 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn process<N: Network>(
         &mut self,
         msg: BatchReconMsg,
+        sender_id: PartyId,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
+        if msg.sender_id != sender_id {
+            return Err(BatchReconError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: msg.sender_id,
+            });
+        }
         self.batch_recon_handler(msg, net).await?;
         Ok(())
     }

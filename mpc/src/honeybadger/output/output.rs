@@ -6,7 +6,7 @@ use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use stoffelnet::network_utils::Network;
+use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::watch::{channel, Receiver, Sender};
 use tokio::time::{timeout, Duration};
 use tracing::info;
@@ -193,7 +193,13 @@ impl<F: FftField> OutputClient<F> {
     }
 
     /// Process any message (used for both client and server roles).
-    pub async fn process(&mut self, msg: OutputMessage) -> Result<(), OutputError> {
+    pub async fn process(&mut self, msg: OutputMessage, sender_id: PartyId) -> Result<(), OutputError> {
+        if msg.sender_id != sender_id {
+            return Err(OutputError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: msg.sender_id,
+            });
+        }
         self.output_handler(msg).await?;
         Ok(())
     }

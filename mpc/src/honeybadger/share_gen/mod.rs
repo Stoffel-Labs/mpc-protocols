@@ -4,7 +4,7 @@ use ark_ff::FftField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::NetworkError;
+use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 
@@ -21,6 +21,12 @@ pub mod share_gen;
 /// Error type for the Random Single Share (RanSha) protocol.
 #[derive(Debug, Error)]
 pub enum RanShaError {
+    /// The sender ID in the message does not match the transport-authenticated sender.
+    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    SenderMismatch {
+        expected_sender: PartyId,
+        actual_sender: PartyId,
+    },
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
     #[error("error while serializing an arkworks object: {0:?}")]

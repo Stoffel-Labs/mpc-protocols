@@ -7,7 +7,7 @@ use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use stoffelnet::network_utils::{ClientId, Network};
+use stoffelnet::network_utils::{ClientId, Network, PartyId};
 use tokio::{
     sync::{
         watch::{channel, Receiver, Sender},
@@ -267,7 +267,13 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
     }
 
     /// Process any message (used for both client and server roles).
-    pub async fn process(&mut self, msg: InputMessage) -> Result<(), InputError> {
+    pub async fn process(&mut self, msg: InputMessage, sender_id: PartyId) -> Result<(), InputError> {
+        if msg.sender_id != sender_id {
+            return Err(InputError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: msg.sender_id,
+            });
+        }
         match msg.msg_type {
             InputMessageType::MaskShare => Err(InputError::InvalidInput(
                 "Incorrect message type".to_string(),
@@ -446,8 +452,15 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
     pub async fn process<N: Network + Send + Sync>(
         &mut self,
         msg: InputMessage,
+        sender_id: PartyId,
         net: Arc<N>,
     ) -> Result<(), InputError> {
+        if msg.sender_id != sender_id {
+            return Err(InputError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: msg.sender_id,
+            });
+        }
         match msg.msg_type {
             InputMessageType::MaskedInput => Err(InputError::InvalidInput(
                 "Incorrect message type".to_string(),
@@ -482,7 +495,7 @@ pub mod tests {
 
         let config = FakeNetworkConfig::new(500);
         let (network, mut receivers, mut client_recv_map) =
-            FakeNetwork::new(n, Some(vec![clientid]), config);
+            FakeNetwork::new(0, n, Some(vec![clientid]), config);
         let mut client_recv = client_recv_map.remove(&clientid).unwrap();
         let network = Arc::new(network);
 
@@ -520,7 +533,7 @@ pub mod tests {
         for _ in 0..3 {
             let received = client_recv.recv().await.unwrap();
             if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received) {
-                assert!(client.process(msg, network.clone()).await.is_ok());
+                assert!(client.process(msg.clone(), msg.sender_id, network.clone()).await.is_ok());
             } else {
                 panic!();
             }
@@ -542,7 +555,7 @@ pub mod tests {
                             node.rbc.process(rbc_msg, network.clone()).await
                         }
                         WrappedMessage::Input(input_msg) => {
-                            let _ = node.process(input_msg).await;
+                            let _ = node.process(input_msg.clone(), input_msg.sender_id).await;
                             return;
                         }
                         _ => {

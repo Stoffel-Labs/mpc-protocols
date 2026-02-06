@@ -17,7 +17,7 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
 use itertools::Itertools;
 use rand::Rng;
 use std::{collections::HashMap, sync::Arc, vec};
-use stoffelnet::network_utils::Network;
+use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::{debug, info};
 
@@ -378,8 +378,15 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     pub async fn process<N: Network + Send + Sync>(
         &mut self,
         msg: PRandBitDMessage,
+        sender_id: PartyId,
         network: Arc<N>,
     ) -> Result<(), PRandError> {
+        if msg.sender_id != sender_id {
+            return Err(PRandError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: msg.sender_id,
+            });
+        }
         match msg.msg_type {
             PRandMessageType::RissMessage => self.riss_handler(msg, network).await?,
             PRandMessageType::OutputMessage => self.output_handler(msg).await?,

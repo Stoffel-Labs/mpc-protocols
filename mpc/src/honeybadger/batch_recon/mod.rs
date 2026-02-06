@@ -11,7 +11,7 @@ use ark_ff::FftField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::NetworkError;
+use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 
 /// Represents message type exchanged between network nodes during the batch reconstruction protocol.
@@ -66,6 +66,12 @@ impl<F: FftField> BatchReconStore<F> {
 /// Error that occurs during the execution of the Batch reconstruction.
 #[derive(Debug, Error)]
 pub enum BatchReconError {
+    /// The sender ID in the message does not match the transport-authenticated sender.
+    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    SenderMismatch {
+        expected_sender: PartyId,
+        actual_sender: PartyId,
+    },
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),

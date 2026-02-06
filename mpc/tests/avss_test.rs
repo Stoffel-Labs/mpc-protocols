@@ -84,7 +84,7 @@ async fn test_avss_end_to_end() {
                 let wrapped: AvssWrappedMessage = bincode::deserialize(&received).unwrap();
                 match wrapped {
                     AvssWrappedMessage::Avss(msg) => {
-                        let _ = node.process(msg).await;
+                        let _ = node.process(msg.clone(), msg.sender_id).await;
                     }
                     AvssWrappedMessage::Rbc(msg) => {
                         let _ = node.rbc.process(msg, net.clone()).await;

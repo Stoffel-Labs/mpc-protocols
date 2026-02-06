@@ -90,6 +90,12 @@ use triple_gen::triple_generation::TripleGenNode;
 
 #[derive(Error, Debug)]
 pub enum HoneyBadgerError {
+    /// The sender ID in the message does not match the transport-authenticated sender.
+    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    SenderMismatch {
+        expected_sender: PartyId,
+        actual_sender: PartyId,
+    },
     #[error("network error: {0:?}")]
     NetworkError(#[from] NetworkError),
     #[error("error in share generation: {0:?}")]
@@ -176,15 +182,16 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
     pub async fn process<N: Network + Send + Sync>(
         &mut self,
         raw_msg: Vec<u8>,
+        sender_id: PartyId,
         net: Arc<N>,
     ) -> Result<(), HoneyBadgerError> {
         let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
 
         match wrapped {
             WrappedMessage::Input(input_msg) => {
-                self.input.process(input_msg, net).await?;
+                self.input.process(input_msg, sender_id, net).await?;
             }
-            WrappedMessage::Output(output_msg) => self.output.process(output_msg).await?,
+            WrappedMessage::Output(output_msg) => self.output.process(output_msg, sender_id).await?,
             _ => warn!("Incorrect message type recieved at input"),
         }
         Ok(())
@@ -496,7 +503,7 @@ where
             .map_err(HoneyBadgerError::from)
     }
 
-    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
+    async fn process(&mut self, raw_msg: Vec<u8>, sender_id: PartyId, net: Arc<N>) -> Result<(), Self::Error> {
         let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
 
         match wrapped {
@@ -567,7 +574,7 @@ where
             }
 
             WrappedMessage::Input(input) => {
-                self.preprocess.input.process(input).await?;
+                self.preprocess.input.process(input, sender_id).await?;
             }
             WrappedMessage::RanSha(rs_msg) => {
                 if rs_msg.session_id.instance_id() != self.params.instance_id {
@@ -575,7 +582,7 @@ where
                         rs_msg.session_id.instance_id(),
                     ));
                 }
-                self.preprocess.share_gen.process(rs_msg, net).await?;
+                self.preprocess.share_gen.process(rs_msg, sender_id, net).await?;
             }
             WrappedMessage::Dousha(ds_msg) => {
                 if ds_msg.session_id.instance_id() != self.params.instance_id {
@@ -583,7 +590,7 @@ where
                         ds_msg.session_id.instance_id(),
                     ));
                 }
-                self.preprocess.dou_sha.process(ds_msg).await?;
+                self.preprocess.dou_sha.process(ds_msg, sender_id).await?;
             }
             WrappedMessage::RanDouSha(rds_msg) => {
                 if rds_msg.session_id.instance_id() != self.params.instance_id {
@@ -591,7 +598,7 @@ where
                         rds_msg.session_id.instance_id(),
                     ));
                 }
-                self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
+                self.preprocess.ran_dou_sha.process(rds_msg, sender_id, net).await?;
             }
             WrappedMessage::Mul(mul_msg) => {
                 if mul_msg.session_id.instance_id() != self.params.instance_id {
@@ -601,12 +608,12 @@ where
                 }
 
                 match mul_msg.session_id.calling_protocol() {
-                    Some(ProtocolType::Mul) => self.operations.mul.process(mul_msg).await?,
+                    Some(ProtocolType::Mul) => self.operations.mul.process(mul_msg, sender_id).await?,
                     Some(ProtocolType::RandBit) => {
-                        self.preprocess.rand_bit.mult_node.process(mul_msg).await?
+                        self.preprocess.rand_bit.mult_node.process(mul_msg, sender_id).await?
                     }
                     Some(ProtocolType::FpMul) => {
-                        self.type_ops.fpmul.mult_node.process(mul_msg).await?
+                        self.type_ops.fpmul.mult_node.process(mul_msg, sender_id).await?
                     }
                     _ => {
                         warn!(
@@ -622,7 +629,7 @@ where
                         triple_msg.session_id.instance_id(),
                     ));
                 }
-                self.preprocess.triple_gen.process(triple_msg).await?;
+                self.preprocess.triple_gen.process(triple_msg, sender_id).await?;
             }
             WrappedMessage::BatchRecon(batch_msg) => {
                 if batch_msg.session_id.instance_id() != self.params.instance_id {
@@ -635,14 +642,14 @@ where
                         self.operations
                             .mul
                             .batch_recon
-                            .process(batch_msg, net)
+                            .process(batch_msg, sender_id, net)
                             .await?
                     }
                     Some(ProtocolType::Triple) => {
                         self.preprocess
                             .triple_gen
                             .batch_recon_node
-                            .process(batch_msg, net)
+                            .process(batch_msg, sender_id, net)
                             .await?
                     }
                     Some(ProtocolType::RandBit) => {
@@ -650,14 +657,14 @@ where
                             self.preprocess
                                 .rand_bit
                                 .batch_recon
-                                .process(batch_msg, net)
+                                .process(batch_msg, sender_id, net)
                                 .await?
                         } else {
                             self.preprocess
                                 .rand_bit
                                 .mult_node
                                 .batch_recon
-                                .process(batch_msg, net)
+                                .process(batch_msg, sender_id, net)
                                 .await?
                         }
                     }
@@ -665,7 +672,7 @@ where
                         self.preprocess
                             .prand_bit
                             .batch_recon
-                            .process(batch_msg, net)
+                            .process(batch_msg, sender_id, net)
                             .await?
                     }
                     Some(ProtocolType::FpMul) => {
@@ -673,7 +680,7 @@ where
                             .fpmul
                             .mult_node
                             .batch_recon
-                            .process(batch_msg, net)
+                            .process(batch_msg, sender_id, net)
                             .await?
                     }
                     _ => {
@@ -690,7 +697,7 @@ where
                         rand_bit_message.session_id.instance_id(),
                     ));
                 }
-                self.preprocess.rand_bit.process(rand_bit_message).await?;
+                self.preprocess.rand_bit.process(rand_bit_message, sender_id).await?;
             }
             WrappedMessage::PRandBit(prand_message) => {
                 if prand_message.session_id.instance_id() != self.params.instance_id {
@@ -700,7 +707,7 @@ where
                 }
                 self.preprocess
                     .prand_bit
-                    .process(prand_message, net)
+                    .process(prand_message, sender_id, net)
                     .await?;
             }
             WrappedMessage::Trunc(trunc_message) => {
@@ -714,14 +721,14 @@ where
                         self.type_ops
                             .fpmul
                             .trunc_node
-                            .process(trunc_message, net)
+                            .process(trunc_message, sender_id, net)
                             .await?;
                     }
                     Some(ProtocolType::FpDivConst) => {
                         self.type_ops
                             .fpdiv_const
                             .trunc_node
-                            .process(trunc_message, net)
+                            .process(trunc_message, sender_id, net)
                             .await?;
                     }
                     _ => {

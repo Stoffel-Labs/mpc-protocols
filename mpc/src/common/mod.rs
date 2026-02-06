@@ -308,7 +308,7 @@ where
     where
         Self: Sized;
 
-    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error>;
+    async fn process(&mut self, raw_msg: Vec<u8>, sender_id: PartyId, net: Arc<N>) -> Result<(), Self::Error>;
 
     async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
     where

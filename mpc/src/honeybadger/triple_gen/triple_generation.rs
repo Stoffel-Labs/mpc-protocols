@@ -191,7 +191,13 @@ where
         Ok(())
     }
 
-    pub async fn process(&mut self, message: TripleGenMessage) -> Result<(), TripleGenError> {
+    pub async fn process(&mut self, message: TripleGenMessage, sender_id: PartyId) -> Result<(), TripleGenError> {
+        if message.sender_id != sender_id {
+            return Err(TripleGenError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: message.sender_id,
+            });
+        }
         self.batch_recon_finish_handler(message).await?;
         Ok(())
     }

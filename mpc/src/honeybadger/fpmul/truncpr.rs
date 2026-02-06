@@ -9,7 +9,7 @@ use crate::{
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::{collections::HashMap, sync::Arc};
-use stoffelnet::network_utils::Network;
+use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;
 
@@ -183,8 +183,15 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     pub async fn process<N: Network>(
         &mut self,
         msg: TruncPrMessage,
+        sender_id: PartyId,
         _network: Arc<N>,
     ) -> Result<(), TruncPrError> {
+        if msg.sender_id != sender_id {
+            return Err(TruncPrError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: msg.sender_id,
+            });
+        }
         self.handle_open(msg).await?;
         Ok(())
     }

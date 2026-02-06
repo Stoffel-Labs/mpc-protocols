@@ -37,6 +37,12 @@ pub mod triple_gen;
 
 #[derive(Error, Debug)]
 pub enum AdkgError {
+    /// The sender ID in the message does not match the transport-authenticated sender.
+    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    SenderMismatch {
+        expected_sender: PartyId,
+        actual_sender: PartyId,
+    },
     #[error("network error: {0:?}")]
     NetworkError(#[from] NetworkError),
     #[error("there is not enough preprocessing to complete the protocol")]
@@ -281,7 +287,7 @@ where
             counters: SubProtocolCounters::new(),
         })
     }
-    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
+    async fn process(&mut self, raw_msg: Vec<u8>, sender_id: PartyId, net: Arc<N>) -> Result<(), Self::Error> {
         let wrapped: AvssWrappedMessage = bincode::deserialize(&raw_msg)?;
         match wrapped {
             AvssWrappedMessage::Rbc(rbc_msg) => match rbc_msg.session_id.calling_protocol() {
@@ -302,10 +308,10 @@ where
             AvssWrappedMessage::Avss(avss_message) => {
                 match avss_message.session_id.calling_protocol() {
                     Some(ProtocolType::Avss) => {
-                        self.share_gen_avss.avss.process(avss_message).await?;
+                        self.share_gen_avss.avss.process(avss_message, sender_id).await?;
                     }
                     Some(ProtocolType::Triple) => {
-                        self.triple_gen.avss.process(avss_message).await?
+                        self.triple_gen.avss.process(avss_message, sender_id).await?
                     }
                     _ => {
                         warn!(
@@ -315,7 +321,7 @@ where
                     }
                 }
             }
-            AvssWrappedMessage::Mul(mul_message) => self.mul_node.process(mul_message).await?,
+            AvssWrappedMessage::Mul(mul_message) => self.mul_node.process(mul_message, sender_id).await?,
         }
 
         Ok(())

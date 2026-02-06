@@ -67,7 +67,7 @@ async fn test_multiple_clients_parallel_input() {
                 let wrapped: WrappedMessage = bincode::deserialize(&received).ok().unwrap();
                 if let WrappedMessage::Input(msg) = wrapped {
                     if msg.msg_type == InputMessageType::MaskShare {
-                        client.process(msg, net_clone.clone()).await.ok();
+                        client.process(msg.clone(), msg.sender_id, net_clone.clone()).await.ok();
                     }
                 }
             }
@@ -141,7 +141,7 @@ async fn test_input_recovery_with_missing_server() {
         while let Some(received) = recv.recv().await {
             if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received) {
                 if msg.msg_type == InputMessageType::MaskShare {
-                    client.process(msg, net_clone.clone()).await.ok();
+                    client.process(msg.clone(), msg.sender_id, net_clone.clone()).await.ok();
                 }
             }
         }
@@ -214,7 +214,7 @@ async fn test_input_with_too_many_faulty_shares() {
         while let Some(received) = recv.recv().await {
             if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received) {
                 // Client will fail internally when trying to decode faulty shares
-                let _ = client.process(msg, net_clone.clone()).await;
+                let _ = client.process(msg.clone(), msg.sender_id, net_clone.clone()).await;
             }
         }
     });

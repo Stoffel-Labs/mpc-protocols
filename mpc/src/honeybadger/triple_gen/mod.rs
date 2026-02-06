@@ -20,6 +20,12 @@ pub mod triple_generation;
 /// Error type for the triple generation protocol.
 #[derive(Debug, Error)]
 pub enum TripleGenError {
+    /// The sender ID in the message does not match the transport-authenticated sender.
+    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    SenderMismatch {
+        expected_sender: PartyId,
+        actual_sender: PartyId,
+    },
     /// Error that describes an failure in the network processes.
     #[error("network error: {0:?}")]
     NetworkError(#[from] NetworkError),

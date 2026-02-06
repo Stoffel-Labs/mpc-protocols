@@ -127,7 +127,7 @@ mod tests {
             111,
         );
         let config = FakeNetworkConfig::new(100);
-        let (network, mut receivers, _) = FakeNetwork::new(n, None, config);
+        let (network, mut receivers, _) = FakeNetwork::new(0, n, None, config);
         let net = Arc::new(network);
 
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(6u64)];
@@ -173,7 +173,7 @@ mod tests {
                     };
                     match wrapped {
                         WrappedMessage::BatchRecon(m) => {
-                            match node.process(m, net_clone.clone()).await {
+                            match node.process(m.clone(), m.sender_id, net_clone.clone()).await {
                                 Ok(()) => {}
                                 Err(e) => warn!(id =i,error = ?e ,"Broadcasting failure"),
                             }

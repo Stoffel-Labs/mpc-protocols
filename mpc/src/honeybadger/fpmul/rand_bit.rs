@@ -259,7 +259,13 @@ where
         Ok(d_share_array)
     }
 
-    pub async fn process(&mut self, message: RandBitMessage) -> Result<(), RandBitError> {
+    pub async fn process(&mut self, message: RandBitMessage, sender_id: PartyId) -> Result<(), RandBitError> {
+        if message.sender != sender_id {
+            return Err(RandBitError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: message.sender,
+            });
+        }
         self.square_reconstruction_handler(message).await?;
         Ok(())
     }

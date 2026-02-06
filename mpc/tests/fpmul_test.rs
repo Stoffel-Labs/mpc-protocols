@@ -92,10 +92,10 @@ async fn test_prandbitd_end_to_end() {
                 let wrapped: WrappedMessage = bincode::deserialize(&received).unwrap();
                 match wrapped {
                     WrappedMessage::PRandBit(msg) => {
-                        let _ = node.process(msg, net.clone()).await;
+                        let _ = node.process(msg.clone(), msg.sender_id, net.clone()).await;
                     }
                     WrappedMessage::BatchRecon(msg) => {
-                        let _ = node.batch_recon.process(msg, net.clone()).await;
+                        let _ = node.batch_recon.process(msg.clone(), msg.sender_id, net.clone()).await;
                     }
                     _ => continue,
                 }
@@ -233,10 +233,10 @@ async fn test_prandbitd_r_reconstruction() {
                 let wrapped: WrappedMessage = bincode::deserialize(&received).unwrap();
                 match wrapped {
                     WrappedMessage::PRandBit(msg) => {
-                        let _ = node.process(msg, net.clone()).await;
+                        let _ = node.process(msg.clone(), msg.sender_id, net.clone()).await;
                     }
                     WrappedMessage::BatchRecon(msg) => {
-                        let _ = node.batch_recon.process(msg, net.clone()).await;
+                        let _ = node.batch_recon.process(msg.clone(), msg.sender_id, net.clone()).await;
                     }
                     _ => continue,
                 }
@@ -419,7 +419,7 @@ async fn test_truncpr_end_to_end() {
                 let wrapped: WrappedMessage = bincode::deserialize(&received).unwrap();
                 match wrapped {
                     WrappedMessage::Trunc(msg) => {
-                        let _ = node.process(msg, net.clone()).await;
+                        let _ = node.process(msg.clone(), msg.sender_id, net.clone()).await;
                     }
                     WrappedMessage::Rbc(msg) => {
                         let _ = node.rbc.process(msg, net.clone()).await;

@@ -48,7 +48,16 @@ pub fn adkg_receive<F, R, S, N, G>(
 
         tokio::spawn(async move {
             while let Some(raw_msg) = rx.recv().await {
-                if let Err(e) = node.process(raw_msg, net_clone.clone()).await {
+                // In tests with centralized broadcast, extract sender_id from message
+                let sender_id = bincode::deserialize::<stoffelmpc_mpc::avss_mpc::AvssWrappedMessage>(&raw_msg)
+                    .ok()
+                    .map(|w| match w {
+                        stoffelmpc_mpc::avss_mpc::AvssWrappedMessage::Avss(m) => m.sender_id,
+                        stoffelmpc_mpc::avss_mpc::AvssWrappedMessage::Rbc(m) => m.sender_id,
+                        stoffelmpc_mpc::avss_mpc::AvssWrappedMessage::Mul(m) => m.sender,
+                    })
+                    .unwrap_or(0);
+                if let Err(e) = node.process(raw_msg, sender_id, net_clone.clone()).await {
                     tracing::error!("Node {i} failed to process message: {e:?}");
                 }
             }

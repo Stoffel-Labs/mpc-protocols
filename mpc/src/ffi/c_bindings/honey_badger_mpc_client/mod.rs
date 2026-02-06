@@ -22,6 +22,7 @@ pub struct HoneyBadgerMPCClientOpaque {
 #[repr(C)]
 pub enum HoneyBadgerErrorCode {
     HoneyBadgerSuccess,
+    HoneyBadgerSenderMismatch,
     HoneyBadgerNetworkError,
     HoneyBadgerRanShaError,
     HoneyBadgerInputError,
@@ -51,6 +52,7 @@ pub enum HoneyBadgerErrorCode {
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
     fn from(value: HoneyBadgerError) -> Self {
         match value {
+            HoneyBadgerError::SenderMismatch { .. } => Self::HoneyBadgerSenderMismatch,
             HoneyBadgerError::NetworkError(_) => Self::HoneyBadgerNetworkError,
             HoneyBadgerError::RanShaError(_) => Self::HoneyBadgerRanShaError,
             HoneyBadgerError::InputError(_) => Self::HoneyBadgerInputError,
@@ -115,6 +117,7 @@ pub extern "C" fn hb_client_process(
     client_ptr: *mut HoneyBadgerMPCClientOpaque,
     net_ptr: *mut network::NetworkOpaque,
     raw_msg: ByteSlice,
+    sender_id: usize,
 ) -> HoneyBadgerErrorCode {
     let client = unsafe { &mut *(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha<SessionId>>) };
     let network = unsafe { &*(net_ptr as *mut network::GenericNetwork) };
@@ -123,10 +126,10 @@ pub extern "C" fn hb_client_process(
     let result = match network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(client.process(msg, Arc::clone(n))),
+            .block_on(client.process(msg, sender_id, Arc::clone(n))),
         GenericNetwork::QuicNetworkManager(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(client.process(msg, Arc::clone(n))),
+            .block_on(client.process(msg, sender_id, Arc::clone(n))),
     };
     match result {
         Ok(_) => HoneyBadgerErrorCode::HoneyBadgerSuccess,

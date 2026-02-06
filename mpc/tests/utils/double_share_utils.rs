@@ -62,7 +62,7 @@ pub fn spawn_receiver_tasks(
                     WrappedMessage::Dousha(dou_sha_message) => dou_sha_message,
                     _ => todo!(),
                 };
-                let result = dousha_node.lock().await.process(dousha_msg.clone()).await;
+                let result = dousha_node.lock().await.process(dousha_msg.clone(), dousha_msg.sender_id).await;
 
                 match result {
                     Ok(_) => {

@@ -125,13 +125,13 @@ pub fn spawn_receiver_tasks(
                     WrappedMessage::BatchRecon(batch_msg) => {
                         node_bind
                             .batch_recon_node
-                            .process(batch_msg, net_clone.clone())
+                            .process(batch_msg.clone(), batch_msg.sender_id, net_clone.clone())
                             .await
                             .unwrap();
                     }
                     WrappedMessage::Triple(triple_gen_msg) => {
                         debug!("Received triple_gen_msg");
-                        node_bind.process(triple_gen_msg).await.unwrap();
+                        node_bind.process(triple_gen_msg.clone(), triple_gen_msg.sender_id).await.unwrap();
                     }
                     _ => {
                         warn!("received invalid msg type");

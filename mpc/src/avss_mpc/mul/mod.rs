@@ -19,6 +19,12 @@ use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 #[derive(Debug, Error)]
 pub enum MulError {
+    /// The sender ID in the message does not match the transport-authenticated sender.
+    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    SenderMismatch {
+        expected_sender: PartyId,
+        actual_sender: PartyId,
+    },
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
     #[error("Shard Error: {0:?}")]

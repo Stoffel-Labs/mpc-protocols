@@ -454,7 +454,13 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         Ok(())
     }
 
-    pub async fn process(&mut self, message: MultMessage) -> Result<(), MulError> {
+    pub async fn process(&mut self, message: MultMessage, sender_id: PartyId) -> Result<(), MulError> {
+        if message.sender != sender_id {
+            return Err(MulError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: message.sender,
+            });
+        }
         self.open_mult_handler(message).await?;
         Ok(())
     }
@@ -656,7 +662,7 @@ pub mod tests {
         }
 
         let config = FakeNetworkConfig::new(500);
-        let (network, mut receivers, _) = FakeNetwork::new(n, None, config);
+        let (network, mut receivers, _) = FakeNetwork::new(0, n, None, config);
         let network = Arc::new(network);
 
         let mut nodes: Vec<_> = (0..n)
@@ -703,7 +709,7 @@ pub mod tests {
                     match wrapped {
                         WrappedMessage::BatchRecon(batchrecon_msg) => {
                             node.batch_recon
-                                .process(batchrecon_msg, network.clone())
+                                .process(batchrecon_msg.clone(), batchrecon_msg.sender_id, network.clone())
                                 .await
                                 .unwrap();
                         }
@@ -717,7 +723,7 @@ pub mod tests {
                             }
                         }
                         WrappedMessage::Mul(input_msg) => {
-                            let _ = node.process(input_msg).await;
+                            let _ = node.process(input_msg.clone(), input_msg.sender).await;
                         }
                         _ => {
                             panic!();
@@ -994,7 +1000,7 @@ pub mod tests {
 
         // 7. Make node handle messages
         for msg in mul_msgs {
-            let result = mul_node.process(msg).await;
+            let result = mul_node.process(msg.clone(), msg.sender).await;
             match result {
                 Ok(()) => {}
                 Err(MulError::WaitForOk) => {

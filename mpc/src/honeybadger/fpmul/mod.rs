@@ -26,6 +26,12 @@ pub mod truncpr;
 //--------------------------------------------Rand-bit--------------------------------------------
 #[derive(Error, Debug)]
 pub enum RandBitError {
+    /// The sender ID in the message does not match the transport-authenticated sender.
+    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    SenderMismatch {
+        expected_sender: PartyId,
+        actual_sender: PartyId,
+    },
     #[error("incompatible treshold ({0:}) and number of parties {1:}")]
     IncompatibleNumberOfParties(usize, usize),
     #[error("the square multiplication was not completed successfuly")]
@@ -114,6 +120,12 @@ where
 //--------------------------------------------Prandbitd--------------------------------------------
 #[derive(Debug, Error)]
 pub enum PRandError {
+    /// The sender ID in the message does not match the transport-authenticated sender.
+    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    SenderMismatch {
+        expected_sender: PartyId,
+        actual_sender: PartyId,
+    },
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
@@ -246,6 +258,12 @@ pub fn build_all_f_polys<H: PrimeField>(
 //--------------------------------------------TruncPr--------------------------------------------
 #[derive(Debug, Error)]
 pub enum TruncPrError {
+    /// The sender ID in the message does not match the transport-authenticated sender.
+    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    SenderMismatch {
+        expected_sender: PartyId,
+        actual_sender: PartyId,
+    },
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),

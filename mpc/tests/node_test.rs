@@ -240,7 +240,7 @@ async fn test_input_protocol_e2e() {
                 Err(_) => continue,
             };
             match wrapped {
-                WrappedMessage::Input(msg) => match client.process(msg, net_clone2.clone()).await {
+                WrappedMessage::Input(msg) => match client.process(msg.clone(), msg.sender_id, net_clone2.clone()).await {
                     Ok(_) => {}
                     Err(e) => eprintln!("Processing error : {}", e),
                 },
@@ -338,7 +338,7 @@ async fn gen_masks_for_input_e2e() {
                 Err(_) => continue,
             };
             match wrapped {
-                WrappedMessage::Input(msg) => match client.process(msg, net_clone2.clone()).await {
+                WrappedMessage::Input(msg) => match client.process(msg.clone(), msg.sender_id, net_clone2.clone()).await {
                     Ok(_) => {}
                     Err(e) => eprintln!("Processing error : {}", e),
                 },
@@ -1324,7 +1324,7 @@ async fn test_output_protocol_e2e() {
                     Err(_) => continue,
                 };
                 match wrapped {
-                    WrappedMessage::Output(msg) => match client.process(msg).await {
+                    WrappedMessage::Output(msg) => match client.process(msg.clone(), msg.sender_id).await {
                         Ok(_) => {}
                         Err(e) => eprintln!("Processing error : {}", e),
                     },

@@ -39,7 +39,7 @@ pub async fn setup_network_and_parties<T: RBC<Id = SessionId>, N: Network>(
     buffer_size: usize,
 ) -> Result<(Vec<T>, Arc<FakeNetwork>, Vec<mpsc::Receiver<Vec<u8>>>), RbcError> {
     let config = FakeNetworkConfig::new(buffer_size);
-    let (network, receivers, _) = FakeNetwork::new(n as usize, None, config);
+    let (network, receivers, _) = FakeNetwork::new(0, n as usize, None, config);
     let net = Arc::new(network);
 
     let mut parties = Vec::with_capacity(n as usize);
@@ -96,7 +96,7 @@ pub fn test_setup(
     HashMap<usize, Receiver<Vec<u8>>>,
 ) {
     let config = FakeNetworkConfig::new(500);
-    let (network, receivers, client_recv) = FakeNetwork::new(n, Some(clientid), config);
+    let (network, receivers, client_recv) = FakeNetwork::new(0, n, Some(clientid), config);
     let network = Arc::new(network);
     (network, receivers, client_recv)
 }
@@ -113,7 +113,7 @@ pub fn test_setup_bad(
 ) {
     let config = BadFakeNetworkConfig::new(500);
     let (network, net_rx, node_channels, receivers, client_recv) =
-        BadFakeNetwork::new(n, Some(clientid), config);
+        BadFakeNetwork::new(0, n, Some(clientid), config);
     let network = Arc::new(network);
     (network, net_rx, node_channels, receivers, client_recv)
 }
@@ -260,7 +260,7 @@ pub fn spawn_receiver_tasks(
                         let result = randousha_node
                             .lock()
                             .await
-                            .process(rds.clone(), Arc::clone(&net_clone))
+                            .process(rds.clone(), rds.sender_id, Arc::clone(&net_clone))
                             .await;
 
                         match result {
@@ -396,7 +396,24 @@ pub fn receive<F, R, S, N>(
 
         tokio::spawn(async move {
             while let Some(raw_msg) = rx.recv().await {
-                if let Err(e) = node.process(raw_msg, net_clone.clone()).await {
+                let sender_id = bincode::deserialize::<WrappedMessage>(&raw_msg)
+                    .ok()
+                    .map(|w| match w {
+                        WrappedMessage::RanDouSha(m) => m.sender_id,
+                        WrappedMessage::Rbc(m) => m.sender_id,
+                        WrappedMessage::Mul(m) => m.sender,
+                        WrappedMessage::Dousha(m) => m.sender_id,
+                        WrappedMessage::RanSha(m) => m.sender_id,
+                        WrappedMessage::BatchRecon(m) => m.sender_id,
+                        WrappedMessage::Triple(m) => m.sender_id,
+                        WrappedMessage::Input(m) => m.sender_id,
+                        WrappedMessage::Output(m) => m.sender_id,
+                        WrappedMessage::RandBit(m) => m.sender,
+                        WrappedMessage::PRandBit(m) => m.sender_id,
+                        WrappedMessage::Trunc(m) => m.sender_id,
+                    })
+                    .unwrap_or(0);
+                if let Err(e) = node.process(raw_msg, sender_id, net_clone.clone()).await {
                     tracing::error!("Node {i} failed to process message: {e:?}");
                 }
             }
@@ -631,7 +648,15 @@ pub fn receive_client<F, R, N>(
 
         tokio::spawn(async move {
             while let Some(received) = recv.recv().await {
-                if let Err(e) = client.process(received, net_clone.clone()).await {
+                let sender_id = bincode::deserialize::<WrappedMessage>(&received)
+                    .ok()
+                    .map(|w| match w {
+                        WrappedMessage::Input(m) => m.sender_id,
+                        WrappedMessage::Output(m) => m.sender_id,
+                        _ => 0,
+                    })
+                    .unwrap_or(0);
+                if let Err(e) = client.process(received, sender_id, net_clone.clone()).await {
                     tracing::error!("Client {clientid} failed to process message: {e:?}");
                 }
             }

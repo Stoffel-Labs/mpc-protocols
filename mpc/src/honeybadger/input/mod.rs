@@ -2,7 +2,7 @@ use crate::{common::rbc::RbcError, honeybadger::robust_interpolate::InterpolateE
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::NetworkError;
+use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 use tokio::{sync::watch::error::RecvError, time::error::Elapsed};
 
@@ -10,6 +10,12 @@ pub mod input;
 
 #[derive(Debug, Error)]
 pub enum InputError {
+    /// The sender ID in the message does not match the transport-authenticated sender.
+    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    SenderMismatch {
+        expected_sender: PartyId,
+        actual_sender: PartyId,
+    },
     #[error("inner error: {0}")]
     RbcError(#[from] RbcError),
     #[error("there was an error in the network: {0:?}")]

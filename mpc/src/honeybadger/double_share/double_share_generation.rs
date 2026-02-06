@@ -66,7 +66,13 @@ where
         }
     }
 
-    pub async fn process(&mut self, message: DouShaMessage) -> Result<(), DouShaError> {
+    pub async fn process(&mut self, message: DouShaMessage, sender_id: PartyId) -> Result<(), DouShaError> {
+        if message.sender_id != sender_id {
+            return Err(DouShaError::SenderMismatch {
+                expected_sender: sender_id,
+                actual_sender: message.sender_id,
+            });
+        }
         self.receive_double_shares_handler(message).await?;
         Ok(())
     }

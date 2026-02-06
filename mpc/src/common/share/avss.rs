@@ -263,7 +263,10 @@ where
         Ok(())
     }
 
-    pub async fn process(&mut self, msg: AvssMessage<Id>) -> Result<(), AvssError> {
+    pub async fn process(&mut self, msg: AvssMessage<Id>, sender_id: PartyId) -> Result<(), AvssError> {
+        if msg.sender_id != sender_id {
+            return Err(AvssError::SenderMismatch);
+        }
         info!(
             party_id = ?self.id,
             session_id = msg.session_id.as_u64(),
