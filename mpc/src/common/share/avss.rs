@@ -199,7 +199,7 @@ where
     }
 
     pub async fn init<Rnd, N>(
-        &mut self,
+        &self,
         secrets: Vec<F>,
         session_id: Id,
         rng: &mut Rnd,
@@ -263,7 +263,7 @@ where
         Ok(())
     }
 
-    pub async fn process(&mut self, msg: AvssMessage<Id>) -> Result<(), AvssError> {
+    pub async fn process(&self, msg: AvssMessage<Id>) -> Result<(), AvssError> {
         info!(
             party_id = ?self.id,
             session_id = msg.session_id.as_u64(),

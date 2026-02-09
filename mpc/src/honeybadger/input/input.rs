@@ -192,7 +192,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
     }
 
     /// Called by each server: receives masked m_i, subtracts r_i to get share of m_i.
-    pub async fn input_handler(&mut self, msg: InputMessage) -> Result<(), InputError> {
+    pub async fn input_handler(&self, msg: InputMessage) -> Result<(), InputError> {
         //handler for server
         //accepts the m+r values and then subtracts the r' local share from it to get m' shares
         // and stores it
@@ -267,7 +267,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
     }
 
     /// Process any message (used for both client and server roles).
-    pub async fn process(&mut self, msg: InputMessage) -> Result<(), InputError> {
+    pub async fn process(&self, msg: InputMessage) -> Result<(), InputError> {
         match msg.msg_type {
             InputMessageType::MaskShare => Err(InputError::InvalidInput(
                 "Incorrect message type".to_string(),
@@ -444,7 +444,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
 
     /// Process any message (used for both client and server roles).
     pub async fn process<N: Network + Send + Sync>(
-        &mut self,
+        &self,
         msg: InputMessage,
         net: Arc<N>,
     ) -> Result<(), InputError> {

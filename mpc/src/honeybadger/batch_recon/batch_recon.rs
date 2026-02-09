@@ -104,7 +104,7 @@ impl<F: FftField> BatchReconNode<F> {
     /// This function processes `Eval` messages (first round) and `Reveal` messages (second round)
     /// to collectively reconstruct the original secrets.
     pub async fn batch_recon_handler<N: Network>(
-        &mut self,
+        &self,
         msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
@@ -307,7 +307,7 @@ impl<F: FftField> BatchReconNode<F> {
         }
     }
     pub async fn process<N: Network>(
-        &mut self,
+        &self,
         msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {

@@ -66,7 +66,7 @@ where
         }
     }
 
-    pub async fn process(&mut self, message: DouShaMessage) -> Result<(), DouShaError> {
+    pub async fn process(&self, message: DouShaMessage) -> Result<(), DouShaError> {
         self.receive_double_shares_handler(message).await?;
         Ok(())
     }
@@ -90,7 +90,7 @@ where
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
     pub async fn get_or_create_store(
-        &mut self,
+        &self,
         session_id: SessionId,
     ) -> Arc<Mutex<DouShaStorage<F>>> {
         let mut storage = self.storage.lock().await;
@@ -101,7 +101,7 @@ where
     }
 
     pub async fn init<N, R>(
-        &mut self,
+        &self,
         session_id: SessionId,
         rng: &mut R,
         network: Arc<N>,
@@ -145,7 +145,7 @@ where
     }
 
     pub async fn receive_double_shares_handler(
-        &mut self,
+        &self,
         recv_message: DouShaMessage,
     ) -> Result<(), DouShaError> {
         let double_share: DoubleShamirShare<F> =

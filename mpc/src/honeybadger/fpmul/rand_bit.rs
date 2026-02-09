@@ -105,7 +105,7 @@ where
     }
 
     pub async fn init<N>(
-        &mut self,
+        &self,
         a: Vec<RobustShare<F>>,
         mult_triple: Vec<ShamirBeaverTriple<F>>,
         session_id: SessionId,
@@ -259,7 +259,7 @@ where
         Ok(d_share_array)
     }
 
-    pub async fn process(&mut self, message: RandBitMessage) -> Result<(), RandBitError> {
+    pub async fn process(&self, message: RandBitMessage) -> Result<(), RandBitError> {
         self.square_reconstruction_handler(message).await?;
         Ok(())
     }

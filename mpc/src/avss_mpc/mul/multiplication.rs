@@ -49,7 +49,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     }
 
     pub async fn init<N: Network + Send + Sync>(
-        &mut self,
+        &self,
         session_id: AvssSessionId,
         x: Vec<FeldmanShamirShare<F, G>>,
         y: Vec<FeldmanShamirShare<F, G>>,
@@ -184,7 +184,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         Ok(())
     }
 
-    pub async fn process(&mut self, message: MultMessage) -> Result<(), MulError> {
+    pub async fn process(&self, message: MultMessage) -> Result<(), MulError> {
         self.open_mult_handler(message).await?;
         Ok(())
     }

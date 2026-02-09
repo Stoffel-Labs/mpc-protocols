@@ -68,7 +68,7 @@ where
     }
 
     async fn get_or_create_store(
-        &mut self,
+        &self,
         sid: AvssSessionId,
     ) -> Arc<Mutex<TripleGenStore<F, C>>> {
         let mut map = self.store.lock().await;
@@ -80,7 +80,7 @@ where
     }
 
     pub async fn gen_triple<N, G>(
-        &mut self,
+        &self,
         session_id: AvssSessionId,
         a: Vec<FeldmanShamirShare<F, C>>,
         b: Vec<FeldmanShamirShare<F, C>>,

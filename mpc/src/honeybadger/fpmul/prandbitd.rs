@@ -67,7 +67,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     /// Distributed RISS generation
     /// generates shares in multiples of (t+1)
     pub async fn generate_riss<N: Network>(
-        &mut self,
+        &self,
         session_id: SessionId,
         smallfield_bits: Vec<RobustShare<F>>,
         l: usize,
@@ -85,13 +85,14 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         {
             return Err(PRandError::Incompatible);
         }
-        self.l = l;
-        self.k = k;
         // Step 1: compute all maximal unqualified sets
         let tsets: Vec<Vec<usize>> = (0..self.n).combinations(self.t).collect();
 
         let binding = self.get_or_create_store(session_id).await;
         let mut store = binding.lock().await;
+        // Store l and k in session store for later use by riss_handler
+        store.l = Some(l);
+        store.k = Some(k);
         let my_tsets: Vec<Vec<usize>> = tsets
             .clone()
             .into_iter()
@@ -110,7 +111,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         drop(store);
         // Step 2: P_i samples randomness and sends
         // Random integer range: [0, 2^(l+k)]
-        let bound: i64 = 1 << (self.l + self.k);
+        let bound: i64 = 1 << (l + k);
         for tset in tsets {
             let r_t_i: Vec<i64> = (0..batch_size)
                 .map(|_| rand::thread_rng().gen_range(0, bound + 1))
@@ -136,7 +137,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     }
 
     pub async fn riss_handler<N: Network + Send + Sync>(
-        &mut self,
+        &self,
         msg: PRandBitDMessage,
         network: Arc<N>,
     ) -> Result<(), PRandError> {
@@ -290,7 +291,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         Ok(())
     }
 
-    pub async fn output_handler(&mut self, msg: PRandBitDMessage) -> Result<(), PRandError> {
+    pub async fn output_handler(&self, msg: PRandBitDMessage) -> Result<(), PRandError> {
         info!(node_id = self.id, "At output handler");
 
         let calling_proto = match msg.session_id.calling_protocol() {
@@ -376,7 +377,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         Ok(())
     }
     pub async fn process<N: Network + Send + Sync>(
-        &mut self,
+        &self,
         msg: PRandBitDMessage,
         network: Arc<N>,
     ) -> Result<(), PRandError> {
@@ -388,7 +389,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     }
 
     pub async fn get_or_create_store(
-        &mut self,
+        &self,
         session_id: SessionId,
     ) -> Arc<Mutex<PRandBitDStore<F, G>>> {
         let mut storage = self.store.lock().await;

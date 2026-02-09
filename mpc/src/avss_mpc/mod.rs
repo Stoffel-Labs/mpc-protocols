@@ -281,7 +281,7 @@ where
             counters: SubProtocolCounters::new(),
         })
     }
-    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
+    async fn process(&self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
         let wrapped: AvssWrappedMessage = bincode::deserialize(&raw_msg)?;
         match wrapped {
             AvssWrappedMessage::Rbc(rbc_msg) => match rbc_msg.session_id.calling_protocol() {
@@ -394,7 +394,7 @@ where
     C: CurveGroup<ScalarField = F>,
 {
     async fn run_preprocessing<G>(
-        &mut self,
+        &self,
         network: Arc<N>,
         rng: &mut G,
     ) -> Result<(), Self::Error>
@@ -515,7 +515,7 @@ where
     C: CurveGroup<ScalarField = F>,
 {
     async fn ensure_v_random_shares<G, N>(
-        &mut self,
+        &self,
         network: Arc<N>,
         rng: &mut G,
         needed: usize,

@@ -77,7 +77,7 @@ where
     }
 
     pub async fn get_or_create_store(
-        &mut self,
+        &self,
         session_id: AvssSessionId,
     ) -> Arc<Mutex<RanShaAvssStore<F, C>>> {
         let mut storage = self.store.lock().await;
@@ -87,7 +87,7 @@ where
             .clone()
     }
 
-    pub async fn output(&mut self, session_id: AvssSessionId) -> Vec<FeldmanShamirShare<F, C>> {
+    pub async fn output(&self, session_id: AvssSessionId) -> Vec<FeldmanShamirShare<F, C>> {
         let mut share_store = self.store.lock().await;
         let store_lock = share_store.remove(&session_id).unwrap();
         let store = store_lock.lock().await;
@@ -95,7 +95,7 @@ where
     }
 
     pub async fn init<N, G>(
-        &mut self,
+        &self,
         session_id: AvssSessionId,
         rng: &mut G,
         network: Arc<N>,
@@ -163,7 +163,7 @@ where
     }
 
     pub async fn ransha_gen(
-        &mut self,
+        &self,
         shares_deg_t: Vec<FeldmanShamirShare<F, C>>,
         session_id: AvssSessionId,
     ) -> Result<(), RanShaAvssError> {

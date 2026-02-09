@@ -74,7 +74,7 @@ where
     /// Accesses the storage of the node, and in case that the storage does not exists yet for the
     /// given `session_id`, it is created in place and returned.
     pub async fn get_or_create_store(
-        &mut self,
+        &self,
         session_id: SessionId,
     ) -> Result<Arc<Mutex<TripleGenStorage<F>>>, TripleGenError> {
         let mut storage = self.storage.lock().await;
@@ -92,7 +92,7 @@ where
     /// Initializes the protocol to generate random triples based on previously generated shares
     /// and random double shares.
     pub async fn init<N: Network>(
-        &mut self,
+        &self,
         random_shares_a: Vec<RobustShare<F>>,
         random_shares_b: Vec<RobustShare<F>>,
         randousha_pairs: Vec<DoubleShamirShare<F>>,
@@ -150,7 +150,7 @@ where
     }
 
     pub async fn batch_recon_finish_handler(
-        &mut self,
+        &self,
         message: TripleGenMessage,
     ) -> Result<(), TripleGenError> {
         info!("Handling Batch reconstruction results");
@@ -191,7 +191,7 @@ where
         Ok(())
     }
 
-    pub async fn process(&mut self, message: TripleGenMessage) -> Result<(), TripleGenError> {
+    pub async fn process(&self, message: TripleGenMessage) -> Result<(), TripleGenError> {
         self.batch_recon_finish_handler(message).await?;
         Ok(())
     }

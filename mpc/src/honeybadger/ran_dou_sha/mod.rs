@@ -180,7 +180,7 @@ where
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
     pub async fn get_or_create_store(
-        &mut self,
+        &self,
         session_id: SessionId,
     ) -> Result<Arc<Mutex<RanDouShaStore<F>>>, RanDouShaError> {
         let mut storage = self.store.lock().await;
@@ -209,7 +209,7 @@ where
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
     pub async fn init<N>(
-        &mut self,
+        &self,
         shares_deg_t: Vec<NonRobustShare<F>>,
         shares_deg_2t: Vec<NonRobustShare<F>>,
         session_id: SessionId,
@@ -277,7 +277,7 @@ where
     ///
     /// If sending the shares through the network fails, the function returns a [`NetworkError`].
     pub async fn reconstruction_handler<N>(
-        &mut self,
+        &self,
         msg: RanDouShaMessage,
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
@@ -387,7 +387,7 @@ where
     /// Wait to receive broadcast of output message from other party.
     /// Return [r_1]_t ... [r_t+1]_t & [r_1]_2t ... [r_t+1]_2t only if one receives more than
     /// (n - (t+1)) Ok message.
-    pub async fn output_handler(&mut self, msg: RanDouShaMessage) -> Result<(), RanDouShaError> {
+    pub async fn output_handler(&self, msg: RanDouShaMessage) -> Result<(), RanDouShaError> {
         let output = match msg.payload {
             RanDouShaPayload::Reconstruct(_) => return Err(RanDouShaError::Abort),
             RanDouShaPayload::Output(ok) => ok,
@@ -437,7 +437,7 @@ where
     }
 
     pub async fn process<N>(
-        &mut self,
+        &self,
         msg: RanDouShaMessage,
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>

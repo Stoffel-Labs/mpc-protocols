@@ -308,7 +308,12 @@ where
     where
         Self: Sized;
 
-    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error>;
+    /// Process an incoming protocol message.
+    ///
+    /// This method uses `&self` instead of `&mut self` to allow concurrent
+    /// message processing during preprocessing. Internal state mutations
+    /// happen through interior mutability (Arc<Mutex<>>).
+    async fn process(&self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error>;
 
     async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
     where
@@ -323,8 +328,13 @@ where
     F: FftField,
     S: SecretSharingScheme<F>,
 {
+    /// Run the preprocessing phase.
+    ///
+    /// This method uses `&self` instead of `&mut self` to allow concurrent
+    /// message processing during preprocessing. Internal state mutations
+    /// happen through interior mutability (Arc<Mutex<>>).
     async fn run_preprocessing<R>(
-        &mut self,
+        &self,
         network: Arc<N>,
         rng: &mut R,
     ) -> Result<(), Self::Error>

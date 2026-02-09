@@ -41,7 +41,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         })
     }
 
-    pub async fn get_or_create_store(&mut self, session: SessionId) -> Arc<Mutex<TruncPrStore<F>>> {
+    pub async fn get_or_create_store(&self, session: SessionId) -> Arc<Mutex<TruncPrStore<F>>> {
         let mut map = self.store.lock().await;
 
         // should always hold, since only exec ID changes between different sessions
@@ -62,7 +62,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     /// - forms share of (b + r) where b = 2^{k-1} + [a],
     /// - broadcasts the share for opening.
     pub async fn init<N: Network + Send + Sync>(
-        &mut self,
+        &self,
         a: RobustShare<F>,
         k: usize,
         m: usize,
@@ -123,7 +123,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         Ok(())
     }
 
-    async fn handle_open(&mut self, msg: TruncPrMessage) -> Result<(), TruncPrError> {
+    async fn handle_open(&self, msg: TruncPrMessage) -> Result<(), TruncPrError> {
         info!(
             node_id = self.id,
             sender = msg.sender_id,
@@ -181,7 +181,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
     /// Handle received messages
     pub async fn process<N: Network>(
-        &mut self,
+        &self,
         msg: TruncPrMessage,
         _network: Arc<N>,
     ) -> Result<(), TruncPrError> {

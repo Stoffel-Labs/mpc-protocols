@@ -199,6 +199,8 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     pub preprocessing_material: Arc<Mutex<HoneyBadgerMPCNodePreprocMaterial<F>>>,
     // Preprocessing parameters.
     pub params: HoneyBadgerMPCNodeOpts,
+    /// Preprocessing nodes. All sub-protocols use interior mutability (Arc<Mutex<>>)
+    /// for their storage, allowing concurrent access from process() and run_preprocessing().
     pub preprocess: PreprocessNodes<F, R>,
     pub operations: Operation<F, R>,
     pub type_ops: TypeOperations<F, R>,
@@ -496,7 +498,7 @@ where
             .map_err(HoneyBadgerError::from)
     }
 
-    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
+    async fn process(&self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
         let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
 
         match wrapped {
@@ -1057,7 +1059,7 @@ where
     /// 3. Generate RanDouSha pairs if missing.
     /// 4. Generate Beaver triples from all the above. No of Multiplications + No of Multiplication of PRandbit
     async fn run_preprocessing<G>(
-        &mut self,
+        &self,
         network: Arc<N>,
         rng: &mut G,
     ) -> Result<(), Self::Error>
@@ -1218,7 +1220,7 @@ where
 {
     /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
     async fn ensure_random_shares<G, N>(
-        &mut self,
+        &self,
         network: Arc<N>,
         rng: &mut G,
         needed: usize,
@@ -1285,7 +1287,7 @@ where
 
     /// Ensure we have a RanDouSha pair available, generating double shares if needed.
     async fn ensure_ran_dou_sha_pair<G, N>(
-        &mut self,
+        &self,
         network: Arc<N>,
         rng: &mut G,
         needed: usize,
@@ -1357,7 +1359,7 @@ where
 
     /// Ensure we have double shares available.
     async fn ensure_double_shares<G, N>(
-        &mut self,
+        &self,
         sessionid: SessionId,
         network: Arc<N>,
         rng: &mut G,
@@ -1391,7 +1393,7 @@ where
         Ok(dou_sha)
     }
 
-    async fn ensure_prandbit_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
+    async fn ensure_prandbit_shares<N>(&self, network: Arc<N>) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
     {
@@ -1523,7 +1525,7 @@ where
         Ok(())
     }
 
-    async fn ensure_prandint_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
+    async fn ensure_prandint_shares<N>(&self, network: Arc<N>) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
     {

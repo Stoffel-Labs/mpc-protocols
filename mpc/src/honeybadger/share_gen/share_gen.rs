@@ -63,7 +63,7 @@ where
     }
 
     pub async fn get_or_create_store(
-        &mut self,
+        &self,
         session_id: SessionId,
     ) -> Result<Arc<Mutex<RanShaStore<F>>>, RanShaError> {
         let mut storage = self.store.lock().await;
@@ -79,7 +79,7 @@ where
     }
 
     pub async fn init<N, G>(
-        &mut self,
+        &self,
         session_id: SessionId,
         rng: &mut G,
         network: Arc<N>,
@@ -123,7 +123,7 @@ where
     }
 
     pub async fn process<N>(
-        &mut self,
+        &self,
         msg: RanShaMessage,
         network: Arc<N>,
     ) -> Result<(), RanShaError>
@@ -142,14 +142,14 @@ where
             }
         }
     }
-    pub async fn output(&mut self, session_id: SessionId) -> Vec<RobustShare<F>> {
+    pub async fn output(&self, session_id: SessionId) -> Vec<RobustShare<F>> {
         let mut share_store = self.store.lock().await;
         let store_lock = share_store.remove(&session_id).unwrap();
         let store = store_lock.lock().await;
         store.protocol_output.clone()
     }
     pub async fn receive_shares_handler<N>(
-        &mut self,
+        &self,
         msg: RanShaMessage,
         network: Arc<N>,
     ) -> Result<(), RanShaError>
@@ -204,7 +204,7 @@ where
     }
 
     pub async fn init_ransha<N>(
-        &mut self,
+        &self,
         shares_deg_t: Vec<RobustShare<F>>,
         session_id: SessionId,
         network: Arc<N>,
@@ -243,7 +243,7 @@ where
     }
 
     pub async fn reconstruction_handler<N>(
-        &mut self,
+        &self,
         msg: RanShaMessage,
         network: Arc<N>,
     ) -> Result<(), RanShaError>
@@ -309,7 +309,7 @@ where
         Ok(())
     }
 
-    pub async fn output_handler(&mut self, msg: RanShaMessage) -> Result<(), RanShaError> {
+    pub async fn output_handler(&self, msg: RanShaMessage) -> Result<(), RanShaError> {
         info!("party {:?} received shares for Output", self.id);
         let ok = match msg.payload {
             RanShaPayload::Output(o) => o,
