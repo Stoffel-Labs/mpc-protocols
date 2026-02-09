@@ -458,9 +458,20 @@ impl Network for BadFakeNetwork {
         self.client_channels.contains_key(&client)
     }
 
-    // --- sender_id management (fake network implementations) ---
+    fn local_party_id(&self) -> PartyId {
+        self.self_id
+    }
 
-    fn sender_id(&self) -> PartyId {
+    fn party_count(&self) -> usize {
+        if self.peer_connections.is_empty() {
+            return self.nodes.len();
+        }
+        1 + self.peer_connections.len()
+    }
+}
+
+impl BadFakeNetwork {
+    pub fn sender_id(&self) -> PartyId {
         if self.peer_connections.is_empty() {
             return self.self_id;
         }
@@ -470,7 +481,7 @@ impl Network for BadFakeNetwork {
         all_ids.iter().position(|&id| id == self.self_id).unwrap_or(self.self_id)
     }
 
-    fn assign_sender_ids(&self) -> usize {
+    pub fn assign_sender_ids(&self) -> usize {
         if self.peer_connections.is_empty() {
             return self.nodes.len();
         }
@@ -481,21 +492,14 @@ impl Network for BadFakeNetwork {
         let mut assigned = 0;
         for (&peer_id, conn) in &self.peer_connections {
             if let Some(pos) = all_ids.iter().position(|&id| id == peer_id) {
-                conn.set_sender_id(pos);
+                conn.set_remote_party_id(pos);
                 assigned += 1;
             }
         }
         assigned
     }
 
-    fn party_count(&self) -> usize {
-        if self.peer_connections.is_empty() {
-            return self.nodes.len();
-        }
-        1 + self.peer_connections.len()
-    }
-
-    fn is_fully_connected(&self, expected_count: usize) -> bool {
+    pub fn is_fully_connected(&self, expected_count: usize) -> bool {
         if self.peer_connections.is_empty() {
             return self.nodes.len() >= expected_count;
         }
@@ -541,7 +545,7 @@ impl NetworkManager for BadFakeNetwork {
             let conn = rx.recv()
                 .await
                 .ok_or_else(|| "Listener channel closed".to_string())?;
-            if let Some(remote_id) = conn.sender_id() {
+            if let Some(remote_id) = conn.remote_party_id() {
                 self.peer_connections.insert(remote_id, conn.clone());
             }
             Ok(conn)
@@ -868,8 +872,8 @@ mod tests {
         let server_conn = accept_handle.await.unwrap();
 
         // Verify sender_ids
-        assert_eq!(client_conn.sender_id(), Some(1)); // net1's self_id
-        assert_eq!(server_conn.sender_id(), Some(0)); // net0's self_id
+        assert_eq!(client_conn.remote_party_id(), Some(1)); // net1's self_id
+        assert_eq!(server_conn.remote_party_id(), Some(0)); // net0's self_id
 
         // Test data exchange
         client_conn.send(b"hello from 0").await.unwrap();
@@ -923,8 +927,8 @@ mod tests {
         assert_eq!(net0.sender_id(), 0);
 
         // Verify peer connections got position-based sender_ids
-        assert_eq!(conn0_to_1.sender_id(), Some(1));
-        assert_eq!(conn0_to_2.sender_id(), Some(2));
+        assert_eq!(conn0_to_1.remote_party_id(), Some(1));
+        assert_eq!(conn0_to_2.remote_party_id(), Some(2));
 
         // Verify party_count and is_fully_connected
         assert_eq!(net0.party_count(), 3);
@@ -938,6 +942,6 @@ mod tests {
         assert_eq!(net1.party_count(), 2);
         assert!(net1.is_fully_connected(2));
         // conn1_from_0 was reassigned: peer 0 at position 0
-        assert_eq!(conn1_from_0.sender_id(), Some(0));
+        assert_eq!(conn1_from_0.remote_party_id(), Some(0));
     }
 }

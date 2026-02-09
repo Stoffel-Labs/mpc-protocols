@@ -263,9 +263,20 @@ impl Network for FakeNetwork {
         self.client_channels.contains_key(&client)
     }
 
-    // --- sender_id management (fake network implementations) ---
+    fn local_party_id(&self) -> PartyId {
+        self.self_id
+    }
 
-    fn sender_id(&self) -> PartyId {
+    fn party_count(&self) -> usize {
+        if self.peer_connections.is_empty() {
+            return self.nodes.len();
+        }
+        1 + self.peer_connections.len()
+    }
+}
+
+impl FakeNetwork {
+    pub fn sender_id(&self) -> PartyId {
         if self.peer_connections.is_empty() {
             return self.self_id;
         }
@@ -275,7 +286,7 @@ impl Network for FakeNetwork {
         all_ids.iter().position(|&id| id == self.self_id).unwrap_or(self.self_id)
     }
 
-    fn assign_sender_ids(&self) -> usize {
+    pub fn assign_sender_ids(&self) -> usize {
         if self.peer_connections.is_empty() {
             return self.nodes.len();
         }
@@ -286,21 +297,14 @@ impl Network for FakeNetwork {
         let mut assigned = 0;
         for (&peer_id, conn) in &self.peer_connections {
             if let Some(pos) = all_ids.iter().position(|&id| id == peer_id) {
-                conn.set_sender_id(pos);
+                conn.set_remote_party_id(pos);
                 assigned += 1;
             }
         }
         assigned
     }
 
-    fn party_count(&self) -> usize {
-        if self.peer_connections.is_empty() {
-            return self.nodes.len();
-        }
-        1 + self.peer_connections.len()
-    }
-
-    fn is_fully_connected(&self, expected_count: usize) -> bool {
+    pub fn is_fully_connected(&self, expected_count: usize) -> bool {
         if self.peer_connections.is_empty() {
             return self.nodes.len() >= expected_count;
         }
@@ -349,7 +353,7 @@ impl NetworkManager for FakeNetwork {
             let conn = rx.recv()
                 .await
                 .ok_or_else(|| "Listener channel closed".to_string())?;
-            if let Some(remote_id) = conn.sender_id() {
+            if let Some(remote_id) = conn.remote_party_id() {
                 self.peer_connections.insert(remote_id, conn.clone());
             }
             Ok(conn)
@@ -575,9 +579,9 @@ mod tests {
 
         // Verify sender_ids
         // conn0 should know the remote is party 1 (port-based)
-        assert_eq!(conn0.sender_id(), Some(1));
+        assert_eq!(conn0.remote_party_id(), Some(1));
         // conn1 should know the remote is party 0
-        assert_eq!(conn1.sender_id(), Some(0));
+        assert_eq!(conn1.remote_party_id(), Some(0));
 
         // Test bidirectional communication
         conn0.send(b"hello from 0").await.unwrap();
@@ -611,10 +615,10 @@ mod tests {
         let conn2_from_0 = net2.accept().await.unwrap();
 
         // Before assign_sender_ids, connections have port-based sender_ids
-        assert_eq!(conn0_to_1.sender_id(), Some(1));
-        assert_eq!(conn1_from_0.sender_id(), Some(0));
-        assert_eq!(conn0_to_2.sender_id(), Some(2));
-        assert_eq!(conn2_from_0.sender_id(), Some(0));
+        assert_eq!(conn0_to_1.remote_party_id(), Some(1));
+        assert_eq!(conn1_from_0.remote_party_id(), Some(0));
+        assert_eq!(conn0_to_2.remote_party_id(), Some(2));
+        assert_eq!(conn2_from_0.remote_party_id(), Some(0));
 
         // Call assign_sender_ids on net0 (has connections to 1 and 2)
         // all_ids = [0, 1, 2] sorted -> positions: 0->0, 1->1, 2->2
@@ -625,8 +629,8 @@ mod tests {
         assert_eq!(net0.sender_id(), 0);
 
         // Verify peer connections got position-based sender_ids
-        assert_eq!(conn0_to_1.sender_id(), Some(1)); // peer_id=1, position=1
-        assert_eq!(conn0_to_2.sender_id(), Some(2)); // peer_id=2, position=2
+        assert_eq!(conn0_to_1.remote_party_id(), Some(1)); // peer_id=1, position=1
+        assert_eq!(conn0_to_2.remote_party_id(), Some(2)); // peer_id=2, position=2
 
         // Verify party_count and is_fully_connected
         assert_eq!(net0.party_count(), 3); // self + 2 peers
@@ -642,7 +646,7 @@ mod tests {
 
         // Verify conn1_from_0 got reassigned by net1.assign_sender_ids()
         // all_ids for net1 = [0, 1] -> peer 0 is at position 0
-        assert_eq!(conn1_from_0.sender_id(), Some(0));
+        assert_eq!(conn1_from_0.remote_party_id(), Some(0));
     }
 
     #[tokio::test]

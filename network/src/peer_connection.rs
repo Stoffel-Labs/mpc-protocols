@@ -111,12 +111,12 @@ impl PeerConnection for FakePeerConnection {
         self.connection_role
     }
 
-    fn sender_id(&self) -> Option<PartyId> {
+    fn remote_party_id(&self) -> Option<PartyId> {
         *self.sender_id_value.lock().unwrap()
     }
 
-    fn set_sender_id(&self, sender_id: PartyId) {
-        *self.sender_id_value.lock().unwrap() = Some(sender_id);
+    fn set_remote_party_id(&self, party_id: PartyId) {
+        *self.sender_id_value.lock().unwrap() = Some(party_id);
     }
 }
 
@@ -241,12 +241,12 @@ mod tests {
         assert_eq!(received, b"hello");
 
         // Check sender_id
-        assert_eq!(conn1.sender_id(), Some(2));
-        assert_eq!(conn2.sender_id(), Some(1));
+        assert_eq!(conn1.remote_party_id(), Some(2));
+        assert_eq!(conn2.remote_party_id(), Some(1));
 
         // Test set_sender_id
-        conn1.set_sender_id(42);
-        assert_eq!(conn1.sender_id(), Some(42));
+        conn1.set_remote_party_id(42);
+        assert_eq!(conn1.remote_party_id(), Some(42));
 
         // Check remote address
         assert_eq!(conn1.remote_address(), addr2);
@@ -289,8 +289,8 @@ mod tests {
         let server_conn = listener_rx.recv().await.unwrap();
 
         // Verify sender_ids
-        assert_eq!(client_conn.sender_id(), Some(1000)); // server addr port
-        assert_eq!(server_conn.sender_id(), Some(1)); // client sender_id
+        assert_eq!(client_conn.remote_party_id(), Some(1000)); // server addr port
+        assert_eq!(server_conn.remote_party_id(), Some(1)); // client sender_id
 
         // Test bidirectional communication
         client_conn.send(b"from client").await.unwrap();
