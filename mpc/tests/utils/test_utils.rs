@@ -329,7 +329,7 @@ static TRACING_INIT: Lazy<()> = Lazy::new(|| {
     let old_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         old_hook(info);
-        tracing::error!("{}", info);
+        error!("{}", info);
         std::process::exit(1);
     }));
 });

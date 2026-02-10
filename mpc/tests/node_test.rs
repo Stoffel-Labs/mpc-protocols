@@ -29,7 +29,7 @@ use stoffelmpc_mpc::{
         MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, SecretSharingScheme, ShamirShare, ADKG,
     },
     honeybadger::{
-        fpmul::f256::F2_8,
+        fpmul::gf_256::GF256,
         input::input::InputClient,
         output::output::{OutputClient, OutputServer},
         ran_dou_sha::RanDouShaState,
@@ -1585,7 +1585,7 @@ async fn fpmul_e2e() {
         let x = RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
             .unwrap();
         for (i, share) in x.iter().enumerate() {
-            r_bits[i].push((share.clone(), F2_8::one()));
+            r_bits[i].push((share.clone(), GF256::one()));
         }
     }
     //----------------------------------------SETUP NODES----------------------------------------
@@ -2153,7 +2153,7 @@ async fn fpdiv_const_e2e() {
             RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
                 .unwrap();
         for (i, share) in bit_shares.iter().enumerate() {
-            r_bits[i].push((share.clone(), F2_8::one()));
+            r_bits[i].push((share.clone(), GF256::one()));
         }
     }
 

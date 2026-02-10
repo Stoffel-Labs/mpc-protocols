@@ -190,13 +190,15 @@ impl<F: FftField> BatchReconNode<F> {
                             return Err(BatchReconError::InterpolateError(e));
                         }
                     }
-                } else {
+                } else if store.evals_received.len() < 2 * self.t + 1 {
                     info!(
                         self_id = self.id,
                         "Not enough eval points yet. The party needs {} points, current points: {}",
                         2 * self.t + 1,
-                        store.evals_received.len()
+                        store.evals_received.len(),
                     );
+                } else {
+                    info!(self_id = self.id, "y_j already computed");
                 }
                 Ok(())
             }
@@ -290,7 +292,7 @@ impl<F: FftField> BatchReconNode<F> {
                                             bincode::serialize(&rand_generic_msg)?;
                                         info!("Finished reconstruction of message within RandBit");
                                         net.send(self.id, &bytes_generic_msg).await?;
-                                    } else  {
+                                    } else {
                                         let mult_generic_msg =
                                             WrappedMessage::Mul(MultMessage::new(
                                                 self.id,
@@ -301,12 +303,12 @@ impl<F: FftField> BatchReconNode<F> {
                                             bincode::serialize(&mult_generic_msg)?;
                                         info!("Finished reconstruction of message within RandBit::Multiplication");
                                         net.send(self.id, &bytes_generic_msg).await?;
-                                    } 
+                                    }
                                 }
                                 ProtocolType::PRandBit => {
                                     let mut bytes_message = Vec::new();
                                     result.serialize_compressed(&mut bytes_message)?;
-                                    let mult_generic_msg =
+                                    let prand_bit_message =
                                         WrappedMessage::PRandBit(PRandBitDMessage::new(
                                             self.id,
                                             PRandMessageType::OutputMessage,
@@ -315,7 +317,8 @@ impl<F: FftField> BatchReconNode<F> {
                                             vec![],
                                             bytes_message,
                                         ));
-                                    let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
+                                    let bytes_generic_msg = bincode::serialize(&prand_bit_message)?;
+                                    info!("Finished reconstruction of message within PRandBit");
                                     net.send(self.id, &bytes_generic_msg).await?;
                                 }
                                 _ => return Ok(()),

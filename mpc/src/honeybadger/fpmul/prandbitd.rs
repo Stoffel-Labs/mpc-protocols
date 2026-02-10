@@ -1,14 +1,17 @@
 //! This is an implementation of the PRandBit protocol mentioned in the paper Secure Computation
-//! With Fixed-Point Numbers. PRandBit is the protocol that combines the protocol RandBit and the
+//! With Fixed-Point Numbers. PRandBitD is the protocol that combines the protocol RandBit and the
 //! share conversion protocols that involve RISS.
+//!
+//! PRandBitD generates a random shared bit in both $\mathbb{Z}_q$ and $\mathbb{F}_{2^8}$.
 
+use crate::honeybadger::fpmul::ProtocolState;
 use crate::{
     common::{share::ShareError, ProtocolSessionId},
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         fpmul::{
             build_all_f_polys,
-            f256::{build_all_f_polys_2_8, F2_8Domain, F2_8},
+            gf_256::{build_all_f_polys_2_8, GF256Domain, GF256},
             PRandBitDMessage, PRandBitDStore, PRandError, PRandMessageType,
         },
         mul::concat_sorted,
@@ -27,7 +30,7 @@ use tracing::{debug, info};
 
 /// Represents the shares stored by a player
 #[derive(Debug, Clone)]
-pub struct PRandBitNode<F: PrimeField, G: PrimeField> {
+pub struct PRandBitDNode<F: PrimeField, G: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
@@ -39,7 +42,7 @@ pub struct PRandBitNode<F: PrimeField, G: PrimeField> {
     pub batch_recon: BatchReconNode<F>,
 }
 
-impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
+impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     /// Creates a new PRandBitDNode with empty shares.
     pub fn new(
         id: usize,
@@ -68,12 +71,13 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         store.clear();
     }
 
-    /// Distributed RISS generation
-    /// generates shares in multiples of (t+1)
+    /// Distributed RISS generation.
+    ///
+    /// This method generates shares in batches of size t + 1.
     pub async fn generate_riss<N: Network>(
         &mut self,
         session_id: SessionId,
-        smallfield_bits: Vec<RobustShare<F>>,
+        small_field_bits: Vec<RobustShare<F>>,
         l: usize,
         k: usize,
         batch_size: usize,
@@ -91,44 +95,55 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         }
         self.l = l;
         self.k = k;
-        // Step 1: compute all maximal unqualified sets
-        let tsets: Vec<Vec<usize>> = (0..self.n).combinations(self.t).collect();
 
-        let binding = self.get_or_create_store(session_id).await;
-        let mut store = binding.lock().await;
-        let my_tsets: Vec<Vec<usize>> = tsets
-            .clone()
-            .into_iter()
-            .filter(|ts| !ts.contains(&self.id))
-            .collect();
-        store.no_of_tsets = Some(my_tsets.len());
-        if smallfield_bits.len() != batch_size
-            && session_id.calling_protocol() == Some(ProtocolType::PRandBit)
-        {
-            return Err(PRandError::NotSet(
-                "Not enough bits from the smaller field".to_string(),
-            ));
-        }
-        store.share_b_q = Some(smallfield_bits);
-        store.batch_size = Some(batch_size);
-        drop(store);
+        let t_sets = {
+            // Mark the protocol as initialized.
+            let binding = self.get_or_create_store(session_id).await;
+            let mut store = binding.lock().await;
+            store.protocol_state = ProtocolState::Initialized;
+
+            // Step 1: Compute all maximal unqualified sets. Given that the unqualified sets are those
+            // that have less than t players, the maximal unqualified sets are those that have exactly
+            // t players.
+            let t_sets: Vec<Vec<usize>> = (0..self.n).combinations(self.t).collect();
+            let my_tsets: Vec<Vec<usize>> = t_sets
+                .clone()
+                .into_iter()
+                .filter(|ts| !ts.contains(&self.id))
+                .collect();
+            store.no_of_tsets = Some(my_tsets.len());
+
+            // Returns an error if there are not enough bits from the smaller field.
+            if small_field_bits.len() != batch_size
+                && session_id.calling_protocol() == Some(ProtocolType::PRandBit)
+            {
+                return Err(PRandError::NotSet(
+                    "Not enough bits from the smaller field".to_string(),
+                ));
+            }
+
+            store.share_small_field_bits = Some(small_field_bits);
+            store.batch_size = Some(batch_size);
+            t_sets
+        };
+
         // Step 2: P_i samples randomness and sends
         // Random integer range: [0, 2^(l+k)]
         let bound: i64 = 1 << (self.l + self.k);
-        for tset in tsets {
-            let r_t_i: Vec<i64> = (0..batch_size)
+        for t_set in t_sets {
+            let r_t_set: Vec<i64> = (0..batch_size)
                 .map(|_| rand::thread_rng().gen_range(0, bound + 1))
                 .collect();
 
-            // send to all players not in T
+            // Send the share to all players not in T.
             for j in 0..self.n {
-                if !tset.contains(&j) {
+                if !t_set.contains(&j) {
                     let msg = WrappedMessage::PRandBit(PRandBitDMessage::new(
                         self.id,
                         PRandMessageType::RissMessage,
                         session_id,
-                        tset.clone(),
-                        r_t_i.clone(),
+                        t_set.clone(),
+                        r_t_set.clone(),
                         vec![],
                     ));
                     let bytes_msg = bincode::serialize(&msg)?;
@@ -139,6 +154,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         Ok(())
     }
 
+    /// Handler for the messages in the RISS protocol.
     pub async fn riss_handler<N: Network + Send + Sync>(
         &mut self,
         msg: PRandBitDMessage,
@@ -156,28 +172,28 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         let binding = self.get_or_create_store(msg.session_id).await;
         let mut store = binding.lock().await;
 
-        // Get or create entry for this tset
-        let tset_entry = store
+        // Get or create an entry for this tset
+        let t_set_entry = store
             .riss_shares
-            .entry(msg.tset.clone())
+            .entry(msg.t_set.clone())
             .or_insert_with(HashMap::new);
 
         // Deduplicate per (sender, tset)
-        if tset_entry.contains_key(&msg.sender_id) {
+        if t_set_entry.contains_key(&msg.sender_id) {
             return Err(PRandError::Duplicate(format!(
                 "Already received from {} for tset {:?}",
-                msg.sender_id, msg.tset
+                msg.sender_id, msg.t_set
             )));
         }
 
-        // Insert sender’s contribution
-        tset_entry.insert(msg.sender_id, msg.r_t);
+        // Insert sender's contribution
+        t_set_entry.insert(msg.sender_id, msg.r_t);
 
         // Check if we have all expected contributors
-        if tset_entry.len() == self.n {
+        if t_set_entry.len() == self.n {
             // Compute r_T = sum of contributions
-            let r_t_sum = tset_entry.values().fold(
-                vec![0; tset_entry.values().next().unwrap().len()],
+            let r_t_sum = t_set_entry.values().fold(
+                vec![0; t_set_entry.values().next().unwrap().len()],
                 |mut acc, v| {
                     for (a, x) in acc.iter_mut().zip(v) {
                         *a += *x;
@@ -185,47 +201,51 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                     acc
                 },
             );
-            store.r_t.insert(msg.tset.clone(), r_t_sum);
+            store.r_t.insert(msg.t_set.clone(), r_t_sum);
         }
-        // Check if all tsets are done
+
+        // Check if all T sets are done
         if store.batch_size.is_none() {
-            debug!("Waiting for initiating");
+            debug!("All T sets are done. Waiting for initiating");
             return Ok(());
         }
         let batch_size = store
             .batch_size
             .ok_or_else(|| PRandError::NotSet("Batch size not set at RISS handler".to_string()))?;
         let total_tsets = store.no_of_tsets.ok_or_else(|| {
-            PRandError::NotSet(format!("No of tsets not set {:?}", calling_proto))
+            PRandError::NotSet(format!("No of T sets not set {:?}", calling_proto))
         })?;
-        if store.r_t.len() == total_tsets {
+
+        // Check if I have all the shares r_T for all the T sets. If not, we must wait.
+        if store.r_t.len() == total_t_sets {
             info!(node_id = self.id, "Constructing Polynomials");
 
-            // Ready to do the conversions of shares
-            let tsets: Vec<Vec<usize>> = store.r_t.keys().cloned().collect();
-            let poly_fq = build_all_f_polys::<F>(self.n, tsets.clone())?;
-            let poly_fp = build_all_f_polys::<G>(self.n, tsets.clone())?;
-            //build f polys for Fq and F_2^8
-            let poly_f2 = build_all_f_polys_2_8(self.n, tsets)?;
+            // We next convert the shares of [r] into Shamir shares mod p and mod q. In that case,
+            // we obtain the shares
+            // Build f_T polynomials for F_p, F_q and F_2^8.
+            let t_sets: Vec<Vec<usize>> = store.r_t.keys().cloned().collect();
+            let poly_f_q = build_all_f_polys::<F>(self.n, t_sets.clone())?;
+            let poly_f_p = build_all_f_polys::<G>(self.n, t_sets.clone())?;
+            let poly_f_2 = build_all_f_polys_2_8(self.n, t_sets)?;
 
             // My evaluation points in each field
             let domain_f = GeneralEvaluationDomain::<F>::new(self.n)
                 .ok_or_else(|| ShareError::NoSuitableDomain(self.n))?;
             let domain_g = GeneralEvaluationDomain::<G>::new(self.n)
                 .ok_or_else(|| ShareError::NoSuitableDomain(self.n))?;
-            let domain_2 = F2_8Domain::new(self.n)?;
+            let domain_2 = GF256Domain::new(self.n)?;
             let xi_q = domain_f.element(self.id);
             let xi_p = domain_g.element(self.id);
             let xi_2 = domain_2.element(self.id);
 
             let mut share_q = vec![RobustShare::new(F::zero(), self.id, self.t); batch_size];
             let mut share_p = vec![RobustShare::new(G::zero(), self.id, self.t); batch_size];
-            let mut share_2 = vec![F2_8::zero(); batch_size];
+            let mut share_2 = vec![GF256::zero(); batch_size];
 
-            for (tset, r_t) in store.r_t.clone() {
-                let poly_q = &poly_fq[&tset];
-                let poly_p = &poly_fp[&tset];
-                let poly_2 = &poly_f2[&tset];
+            for (t_set, r_t) in &store.r_t {
+                let poly_q = &poly_f_q[t_set];
+                let poly_p = &poly_f_p[t_set];
+                let poly_2 = &poly_f_2[t_set];
 
                 // Evaluate polynomials at my xi
                 let coeff_q = poly_q.evaluate(&xi_q);
@@ -233,12 +253,13 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 let coeff_2 = poly_2.evaluate(xi_2);
 
                 for i in 0..batch_size {
-                    // Reduce r_T into each field
+                    // Reduce r_T into each field.
                     let r_q = F::from(r_t[i]);
                     let r_p = G::from(r_t[i]);
-                    let r_2 = F2_8::from((r_t[i] & 1) as u8); // parity
+                    // Gets the parity of r_t[i].
+                    let r_2 = GF256::from((r_t[i] & 1) as u8);
 
-                    // Accumulate
+                    // Accumulate the values.
                     share_q[i].share[0] += r_q * coeff_q;
                     share_p[i].share[0] += r_p * coeff_p;
                     share_2[i] = share_2[i] + (r_2 * coeff_2);
@@ -251,35 +272,37 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             store.share_r_2 = Some(share_2);
 
             if msg.session_id.calling_protocol() == Some(ProtocolType::PRandInt) {
-                //output the shared random integer,r_t that is converted to r_p
+                //output the shared random integer, r_t that is converted to r_p
                 //stored in share_r_p
                 info!(node_id = self.id, "Output for PRandInt");
                 self.output_int_channel.send(msg.session_id).await?;
                 return Ok(());
             }
 
-            //Compute
-            let share_b_q = store
-                .share_b_q
+            // Compute shares.
+            let share_b_small_field = store
+                .share_small_field_bits
                 .clone()
                 .ok_or_else(|| PRandError::NotSet("Small field bits not set".to_string()))?;
             drop(store);
 
-            // share of r + b
-            let share_rplusb: Vec<RobustShare<F>> = share_q
+            // Share of r + b
+            let share_r_plus_b: Vec<RobustShare<F>> = share_q
                 .iter()
-                .zip(share_b_q.iter())
-                .filter_map(|(x, y)| match x.clone() + y.clone() {
-                    Ok(sum) => Some(sum),
-                    Err(e) => {
-                        eprintln!("Share addition failed: {:?}", e);
-                        None
-                    }
-                })
+                .zip(share_b_small_field.iter())
+                .filter_map(
+                    |(share_q, share_b)| match share_q.clone() + share_b.clone() {
+                        Ok(sum) => Some(sum),
+                        Err(e) => {
+                            eprintln!("Share addition failed: {:?}", e);
+                            None
+                        }
+                    },
+                )
                 .collect();
 
-            // Batch reconstruct r+b
-            for (i, chunk) in share_rplusb.chunks(self.t + 1).enumerate() {
+            // Batch reconstruction of r + b.
+            for (i, chunk) in share_r_plus_b.chunks(self.t + 1).enumerate() {
                 let session_id_batch = SessionId::new(
                     calling_proto,
                     SessionId::pack_slot24(msg.session_id.exec_id(), 0, i as u8),
@@ -290,10 +313,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                     .await?;
             }
         }
-
         Ok(())
     }
 
+    /// Handler for output messages in the PRandBitD protocol.
     pub async fn output_handler(&mut self, msg: PRandBitDMessage) -> Result<(), PRandError> {
         info!(node_id = self.id, "At output handler");
 
@@ -340,12 +363,12 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             for (i, v) in share_r_plus_b.iter().enumerate() {
                 // Compute lsb(v)
                 // BigInteger has is_odd() method.
-                let repr = v.into_bigint();
-                let lsb = repr.is_odd(); // boolean
-                let lsb_elem_2 = F2_8::from(lsb as u8);
+                let r_plus_b_big_int = v.into_bigint();
+                let lsb = r_plus_b_big_int.is_odd(); // boolean
+                let lsb_elem_2 = GF256::from(lsb as u8);
 
-                let bytes = repr.to_bytes_le();
-                let v_g = G::from_le_bytes_mod_order(&bytes); // reduction into G
+                let bytes = r_plus_b_big_int.to_bytes_le();
+                let r_plus_b_mod_g = G::from_le_bytes_mod_order(&bytes); // reduction into G
 
                 // Now finalize GF(2^8) share: b = r0 XOR lsb
                 if store.share_r_2.is_none() {
@@ -363,7 +386,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
 
                 let my_b2_share = my_r0_share_2[i] + (lsb_elem_2);
                 let my_b_p_share = RobustShare::new(
-                    v_g - my_r0_share_g[i].share[0],
+                    r_plus_b_mod_g - my_r0_share_g[i].share[0],
                     my_r0_share_g[i].id,
                     my_r0_share_g[i].degree,
                 );
@@ -372,7 +395,8 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 store.share_b_2.push(my_b2_share);
                 store.share_b_p.push(my_b_p_share);
             }
-            info!(id = self.id, "Prandbit finished");
+            info!(id = self.id, "PrandBit finished");
+            store.protocol_state = ProtocolState::Finished;
             self.output_bit_channel.send(session_id).await?;
             return Ok(());
         }

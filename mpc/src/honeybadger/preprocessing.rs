@@ -2,7 +2,7 @@ use crate::common::math::goldilocks::GoldilocksField;
 use crate::{
     common::share::avss::FeldmanShamirShare,
     honeybadger::{
-        fpmul::f256::F2_8, robust_interpolate::robust_interpolate::RobustShare,
+        fpmul::gf_256::GF256, robust_interpolate::robust_interpolate::RobustShare,
         triple_gen::ShamirBeaverTriple, HoneyBadgerError,
     },
 };
@@ -26,7 +26,7 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField, G: CurveGroup<ScalarFi
     /// A pool of verifiable random shares
     v_random_shares: Vec<FeldmanShamirShare<F, G>>,
     ///A pool of PRandBit outputs for truncation
-    prandbit_shares: Vec<(RobustShare<F>, F2_8)>,
+    prandbit_shares: Vec<(RobustShare<F>, GF256)>,
     ///A pool of PRandInt outputs for truncation
     prandint_shares: Vec<RobustShare<F>>,
 }
@@ -55,7 +55,7 @@ where
         mut random_shares: Option<Vec<RobustShare<F>>>,
         mut random_shares_small_field: Option<Vec<RobustShare<GoldilocksField>>>,
         mut v_random_shares: Option<Vec<FeldmanShamirShare<F, G>>>,
-        mut prandbit_shares: Option<Vec<(RobustShare<F>, F2_8)>>,
+        mut prandbit_shares: Option<Vec<(RobustShare<F>, GF256)>>,
         mut prandbit_int: Option<Vec<RobustShare<F>>>,
     ) {
         if let Some(pairs) = &mut triples {
@@ -123,7 +123,7 @@ where
     pub fn take_prandbit_shares(
         &mut self,
         n_prandbit: usize,
-    ) -> Result<Vec<(RobustShare<F>, F2_8)>, HoneyBadgerError> {
+    ) -> Result<Vec<(RobustShare<F>, GF256)>, HoneyBadgerError> {
         if n_prandbit > self.prandbit_shares.len() {
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
@@ -178,7 +178,7 @@ pub enum PreprocKind {
 pub enum PreprocContents<F: FftField> {
     BeaverTriples(Vec<Indexed<ShamirBeaverTriple<F>>>),
     RandomShares(Vec<Indexed<RobustShare<F>>>),
-    PRandBits(Vec<Indexed<(RobustShare<F>, F2_8)>>),
+    PRandBits(Vec<Indexed<(RobustShare<F>, GF256)>>),
     PRandInts(Vec<Indexed<RobustShare<F>>>),
 }
 

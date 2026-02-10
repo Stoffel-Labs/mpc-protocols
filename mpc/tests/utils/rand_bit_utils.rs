@@ -2,235 +2,13 @@ use ark_ff::FftField;
 use ark_std::test_rng;
 use std::sync::Arc;
 use stoffelmpc_mpc::common::{SecretSharingScheme, RBC};
-use stoffelmpc_mpc::honeybadger::fpmul::rand_bit::{RandBit, RandBitError};
-use stoffelmpc_mpc::honeybadger::fpmul::ProtocolState;
+use stoffelmpc_mpc::honeybadger::fpmul::rand_bit::RandBit;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{SessionId, WrappedMessage};
-use stoffelmpc_network::fake_network::{FakeNetwork, FakeNode};
-use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, info, warn};
-
-pub fn create_nodes<F: FftField, R: RBC>(
-    n_parties: usize,
-    threshold: usize,
-    senders: Vec<Sender<SessionId>>,
-) -> Vec<RandBit<F, R>> {
-    (0..n_parties)
-        .zip(senders)
-        .map(|(id, sender)| RandBit::new(id, n_parties, threshold, sender).unwrap())
-        .collect()
-}
-
-pub enum TestEvent<F: FftField> {
-    IoMessage {
-        message_bytes: Vec<u8>,
-    },
-    InitializeNode {
-        a_shares: Vec<RobustShare<F>>,
-        mult_triples: Vec<ShamirBeaverTriple<F>>,
-        session_id: SessionId,
-    },
-    Shutdown,
-}
-
-pub struct NodeHandler<F: FftField, R: RBC + 'static> {
-    pub node: RandBit<F, R>,
-    pub event_channel: Receiver<TestEvent<F>>,
-    node_state: NodeState,
-    final_result_data_chan: Sender<(usize, Vec<RobustShare<F>>)>,
-    network: Arc<FakeNetwork>,
-}
-
-pub enum NodeState {
-    NotInitialized,
-    Initializing,
-    Initialized,
-}
-
-impl<F, R> NodeHandler<F, R>
-where
-    F: FftField,
-    R: RBC + 'static,
-{
-    pub fn new(
-        node: RandBit<F, R>,
-        event_channel: Receiver<TestEvent<F>>,
-        network: Arc<FakeNetwork>,
-        final_result_data_chan: Sender<(usize, Vec<RobustShare<F>>)>,
-    ) -> Self {
-        Self {
-            node,
-            event_channel,
-            network,
-            final_result_data_chan,
-            node_state: NodeState::NotInitialized,
-        }
-    }
-
-    pub fn spawn_node_handler_task(mut self) {
-        tokio::spawn(async move {
-            while let Some(event) = self.event_channel.recv().await {
-                match event {
-                    TestEvent::IoMessage { message_bytes } => {
-                        self.process_message(
-                            message_bytes,
-                            self.final_result_data_chan.clone(),
-                            self.network.clone(),
-                        )
-                        .await
-                    }
-                    TestEvent::InitializeNode {
-                        a_shares,
-                        mult_triples,
-                        session_id,
-                    } => {
-                        self.node
-                            .init(a_shares, mult_triples, session_id, self.network.clone())
-                            .await
-                            .unwrap();
-                    }
-                    TestEvent::Shutdown => {
-                        info!("Shutting down node handler task");
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    async fn process_message(
-        &mut self,
-        message_bytes: Vec<u8>,
-        final_result_data_chan: Sender<(usize, Vec<RobustShare<F>>)>,
-        network: Arc<FakeNetwork>,
-    ) {
-        let wrapped: WrappedMessage = match bincode::deserialize(&message_bytes) {
-            Ok(m) => m,
-            Err(_) => {
-                error!("Malformed or unrecognized message format.");
-                return;
-            }
-        };
-
-        match wrapped {
-            WrappedMessage::RandBit(rand_bit_message) => {
-                info!(
-                    self_id = self.node.id,
-                    remote_id = rand_bit_message.sender,
-                    "Received RandBit message"
-                );
-                let result = { self.node.process(rand_bit_message.clone()).await };
-                match result {
-                    Ok(_) => {
-                        let protocol_state = {
-                            let node_storage_guard = self.node.storage.lock().await;
-                            let node_storage_for_sid = node_storage_guard
-                                .get(&rand_bit_message.session_id)
-                                .unwrap()
-                                .lock()
-                                .await;
-                            node_storage_for_sid.protocol_state.clone()
-                        };
-                        if protocol_state == ProtocolState::Finished {
-                            let resulting_rand_bits = {
-                                let node_storage_guard = self.node.storage.lock().await;
-                                let node_storage_for_sid = node_storage_guard
-                                    .get(&rand_bit_message.session_id)
-                                    .unwrap()
-                                    .lock()
-                                    .await;
-                                node_storage_for_sid.protocol_output.clone()
-                            };
-                            final_result_data_chan
-                                .send((self.node.id, resulting_rand_bits.unwrap()))
-                                .await
-                                .unwrap();
-                        }
-                    }
-                    Err(RandBitError::WaitForAllBatches) => {
-                        warn!("Waiting for all batches in RandBit protocol");
-                        return;
-                    }
-                    Err(e) => {
-                        return;
-                    }
-                }
-            }
-            WrappedMessage::BatchRecon(batch_recon_message) => {
-                let result = if batch_recon_message.session_id.sub_id() == 0 {
-                    info!(
-                        self_id = self.node.id,
-                        remote_id = batch_recon_message.sender_id,
-                        "Processing message for the RandBit > Multiplication > BatchRecon node"
-                    );
-                    info!(
-                        self_id = self.node.id,
-                        remote_id = batch_recon_message.sender_id,
-                        "RandBit node lock aquired successfully"
-                    );
-                    self.node
-                        .mult_node
-                        .batch_recon
-                        .process(batch_recon_message, network.clone())
-                        .await
-                } else {
-                    info!(
-                        self_id = self.node.id,
-                        remote_id = batch_recon_message.sender_id,
-                        "Processing message for the RandBit > BatchRecon node"
-                    );
-                    info!(
-                        self_id = self.node.id,
-                        remote_id = batch_recon_message.sender_id,
-                        "RandBit node lock aquired successfully"
-                    );
-                    self.node
-                        .batch_recon
-                        .process(batch_recon_message, network.clone())
-                        .await
-                };
-
-                if let Err(e) = result {
-                    error!("Encountered an error in batch reconstruction: {:?}", e);
-                    return;
-                }
-            }
-            WrappedMessage::Mul(multiplication_message) => {
-                info!(
-                    self_id = self.node.id,
-                    remote_id = multiplication_message.sender,
-                    "Received Multiplication message"
-                );
-                let result = { self.node.mult_node.process(multiplication_message).await };
-                if let Err(e) = result {
-                    error!("Encountered an error in multiplication: {:?}", e);
-                    return;
-                }
-            }
-            message => {
-                error!(self_id = self.node.id, "Unexpected message: {message:?}");
-            }
-        }
-    }
-}
-
-pub fn spawn_receiver_tasks<F: FftField, R: RBC + 'static>(
-    event_senders: Vec<Sender<TestEvent<F>>>,
-    receivers: Vec<Receiver<Vec<u8>>>,
-) {
-    assert_eq!(event_senders.len(), receivers.len());
-    for (event_sender, mut receiver) in event_senders.into_iter().zip(receivers.into_iter()) {
-        tokio::spawn(async move {
-            while let Some(message_bytes) = receiver.recv().await {
-                event_sender
-                    .send(TestEvent::IoMessage { message_bytes })
-                    .await
-                    .unwrap();
-            }
-        });
-    }
-}
+use stoffelmpc_network::fake_network::FakeNetwork;
+use tokio::sync::mpsc::Receiver;
+use tokio::task::JoinSet;
 
 /// Creates dummy inputs for the RandBit protocol.
 ///
@@ -278,4 +56,73 @@ where
         }
     }
     (a_shares, mult_triples)
+}
+
+/// Spawn receiver tasks for the RandBit protocol.
+pub async fn spawn_receiver_tasks<F, R>(
+    num_parties: usize,
+    mut receivers: Vec<Receiver<Vec<u8>>>,
+    nodes: Vec<RandBit<F, R>>,
+    network: Arc<FakeNetwork>,
+) -> JoinSet<()>
+where
+    F: FftField,
+    R: RBC + Clone + 'static,
+{
+    let mut set = JoinSet::new();
+
+    for i in 0..num_parties {
+        let mut receiver = receivers.remove(0);
+        let mut node = nodes[i].clone();
+        let net = network.clone();
+
+        set.spawn(async move {
+            while let Some(bytes) = receiver.recv().await {
+                let wrapped: WrappedMessage = bincode::deserialize(&bytes).unwrap();
+                match wrapped {
+                    WrappedMessage::RandBit(msg) => {
+                        let _ = node.process(msg).await;
+                    }
+                    WrappedMessage::BatchRecon(msg) => {
+                        if msg.session_id.sub_id() == 0 {
+                            let _ = node.batch_recon.process(msg, net.clone()).await;
+                        } else {
+                            let _ = node.mult_node.batch_recon.process(msg, net.clone()).await;
+                        }
+                    }
+                    WrappedMessage::Mul(msg) => {
+                        let _ = node.mult_node.process(msg).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+    set
+}
+
+pub async fn initialize_nodes<F, R>(
+    num_parties: usize,
+    a_shares: Vec<Vec<RobustShare<F>>>,
+    mult_triples: Vec<Vec<ShamirBeaverTriple<F>>>,
+    session_id: SessionId,
+    nodes: Vec<RandBit<F, R>>,
+    network: Arc<FakeNetwork>,
+) -> JoinSet<()>
+where
+    F: FftField,
+    R: RBC + Clone + 'static,
+{
+    let mut init_set = JoinSet::new();
+    for i in 0..num_parties {
+        let mut node = nodes[i].clone();
+        let net = network.clone();
+        let a = a_shares[i].clone();
+        let triples = mult_triples[i].clone();
+
+        init_set.spawn(async move {
+            node.init(a, triples, session_id, net).await.unwrap();
+        });
+    }
+    init_set
 }

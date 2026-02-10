@@ -8,11 +8,11 @@ use itertools::Itertools;
 use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC};
-use stoffelmpc_mpc::honeybadger::fpmul::f256::{
-    build_all_f_polys_2_8, lagrange_interpolate_f2_8, F2_8Domain, F2_8,
+use stoffelmpc_mpc::common::{SecretSharingScheme, ShamirShare, RBC};
+use stoffelmpc_mpc::honeybadger::fpmul::gf_256::{
+    build_all_f_polys_2_8, lagrange_interpolate_f2_8, GF256Domain, GF256,
 };
-use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitNode;
+use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitDNode;
 use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::{Robust, RobustShare};
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
@@ -44,9 +44,9 @@ async fn test_prandbitd_end_to_end() {
         .collect();
 
     // Initialize nodes
-    let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
+    let mut nodes: Vec<PRandBitDNode<F, G>> = (0..n)
         .map(|i| {
-            PRandBitNode::new(
+            PRandBitDNode::new(
                 i,
                 n,
                 t,
@@ -108,7 +108,7 @@ async fn test_prandbitd_end_to_end() {
     //Check outputs
     let mut x_vals_2 = Vec::new();
     let mut y_vals_2 = vec![Vec::new(); batch_size];
-    let domain_2 = F2_8Domain::new(n).unwrap();
+    let domain_2 = GF256Domain::new(n).unwrap();
 
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
@@ -128,7 +128,11 @@ async fn test_prandbitd_end_to_end() {
         let poly_2 = lagrange_interpolate_f2_8(&x_vals_2, &y);
         let recovered_b_2 = poly_2.coeffs[0];
         println!("Recovered b (GF(2^8)) = {:?}", recovered_b_2);
-        assert_eq!(recovered_b_2, F2_8::from(1u16), "Recovered b_2 != expected");
+        assert_eq!(
+            recovered_b_2,
+            GF256::from(1u16),
+            "Recovered b_2 != expected"
+        );
     }
 
     // === Reconstruct [b]_p in G (bigger prime field) ===
@@ -186,9 +190,9 @@ async fn test_prandbitd_r_reconstruction() {
         .collect();
 
     // Initialize nodes
-    let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
+    let mut nodes: Vec<PRandBitDNode<F, G>> = (0..n)
         .map(|i| {
-            PRandBitNode::new(
+            PRandBitDNode::new(
                 i,
                 n,
                 t,
@@ -310,8 +314,8 @@ async fn test_prandbitd_r_reconstruction() {
 
     println!("All r_t values consistent and all Shamir reconstructions matched ground truth");
     // === Step 4: Reconstruct r0 (GF(2^8)) ===
-    let domain_2 = F2_8Domain::new(n).unwrap();
-    let expected_r0: Vec<F2_8> = r_int.iter().map(|i| F2_8::from((i & 1) as u8)).collect();
+    let domain_2 = GF256Domain::new(n).unwrap();
+    let expected_r0: Vec<GF256> = r_int.iter().map(|i| GF256::from((i & 1) as u8)).collect();
 
     let mut shares_r2 = Vec::new();
     for node in &mut nodes {
@@ -332,7 +336,7 @@ async fn test_prandbitd_r_reconstruction() {
         }
         for i in 0..batch_size {
             let poly = lagrange_interpolate_f2_8(&xs, &ys[i]);
-            let rec_r0 = poly.evaluate(F2_8::zero());
+            let rec_r0 = poly.evaluate(GF256::zero());
             assert_eq!(
                 rec_r0, expected_r0[i],
                 "Mismatch in r0 for combo {:?}",
@@ -349,11 +353,11 @@ async fn test_prandbitd_r_reconstruction() {
         let tsets: Vec<Vec<usize>> = store.r_t.keys().cloned().collect();
         let poly_f2 = build_all_f_polys_2_8(n, tsets).unwrap();
         let xi2 = domain_2.element(node.id);
-        let mut recomputed = vec![F2_8::zero(); batch_size];
+        let mut recomputed = vec![GF256::zero(); batch_size];
         for (tset, r_t) in store.r_t.iter() {
             let coeff = poly_f2[tset].evaluate(xi2);
             for i in 0..batch_size {
-                let r2 = F2_8::from((r_t[i] & 1) as u8);
+                let r2 = GF256::from((r_t[i] & 1) as u8);
                 recomputed[i] = recomputed[i] + (r2 * coeff);
             }
         }

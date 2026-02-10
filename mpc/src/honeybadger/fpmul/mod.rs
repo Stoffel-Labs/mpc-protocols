@@ -2,7 +2,7 @@ use crate::{
     common::{lagrange_interpolate, rbc::RbcError, share::ShareError},
     honeybadger::{
         batch_recon::BatchReconError,
-        fpmul::f256::{F2_8Error, F2_8},
+        fpmul::gf_256::{GF256Error, GF256},
         robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId,
     },
@@ -17,8 +17,8 @@ use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 
-pub mod f256;
 pub mod fpmul;
+pub mod gf_256;
 pub mod prandbitd;
 pub mod rand_bit;
 pub mod truncpr;
@@ -62,7 +62,7 @@ pub enum RandBitError {
 pub enum ProtocolState {
     /// The protocol is initialized.
     Initialized,
-    /// The protocol is not initialized yet..
+    /// The protocol is not initialized yet.
     NotInitialized,
     /// The protocol has finished.
     Finished,
@@ -96,7 +96,7 @@ pub enum PRandError {
     #[error("error sending the finished session ID to the caller: {0:?}")]
     SenderError(#[from] SendError<SessionId>),
     #[error("F2_8 Error: {0}")]
-    F2_8Error(#[from] F2_8Error),
+    F2_8Error(#[from] GF256Error),
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
     #[error("error in batch reconstruction: {0:?}")]
@@ -116,7 +116,7 @@ pub struct PRandBitDMessage {
     pub sender_id: usize,
     pub msg_type: PRandMessageType,
     pub session_id: SessionId,
-    pub tset: Vec<usize>,
+    pub t_set: Vec<usize>,
     pub r_t: Vec<i64>,
     pub payload: Vec<u8>,
 }
@@ -135,7 +135,7 @@ impl PRandBitDMessage {
             sender_id,
             msg_type,
             session_id,
-            tset,
+            t_set: tset,
             r_t,
             payload,
         }
@@ -153,10 +153,11 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     pub no_of_tsets: Option<usize>,
     pub share_r_q: Option<Vec<RobustShare<F>>>, //smaller field
     pub share_r_p: Option<Vec<RobustShare<G>>>, // PrandInt output
-    pub share_b_q: Option<Vec<RobustShare<F>>>, //smaller field
-    pub share_r_2: Option<Vec<F2_8>>,
-    pub share_b_2: Vec<F2_8>,           //PrandBitD output
+    pub share_small_field_bits: Option<Vec<RobustShare<F>>>, //smaller field
+    pub share_r_2: Option<Vec<GF256>>,
+    pub share_b_2: Vec<GF256>,          //PrandBitD output
     pub share_b_p: Vec<RobustShare<G>>, //PrandBitD/PrandBitL output
+    pub protocol_state: ProtocolState,
 }
 
 impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
@@ -169,14 +170,17 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
             no_of_tsets: None,
             share_r_q: None,
             share_r_p: None,
-            share_b_q: None,
+            share_small_field_bits: None,
             share_r_2: None,
             share_b_2: Vec::new(),
             share_b_p: Vec::new(),
+            protocol_state: ProtocolState::NotInitialized,
         }
     }
 }
 
+/// Interpolates a polynomial f_T for each T set, such that f_T(0) = 1, and f_T(x_i) = 0 for all i
+/// in T.
 pub fn build_all_f_polys<H: PrimeField>(
     n: usize,
     tsets: Vec<Vec<usize>>,
@@ -186,10 +190,11 @@ pub fn build_all_f_polys<H: PrimeField>(
     tsets
         .into_iter()
         .map(|tset| {
-            // Construct interpolation points
+            // Construct interpolation points: [0, x_1, x_2, ..., x_t].
             let xs = std::iter::once(H::zero())
                 .chain(tset.iter().map(|j| domain.element(*j)))
                 .collect::<Vec<_>>();
+            // Construct evaluation points: [1, 0, 0, ..., 0].
             let ys = std::iter::once(H::one())
                 .chain(std::iter::repeat(H::zero()).take(tset.len()))
                 .collect::<Vec<_>>();

@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 thiserror.workspace = true
 tracing-subscriber.workspace = true
-stoffelmpc-network = { path = "../network/"}
+stoffelmpc-network = { path = "../network/" }
 ark-ff.workspace = true
 serde.workspace = true
 ark-serialize.workspace = true
@@ -35,6 +35,7 @@ chacha20poly1305.workspace = true
 [dev-dependencies]
 once_cell = "1.21.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+num-integer = "0.1.46"
 
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
