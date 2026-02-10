@@ -282,6 +282,32 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         drop(storage);
         notify.notify_waiters();
 
+        // Check if pending data from handler is sufficient to finalize immediately
+        {
+            let mut storage = storage_bind.lock().await;
+            // Try to reconstruct openings from received shares if needed
+            if storage.received_shares.len() >= 2 * self.t + 1 && storage.openings.is_none() {
+                if let Ok(openings) = reconstruct_rbc(&storage.received_shares, share_len, self.n) {
+                    storage.openings = Some(openings);
+                }
+            }
+
+            // Check if we have all the data to finalize
+            if storage.output_open_mult1.len() == no_of_batch
+                && storage.output_open_mult2.len() == no_of_batch
+                && storage.openings.is_some()
+            {
+                let shares_mult = finalize_mul(&storage)?;
+                let taken_output_sender = storage.output_sender.take().unwrap();
+                taken_output_sender
+                    .send(shares_mult)
+                    .map_err(|_| MulError::SendError(session_id))?;
+                storage.protocol_state = MultProtocolState::Finished;
+                info!("Multiplication completed at node {} (from init pending data)", self.id);
+                return Ok(());
+            }
+        }
+
         // 8.
         // initiate batch reconstruction for those chunks that need it
         for (i, (chunk_a, chunk_b)) in a_full

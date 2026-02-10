@@ -229,6 +229,20 @@ where
         drop(store);
         notify.notify_waiters();
 
+        // Check if pending OK messages are sufficient to finalize immediately
+        {
+            let mut store = bind_store.lock().await;
+            if store.received_ok_msg.len() >= 2 * self.threshold {
+                store.state = RanShaState::Output;
+                let output = r_deg_t[2 * self.threshold..].to_vec();
+                store.state = RanShaState::Finished;
+                store.protocol_output = output;
+                drop(store);
+                self.output_sender.send(session_id).await?;
+                return Ok(());
+            }
+        }
+
         for i in 0..2 * self.threshold {
             let share_deg_t = r_deg_t[i].clone();
 

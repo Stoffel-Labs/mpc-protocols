@@ -155,6 +155,63 @@ where
                 .await?;
         }
 
+        // Check if pending open data is sufficient to finalize immediately
+        let storage_bind = self.get_or_create_storage(session_id).await?;
+        let storage = storage_bind.lock().await;
+        let a_share = storage.a_share.clone().unwrap();
+        let batch_size = a_share.len() / (self.threshold + 1);
+
+        if storage.output_open.len() == batch_size {
+            let a_square_array: Vec<F> = concat_sorted(&storage.output_open);
+            drop(storage);
+
+            // Step 4.
+            for a_square in &a_square_array {
+                if *a_square == F::zero() {
+                    return Err(RandBitError::ZeroSquare);
+                }
+            }
+
+            // Step 5.
+            let mut b_array = Vec::new();
+            for a_square in &a_square_array {
+                let b = a_square.sqrt().ok_or(RandBitError::SquareRoot)?;
+                b_array.push(b);
+            }
+
+            // Step 6.
+            let mut b_inv_array = Vec::new();
+            for b in &b_array {
+                let b_inv = b.inverse().ok_or(RandBitError::Inverse)?;
+                b_inv_array.push(b_inv);
+            }
+
+            let mut c_share_array = Vec::new();
+            for (a_share, b_inv) in izip!(&a_share, &b_inv_array) {
+                let c_share = a_share.clone().mul(b_inv.clone())?;
+                c_share_array.push(c_share);
+            }
+
+            // Step 7.
+            let two_inv = (F::one() + F::one()).inverse().unwrap();
+            let mut d_share_array = Vec::new();
+            for c_share in &c_share_array {
+                let d = c_share.clone().add(F::one())?.mul(two_inv)?;
+                d_share_array.push(d);
+            }
+
+            // Mark the protocol as finished.
+            {
+                let storage_bind = self.get_or_create_storage(session_id).await?;
+                let mut storage = storage_bind.lock().await;
+                storage.protocol_state = ProtocolState::Finished;
+                storage.protocol_output = Some(d_share_array.clone());
+            }
+
+            self.output_channel.send(session_id).await?;
+            tracing::info!("RandBit completed at node {} (from init pending data)", self.id);
+        }
+
         Ok(())
     }
 

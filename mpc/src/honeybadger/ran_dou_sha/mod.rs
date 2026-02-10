@@ -250,6 +250,28 @@ where
         let notify = store.init_notifier.clone();
         drop(store);
         notify.notify_waiters();
+
+        // Check if pending OK messages are sufficient to finalize immediately
+        {
+            let mut store = bind_store.lock().await;
+            if store.received_ok_msg.len() >= self.n_parties - (self.threshold + 1) {
+                let output_r_t = r_deg_t[0..self.threshold + 1].to_vec();
+                let output_r_2t = r_deg_2t[0..self.threshold + 1].to_vec();
+                let output_double_share = output_r_t
+                    .into_iter()
+                    .zip(output_r_2t)
+                    .map(|(share_deg_t, share_deg_2t)| {
+                        DoubleShamirShare::new(share_deg_t, share_deg_2t)
+                    })
+                    .collect();
+                store.state = RanDouShaState::Finished;
+                store.protocol_output = output_double_share;
+                drop(store);
+                self.output_sender.send(session_id).await?;
+                return Ok(());
+            }
+        }
+
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
         for i in 0..self.n_parties {
