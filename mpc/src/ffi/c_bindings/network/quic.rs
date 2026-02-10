@@ -1,19 +1,14 @@
 use std::{
-    alloc::GlobalAlloc,
     collections::HashMap,
     ffi::{c_char, CStr, CString},
-    mem::{self, ManuallyDrop},
+    mem::ManuallyDrop,
     net::SocketAddr,
     slice,
     str::FromStr,
     sync::{Arc, LazyLock},
 };
 
-use rustls::crypto::hash::Hash;
-use stoffelnet::{
-    network_utils::{ClientId, PartyId},
-    transports::quic::{NetworkManager, PeerConnection, QuicNetworkManager},
-};
+use stoffelnet::transports::quic::{NetworkManager, PeerConnection, QuicNetworkManager};
 
 use crate::ffi::c_bindings::{
     network::{GenericNetwork, NetworkErrorCode, NetworkOpaque},
@@ -273,6 +268,15 @@ pub extern "C" fn quic_send(
     match r {
         Ok(_) => NetworkErrorCode::NetworkSuccess,
         Err(_) => NetworkErrorCode::SendError,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn free_quic_addr(addr: *mut c_char) {
+    if !addr.is_null() {
+        unsafe {
+            let _ = CString::from_raw(addr);
+        }
     }
 }
 

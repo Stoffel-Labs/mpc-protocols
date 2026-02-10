@@ -3,6 +3,7 @@ use crate::utils::test_utils::{
 };
 use ark_bls12_381::Fr;
 use stoffelmpc_mpc::honeybadger::input::InputError;
+use stoffelmpc_mpc::honeybadger::SessionId;
 use stoffelmpc_mpc::{
     common::{rbc::rbc::Avid, SecretSharingScheme, ShamirShare},
     honeybadger::{
@@ -11,8 +12,8 @@ use stoffelmpc_mpc::{
         HoneyBadgerMPCNode, WrappedMessage,
     },
 };
-use tokio::time::{sleep, Duration};
 use stoffelmpc_network::fake_network::FakeNetwork;
+use tokio::time::Duration;
 
 pub mod utils;
 #[tokio::test]
@@ -36,13 +37,29 @@ async fn test_multiple_clients_parallel_input() {
         .map(|mask| generate_independent_shares(mask, t, n))
         .collect();
 
-    let mut nodes: Vec<HoneyBadgerMPCNode<Fr, Avid>> =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111, 0, 0, 0, 0, client_ids.clone());
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
+    let mut nodes: Vec<HoneyBadgerMPCNode<Fr, Avid<SessionId>>> =
+        create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+            n,
+            t,
+            0,
+            0,
+            111,
+            0,
+            0,
+            0,
+            0,
+            client_ids.clone(),
+        );
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        server_recv,
+        nodes.clone(),
+        net.clone(),
+    );
 
     for (i, &cid) in client_ids.iter().enumerate() {
         let input = inputs[i].clone();
-        let mut client = InputClient::<Fr, Avid>::new(cid, n, t, 111, input.clone()).unwrap();
+        let mut client =
+            InputClient::<Fr, Avid<SessionId>>::new(cid, n, t, 111, input.clone()).unwrap();
         let mut recv = client_recv.remove(&cid).unwrap();
         let net_clone = net.clone();
         tokio::spawn(async move {
@@ -67,7 +84,12 @@ async fn test_multiple_clients_parallel_input() {
     for (i, &cid) in client_ids.iter().enumerate() {
         let mut recovered_shares = vec![vec![]; inputs[i].len()];
         for server in &mut nodes {
-            let shares = server.preprocess.input.wait_for_all_inputs(Duration::from_millis(200)).await.expect("input error");
+            let shares = server
+                .preprocess
+                .input
+                .wait_for_all_inputs(Duration::from_millis(200))
+                .await
+                .expect("input error");
             let server_shares = shares.get(&cid).unwrap();
             for (j, s) in server_shares.iter().enumerate() {
                 recovered_shares[j].push(s.clone());
@@ -94,11 +116,25 @@ async fn test_input_recovery_with_missing_server() {
     let (net, server_recv, mut client_recv) = test_setup(n, vec![clientid]);
     let local_shares = generate_independent_shares(&mask_values, t, n);
     let mut client =
-        InputClient::<Fr, Avid>::new(clientid, n, t, 111, input_values.clone()).unwrap();
-    let mut nodes =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111, 0, 0, 0, 0, vec![clientid]);
+        InputClient::<Fr, Avid<SessionId>>::new(clientid, n, t, 111, input_values.clone()).unwrap();
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![clientid],
+    );
 
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        server_recv,
+        nodes.clone(),
+        net.clone(),
+    );
     let mut recv = client_recv.remove(&clientid).unwrap();
     let net_clone = net.clone();
     tokio::spawn(async move {
@@ -122,7 +158,12 @@ async fn test_input_recovery_with_missing_server() {
 
     let mut recovered_shares = vec![];
     for server in &mut nodes[..3] {
-        let shares = server.preprocess.input.wait_for_all_inputs(Duration::from_millis(200)).await.expect("input error");
+        let shares = server
+            .preprocess
+            .input
+            .wait_for_all_inputs(Duration::from_millis(200))
+            .await
+            .expect("input error");
         let server_shares = shares.get(&clientid).unwrap();
         recovered_shares.push(server_shares[0].clone());
     }
@@ -144,12 +185,27 @@ async fn test_input_with_too_many_faulty_shares() {
     let (net, server_recv, mut client_recv) = test_setup(n, vec![client_id]);
 
     let mut local_shares = generate_independent_shares(&[mask_value], t, n);
-    let mut client = InputClient::<Fr, Avid>::new(client_id, n, t, 111, vec![input_value]).unwrap();
-    let mut nodes =
-        create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(n, t, 0, 0, 111, 0, 0, 0, 0, vec![client_id]);
+    let mut client =
+        InputClient::<Fr, Avid<SessionId>>::new(client_id, n, t, 111, vec![input_value]).unwrap();
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![client_id],
+    );
 
     // Start server receiver loop
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(server_recv, nodes.clone(), net.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        server_recv,
+        nodes.clone(),
+        net.clone(),
+    );
 
     // Start client receiver loop
     let mut recv = client_recv.remove(&client_id).unwrap();
@@ -179,7 +235,11 @@ async fn test_input_with_too_many_faulty_shares() {
 
     // Ensure no server accepted the faulty masked input
     for (i, server) in nodes.iter_mut().enumerate() {
-        let shares = server.preprocess.input.wait_for_all_inputs(Duration::from_millis(300)).await;
+        let shares = server
+            .preprocess
+            .input
+            .wait_for_all_inputs(Duration::from_millis(300))
+            .await;
         assert!(
             matches!(shares, Err(InputError::Timeout(_))),
             "Server {i} should not have received input from client due to decoding failure"

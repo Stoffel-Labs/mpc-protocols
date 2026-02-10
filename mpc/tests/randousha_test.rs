@@ -14,7 +14,7 @@ use std::{
 };
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
-use stoffelmpc_mpc::common::{SecretSharingScheme, RBC};
+use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::double_share::DoubleShamirShare;
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
     RanDouShaMessage, RanDouShaMessageType, RanDouShaPayload, ReconstructionMessage,
@@ -31,7 +31,11 @@ async fn test_init_reconstruct_flow() {
 
     let n_parties = 10;
     let threshold = 3;
-    let session_id = SessionId::new(ProtocolType::Randousha, 123, 0, 0, 111);
+    let session_id = SessionId::new(
+        ProtocolType::Randousha,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
     let degree_t = 3;
 
     let (network, mut receivers, _) = test_setup(n_parties, vec![]);
@@ -96,6 +100,7 @@ async fn test_init_reconstruct_flow() {
             .clone()
             .get_or_create_store(session_id)
             .await
+            .unwrap()
             .lock()
             .await
             .clone();
@@ -124,7 +129,11 @@ async fn test_reconstruct_handler() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = SessionId::new(ProtocolType::Randousha, 123, 0, 0, 111);
+    let session_id = SessionId::new(
+        ProtocolType::Randousha,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
     let degree_t = 3;
 
     let (network, mut receivers, _) = test_setup(n_parties, vec![]);
@@ -214,6 +223,7 @@ async fn test_reconstruct_handler() {
     let store = randousha_node
         .get_or_create_store(session_id)
         .await
+        .unwrap()
         .lock()
         .await
         .clone();
@@ -227,7 +237,11 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = SessionId::new(ProtocolType::Randousha, 123, 0, 0, 111);
+    let session_id = SessionId::new(
+        ProtocolType::Randousha,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
 
     let (network, mut receivers, _) = test_setup(n_parties, vec![]);
     let secret = Fr::from(1234);
@@ -324,6 +338,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let store = randousha_node
         .get_or_create_store(session_id)
         .await
+        .unwrap()
         .lock()
         .await
         .clone();
@@ -337,7 +352,11 @@ async fn test_output_handler() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = SessionId::new(ProtocolType::Randousha, 123, 0, 0, 111);
+    let session_id = SessionId::new(
+        ProtocolType::Randousha,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
     let degree_t = 3;
 
     let (network, _receivers, _) = test_setup(n_parties, vec![]);
@@ -347,7 +366,7 @@ async fn test_output_handler() {
     let (sender_ch, _receiver_ch) = mpsc::channel(128);
 
     // create receiver randousha node
-    let mut randousha_node: RanDouShaNode<Fr, Avid> =
+    let mut randousha_node: RanDouShaNode<Fr, Avid<SessionId>> =
         RanDouShaNode::new(receiver_id, sender_ch, n_parties, threshold, threshold + 1).unwrap();
     // call init_handler to create random share
     randousha_node
@@ -360,7 +379,10 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
-    let node_store = randousha_node.get_or_create_store(session_id).await;
+    let node_store = randousha_node
+        .get_or_create_store(session_id)
+        .await
+        .unwrap();
 
     // first n-(t+1)-1 message should return error
     for i in 0..n_parties - (threshold + 2) {
@@ -419,7 +441,10 @@ async fn test_output_handler() {
         .await
         .expect("output handler should not fail");
     {
-        let storage_mutex = randousha_node.get_or_create_store(session_id).await;
+        let storage_mutex = randousha_node
+            .get_or_create_store(session_id)
+            .await
+            .unwrap();
         let storage = storage_mutex.lock().await;
         let output = storage.protocol_output.clone();
 
@@ -439,7 +464,11 @@ async fn randousha_e2e() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = SessionId::new(ProtocolType::Randousha, 123, 0, 0, 111);
+    let session_id = SessionId::new(
+        ProtocolType::Randousha,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
     let degree_t = 3;
 
     let (network, receivers, _) = test_setup(n_parties, vec![]);
@@ -504,7 +533,7 @@ async fn randousha_e2e() {
 
     for nodes in &randousha_nodes {
         let mut node_locked = nodes.lock().await;
-        let store = node_locked.get_or_create_store(session_id).await;
+        let store = node_locked.get_or_create_store(session_id).await.unwrap();
         let store_locked = store.lock().await;
         assert!(store_locked.state == RanDouShaState::Finished);
     }
@@ -515,7 +544,11 @@ async fn test_e2e_reconstruct_mismatch() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = SessionId::new(ProtocolType::Randousha, 123, 0, 0, 111);
+    let session_id = SessionId::new(
+        ProtocolType::Randousha,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
     let degree_t = 3;
 
     let (network, receivers, _) = test_setup(n_parties, vec![]);
@@ -583,7 +616,11 @@ async fn test_e2e_wrong_degree() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = SessionId::new(ProtocolType::Randousha, 123, 0, 0, 111);
+    let session_id = SessionId::new(
+        ProtocolType::Randousha,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
     let degree_t = 3;
 
     // Generate the network and parameters.

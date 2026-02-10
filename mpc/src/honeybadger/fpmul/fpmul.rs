@@ -13,11 +13,11 @@ use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use thiserror::Error;
 use tokio::{
-    time::Duration,
     sync::{
         mpsc::{self, error::SendError, Receiver, Sender},
         Mutex,
-    }
+    },
+    time::Duration,
 };
 
 #[derive(Error, Debug)]
@@ -53,7 +53,7 @@ where
 impl<F, R> FPMulNode<F, R>
 where
     F: PrimeField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     pub fn new(
         id: usize,

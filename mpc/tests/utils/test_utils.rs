@@ -1,8 +1,9 @@
 use ark_bls12_381::Fr;
 use ark_ff::{FftField, PrimeField, UniformRand};
+use ark_std::rand::rngs::{OsRng, StdRng};
+use ark_std::rand::SeedableRng;
 use ark_std::test_rng;
 use once_cell::sync::Lazy;
-use stoffelmpc_network::bad_fake_network::{BadFakeNetwork, BadFakeNetworkConfig};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
@@ -18,6 +19,7 @@ use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{
     HoneyBadgerMPCClient, HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
+use stoffelmpc_network::bad_fake_network::{BadFakeNetwork, BadFakeNetworkConfig};
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -30,7 +32,7 @@ use tracing_subscriber::FmtSubscriber;
 //--------------------------RBC--------------------------
 
 /// Helper function to set up parties,Network,Receivers
-pub async fn setup_network_and_parties<T: RBC, N: Network>(
+pub async fn setup_network_and_parties<T: RBC<Id = SessionId>, N: Network>(
     n: usize,
     t: usize,
     k: usize,
@@ -42,7 +44,7 @@ pub async fn setup_network_and_parties<T: RBC, N: Network>(
 
     let mut parties = Vec::with_capacity(n as usize);
     for i in 0..n {
-        let rbc = T::new(i, n, t, k)?; // Create a new RBC instance for each party
+        let rbc = T::new(i, n, t, k, Arc::new(WrappedMessage::rbc_wrap))?; // Create a new RBC instance for each party
         parties.push(rbc);
     }
     Ok((parties, net, receivers))
@@ -54,7 +56,7 @@ pub async fn spawn_parties<T, N>(
     receivers: Vec<mpsc::Receiver<Vec<u8>>>,
     net: Arc<N>,
 ) where
-    T: RBC + Clone + Send + Sync + 'static,
+    T: RBC<Id = SessionId> + Clone + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
     for (rbc, mut rx) in parties.iter().cloned().zip(receivers.into_iter()) {
@@ -110,7 +112,8 @@ pub fn test_setup_bad(
     HashMap<ClientId, Receiver<Vec<u8>>>,
 ) {
     let config = BadFakeNetworkConfig::new(500);
-    let (network, net_rx, node_channels, receivers, client_recv) = BadFakeNetwork::new(n, Some(clientid), config);
+    let (network, net_rx, node_channels, receivers, client_recv) =
+        BadFakeNetwork::new(n, Some(clientid), config);
     let network = Arc::new(network);
     (network, net_rx, node_channels, receivers, client_recv)
 }
@@ -163,7 +166,7 @@ pub fn initialize_node(
     t: usize,
     k: usize,
     output_sender: Sender<SessionId>,
-) -> RanDouShaNode<Fr, Avid> {
+) -> RanDouShaNode<Fr, Avid<SessionId>> {
     RanDouShaNode::new(node_id, output_sender, n, t, k).unwrap()
 }
 
@@ -173,7 +176,7 @@ pub fn create_nodes(
     senders: Vec<Sender<SessionId>>,
     t: usize,
     k: usize,
-) -> Vec<Arc<Mutex<RanDouShaNode<Fr, Avid>>>> {
+) -> Vec<Arc<Mutex<RanDouShaNode<Fr, Avid<SessionId>>>>> {
     (0..n_parties)
         .zip(senders)
         .map(|(id, sender)| Arc::new(Mutex::new(initialize_node(id, n_parties, t, k, sender))))
@@ -182,7 +185,7 @@ pub fn create_nodes(
 
 /// Initializes all nodes with their respective shares.
 pub async fn initialize_all_nodes(
-    nodes: &[Arc<Mutex<RanDouShaNode<Fr, Avid>>>],
+    nodes: &[Arc<Mutex<RanDouShaNode<Fr, Avid<SessionId>>>>],
     n_shares_t: &[Vec<NonRobustShare<Fr>>],
     n_shares_2t: &[Vec<NonRobustShare<Fr>>],
     session_id: SessionId,
@@ -227,7 +230,7 @@ pub async fn initialize_all_nodes(
 /// In the case of Abort, the node is dropped from the network and the task is cancelled
 /// For the rest of the errors, we panic
 pub fn spawn_receiver_tasks(
-    nodes: Vec<Arc<Mutex<RanDouShaNode<Fr, Avid>>>>,
+    nodes: Vec<Arc<Mutex<RanDouShaNode<Fr, Avid<SessionId>>>>>,
     mut receivers: Vec<Receiver<Vec<u8>>>,
     network: Arc<FakeNetwork>,
     fin_send: mpsc::Sender<(usize, Vec<DoubleShamirShare<Fr>>)>,
@@ -412,7 +415,7 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     n_prandint: usize,
     l: usize,
     k: usize,
-    input_ids: Vec<ClientId>
+    input_ids: Vec<ClientId>,
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
     N: Network + Send + Sync + 'static,
@@ -444,7 +447,7 @@ pub async fn initialize_global_nodes_randousha<F, R, N>(
     network: Arc<N>,
 ) where
     F: PrimeField,
-    R: RBC + 'static,
+    R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
 {
     assert!(nodes.len() == n_shares_t.len());
@@ -508,10 +511,10 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
     network: Arc<N>,
 ) where
     F: PrimeField,
-    R: RBC + 'static,
+    R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
 {
-    let mut rng = test_rng();
+    let mut rng = StdRng::from_rng(OsRng).unwrap();
 
     for node in nodes {
         let mut node_rds = node.preprocess.share_gen;
@@ -545,7 +548,10 @@ pub async fn construct_e2e_input_mul(
     n_parties: usize,
     n_triples: usize,
     threshold: usize,
-) -> ((Vec<Fr>, Vec<Fr>, Vec<Fr>), Vec<Vec<ShamirBeaverTriple<Fr>>>) {
+) -> (
+    (Vec<Fr>, Vec<Fr>, Vec<Fr>),
+    Vec<Vec<ShamirBeaverTriple<Fr>>>,
+) {
     let mut rng = test_rng();
     let mut secrets_a = Vec::new();
     let mut secrets_b = Vec::new();
@@ -585,7 +591,7 @@ pub async fn construct_e2e_input_mul(
 }
 
 //--------------------------CLIENT--------------------------
-pub fn create_clients<F: FftField, R: RBC + 'static>(
+pub fn create_clients<F: FftField, R: RBC<Id = SessionId> + 'static>(
     client_ids: Vec<ClientId>,
     n_parties: usize,
     t: usize,
@@ -610,7 +616,7 @@ pub fn receive_client<F, R, N>(
     net: Arc<N>,
 ) where
     F: FftField + 'static,
-    R: RBC + 'static,
+    R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
 {
     assert_eq!(

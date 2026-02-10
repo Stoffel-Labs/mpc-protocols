@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde},
-        SecretSharingScheme,
+        ProtocolSessionId, SecretSharingScheme,
     },
     honeybadger::{
         fpmul::{PRandBitDMessage, PRandMessageType, RandBitMessage},
@@ -58,7 +58,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.store.lock().await;
         store.remove(&session_id).is_some()
-     }
+    }
 
     /// Initiates the batch reconstruction protocol for a given node.
     ///
@@ -104,7 +104,7 @@ impl<F: FftField> BatchReconNode<F> {
     /// This function processes `Eval` messages (first round) and `Reveal` messages (second round)
     /// to collectively reconstruct the original secrets.
     pub async fn batch_recon_handler<N: Network>(
-        &mut self,
+        &self,
         msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
@@ -307,7 +307,7 @@ impl<F: FftField> BatchReconNode<F> {
         }
     }
     pub async fn process<N: Network>(
-        &mut self,
+        &self,
         msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {

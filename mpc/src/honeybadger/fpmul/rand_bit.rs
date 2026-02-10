@@ -1,4 +1,4 @@
-use crate::common::RBC;
+use crate::common::{ProtocolSessionId, RBC};
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
 use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitMessage, RandBitStorage};
 use crate::honeybadger::mul::concat_sorted;
@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::ops::{Add, Mul};
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
@@ -58,7 +58,7 @@ where
 impl<F, R> RandBit<F, R>
 where
     F: FftField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     pub fn new(
         id: PartyId,
@@ -89,16 +89,23 @@ where
     pub async fn get_or_create_storage(
         &self,
         session_id: SessionId,
-    ) -> Arc<Mutex<RandBitStorage<F>>> {
+    ) -> Result<Arc<Mutex<RandBitStorage<F>>>, RandBitError> {
         let mut storage = self.storage.lock().await;
-        storage
+
+        // only exec ID changes between different runs
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            return Err(RandBitError::LimitError(
+                "Maximum number of concurrent sessions (256) exceeded".to_string(),
+            ));
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(RandBitStorage::empty())))
-            .clone()
+            .clone())
     }
 
     pub async fn init<N>(
-        &mut self,
+        &self,
         a: Vec<RobustShare<F>>,
         mult_triple: Vec<ShamirBeaverTriple<F>>,
         session_id: SessionId,
@@ -115,7 +122,7 @@ where
 
         // Mark the protocol as initialized.
         {
-            let storage_bind = self.get_or_create_storage(session_id).await;
+            let storage_bind = self.get_or_create_storage(session_id).await?;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.a_share = Some(a.clone());
@@ -134,9 +141,7 @@ where
         for (i, chunk) in a_square_share.chunks(self.threshold + 1).enumerate() {
             let session_id_batch = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                session_id.exec_id(),
-                0,
-                i as u8,
+                SessionId::pack_slot24(session_id.exec_id(), 0, i as u8),
                 session_id.instance_id(),
             );
             self.batch_recon
@@ -165,12 +170,10 @@ where
 
         let session_id = SessionId::new(
             calling_proto,
-            message.session_id.exec_id(),
-            0,
-            0,
+            SessionId::pack_slot24(message.session_id.exec_id(), 0, 0),
             message.session_id.instance_id(),
         );
-        let storage_bind = self.get_or_create_storage(session_id).await;
+        let storage_bind = self.get_or_create_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
         let a = storage
             .a_share
@@ -217,7 +220,7 @@ where
 
         let a_share_array = self
             .get_or_create_storage(session_id)
-            .await
+            .await?
             .lock()
             .await
             .a_share
@@ -241,7 +244,7 @@ where
 
         // Mark the protocol as finished.
         {
-            let storage_bind = self.get_or_create_storage(session_id).await;
+            let storage_bind = self.get_or_create_storage(session_id).await?;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Finished;
             storage.protocol_output = Some(d_share_array.clone());
@@ -253,8 +256,44 @@ where
         Ok(d_share_array)
     }
 
-    pub async fn process(&mut self, message: RandBitMessage) -> Result<(), RandBitError> {
+    pub async fn process(&self, message: RandBitMessage) -> Result<(), RandBitError> {
         self.square_reconstruction_handler(message).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::rbc::rbc::Avid;
+    use ark_bls12_381::Fr;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn test_randbit_storage_limit() {
+        let (tx, _rx) = mpsc::channel(1);
+        let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1, tx).unwrap();
+
+        // Fill up storage to the limit (256 sessions)
+        for i in 0u8..=255 {
+            let session_id = SessionId::new(
+                crate::honeybadger::ProtocolType::RandBit,
+                SessionId::pack_slot24(i, 0, 0),
+                111,
+            );
+            let _ = node.get_or_create_storage(session_id).await;
+        }
+
+        // The 257th session should fail
+        let session_id = SessionId::new(
+            crate::honeybadger::ProtocolType::RandBit,
+            SessionId::pack_slot24(0, 1, 0),
+            111,
+        );
+        let result = node.get_or_create_storage(session_id).await;
+        assert!(
+            matches!(result, Err(RandBitError::LimitError(_))),
+            "Should error on exceeding storage limit"
+        );
     }
 }

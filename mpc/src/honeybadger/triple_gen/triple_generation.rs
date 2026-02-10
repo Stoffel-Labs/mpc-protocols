@@ -47,6 +47,8 @@ where
     pub batch_recon_node: BatchReconNode<F>,
 }
 
+pub static MAX_TRIPLE_GEN_SESSIONS: usize = 1024;
+
 impl<F> TripleGenNode<F>
 where
     F: FftField,
@@ -72,20 +74,25 @@ where
     /// Accesses the storage of the node, and in case that the storage does not exists yet for the
     /// given `session_id`, it is created in place and returned.
     pub async fn get_or_create_store(
-        &mut self,
+        &self,
         session_id: SessionId,
-    ) -> Arc<Mutex<TripleGenStorage<F>>> {
+    ) -> Result<Arc<Mutex<TripleGenStorage<F>>>, TripleGenError> {
         let mut storage = self.storage.lock().await;
-        storage
+
+        if storage.len() == MAX_TRIPLE_GEN_SESSIONS {
+            return Err(TripleGenError::LimitError);
+        }
+
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(TripleGenStorage::empty())))
-            .clone()
+            .clone())
     }
 
     /// Initializes the protocol to generate random triples based on previously generated shares
     /// and random double shares.
     pub async fn init<N: Network>(
-        &mut self,
+        &self,
         random_shares_a: Vec<RobustShare<F>>,
         random_shares_b: Vec<RobustShare<F>>,
         randousha_pairs: Vec<DoubleShamirShare<F>>,
@@ -101,6 +108,8 @@ where
             num_random_b = random_shares_b.len(),
             "Initializing TripleGen protocol"
         );
+
+        assert_eq!(session_id.sub_id(), 0);
 
         if randousha_pairs.len() != 2 * self.threshold + 1
             || random_shares_a.len() != 2 * self.threshold + 1
@@ -121,7 +130,7 @@ where
 
         // We mark the protocol as initialized and store the input shares.
         {
-            let storage_bind = self.get_or_create_store(session_id).await;
+            let storage_bind = self.get_or_create_store(session_id).await?;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.randousha_pairs = randousha_pairs;
@@ -141,14 +150,20 @@ where
     }
 
     pub async fn batch_recon_finish_handler(
-        &mut self,
+        &self,
         message: TripleGenMessage,
     ) -> Result<(), TripleGenError> {
         info!("Handling Batch reconstruction results");
         let batch_recon_result: Vec<F> =
             CanonicalDeserialize::deserialize_compressed(message.payload.as_slice())?;
 
-        let storage_bind = self.get_or_create_store(message.session_id).await;
+        // SHOULD NEVER HAPPEN, since comes from batch reconstruction
+        if message.session_id.sub_id() != 0 {
+            return Err(TripleGenError::SessionIdError(message.session_id));
+        }
+
+        // SHOULD ALSO NEVER FAIL, since comes from batch reconstruction
+        let storage_bind = self.get_or_create_store(message.session_id).await?;
         let mut storage = storage_bind.lock().await;
 
         let mut result_triples = Vec::new();
@@ -176,7 +191,7 @@ where
         Ok(())
     }
 
-    pub async fn process(&mut self, message: TripleGenMessage) -> Result<(), TripleGenError> {
+    pub async fn process(&self, message: TripleGenMessage) -> Result<(), TripleGenError> {
         self.batch_recon_finish_handler(message).await?;
         Ok(())
     }

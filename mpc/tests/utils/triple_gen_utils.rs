@@ -5,10 +5,8 @@ use std::sync::Arc;
 use stoffelmpc_mpc::{
     common::{share::shamir::NonRobustShare, SecretSharingScheme},
     honeybadger::{
-        double_share::DoubleShamirShare,
-        robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::{triple_generation::TripleGenNode},
-        SessionId, WrappedMessage,
+        double_share::DoubleShamirShare, robust_interpolate::robust_interpolate::RobustShare,
+        triple_gen::triple_generation::TripleGenNode, SessionId, WrappedMessage,
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;

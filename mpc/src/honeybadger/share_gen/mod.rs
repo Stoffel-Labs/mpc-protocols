@@ -41,6 +41,10 @@ pub enum RanShaError {
     Abort,
     #[error("waiting for more confirmations")]
     WaitForOk,
+    #[error("session ID {0:?} malformed")]
+    SessionIdError(SessionId),
+    #[error("limit reached")]
+    LimitError,
 }
 
 #[derive(Clone, Debug)]

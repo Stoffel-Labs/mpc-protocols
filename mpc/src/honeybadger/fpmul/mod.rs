@@ -54,6 +54,8 @@ pub enum RandBitError {
     SenderError(#[from] SendError<SessionId>),
     #[error("unknown calling protocol in session ID {0:?}")]
     SessionIdError(SessionId),
+    #[error("storage limit exceeded: {0}")]
+    LimitError(String),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -188,6 +190,10 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     /// For every maximal unqualified set T that excludes this player,
     /// we store the full mask r_T = sum_i r_T^i
     pub batch_size: Option<usize>,
+    /// Security parameter l (bit length)
+    pub l: Option<usize>,
+    /// Security parameter k (statistical security)
+    pub k: Option<usize>,
     pub output_open: HashMap<u8, Vec<F>>,
     pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<i64>>>, // tset -> {sender -> val}
     pub r_t: HashMap<Vec<usize>, Vec<i64>>,
@@ -204,6 +210,8 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
     pub fn empty() -> Self {
         Self {
             batch_size: None,
+            l: None,
+            k: None,
             output_open: HashMap::new(),
             riss_shares: HashMap::new(),
             r_t: HashMap::new(),
@@ -269,7 +277,7 @@ pub enum TruncPrError {
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
     #[error("unknown calling protocol in session ID {0:?}")]
-    SessionIdError(SessionId)
+    SessionIdError(SessionId),
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

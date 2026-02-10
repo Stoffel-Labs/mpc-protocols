@@ -10,7 +10,6 @@ use ark_poly::{
 use ark_std::rand::Rng;
 use std::{collections::HashSet, marker::PhantomData};
 
-
 #[derive(Clone, Debug)]
 pub struct Shamir;
 pub type Shamirshare<T> = ShamirShare<T, 1, Shamir>;
@@ -400,8 +399,12 @@ mod test {
         let secret2 = Fr::from(20);
         let mut ids2 = vec![7, 8, 9, 4, 5, 6];
         let mut rng = test_rng();
-        let shares_1 = Shamirshare::compute_shares(secret1, 6, 5, Some(&[1, 2, 3, 4, 5, 6]), &mut rng).unwrap();
-        let mut shares_2 = Shamirshare::compute_shares(secret2, 6, 5, Some(&[1, 2, 3, 4, 5, 6]), &mut rng).unwrap();
+        let shares_1 =
+            Shamirshare::compute_shares(secret1, 6, 5, Some(&[1, 2, 3, 4, 5, 6]), &mut rng)
+                .unwrap();
+        let mut shares_2 =
+            Shamirshare::compute_shares(secret2, 6, 5, Some(&[1, 2, 3, 4, 5, 6]), &mut rng)
+                .unwrap();
         shares_2
             .iter_mut()
             .for_each(|share| share.id = ids2.pop().unwrap());

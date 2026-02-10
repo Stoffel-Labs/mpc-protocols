@@ -51,10 +51,14 @@ pub enum TripleGenError {
     SessionIdMismatch,
     #[error("error sending the thread asynchronously")]
     SendError(#[from] SendError<SessionId>),
+    #[error("session ID {0:?} malformed")]
+    SessionIdError(SessionId),
+    #[error("limit reached")]
+    LimitError,
 }
 
 /// Represents a Beaver triple of non-robust Shamir shares.
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct ShamirBeaverTriple<F: FftField> {
     /// First random value of the triple.
     pub a: RobustShare<F>,
@@ -70,17 +74,13 @@ where
 {
     /// Creates a new Shamir Beaver triple with `a` and `b` being the random values of the triple
     /// and `mult` is the multiplication of `a` and `b`.
-    pub fn new(
-        a: RobustShare<F>,
-        b: RobustShare<F>,
-        mult: RobustShare<F>,
-    ) -> Self {
+    pub fn new(a: RobustShare<F>, b: RobustShare<F>, mult: RobustShare<F>) -> Self {
         Self { a, b, mult }
     }
 }
 
 /// Storage necessary for the triple generation protocol.
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct TripleGenStorage<F>
 where
     F: FftField,
@@ -115,7 +115,7 @@ where
 /// execution. Any message that is sent in the protocol is converted into bytes that are placed in
 /// the `payload`. Once a party receives a message, it takes the payload and deserialize it to the
 /// specific message sent during the protocol execution.
-#[derive(Clone,Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TripleGenMessage {
     /// The ID of the party.
     pub sender_id: PartyId,
