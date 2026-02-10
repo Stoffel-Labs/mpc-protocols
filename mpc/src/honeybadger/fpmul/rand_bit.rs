@@ -5,7 +5,7 @@ use crate::honeybadger::mul::concat_sorted;
 use crate::honeybadger::mul::multiplication::Multiply;
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::triple_gen::ShamirBeaverTriple;
-use crate::honeybadger::SessionId;
+use crate::honeybadger::{ProtocolType, SessionId};
 use ark_ff::FftField;
 use ark_serialize::CanonicalDeserialize;
 use itertools::izip;
@@ -120,9 +120,18 @@ where
 
         assert!(session_id.calling_protocol().is_some());
 
+        // Normalize session_id to use RandBit as calling_protocol for storage.
+        // This ensures init() and handler() use the same storage key, regardless
+        // of whether RandBit was called by TripleGen or directly.
+        let storage_session_id = SessionId::new(
+            ProtocolType::RandBit,
+            SessionId::pack_slot24(session_id.exec_id(), 0, 0),
+            session_id.instance_id(),
+        );
+
         // Mark the protocol as initialized.
         let notify = {
-            let storage_bind = self.get_or_create_storage(session_id).await?;
+            let storage_bind = self.get_or_create_storage(storage_session_id).await?;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.a_share = Some(a.clone());
@@ -146,7 +155,7 @@ where
 
         for (i, chunk) in a_square_share.chunks(self.threshold + 1).enumerate() {
             let session_id_batch = SessionId::new(
-                session_id.calling_protocol().unwrap(),
+                ProtocolType::RandBit, // FIX: RandBit is calling batch_recon, not the parent protocol
                 SessionId::pack_slot24(session_id.exec_id(), 0, i as u8),
                 session_id.instance_id(),
             );
@@ -156,7 +165,7 @@ where
         }
 
         // Check if pending open data is sufficient to finalize immediately
-        let storage_bind = self.get_or_create_storage(session_id).await?;
+        let storage_bind = self.get_or_create_storage(storage_session_id).await?;
         let storage = storage_bind.lock().await;
         let a_share = storage.a_share.clone().unwrap();
         let batch_size = a_share.len() / (self.threshold + 1);
@@ -202,13 +211,13 @@ where
 
             // Mark the protocol as finished.
             {
-                let storage_bind = self.get_or_create_storage(session_id).await?;
+                let storage_bind = self.get_or_create_storage(storage_session_id).await?;
                 let mut storage = storage_bind.lock().await;
                 storage.protocol_state = ProtocolState::Finished;
                 storage.protocol_output = Some(d_share_array.clone());
             }
 
-            self.output_channel.send(session_id).await?;
+            self.output_channel.send(storage_session_id).await?;
             tracing::info!("RandBit completed at node {} (from init pending data)", self.id);
         }
 
