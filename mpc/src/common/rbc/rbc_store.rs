@@ -86,7 +86,6 @@ impl fmt::Display for MsgType {
 
 /// Stores the internal state for each RBC session at a party.
 /// Bracha's RBC involves thresholds for ECHO and READY messages to achieve consensus.
-#[derive(Default)]
 pub struct BrachaStore {
     pub echo_senders: HashMap<usize, bool>, // Which parties sent ECHO (sender_id -> true)
     pub ready_senders: HashMap<usize, bool>, // Which parties sent READY (sender_id -> true)
@@ -96,6 +95,27 @@ pub struct BrachaStore {
     pub echo: bool,                         // True if this party already sent an ECHO
     pub ready: bool,                        // True if this party already sent a READY
     pub output: Vec<u8>,                    // Agreed value after consensus
+    /// Whether INIT has been processed for this session
+    pub initialized: bool,
+    /// Notification for handlers waiting for INIT to be processed
+    pub init_notifier: Arc<Notify>,
+}
+
+impl Default for BrachaStore {
+    fn default() -> Self {
+        Self {
+            echo_senders: HashMap::new(),
+            ready_senders: HashMap::new(),
+            echo_count: HashMap::new(),
+            ready_count: HashMap::new(),
+            ended: false,
+            echo: false,
+            ready: false,
+            output: Vec::new(),
+            initialized: false,
+            init_notifier: Arc::new(Notify::new()),
+        }
+    }
 }
 
 impl BrachaStore {
@@ -110,6 +130,8 @@ impl BrachaStore {
             echo: false,
             ready: false,
             output: Vec::new(),
+            initialized: false,
+            init_notifier: Arc::new(Notify::new()),
         }
     }
     /// Returns true if the given sender_id has sent an echo (i.e., is set to true in echo_senders).

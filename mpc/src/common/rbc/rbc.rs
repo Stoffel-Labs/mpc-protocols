@@ -163,6 +163,11 @@ where
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
+        // Mark session as initialized and notify any waiting handlers
+        if !store.initialized {
+            store.initialized = true;
+        }
+
         // Only broadcast the ECHO if it hasn't already been sent.
         if !store.echo {
             let new_msg = Msg::new(
@@ -181,8 +186,16 @@ where
                 msg_type = "ECHO",
                 "Broadcasting ECHO in response to INIT"
             );
+            // Notify waiters before dropping lock and broadcasting
+            let notify = store.init_notifier.clone();
             drop(store);
+            notify.notify_waiters();
             self.broadcast(new_msg, net).await?;
+        } else {
+            // Still notify waiters if we didn't broadcast
+            let notify = store.init_notifier.clone();
+            drop(store);
+            notify.notify_waiters();
         }
         Ok(())
     }
@@ -203,6 +216,19 @@ where
         let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
+
+        // Wait for INIT to be processed first
+        while !store.initialized {
+            let notify = store.init_notifier.clone();
+            drop(store);
+            debug!(
+                id = self.id,
+                session_id = msg.session_id.as_u64(),
+                "ECHO handler waiting for INIT"
+            );
+            notify.notified().await;
+            store = session_store.lock().await;
+        }
 
         // Ignore the message if the session has already ended.
         if store.ended {
@@ -283,6 +309,19 @@ where
         let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
+
+        // Wait for INIT to be processed first
+        while !store.initialized {
+            let notify = store.init_notifier.clone();
+            drop(store);
+            debug!(
+                id = self.id,
+                session_id = msg.session_id.as_u64(),
+                "READY handler waiting for INIT"
+            );
+            notify.notified().await;
+            store = session_store.lock().await;
+        }
 
         // Ignore the message if the session has already ended.
         if store.ended {
