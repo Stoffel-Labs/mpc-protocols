@@ -20,7 +20,7 @@ use std::{
     sync::Arc,
 };
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn};
 
@@ -245,6 +245,12 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 .map_err(|_| MulError::SendError(session_id))?;
             storage.protocol_state = MultProtocolState::Finished;
 
+            // Mark as initialized and notify waiting handlers before returning
+            storage.initialized = true;
+            let notify = storage.init_notifier.clone();
+            drop(storage);
+            notify.notify_waiters();
+
             info!("Multiplication completed at node {}", self.id);
 
             return Ok(());
@@ -268,8 +274,13 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
         let need_rbc = storage.openings.is_none();
 
+        // Mark as initialized and notify waiting handlers
+        storage.initialized = true;
+        let notify = storage.init_notifier.clone();
+
         // 7.
         drop(storage);
+        notify.notify_waiters();
 
         // 8.
         // initiate batch reconstruction for those chunks that need it
@@ -365,6 +376,18 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             return Ok(());
         }
 
+        // Wait for initialization if not complete
+        while !storage.initialized {
+            let notify = storage.init_notifier.clone();
+            drop(storage);
+            notify.notified().await;
+            storage = storage_bind.lock().await;
+            // Re-check if finished while waiting
+            if storage.protocol_state == MultProtocolState::Finished {
+                return Ok(());
+            }
+        }
+
         // 2.
         if msg.session_id.sub_id() == 1 {
             let open: Vec<F> =
@@ -412,11 +435,8 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 .insert(msg.sender, (open_message.a_sub_x, open_message.b_sub_y));
         }
 
-        // 3.
-        let no_of_mul = storage.no_of_mul.ok_or(MulError::InvalidInput(format!(
-            "No. of multiplications not set for node (init not called yet) {}",
-            self.id
-        )))?;
+        // 3. Safe: init() completed, no_of_mul is guaranteed to be Some
+        let no_of_mul = storage.no_of_mul.unwrap();
         let no_of_batch = no_of_mul / (self.t + 1);
         let share_len = no_of_mul % (self.t + 1);
 

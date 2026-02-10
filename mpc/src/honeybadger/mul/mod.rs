@@ -10,10 +10,13 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
-use tokio::sync::oneshot::{channel, Receiver, Sender};
+use tokio::sync::{
+    oneshot::{channel, Receiver, Sender},
+    Notify,
+};
 
 pub mod multiplication;
 
@@ -43,6 +46,10 @@ where
     pub openings: Option<(Vec<F>, Vec<F>)>,
     pub output_sender: Option<Sender<Vec<RobustShare<F>>>>,
     pub output_receiver: Option<Receiver<Vec<RobustShare<F>>>>,
+    /// Whether initialization has completed (inputs and triples set)
+    pub initialized: bool,
+    /// Notification for handlers waiting for initialization
+    pub init_notifier: Arc<Notify>,
 }
 
 impl<F> MultStorage<F>
@@ -63,6 +70,8 @@ where
             openings: None,
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
+            initialized: false,
+            init_notifier: Arc::new(Notify::new()),
         }
     }
 }
