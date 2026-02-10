@@ -14,7 +14,7 @@ use std::ops::{Add, Mul};
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 use tokio::time::Duration;
 
 /// Represents the random bit generation protocol.
@@ -182,18 +182,7 @@ where
         let storage_bind = self.get_or_create_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
 
-        // Wait for initialization if not complete
-        while !storage.initialized {
-            let notify = storage.init_notifier.clone();
-            drop(storage);
-            notify.notified().await;
-            storage = storage_bind.lock().await;
-        }
-
-        // Safe: init() completed, a_share is guaranteed to be Some
-        let a = storage.a_share.clone().unwrap();
-        let batch_size = a.len() / (self.threshold + 1);
-
+        // Deserialize and store the open data first (before initialization check)
         let open: Vec<F> =
             CanonicalDeserialize::deserialize_compressed(message.payload.as_slice())?;
         let round_id = message.session_id.round_id();
@@ -204,6 +193,17 @@ where
             )));
         }
         storage.output_open.insert(round_id, open);
+
+        // If not initialized, data is stored but can't finalize yet.
+        // init() will check for stored data and finalize if ready.
+        if !storage.initialized {
+            return Ok(vec![]);
+        }
+
+        // Safe: init() completed, a_share is guaranteed to be Some
+        let a = storage.a_share.clone().unwrap();
+        let batch_size = a.len() / (self.threshold + 1);
+
         if storage.output_open.len() != batch_size {
             return Err(RandBitError::WaitForOk);
         }

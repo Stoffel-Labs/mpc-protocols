@@ -20,7 +20,7 @@ use std::{
     sync::Arc,
 };
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn};
 
@@ -376,19 +376,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             return Ok(());
         }
 
-        // Wait for initialization if not complete
-        while !storage.initialized {
-            let notify = storage.init_notifier.clone();
-            drop(storage);
-            notify.notified().await;
-            storage = storage_bind.lock().await;
-            // Re-check if finished while waiting
-            if storage.protocol_state == MultProtocolState::Finished {
-                return Ok(());
-            }
-        }
-
-        // 2.
+        // 2. Store incoming data first (before waiting for init)
         if msg.session_id.sub_id() == 1 {
             let open: Vec<F> =
                 CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
@@ -435,7 +423,13 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 .insert(msg.sender, (open_message.a_sub_x, open_message.b_sub_y));
         }
 
-        // 3. Safe: init() completed, no_of_mul is guaranteed to be Some
+        // 3. If not initialized, data is stored but can't finalize yet.
+        // init() will check for stored data and finalize if ready.
+        if !storage.initialized {
+            return Ok(());
+        }
+
+        // Safe: init() completed, no_of_mul is guaranteed to be Some
         let no_of_mul = storage.no_of_mul.unwrap();
         let no_of_batch = no_of_mul / (self.t + 1);
         let share_len = no_of_mul % (self.t + 1);
@@ -931,7 +925,11 @@ pub mod tests {
             .map(|triple| triple.mult.clone())
             .collect();
         storage.no_of_mul = Some(correct_a_sub_x.len());
+        // Mark as initialized so handler can complete processing
+        storage.initialized = true;
+        let notify = storage.init_notifier.clone();
         drop(storage);
+        notify.notify_waiters();
 
         // 5. Generate messages
         let mut mul_msgs = Vec::new();

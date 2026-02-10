@@ -223,7 +223,11 @@ where
         let bind_store = self.get_or_create_store(session_id).await?;
         let mut store = bind_store.lock().await;
         store.computed_r_shares = r_deg_t.clone();
+        // Mark as initialized and notify waiting handlers
+        store.initialized = true;
+        let notify = store.init_notifier.clone();
         drop(store);
+        notify.notify_waiters();
 
         for i in 0..2 * self.threshold {
             let share_deg_t = r_deg_t[i].clone();
@@ -325,20 +329,25 @@ where
 
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
-        store.state = RanShaState::Output;
 
+        // Store received ok message first (before initialization check)
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
         }
+
+        // If not initialized, data is stored but can't finalize yet.
+        // init() will check for stored data and finalize if ready.
+        if !store.initialized {
+            return Ok(());
+        }
+
+        store.state = RanShaState::Output;
 
         if store.received_ok_msg.len() < 2 * self.threshold {
             return Err(RanShaError::WaitForOk);
         }
 
-        if store.computed_r_shares.len() < self.n_parties {
-            return Err(RanShaError::WaitForOk);
-        }
-
+        // Safe: init() completed, computed_r_shares is guaranteed to be set
         let output = store.computed_r_shares[2 * self.threshold..].to_vec();
         store.state = RanShaState::Finished;
         store.protocol_output = output;

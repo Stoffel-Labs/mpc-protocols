@@ -411,18 +411,17 @@ where
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
-        // Wait for initialization if not complete
-        while !store.initialized {
-            let notify = store.init_notifier.clone();
-            drop(store);
-            notify.notified().await;
-            store = binding.lock().await;
-        }
-
-        // push to received_ok_msg if sender doesn't exist
+        // Store received ok message first (before initialization check)
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
         }
+
+        // If not initialized, data is stored but can't finalize yet.
+        // init() will check for stored data and finalize if ready.
+        if !store.initialized {
+            return Ok(());
+        }
+
         // wait for (n-(t+1)) Ok messages
         if store.received_ok_msg.len() < self.n_parties - (self.threshold + 1) {
             return Err(RanDouShaError::WaitForOk);

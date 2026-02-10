@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ark_ff::FftField;
 use ark_serialize::SerializationError;
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
+use tokio::sync::Notify;
 
 use crate::{
     common::{rbc::RbcError, share::ShareError},
@@ -56,6 +58,10 @@ pub struct RanShaStore<F: FftField> {
     pub received_ok_msg: Vec<usize>,
     pub state: RanShaState,
     pub protocol_output: Vec<RobustShare<F>>,
+    /// Whether initialization has completed (computed_r_shares set)
+    pub initialized: bool,
+    /// Notification for handlers waiting for initialization
+    pub init_notifier: Arc<Notify>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +83,8 @@ impl<F: FftField> RanShaStore<F> {
             received_ok_msg: Vec::new(),
             state: RanShaState::Initialized,
             protocol_output: Vec::new(),
+            initialized: false,
+            init_notifier: Arc::new(Notify::new()),
         }
     }
 }
