@@ -23,7 +23,7 @@ use std::{
 use thiserror::Error;
 use tokio::sync::{
     mpsc::{error::SendError, Sender},
-    Mutex,
+    Mutex, Notify,
 };
 
 use stoffelnet::network_utils::{Network, NetworkError, PartyId};
@@ -79,6 +79,10 @@ pub struct RanDouShaStore<F: FftField> {
     /// Current state of the protocol.
     pub state: RanDouShaState,
     pub protocol_output: Vec<DoubleShamirShare<F>>,
+    /// Whether initialization has completed (computed_r_shares set)
+    pub initialized: bool,
+    /// Notification for handlers waiting for initialization
+    pub init_notifier: Arc<Notify>,
 }
 
 /// State of the Random Double Sharing protocol.
@@ -104,6 +108,8 @@ where
             received_ok_msg: Vec::new(),
             state: RanDouShaState::Initialized,
             protocol_output: Vec::new(),
+            initialized: false,
+            init_notifier: Arc::new(Notify::new()),
         }
     }
 }
@@ -239,7 +245,11 @@ where
         let mut store = bind_store.lock().await;
         store.computed_r_shares_degree_t = r_deg_t.clone();
         store.computed_r_shares_degree_2t = r_deg_2t.clone();
+        // Mark as initialized and notify waiting handlers
+        store.initialized = true;
+        let notify = store.init_notifier.clone();
         drop(store);
+        notify.notify_waiters();
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
         for i in 0..self.n_parties {
@@ -401,19 +411,20 @@ where
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
+        // Wait for initialization if not complete
+        while !store.initialized {
+            let notify = store.init_notifier.clone();
+            drop(store);
+            notify.notified().await;
+            store = binding.lock().await;
+        }
+
         // push to received_ok_msg if sender doesn't exist
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
         }
         // wait for (n-(t+1)) Ok messages
         if store.received_ok_msg.len() < self.n_parties - (self.threshold + 1) {
-            return Err(RanDouShaError::WaitForOk);
-        }
-
-        if store.computed_r_shares_degree_t.len() < self.threshold + 1
-            && store.computed_r_shares_degree_2t.len() < self.threshold + 1
-        {
-            // waiting for self.init
             return Err(RanDouShaError::WaitForOk);
         }
 
