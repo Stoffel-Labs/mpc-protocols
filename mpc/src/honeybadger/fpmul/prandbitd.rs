@@ -108,7 +108,14 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         }
         store.share_b_q = Some(smallfield_bits);
         store.batch_size = Some(batch_size);
+
+        // Clone notify handle before dropping lock, then wake waiting handlers
+        let notify = store.initialized.clone();
         drop(store);
+
+        // Notify all handlers that were waiting for initialization
+        notify.notify_waiters();
+
         // Step 2: P_i samples randomness and sends
         // Random integer range: [0, 2^(l+k)]
         let bound: i64 = 1 << (l + k);
@@ -184,14 +191,20 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             );
             store.r_t.insert(msg.tset.clone(), r_t_sum);
         }
-        // Check if all tsets are done
-        if store.batch_size.is_none() {
-            debug!("Waiting for initiating");
-            return Ok(());
+        // Wait for initialization if not yet done
+        while store.batch_size.is_none() {
+            let notify = store.initialized.clone();
+            drop(store); // Release lock before waiting
+
+            debug!("Waiting for initialization, will be notified");
+            notify.notified().await; // Wait for generate_riss to notify
+
+            // Re-acquire lock after being notified
+            store = binding.lock().await;
         }
-        let batch_size = store
-            .batch_size
-            .ok_or_else(|| PRandError::NotSet("Batch size not set at RISS handler".to_string()))?;
+
+        // Now safe to proceed - batch_size is guaranteed to be Some
+        let batch_size = store.batch_size.unwrap();
         let total_tsets = store.no_of_tsets.ok_or_else(|| {
             PRandError::NotSet(format!("No of tsets not set {:?}", calling_proto))
         })?;

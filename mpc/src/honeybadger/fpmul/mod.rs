@@ -13,8 +13,9 @@ use ark_poly::{univariate::DensePolynomial, EvaluationDomain, GeneralEvaluationD
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{NetworkError, PartyId};
+use tokio::sync::Notify;
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 
@@ -185,7 +186,7 @@ impl PRandBitDMessage {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     /// For every maximal unqualified set T that excludes this player,
     /// we store the full mask r_T = sum_i r_T^i
@@ -204,6 +205,8 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     pub share_r_2: Option<Vec<F2_8>>,
     pub share_b_2: Vec<F2_8>,           //PrandBitD output
     pub share_b_p: Vec<RobustShare<G>>, //PrandBitD/PrandBitL output
+    /// Notification for handlers waiting for initialization
+    pub initialized: Arc<Notify>,
 }
 
 impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
@@ -222,6 +225,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
             share_r_2: None,
             share_b_2: Vec::new(),
             share_b_p: Vec::new(),
+            initialized: Arc::new(Notify::new()),
         }
     }
 }
