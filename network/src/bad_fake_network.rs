@@ -429,6 +429,191 @@ impl BadFakeNetworkConfig {
     }
 }
 
+/// Configuration for asymmetric per-node delays.
+///
+/// This allows testing scenarios where some nodes are systematically slower than others,
+/// which is critical for catching race conditions that only manifest when nodes complete
+/// at different times (e.g., premature cleanup of shared state).
+///
+/// # Example
+///
+/// ```ignore
+/// use rand::distributions::Uniform;
+///
+/// // Create asymmetric delays: nodes 0, 2, 3 are slow, nodes 1, 4 are fast
+/// let config = AsymmetricDelayConfig::new(5)
+///     .with_node_delay(0, Uniform::new(100, 500))  // 100-500ms
+///     .with_node_delay(1, Uniform::new(1, 10))     // 1-10ms (fast)
+///     .with_node_delay(2, Uniform::new(100, 500))  // slow
+///     .with_node_delay(3, Uniform::new(100, 500))  // slow
+///     .with_node_delay(4, Uniform::new(1, 10));    // fast
+/// ```
+pub struct AsymmetricDelayConfig {
+    /// Per-node delay distributions. If a node doesn't have a specific distribution,
+    /// the default distribution is used.
+    node_delays: HashMap<PartyId, Box<dyn DelayDistribution>>,
+    /// Default delay distribution for nodes without specific configuration.
+    default_delay: Box<dyn DelayDistribution>,
+    /// Number of nodes in the network.
+    n_nodes: usize,
+}
+
+/// Trait for delay distributions that can be boxed and sent between threads.
+pub trait DelayDistribution: Send + Sync {
+    /// Sample a delay in milliseconds.
+    fn sample_delay(&self, rng: &mut StdRng) -> u64;
+}
+
+/// Wrapper to make any Distribution<u64> implement DelayDistribution.
+pub struct DistributionWrapper<D: Distribution<u64> + Send + Sync> {
+    inner: D,
+}
+
+impl<D: Distribution<u64> + Send + Sync> DistributionWrapper<D> {
+    pub fn new(dist: D) -> Self {
+        Self { inner: dist }
+    }
+}
+
+impl<D: Distribution<u64> + Send + Sync> DelayDistribution for DistributionWrapper<D> {
+    fn sample_delay(&self, rng: &mut StdRng) -> u64 {
+        self.inner.sample(rng)
+    }
+}
+
+impl AsymmetricDelayConfig {
+    /// Create a new asymmetric delay config with the given number of nodes.
+    /// By default, all nodes use a 1-10ms delay distribution.
+    pub fn new(n_nodes: usize) -> Self {
+        use ark_std::rand::distributions::Uniform;
+        Self {
+            node_delays: HashMap::new(),
+            default_delay: Box::new(DistributionWrapper::new(Uniform::new(1, 10))),
+            n_nodes,
+        }
+    }
+
+    /// Set the default delay distribution for nodes without specific configuration.
+    pub fn with_default_delay<D: Distribution<u64> + Send + Sync + 'static>(
+        mut self,
+        dist: D,
+    ) -> Self {
+        self.default_delay = Box::new(DistributionWrapper::new(dist));
+        self
+    }
+
+    /// Set a specific delay distribution for a node.
+    pub fn with_node_delay<D: Distribution<u64> + Send + Sync + 'static>(
+        mut self,
+        node_id: PartyId,
+        dist: D,
+    ) -> Self {
+        self.node_delays
+            .insert(node_id, Box::new(DistributionWrapper::new(dist)));
+        self
+    }
+
+    /// Sample a delay for a specific node.
+    pub fn sample_delay(&self, node_id: PartyId, rng: &mut StdRng) -> u64 {
+        if let Some(dist) = self.node_delays.get(&node_id) {
+            dist.sample_delay(rng)
+        } else {
+            self.default_delay.sample_delay(rng)
+        }
+    }
+
+    /// Get the number of nodes.
+    pub fn n_nodes(&self) -> usize {
+        self.n_nodes
+    }
+}
+
+impl BadFakeNetwork {
+    /// Starts the network with asymmetric per-node delays.
+    ///
+    /// This is similar to `start()` but allows different delay distributions for different
+    /// nodes. This is crucial for testing race conditions that only manifest when nodes
+    /// complete at different times.
+    ///
+    /// # Arguments
+    ///
+    /// * `net_rx` - Receiver for messages from nodes
+    /// * `node_channels` - Channels to deliver messages to nodes
+    /// * `rng` - Random number generator
+    /// * `delay_config` - Per-node delay configuration
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Test with 2 fast nodes and 3 slow nodes
+    /// let config = AsymmetricDelayConfig::new(5)
+    ///     .with_node_delay(0, Uniform::new(100, 500))  // slow
+    ///     .with_node_delay(1, Uniform::new(1, 10))     // fast
+    ///     .with_node_delay(2, Uniform::new(100, 500))  // slow
+    ///     .with_node_delay(3, Uniform::new(100, 500))  // slow
+    ///     .with_node_delay(4, Uniform::new(1, 10));    // fast
+    ///
+    /// BadFakeNetwork::start_asymmetric(net_rx, node_channels, rng, config);
+    /// ```
+    pub fn start_asymmetric(
+        mut net_rx: Receiver<(PartyId, Vec<u8>)>,
+        mut node_channels: Vec<Sender<Vec<u8>>>,
+        mut rng: StdRng,
+        delay_config: AsymmetricDelayConfig,
+    ) -> JoinHandle<()> {
+        spawn(async move {
+            let mut net_msgs = BinaryHeap::new();
+            let mut duration = Duration::MAX;
+            let mut timer_start = Instant::now();
+
+            loop {
+                let timer = sleep(duration);
+
+                #[cfg(debug_assertions)]
+                debug!("TIME: new timer started with duration={:?}", duration);
+
+                tokio::pin!(timer);
+
+                tokio::select! {
+                    id_msg = net_rx.recv() => {
+                        if id_msg.is_none() {
+                            panic!("channel closed");
+                        }
+
+                        let now = Instant::now();
+
+                        let (id, msg) = id_msg.unwrap();
+                        // Sample delay from the node-specific distribution
+                        let delay_ms = delay_config.sample_delay(id, &mut rng);
+                        let delay = Duration::from_millis(delay_ms);
+
+                        #[cfg(debug_assertions)]
+                        debug!("TIME: recvd msg for node {} with delay {:?}", id, delay);
+
+                        duration = send_next_msgs(
+                            &mut net_msgs,
+                            &mut node_channels,
+                            Some(KeyedMessage(delay, (id, msg))),
+                            now - timer_start
+                        ).await;
+
+                        timer_start = now;
+                    }
+                    _ = &mut timer => {
+                        let now = Instant::now();
+
+                        #[cfg(debug_assertions)]
+                        debug!("TIME: expired, should after {:?}, did after {:?}", duration, now - timer_start);
+
+                        duration = send_next_msgs(&mut net_msgs, &mut node_channels, None, now - timer_start).await;
+                        timer_start = now;
+                    }
+                }
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ark_std::rand::{distributions::Uniform, SeedableRng};
@@ -437,6 +622,109 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::*;
+
+    #[tokio::test]
+    async fn test_asymmetric_delay_config() {
+        setup_tracing();
+
+        // Create config with asymmetric delays: node 0 slow, node 1 fast
+        let config = AsymmetricDelayConfig::new(2)
+            .with_node_delay(0, Uniform::new(100, 200)) // 100-200ms
+            .with_node_delay(1, Uniform::new(1, 5)); // 1-5ms
+
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Sample delays and verify they're in expected ranges
+        let mut node0_delays = Vec::new();
+        let mut node1_delays = Vec::new();
+
+        for _ in 0..100 {
+            node0_delays.push(config.sample_delay(0, &mut rng));
+            node1_delays.push(config.sample_delay(1, &mut rng));
+        }
+
+        // Node 0 delays should be in 100-200 range
+        for delay in &node0_delays {
+            assert!(*delay >= 100 && *delay < 200, "Node 0 delay {} out of range", delay);
+        }
+
+        // Node 1 delays should be in 1-5 range
+        for delay in &node1_delays {
+            assert!(*delay >= 1 && *delay < 5, "Node 1 delay {} out of range", delay);
+        }
+
+        // Average of node 0 should be much higher than node 1
+        let avg0: f64 = node0_delays.iter().map(|d| *d as f64).sum::<f64>() / 100.0;
+        let avg1: f64 = node1_delays.iter().map(|d| *d as f64).sum::<f64>() / 100.0;
+
+        assert!(
+            avg0 > avg1 * 10.0,
+            "Node 0 avg ({}) should be >> Node 1 avg ({})",
+            avg0,
+            avg1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_asymmetric_network_fast_vs_slow_nodes() {
+        setup_tracing();
+
+        let n_nodes = 2;
+        let config = BadFakeNetworkConfig::new(500);
+        let (network, net_rx, node_channels, mut receivers, _) =
+            BadFakeNetwork::new(n_nodes, None, config);
+
+        // Node 0 is SLOW (50-100ms), Node 1 is FAST (1-5ms)
+        let delay_config = AsymmetricDelayConfig::new(n_nodes)
+            .with_node_delay(0, Uniform::new(50, 100))
+            .with_node_delay(1, Uniform::new(1, 5));
+
+        BadFakeNetwork::start_asymmetric(
+            net_rx,
+            node_channels,
+            StdRng::seed_from_u64(42),
+            delay_config,
+        );
+
+        // Send messages to both nodes at the same time
+        let start = Instant::now();
+
+        // Send 5 messages to each node
+        for _ in 0..5 {
+            let _ = network.send(0, b"to_slow").await;
+            let _ = network.send(1, b"to_fast").await;
+        }
+
+        // Fast node should receive all messages first
+        let fast_node = &mut receivers[1];
+        for _ in 0..5 {
+            let _ = fast_node.recv().await;
+        }
+        let fast_done = start.elapsed();
+
+        // Slow node should take longer
+        let slow_node = &mut receivers[0];
+        for _ in 0..5 {
+            let _ = slow_node.recv().await;
+        }
+        let slow_done = start.elapsed();
+
+        // Fast should complete well before slow
+        assert!(
+            slow_done > fast_done,
+            "Slow node should complete after fast node: fast={:?}, slow={:?}",
+            fast_done,
+            slow_done
+        );
+
+        // The difference should be significant (at least 100ms)
+        let diff = slow_done - fast_done;
+        assert!(
+            diff.as_millis() > 50,
+            "Time difference should be significant: {:?}",
+            diff
+        );
+    }
 
     #[tokio::test]
     async fn test_fake_network_new() {

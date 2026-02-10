@@ -1283,8 +1283,12 @@ where
             }
         }
 
-        // Clear RBC store
-        self.preprocess.share_gen.rbc.clear_store().await;
+        // NOTE: Removed clear_store() call - it was causing premature clearing of RBC
+        // message stores before slower nodes could complete processing. The RBC stores
+        // will accumulate data but this prevents the race condition where fast nodes
+        // clear stores while slow nodes are still waiting for acknowledgments.
+        // TODO: Implement proper barrier synchronization so all nodes complete before cleanup.
+        // See: STO-177, mpc-protocols race condition analysis
         Ok(())
     }
 
@@ -1351,7 +1355,8 @@ where
                 round_id += 1;
             }
         }
-        self.preprocess.ran_dou_sha.rbc.clear_store().await;
+        // NOTE: Removed clear_store() - see comment in ensure_random_shares()
+        // Premature clearing causes race conditions with slower nodes.
         Ok(pair)
     }
 
@@ -1463,8 +1468,8 @@ where
             Err(_) => return Err(HoneyBadgerError::Timeout),
         }
 
-        // Clear stores
-        self.preprocess.rand_bit.clear_store().await;
+        // NOTE: Removed clear_store() - see comment in ensure_random_shares()
+        // Premature clearing causes race conditions with slower nodes.
 
         //Prandbit share generation
         info!("PRandbit share generation");
@@ -1504,7 +1509,7 @@ where
             Err(_) => return Err(HoneyBadgerError::Timeout),
         }
 
-        self.preprocess.prand_bit.clear_store().await;
+        // NOTE: Removed clear_store() - see comment in ensure_random_shares()
         Ok(())
     }
 
@@ -1563,8 +1568,7 @@ where
             Ok(Some(_)) | Ok(None) => {}
             Err(_) => return Err(HoneyBadgerError::Timeout),
         }
-        // Clear store
-        self.preprocess.prand_bit.clear_store().await;
+        // NOTE: Removed clear_store() - see comment in ensure_random_shares()
         Ok(())
     }
 }

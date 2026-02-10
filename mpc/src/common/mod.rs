@@ -259,6 +259,11 @@ pub trait RBC: Send + Sync {
     /// Returns the unique identifier of the current party.
     fn id(&self) -> usize;
     async fn clear_store(&self);
+
+    /// Clears a specific session from the store, avoiding premature clearing
+    /// of other sessions that may still be in progress on slower nodes.
+    async fn clear_session(&self, session_id: &Self::Id) -> bool;
+
     /// Required for initiating the broadcast
     async fn init<N: Network + Send + Sync>(
         &self,

@@ -72,6 +72,12 @@ where
         let mut store = self.store.lock().await;
         store.clear();
     }
+
+    async fn clear_session(&self, session_id: &Id) -> bool {
+        let mut store = self.store.lock().await;
+        store.remove(session_id).is_some()
+    }
+
     /// This initiates the Bracha protocol.
     async fn init<N: Network + Send + Sync>(
         &self,
@@ -484,6 +490,12 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         let mut store = self.store.lock().await;
         store.clear();
     }
+
+    async fn clear_session(&self, session_id: &Id) -> bool {
+        let mut store = self.store.lock().await;
+        store.remove(session_id).is_some()
+    }
+
     ///This initiates the Avid protocol.
     async fn init<N: Network + Send + Sync>(
         &self,
@@ -1030,6 +1042,15 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
         store.clear();
         coin_store.clear();
     }
+
+    async fn clear_session(&self, session_id: &Id) -> bool {
+        let mut store = self.store.lock().await;
+        let mut coin_store = self.coin.lock().await;
+        let removed_store = store.remove(session_id).is_some();
+        let removed_coin = coin_store.remove(session_id).is_some();
+        removed_store || removed_coin
+    }
+
     /// This initiates the ABA protocol.
     async fn init<N: Network + Send + Sync>(
         &self,
