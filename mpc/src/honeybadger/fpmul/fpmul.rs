@@ -103,7 +103,7 @@ where
             )
             .await?;
 
-        let trunc_input = self.mult_node.wait_for_result(session_id, Duration::from_millis(500)).await?;
+        let trunc_input = self.mult_node.wait_for_result(session_id, Duration::from_secs(30)).await?;
 
         self.mult_node.clear_store().await;
         self.trunc_node

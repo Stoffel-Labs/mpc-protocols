@@ -82,7 +82,7 @@ use tokio::{
         mpsc::{self, Receiver},
         Mutex,
     },
-    time::Duration
+    time::{Duration, timeout}
 };
 use tracing::{info, warn};
 use triple_gen::triple_generation::TripleGenNode;
@@ -132,6 +132,8 @@ pub enum HoneyBadgerError {
     JoinError,
     #[error("output channel closed before result was received")]
     ChannelClosed,
+    #[error("operation timed out waiting for result")]
+    Timeout,
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -747,19 +749,22 @@ where
             .await?;
 
         let mut rx = self.outputchannels.fpmul_channel.lock().await;
-        while let Some(id) = rx.recv().await {
-            if id == session_id {
-                let output = self
-                    .type_ops
-                    .fpmul
-                    .protocol_output
-                    .clone()
-                    .ok_or(FPError::Failed)?;
-
-                return Ok(output);
+        loop {
+            match timeout(Duration::from_secs(60), rx.recv()).await {
+                Ok(Some(id)) if id == session_id => {
+                    let output = self
+                        .type_ops
+                        .fpmul
+                        .protocol_output
+                        .clone()
+                        .ok_or(FPError::Failed)?;
+                    return Ok(output);
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => return Err(HoneyBadgerError::ChannelClosed),
+                Err(_) => return Err(HoneyBadgerError::Timeout),
             }
         }
-        Err(HoneyBadgerError::ChannelClosed)
     }
 
     async fn div_with_const_fixed(
@@ -825,21 +830,22 @@ where
 
         // 6. Wait for output on the channel --------------------------------
         let mut rx = self.outputchannels.fpdiv_const_channel.lock().await;
-
-        while let Some(id) = rx.recv().await {
-            if id == session_id {
-                let output = self
-                    .type_ops
-                    .fpdiv_const
-                    .protocol_output
-                    .clone()
-                    .ok_or(HoneyBadgerError::FPDivConstError(FPDivConstError::Failed))?;
-
-                return Ok(output);
+        loop {
+            match timeout(Duration::from_secs(60), rx.recv()).await {
+                Ok(Some(id)) if id == session_id => {
+                    let output = self
+                        .type_ops
+                        .fpdiv_const
+                        .protocol_output
+                        .clone()
+                        .ok_or(HoneyBadgerError::FPDivConstError(FPDivConstError::Failed))?;
+                    return Ok(output);
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => return Err(HoneyBadgerError::ChannelClosed),
+                Err(_) => return Err(HoneyBadgerError::Timeout),
             }
         }
-
-        Err(HoneyBadgerError::ChannelClosed)
     }
 
     /// Integer addition (int8/16/32/64)
@@ -1049,8 +1055,8 @@ where
                 // ------------------------
                 // Step 4. Collect triples
                 // ------------------------
-                if let Some(sid) = self.outputchannels.triple_channel.lock().await.recv().await {
-                    if sid == sessionid {
+                match timeout(Duration::from_secs(60), self.outputchannels.triple_channel.lock().await.recv()).await {
+                    Ok(Some(sid)) if sid == sessionid => {
                         let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
                         let triple_storage_mutex = triple_gen_db.remove(&sid).unwrap();
                         let triple_storage = triple_storage_mutex.lock().await;
@@ -1068,6 +1074,8 @@ where
                             .clear_store(sessionid)
                             .await);
                     }
+                    Ok(Some(_)) | Ok(None) => {}
+                    Err(_) => return Err(HoneyBadgerError::Timeout),
                 }
 
                 if round_id == 255 {
@@ -1127,15 +1135,8 @@ where
                 .await?;
 
             // Collect its output
-            if let Some(id) = self
-                .outputchannels
-                .share_gen_channel
-                .lock()
-                .await
-                .recv()
-                .await
-            {
-                if id == sessionid {
+            match timeout(Duration::from_secs(60), self.outputchannels.share_gen_channel.lock().await.recv()).await {
+                Ok(Some(id)) if id == sessionid => {
                     let mut share_store = self.preprocess.share_gen.store.lock().await;
                     let store_lock = share_store.remove(&id).unwrap();
                     let store = store_lock.lock().await;
@@ -1146,6 +1147,8 @@ where
                         .await
                         .add(None, Some(output), None, None);
                 }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(_) => return Err(HoneyBadgerError::Timeout),
             }
 
             if round_id == 255 {
@@ -1199,20 +1202,15 @@ where
                 .init(shares_deg_t, shares_deg_2t, sessionid, network.clone())
                 .await?;
 
-            if let Some(sid) = self
-                .outputchannels
-                .ran_dou_sha_channel
-                .lock()
-                .await
-                .recv()
-                .await
-            {
-                if sid == sessionid {
+            match timeout(Duration::from_secs(60), self.outputchannels.ran_dou_sha_channel.lock().await.recv()).await {
+                Ok(Some(sid)) if sid == sessionid => {
                     let mut ran_dou_sha_db = self.preprocess.ran_dou_sha.store.lock().await;
                     let ran_dou_sha_storage_mutex = ran_dou_sha_db.remove(&sid).unwrap();
                     let storage = ran_dou_sha_storage_mutex.lock().await;
                     pair.extend(storage.protocol_output.clone());
                 }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(_) => return Err(HoneyBadgerError::Timeout),
             }
 
             if round_id == 255 {
@@ -1243,20 +1241,15 @@ where
             .await?;
 
         let mut dou_sha = Vec::new();
-        if let Some(sid) = self
-            .outputchannels
-            .dou_sha_channel
-            .lock()
-            .await
-            .recv()
-            .await
-        {
-            if sid == sessionid {
+        match timeout(Duration::from_secs(60), self.outputchannels.dou_sha_channel.lock().await.recv()).await {
+            Ok(Some(sid)) if sid == sessionid => {
                 let mut dou_sha_db = self.preprocess.dou_sha.storage.lock().await;
                 let dou_sha_storage_mutex = dou_sha_db.remove(&sid).unwrap();
                 let dou_sha_storage = dou_sha_storage_mutex.lock().await;
                 dou_sha = dou_sha_storage.protocol_output.clone();
             }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(_) => return Err(HoneyBadgerError::Timeout),
         }
 
         Ok(dou_sha)
@@ -1314,15 +1307,8 @@ where
             .await?;
 
         // Collect its output
-        if let Some(id) = self
-            .outputchannels
-            .rand_bit_channel
-            .lock()
-            .await
-            .recv()
-            .await
-        {
-            if id == sessionid {
+        match timeout(Duration::from_secs(60), self.outputchannels.rand_bit_channel.lock().await.recv()).await {
+            Ok(Some(id)) if id == sessionid => {
                 let mut share_store = self.preprocess.rand_bit.storage.lock().await;
                 let store_lock = share_store.remove(&id).unwrap();
                 let store = store_lock.lock().await;
@@ -1331,6 +1317,8 @@ where
                 //Collect the randbit outputs
                 randbit_output.extend(output);
             }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(_) => return Err(HoneyBadgerError::Timeout),
         }
 
         // Clear stores
@@ -1360,15 +1348,8 @@ where
             .await?;
 
         // Collect its output
-        if let Some(id) = self
-            .outputchannels
-            .prand_bit_channel
-            .lock()
-            .await
-            .recv()
-            .await
-        {
-            if id == sessionid {
+        match timeout(Duration::from_secs(60), self.outputchannels.prand_bit_channel.lock().await.recv()).await {
+            Ok(Some(id)) if id == sessionid => {
                 let mut share_store = self.preprocess.prand_bit.store.lock().await;
                 let store_lock = share_store.remove(&id).unwrap();
                 let store = store_lock.lock().await;
@@ -1384,6 +1365,8 @@ where
                     .await
                     .add(None, None, Some(output), None);
             }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(_) => return Err(HoneyBadgerError::Timeout),
         }
 
         self.preprocess.prand_bit.clear_store().await;
@@ -1432,15 +1415,8 @@ where
             .await?;
 
         // Collect its output
-        if let Some(id) = self
-            .outputchannels
-            .prand_int_channel
-            .lock()
-            .await
-            .recv()
-            .await
-        {
-            if id == sessionid {
+        match timeout(Duration::from_secs(60), self.outputchannels.prand_int_channel.lock().await.recv()).await {
+            Ok(Some(id)) if id == sessionid => {
                 let mut share_store = self.preprocess.prand_bit.store.lock().await;
                 let store_lock = share_store.remove(&id).unwrap();
                 let store = store_lock.lock().await;
@@ -1451,6 +1427,8 @@ where
                     .await
                     .add(None, None, None, Some(output));
             }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(_) => return Err(HoneyBadgerError::Timeout),
         }
         // Clear store
         self.preprocess.prand_bit.clear_store().await;

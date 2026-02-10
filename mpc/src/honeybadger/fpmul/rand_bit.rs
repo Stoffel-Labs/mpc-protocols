@@ -127,7 +127,7 @@ where
             .init(session_id, a, a_copy, mult_triple, network.clone())
             .await?;
 
-        let a_square_share = self.mult_node.wait_for_result(session_id, Duration::from_millis(500)).await?;
+        let a_square_share = self.mult_node.wait_for_result(session_id, Duration::from_secs(30)).await?;
 
         tracing::info!("Multiplication at Rand_bit done: {0:?}", self.id);
 
