@@ -1,3 +1,4 @@
+use crate::honeybadger::fpmul::ProtocolState;
 use crate::{
     common::{ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
@@ -58,7 +59,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         store.clear();
     }
     /// Start TruncPr:
-    /// - builds [r'] and [r] from preseeded randomness,
+    /// - builds \[r'\] and \[r\] from preseeded randomness,
     /// - forms share of (b + r) where b = 2^{k-1} + [a],
     /// - broadcasts the share for opening.
     pub async fn init<N: Network + Send + Sync>(
@@ -85,8 +86,9 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         s.k = k;
         s.m = m;
         s.share_a = Some(a.clone());
+        s.protocol_state = ProtocolState::Initialized;
 
-        // b = 2^{k-1} + [a]   (2^{k-1} is public constant in the field)
+        // b = 2^{k-1} + [a]   (2^{k-1} is a public constant in the field)
         let b = (a + pow2_f::<F>(k - 1))?;
 
         // [r'] = sum_{i=0}^{m-1} 2^i [r_i]
@@ -116,7 +118,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         self.rbc
             .init(
                 bytes_wrapped,
-                sessionid, // A unique session id per node
+                session_id_rbc, // A unique session id per node
                 Arc::clone(&network),
             )
             .await?;
@@ -137,7 +139,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         let store = self.get_or_create_store(msg.session_id).await;
         let mut s = store.lock().await;
 
-        // de-serialize incoming share of (b + r)
+        // Deserialize incoming share of (b + r)
         let share_i: RobustShare<F> =
             CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 
@@ -173,6 +175,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
             s.share_d = Some(d);
             s.open_buf.clear();
+            s.protocol_state = ProtocolState::Finished;
             self.output_channel.send(msg.session_id).await?;
         }
 

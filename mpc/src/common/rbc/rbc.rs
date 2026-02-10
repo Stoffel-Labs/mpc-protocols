@@ -15,6 +15,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+
 ///--------------------------Bracha RBC--------------------------
 ///
 /// Protocol works as follows(m is the message to broadcast) :
@@ -759,7 +760,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
 
         // Ignore the message if the session has already ended.
         if store.ended {
-            debug!(
+            error!(
                 id = self.id,
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring READY"

@@ -261,6 +261,7 @@ pub struct TruncPrStore<F: PrimeField> {
     pub share_a: Option<RobustShare<F>>,
     pub open_buf: HashMap<usize, RobustShare<F>>, // sender_id -> share of (b + r)
     pub share_d: Option<RobustShare<F>>,          // [d]
+    pub protocol_state: ProtocolState,
 }
 
 impl<F: PrimeField> TruncPrStore<F> {
@@ -272,6 +273,7 @@ impl<F: PrimeField> TruncPrStore<F> {
             share_a: None,
             open_buf: HashMap::new(),
             share_d: None,
+            protocol_state: ProtocolState::NotInitialized,
         }
     }
 }

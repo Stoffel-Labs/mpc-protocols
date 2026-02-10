@@ -86,7 +86,7 @@ async fn test_init_reconstruct_flow() {
 
             let msg_type = rdsmsg.msg_type;
             assert!(matches!(rdsmsg.payload, RanDouShaPayload::Reconstruct(_)));
-            assert!(msg_type == RanDouShaMessageType::ReconstructMessage);
+            assert_eq!(msg_type, RanDouShaMessageType::ReconstructMessage);
         }
         // check that rest does not receive messages
         else {
