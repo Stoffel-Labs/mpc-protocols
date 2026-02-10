@@ -14,7 +14,7 @@ use std::ops::{Add, Mul};
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::mpsc::Sender;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::time::Duration;
 
 /// Represents the random bit generation protocol.
@@ -121,12 +121,15 @@ where
         assert!(session_id.calling_protocol().is_some());
 
         // Mark the protocol as initialized.
-        {
+        let notify = {
             let storage_bind = self.get_or_create_storage(session_id).await?;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.a_share = Some(a.clone());
-        }
+            storage.initialized = true;
+            storage.init_notifier.clone()
+        };
+        notify.notify_waiters();
 
         // Step 2: Execute the multiplication to obtain a^2 mod p.
         let a_copy = a.clone();
@@ -178,10 +181,17 @@ where
         );
         let storage_bind = self.get_or_create_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
-        let a = storage
-            .a_share
-            .clone()
-            .ok_or(RandBitError::NotInitialized)?;
+
+        // Wait for initialization if not complete
+        while !storage.initialized {
+            let notify = storage.init_notifier.clone();
+            drop(storage);
+            notify.notified().await;
+            storage = storage_bind.lock().await;
+        }
+
+        // Safe: init() completed, a_share is guaranteed to be Some
+        let a = storage.a_share.clone().unwrap();
         let batch_size = a.len() / (self.threshold + 1);
 
         let open: Vec<F> =
@@ -221,6 +231,7 @@ where
             b_inv_array.push(b_inv);
         }
 
+        // Safe: init() completed, a_share is guaranteed to be Some
         let a_share_array = self
             .get_or_create_storage(session_id)
             .await?
@@ -228,7 +239,7 @@ where
             .await
             .a_share
             .clone()
-            .ok_or(RandBitError::NotInitialized)?;
+            .unwrap();
 
         let mut c_share_array = Vec::new();
         for (a_share, b_inv) in izip!(&a_share_array, &b_inv_array) {

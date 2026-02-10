@@ -96,6 +96,10 @@ where
     /// Share of `a`
     pub a_share: Option<Vec<RobustShare<F>>>,
     pub output_open: HashMap<u8, Vec<F>>,
+    /// Whether initialization has completed (a_share set)
+    pub initialized: bool,
+    /// Notification for handlers waiting for initialization
+    pub init_notifier: Arc<Notify>,
 }
 
 impl<F> RandBitStorage<F>
@@ -108,6 +112,8 @@ where
             protocol_output: None,
             a_share: None,
             output_open: HashMap::new(),
+            initialized: false,
+            init_notifier: Arc::new(Notify::new()),
         }
     }
 }
