@@ -465,21 +465,22 @@ where
         // Both lists must have the same length.
         assert_eq!(x.len(), y.len());
 
-        let (no_triples, _, _, _) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-        if no_triples < x.len() {
-            //Run preprocessing
+        // Atomic check-and-take pattern to prevent TOCTOU race conditions.
+        let required_triples = x.len();
+        let beaver_triples = loop {
+            let mut store = self.preprocessing_material.lock().await;
+            let (n_triples, _, _, _) = store.len();
+
+            if n_triples >= required_triples {
+                // Atomically take under single lock
+                break store.take_beaver_triples(required_triples)?;
+            }
+
+            // Not enough - release lock before async preprocessing
+            drop(store);
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(network.clone(), &mut rng).await?;
-        }
-        // Extract the preprocessing triple.
-        let beaver_triples = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_beaver_triples(x.len())?;
+        };
 
         let session_id = SessionId::new(
             ProtocolType::Mul,
@@ -743,24 +744,21 @@ where
     }
 
     async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
-        // Check if we have a random share available
-        let (_, n_random, _, _) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
+        // Atomic check-and-take pattern to prevent TOCTOU race conditions.
+        let shares = loop {
+            let mut store = self.preprocessing_material.lock().await;
+            let (_, n_random, _, _) = store.len();
 
-        // If no random shares available, generate some
-        if n_random == 0 {
+            if n_random >= 1 {
+                // Atomically take under single lock
+                break store.take_random_shares(1)?;
+            }
+
+            // Not enough - release lock before async operation
+            drop(store);
             let mut rng = StdRng::from_rng(OsRng).unwrap();
-            self.ensure_random_shares(network, &mut rng, 1).await?;
-        }
-
-        // Take one random share from the preprocessing material
-        let shares = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(1)?;
+            self.ensure_random_shares(network.clone(), &mut rng, 1).await?;
+        };
 
         Ok(shares.into_iter().next().unwrap())
     }
@@ -820,31 +818,30 @@ where
         if x.precision() != y.precision() {
             return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
-        let (_, _, no_rand_bit, no_rand_int) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-        if no_rand_bit < x.precision().f() || no_rand_int == 0 {
-            //Run preprocessing
+        // Atomic check-and-take pattern to prevent TOCTOU race conditions.
+        // Uses a retry loop: if we don't have enough material, release lock,
+        // run preprocessing, and retry. This ensures check and take happen
+        // under the same lock acquisition.
+        let required_rand_bits = x.precision().f();
+        let (beaver_triples, r_bits_vec, r_int) = loop {
+            let mut store = self.preprocessing_material.lock().await;
+            let (n_triples, _, n_rand_bits, n_rand_ints) = store.len();
+
+            // Check if we have enough material
+            if n_triples >= 1 && n_rand_bits >= required_rand_bits && n_rand_ints >= 1 {
+                // Atomically take all required material under single lock
+                let triples = store.take_beaver_triples(1)?;
+                let r_bits = store.take_prandbit_shares(required_rand_bits)?;
+                let r_ints = store.take_prandint_shares(1)?;
+                break (triples, r_bits, r_ints);
+            }
+
+            // Not enough material - release lock before async preprocessing
+            drop(store);
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(net.clone(), &mut rng).await?;
-        }
-        // Extract the preprocessing triple.
-        let beaver_triples = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_beaver_triples(1)?;
-        let r_bits_vec = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_prandbit_shares(x.precision().f())?;
-        let r_int = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_prandint_shares(1)?;
+            // Loop back to retry with fresh lock acquisition
+        };
 
         let session_id = SessionId::new(
             ProtocolType::FpMul,
@@ -899,31 +896,25 @@ where
             ));
         }
 
-        // 2. Check preprocessing inventory --------------------------------
-        let (_, _, no_rand_bit, no_rand_int) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
+        // 2. Atomic check-and-take for preprocessing material ---------------
+        // Prevents TOCTOU race conditions by using single lock acquisition.
+        let required_rand_bits = x.precision().f();
+        let (r_bits_vec, r_int) = loop {
+            let mut store = self.preprocessing_material.lock().await;
+            let (_, _, n_rand_bits, n_rand_ints) = store.len();
 
-        // Need f random bits and 1 random integer for truncation
-        if no_rand_bit < x.precision().f() || no_rand_int == 0 {
-            // Run full preprocessing if insufficient
+            if n_rand_bits >= required_rand_bits && n_rand_ints >= 1 {
+                // Atomically take under single lock
+                let r_bits = store.take_prandbit_shares(required_rand_bits)?;
+                let r_ints = store.take_prandint_shares(1)?;
+                break (r_bits, r_ints);
+            }
+
+            // Not enough - release lock before async preprocessing
+            drop(store);
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(net.clone(), &mut rng).await?;
-        }
-
-        // 3. Pull preprocessing randomness --------------------------------
-        let r_bits_vec = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_prandbit_shares(x.precision().f())?;
-
-        let r_int = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_prandint_shares(1)?;
+        };
 
         // Extract just the shares (drop F2_8 auxiliary)
         let r_bits_only = r_bits_vec
@@ -1135,17 +1126,13 @@ where
             // Step 3. Generate triples
             // ------------------------
 
-            // Take random shares for triples
-            let random_shares_a = self
-                .preprocessing_material
-                .lock()
-                .await
-                .take_random_shares(total_triples_to_generate)?;
-            let random_shares_b = self
-                .preprocessing_material
-                .lock()
-                .await
-                .take_random_shares(total_triples_to_generate)?;
+            // Atomically take random shares for triples under single lock
+            let (random_shares_a, random_shares_b) = {
+                let mut store = self.preprocessing_material.lock().await;
+                let a = store.take_random_shares(total_triples_to_generate)?;
+                let b = store.take_random_shares(total_triples_to_generate)?;
+                (a, b)
+            };
 
             //Outputs 2t+1 triples at a time
             let a_chunks = random_shares_a.chunks_exact(group_size);
@@ -1430,17 +1417,13 @@ where
             self.params.instance_id,
         );
 
-        let random_shares_a = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(total_randbit_to_generate)?;
-
-        let beaver_triples = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_beaver_triples(total_randbit_to_generate)?;
+        // Atomically take random shares and beaver triples under single lock
+        let (random_shares_a, beaver_triples) = {
+            let mut store = self.preprocessing_material.lock().await;
+            let shares = store.take_random_shares(total_randbit_to_generate)?;
+            let triples = store.take_beaver_triples(total_randbit_to_generate)?;
+            (shares, triples)
+        };
 
         // Run Randbit share protocol
         self.preprocess
