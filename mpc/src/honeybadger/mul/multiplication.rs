@@ -8,7 +8,7 @@ use crate::{
         },
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         triple_gen::ShamirBeaverTriple,
-        SessionId, WrappedMessage,
+        ProtocolType, SessionId, WrappedMessage,
     },
 };
 use ark_ff::FftField;
@@ -189,12 +189,20 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
         assert!(session_id.calling_protocol().is_some());
 
+        // Normalize session_id for storage: keep calling_protocol, but zero out sub_id and round_id.
+        // This ensures init() and open_mult_handler() use the same storage key.
+        let storage_session_id = SessionId::new(
+            session_id.calling_protocol().unwrap(),
+            SessionId::pack_slot24(session_id.exec_id(), 0, 0),
+            session_id.instance_id(),
+        );
+
         let no_of_mul = x.len();
         let no_of_batch = no_of_mul / (self.t + 1);
         let share_len = x.len() % (self.t + 1);
 
         // 1.
-        let storage_bind = self.get_or_create_mult_storage(session_id).await;
+        let storage_bind = self.get_or_create_mult_storage(storage_session_id).await;
         let mut storage = storage_bind.lock().await;
 
         // 2.
@@ -242,7 +250,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
             taken_output_sender
                 .send(shares_mult)
-                .map_err(|_| MulError::SendError(session_id))?;
+                .map_err(|_| MulError::SendError(storage_session_id))?;
             storage.protocol_state = MultProtocolState::Finished;
 
             // Mark as initialized and notify waiting handlers before returning
@@ -301,7 +309,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 let taken_output_sender = storage.output_sender.take().unwrap();
                 taken_output_sender
                     .send(shares_mult)
-                    .map_err(|_| MulError::SendError(session_id))?;
+                    .map_err(|_| MulError::SendError(storage_session_id))?;
                 storage.protocol_state = MultProtocolState::Finished;
                 info!("Multiplication completed at node {} (from init pending data)", self.id);
                 return Ok(());
@@ -519,25 +527,34 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         session_id: SessionId,
         duration: Duration,
     ) -> Result<Vec<RobustShare<F>>, MulError> {
+        // Normalize session_id to match what init() uses for storage
+        let storage_session_id = SessionId::new(
+            session_id.calling_protocol().ok_or_else(|| {
+                MulError::InvalidInput("Session ID missing calling protocol".to_string())
+            })?,
+            SessionId::pack_slot24(session_id.exec_id(), 0, 0),
+            session_id.instance_id(),
+        );
+
         // scoped because self.mult_storage and storage locks must not be held anymore
         // when receiving afterwards
         let output_receiver = {
             let mult_storage = self.mult_storage.lock().await;
-            let storage_bind = match mult_storage.get(&session_id) {
+            let storage_bind = match mult_storage.get(&storage_session_id) {
                 Some(value) => value,
-                None => return Err(MulError::NoSuchSessionId(session_id)),
+                None => return Err(MulError::NoSuchSessionId(storage_session_id)),
             };
             let mut storage = storage_bind.lock().await;
 
             storage
                 .output_receiver
                 .take()
-                .ok_or(MulError::ResultAlreadyReceived(session_id))?
+                .ok_or(MulError::ResultAlreadyReceived(storage_session_id))?
         };
 
         match timeout(duration, output_receiver).await {
-            Err(_) => Err(MulError::Timeout(session_id)),
-            Ok(Err(_)) => Err(MulError::ReceiveError(session_id)),
+            Err(_) => Err(MulError::Timeout(storage_session_id)),
+            Ok(Err(_)) => Err(MulError::ReceiveError(storage_session_id)),
             Ok(Ok(mul_shares)) => Ok(mul_shares),
         }
     }
