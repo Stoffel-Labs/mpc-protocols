@@ -1,7 +1,7 @@
 pub mod utils;
 #[cfg(test)]
 mod tests {
-    use crate::utils::test_utils::{generate_independent_shares, setup_tracing};
+    use crate::utils::test_utils::{fan_in_inboxes, generate_independent_shares, setup_tracing};
     use ark_bls12_381::Fr;
     use ark_ff::Zero;
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -17,7 +17,11 @@ mod tests {
             ProtocolType, SessionId, WrappedMessage,
         },
     };
-    use tokio::{sync::Barrier, time::timeout};
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, SenderId};
+    use tokio::{
+        sync::{mpsc::Receiver, Barrier},
+        time::timeout,
+    };
     use tracing::warn;
 
     #[test]
@@ -119,9 +123,10 @@ mod tests {
         let t = 1;
         let session_id = SessionId::new(ProtocolType::BatchRecon, 123, 0, 0, 111);
         let config = FakeNetworkConfig::new(100);
-        let (network, mut receivers, _) = FakeNetwork::new(n, None, config);
-        let net = Arc::new(network);
-
+        let (inner, mut receivers, _) = FakeInnerNetwork::new(n, None, config);
+        let net: Vec<_> = (0..n)
+            .map(|id| Arc::new(FakeNetwork::new(id, inner.clone())))
+            .collect();
         let secrets: Vec<Fr> = vec![Fr::from(3u64), Fr::from(6u64)];
         let all_shares = generate_independent_shares(&secrets, t, n);
 
@@ -131,8 +136,14 @@ mod tests {
         for i in 0..n {
             let mut node = BatchReconNode::new(i, n, t, t).unwrap();
             let shares = all_shares[i].clone();
-            let net_clone = Arc::clone(&net);
-            let mut recv = receivers.remove(0);
+            let net_clone = net[i].clone();
+            let inboxes = receivers[i].drain(..).collect::<Vec<_>>();
+            let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = inboxes
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| (SenderId::Node(i), r))
+                .collect();
+            let mut merged_rx = fan_in_inboxes(inbox);
             let barrier_i = barrier.clone();
 
             handles.push(tokio::spawn(async move {
@@ -150,27 +161,23 @@ mod tests {
                     let s = session_store.lock().await;
                     s.secrets.is_none()
                 } {
-                    let msg = timeout(Duration::from_secs(2), recv.recv()).await;
-                    // Attempt to deserialize into WrappedMessage
-                    let brmsg = match msg {
-                        Ok(m) => m.unwrap(),
-                        Err(_) => todo!(),
+                    let (_from, raw) = match timeout(Duration::from_secs(2), merged_rx.recv()).await
+                    {
+                        Ok(Some(v)) => v,
+                        _ => continue,
                     };
-                    let wrapped: WrappedMessage = match bincode::deserialize(&brmsg) {
+                    let wrapped: WrappedMessage = match bincode::deserialize(&raw) {
                         Ok(m) => m,
                         Err(_) => {
                             warn!("Malformed or unrecognized message format.");
                             continue;
                         }
                     };
-                    match wrapped {
-                        WrappedMessage::BatchRecon(m) => {
-                            match node.process(m, net_clone.clone()).await {
-                                Ok(()) => {}
-                                Err(e) => warn!(id =i,error = ?e ,"Broadcasting failure"),
-                            }
+
+                    if let WrappedMessage::BatchRecon(m) = wrapped {
+                        if let Err(e) = node.process(m, net_clone.clone()).await {
+                            warn!(id = i, error = ?e, "Processing failure");
                         }
-                        _ => todo!(),
                     }
                 }
 

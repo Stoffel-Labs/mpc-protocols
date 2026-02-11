@@ -1,12 +1,16 @@
 pub mod utils;
 
-use crate::utils::test_utils::{construct_e2e_input_mul, setup_tracing, test_setup};
+use crate::utils::test_utils::{
+    construct_e2e_input_mul, fan_in_inboxes, setup_tracing, test_setup,
+};
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use itertools::izip;
 use rand::{seq::SliceRandom, thread_rng};
+use stoffelmpc_network::fake_network::SenderId;
+use tokio::sync::mpsc::Receiver;
 use std::ops::{Mul, Sub};
 use std::{collections::HashMap, sync::Arc, time::Duration, vec};
 use stoffelmpc_mpc::common::{
@@ -75,7 +79,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
     let session_id = SessionId::new(ProtocolType::Mul, 123, 0, 0, 111);
 
     // 1. Setup network
-    let (network, mut receivers, _) = test_setup(n_parties, vec![]);
+    let (network, mut receivers, _, _) = test_setup(n_parties, vec![]);
     // 2. Generate Beaver triples
     let (_, beaver_triples) = construct_e2e_input_mul(n_parties, no_of_mul, t).await;
 
@@ -113,7 +117,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
                 x_inputs_per_node[i].clone(),
                 y_inputs_per_node[i].clone(),
                 beaver_triples[i].clone(),
-                Arc::clone(&network),
+                network[i].clone(),
             )
             .await
         {
@@ -132,13 +136,19 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
     let mut set = JoinSet::new();
     for node in &mul_nodes {
         let mut mul_node = node.clone();
-        let mut receiver = receivers.remove(0);
-        let net_clone = Arc::clone(&network);
+        let receiver = receivers.remove(0);
+        let net_clone = network[node.id].clone();
+         let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+        let mut merged_rx = fan_in_inboxes(inbox);
 
         set.spawn(async move {
-            while let Some(msg_bytes) = receiver.recv().await {
+            while let Some(msg_bytes) = merged_rx.recv().await {
                 // Attempt to deserialize into WrappedMessage
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg_bytes) {
+                let wrapped: WrappedMessage = match bincode::deserialize(&msg_bytes.1) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("failed to deserialize into wrapped message");
@@ -171,6 +181,9 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
                         {
                             warn!("RBC processing error: {e}");
                         }
+                        if let Err(e) = mul_node.drain_rbc_output().await {
+                            warn!("RBC output handling error: {e}");
+                        }
                     }
                     WrappedMessage::BatchRecon(batch_msg) => {
                         match batch_msg.session_id.calling_protocol() {
@@ -199,7 +212,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
     for i in 0..n_parties {
         let node = &mul_nodes[i];
         let final_shares = node
-            .wait_for_result(session_id, Duration::from_millis(500))
+            .wait_for_result(session_id, Duration::from_millis(1500))
             .await
             .unwrap();
 

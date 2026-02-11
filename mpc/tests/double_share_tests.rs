@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, thread, time::Duration};
+use std::{collections::HashMap, thread, time::Duration};
 
 use crate::utils::test_utils::test_setup;
 use ark_std::test_rng;
@@ -21,7 +21,7 @@ async fn generate_faulty_double_shares_e2e() {
     let threshold = 2;
     let session_id = SessionId::new(ProtocolType::Dousha, 123, 0, 0, 111);
 
-    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
     let mut sender_channels = Vec::new();
     let mut receiver_channels = Vec::new();
@@ -45,8 +45,9 @@ async fn generate_faulty_double_shares_e2e() {
     // Initialize nodes.
     for node in &dou_sha_nodes {
         let mut node_locked = node.lock().await;
+        let id = node_locked.id;
         node_locked
-            .init(session_id, &mut rng, Arc::clone(&network))
+            .init(session_id, &mut rng, network[id].clone())
             .await
             .unwrap();
     }

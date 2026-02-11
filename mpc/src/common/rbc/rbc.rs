@@ -13,7 +13,10 @@ use threshold_crypto::{
     serde_impl::SerdeSecret, PublicKeySet, SecretKeySet, SecretKeyShare, SignatureShare,
 };
 use tokio::{
-    sync::{Mutex, Notify, OnceCell},
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Mutex, Notify, OnceCell,
+    },
     time::Duration,
 };
 use tracing::{debug, error, info, warn};
@@ -37,11 +40,18 @@ pub struct Bracha {
     pub t: usize,  // Number of allowed malicious parties
     pub k: usize,  //threshold (Not really used in Bracha)
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
+    pub output_sender: Sender<SessionId>,
 }
 #[async_trait]
 impl RBC for Bracha {
     /// Creates a new Bracha instance with the given parameters.
-    fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError> {
+    fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        k: usize,
+        output_sender: Sender<SessionId>,
+    ) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
             return Err(RbcError::InvalidThreshold(t, n));
@@ -52,12 +62,29 @@ impl RBC for Bracha {
             t,
             k,
             store: Arc::new(Mutex::new(HashMap::new())),
+            output_sender,
         })
     }
     /// Returns the unique identifier of the current party.
     fn id(&self) -> usize {
         self.id
     }
+    async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, RbcError> {
+        let mut store = self.store.lock().await;
+
+        let output_store = store
+            .remove(&session_id)
+            .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
+
+        let store_lock = output_store.lock().await;
+
+        if !store_lock.ended {
+            return Err(RbcError::Internal("Rbc has not terminated".to_string()));
+        }
+
+        Ok(store_lock.output.clone())
+    }
+
     async fn clear_store(&self) {
         let mut store = self.store.lock().await;
         store.clear();
@@ -359,7 +386,10 @@ impl Bracha {
                 output = ?m,
                 "Consensus achieved; RBC instance ended"
             );
-            net.send(self.id, &m).await?;
+            self.output_sender
+                .send(msg.session_id)
+                .await
+                .map_err(|_| RbcError::SendError)?;
         }
 
         Ok(())
@@ -452,11 +482,18 @@ pub struct Avid {
     pub t: usize,                                                     //No. of malicious parties
     pub k: usize,                                                     //Threshold
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
+    pub output_sender: Sender<SessionId>,
 }
 #[async_trait]
 impl RBC for Avid {
     /// Creates a new Avid instance with the given parameters.
-    fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError> {
+    fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        k: usize,
+        output_sender: Sender<SessionId>,
+    ) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
             return Err(RbcError::InvalidThreshold(t, n));
@@ -474,6 +511,7 @@ impl RBC for Avid {
             t,
             k,
             store: Arc::new(Mutex::new(HashMap::new())),
+            output_sender,
         })
     }
     fn id(&self) -> usize {
@@ -483,6 +521,22 @@ impl RBC for Avid {
         let mut store = self.store.lock().await;
         store.clear();
     }
+    async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, RbcError> {
+        let mut store = self.store.lock().await;
+
+        let output_store = store
+            .remove(&session_id)
+            .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
+
+        let store_lock = output_store.lock().await;
+
+        if !store_lock.ended {
+            return Err(RbcError::Internal("Rbc has not terminated".to_string()));
+        }
+
+        Ok(store_lock.output.clone())
+    }
+
     ///This initiates the Avid protocol.
     async fn init<N: Network + Send + Sync>(
         &self,
@@ -831,7 +885,10 @@ impl Avid {
                             output = ?m,
                             "Consensus achieved; AVID instance ended"
                         );
-                        net.send(self.id, &m).await?;
+                        self.output_sender
+                            .send(msg.session_id)
+                            .await
+                            .map_err(|_| RbcError::SendError)?;
                     }
                 }
                 Ok(false) => {
@@ -1000,14 +1057,33 @@ pub struct ABA {
     pub pkset: Arc<OnceCell<Vec<u8>>>,   //Public key set
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<AbaStore>>>>>, // Stores the ABA session state
     pub coin: Arc<Mutex<HashMap<SessionId, Arc<Mutex<CoinStore>>>>>, // Stores the common coin session state
+    pub output_sender: Sender<SessionId>,
 }
 #[async_trait]
 impl RBC for ABA {
     /// Creates a new ABA instance with the given parameters.
-    fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError> {
+    fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        k: usize,
+        output_sender: Sender<SessionId>,
+    ) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
             return Err(RbcError::InvalidThreshold(t, n));
+        }
+        if !(t + 1 <= k && k <= n - 2 * t) {
+            return Err(RbcError::Internal(format!(
+                "Invalid k: must satisfy t + 1 <= k <= n - 2t (t={}, k={}, n={})",
+                t, k, n
+            )));
+        }
+
+        if id >= n {
+            return Err(RbcError::Internal(
+                "PartyID is greater than party size".to_string(),
+            ));
         }
         Ok(ABA {
             id,
@@ -1018,6 +1094,7 @@ impl RBC for ABA {
             pkset: Arc::new(OnceCell::new()),
             store: Arc::new(Mutex::new(HashMap::new())),
             coin: Arc::new(Mutex::new(HashMap::new())),
+            output_sender,
         })
     }
     fn id(&self) -> usize {
@@ -1030,6 +1107,22 @@ impl RBC for ABA {
         store.clear();
         coin_store.clear();
     }
+    async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, RbcError> {
+        let mut store = self.store.lock().await;
+
+        let output_store = store
+            .remove(&session_id)
+            .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
+
+        let store_lock = output_store.lock().await;
+
+        if !store_lock.ended {
+            return Err(RbcError::Internal("Rbc has not terminated".to_string()));
+        }
+
+        Ok(vec![store_lock.output as u8])
+    }
+
     /// This initiates the ABA protocol.
     async fn init<N: Network + Send + Sync>(
         &self,
@@ -1084,7 +1177,7 @@ impl RBC for ABA {
         msg: Msg,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
-        match &msg.msg_type {
+                match &msg.msg_type {
             GenericMsgType::ABA(msg_type) => match msg_type {
                 MsgTypeAba::Est => self.est_handler(msg, net).await?,
                 MsgTypeAba::Aux => self.aux_handler(msg, net).await?,
@@ -1753,16 +1846,37 @@ pub struct ACS {
     pub k: usize,                    // threshold
     pub store: Arc<Mutex<AcsStore>>, // Stores the ACS session state
     pub aba: ABA,                    //ABA instance for the common subset
+    pub aba_output: Arc<Mutex<Receiver<SessionId>>>,
+    pub acs_output_sender: Sender<SessionId>,
 }
 
 impl ACS {
     /// Creates a new ACS instance with the given parameters.
-    pub fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError> {
+    pub fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        k: usize,
+        acs_output_sender: Sender<SessionId>,
+    ) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
             // ceil(n / 3)
             return Err(RbcError::InvalidThreshold(t, n));
         }
-        let aba = ABA::new(id, n, t, k)?;
+        if !(t + 1 <= k && k <= n - 2 * t) {
+            return Err(RbcError::Internal(format!(
+                "Invalid k: must satisfy t + 1 <= k <= n - 2t (t={}, k={}, n={})",
+                t, k, n
+            )));
+        }
+
+        if id >= n {
+            return Err(RbcError::Internal(
+                "PartyID is greater than party size".to_string(),
+            ));
+        }
+        let (s, r) = mpsc::channel(256);
+        let aba = ABA::new(id, n, t, k, s)?;
         Ok(ACS {
             id,
             n,
@@ -1770,6 +1884,8 @@ impl ACS {
             k,
             store: Arc::new(Mutex::new(AcsStore::default())),
             aba: aba,
+            aba_output: Arc::new(Mutex::new(r)),
+            acs_output_sender,
         })
     }
 
@@ -1958,21 +2074,22 @@ mod tests {
 
     #[test]
     fn test_bracha_avid_valid_params() {
+        let (s, _) = mpsc::channel(256);
         // Test for Bracha
-        let bracha = Bracha::new(0, 4, 1, 2);
+        let bracha = Bracha::new(0, 4, 1, 2, s.clone());
         assert!(
             bracha.is_ok(),
             "Expected valid parameters for Bracha to succeed"
         );
 
         // Test for Avid
-        let avid = Avid::new(0, 6, 1, 2);
+        let avid = Avid::new(0, 6, 1, 2, s.clone());
         assert!(
             avid.is_ok(),
             "Expected valid parameters for Avid to succeed"
         );
 
-        let avid = Avid::new(1, 9, 2, 4);
+        let avid = Avid::new(1, 9, 2, 4, s);
         assert!(
             avid.is_ok(),
             "Expected valid parameters for Avid to succeed"
@@ -1981,8 +2098,9 @@ mod tests {
 
     #[test]
     fn test_bracha_avid_invalid_t() {
+        let (s, _) = mpsc::channel(256);
         // Test for Bracha
-        let bracha = Bracha::new(0, 4, 2, 2); // Invalid t
+        let bracha = Bracha::new(0, 4, 2, 2, s.clone()); // Invalid t
         assert!(bracha.is_err(), "Expected invalid t to fail for Bracha");
         if let Err(msg) = bracha {
             assert!(
@@ -1992,7 +2110,7 @@ mod tests {
         }
 
         // Test for Avid
-        let avid = Avid::new(0, 6, 2, 2); // Invalid t (t >= ceil(n / 3))
+        let avid = Avid::new(0, 6, 2, 2, s.clone()); // Invalid t (t >= ceil(n / 3))
         assert!(avid.is_err(), "Expected invalid t to fail for Avid");
         if let Err(msg) = avid {
             assert!(
@@ -2001,14 +2119,15 @@ mod tests {
             );
         }
 
-        let avid = Avid::new(1, 9, 4, 4); // Invalid t (t >= ceil(n / 3))
+        let avid = Avid::new(1, 9, 4, 4, s); // Invalid t (t >= ceil(n / 3))
         assert!(avid.is_err(), "Expected invalid t to fail for Avid");
     }
 
     #[test]
     fn test_bracha_avid_invalid_k() {
+        let (s, _) = mpsc::channel(256);
         // Test for Avid with invalid k
-        let avid = Avid::new(0, 6, 1, 0); // Invalid k (k < t + 1)
+        let avid = Avid::new(0, 6, 1, 0, s.clone()); // Invalid k (k < t + 1)
         assert!(avid.is_err(), "Expected invalid k to fail for Avid");
         if let Err(msg) = avid {
             assert!(
@@ -2017,28 +2136,30 @@ mod tests {
             );
         }
 
-        let avid = Avid::new(1, 9, 2, 7); // Invalid k (k > n - 2t)
+        let avid = Avid::new(1, 9, 2, 7, s.clone()); // Invalid k (k > n - 2t)
         assert!(avid.is_err(), "Expected invalid k to fail for Avid");
 
         // Test for Bracha with valid parameters
-        let bracha = Bracha::new(0, 5, 1, 3); // Valid k for Bracha
+        let bracha = Bracha::new(0, 5, 1, 3, s); // Valid k for Bracha
         assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
     }
 
     #[test]
     fn test_bracha_avid_edge_cases() {
+        let (s, _) = mpsc::channel(256);
+
         // n = 5, t = 1, k = 2: valid case for both Bracha and Avid
-        let bracha = Bracha::new(0, 5, 1, 2);
+        let bracha = Bracha::new(0, 5, 1, 2, s.clone());
         assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
-        let avid = Avid::new(0, 5, 1, 2);
+        let avid = Avid::new(0, 5, 1, 2, s.clone());
         assert!(avid.is_ok(), "Expected valid parameters for Avid");
 
         // n = 5, t = 2, k = 2: invalid for Avid as k cannot be n - 2 * t
-        let avid_invalid = Avid::new(0, 5, 2, 2);
+        let avid_invalid = Avid::new(0, 5, 2, 2, s.clone());
         assert!(avid_invalid.is_err(), "Expected invalid k to fail for Avid");
 
         // n = 5, t = 2: invalid as t cannot be >= ceil(n / 3)
-        let bracha_invalid = Bracha::new(0, 5, 2, 2);
+        let bracha_invalid = Bracha::new(0, 5, 2, 2, s);
         assert!(
             bracha_invalid.is_err(),
             "Expected invalid t to fail for Bracha"
@@ -2047,18 +2168,19 @@ mod tests {
 
     #[test]
     fn test_bracha_avid_zero_t() {
+        let (s, _) = mpsc::channel(256);
         // t = 0 should always be valid for both Bracha and Avid as long as k >= 1
-        let bracha = Bracha::new(2, 3, 0, 1);
+        let bracha = Bracha::new(2, 3, 0, 1, s.clone());
         assert!(bracha.is_ok(), "Expected t = 0 to be valid for Bracha");
 
-        let avid = Avid::new(2, 5, 0, 1);
+        let avid = Avid::new(2, 5, 0, 1, s.clone());
         assert!(avid.is_ok(), "Expected t = 0 to be valid for Avid");
 
         // n = 3, t = 0, k = 2: valid for both Bracha and Avid
-        let bracha = Bracha::new(2, 3, 0, 2);
+        let bracha = Bracha::new(2, 3, 0, 2, s.clone());
         assert!(bracha.is_ok(), "Expected valid parameters for Bracha");
 
-        let avid = Avid::new(3, 3, 0, 2);
+        let avid = Avid::new(3, 3, 0, 2, s);
         assert!(avid.is_ok(), "Expected valid parameters for Avid");
     }
 }

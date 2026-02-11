@@ -48,6 +48,7 @@ pub enum RbcErrorCode {
     RbcShardError,
     // Session does not exits
     RbcSessionNotFound,
+    RbcSendError,
 }
 
 #[repr(C)]
@@ -75,6 +76,11 @@ pub struct BrachaOpaque {
     _data: (),
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
+#[repr(C)]
+pub struct BrachaOutputReceiverOpaque {
+    _data: (),
+    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
 
 // opaque pointer for Avid
 #[repr(C)]
@@ -83,9 +89,21 @@ pub struct AvidOpaque {
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
 
+#[repr(C)]
+pub struct AvidOutputReceiverOpaque {
+    _data: (),
+    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
+
 // opaque pointer for ABA
 #[repr(C)]
 pub struct AbaOpaque {
+    _data: (),
+    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
+
+#[repr(C)]
+pub struct AbaOutputReceiverOpaque {
     _data: (),
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
@@ -153,6 +171,7 @@ impl From<RbcError> for RbcErrorCode {
             },
             RbcError::SerializationError(_) => RbcErrorCode::RbcSerializationError,
             RbcError::ShardError(_) => RbcErrorCode::RbcShardError,
+            RbcError::SendError => RbcErrorCode::RbcSendError,
         }
     }
 }
@@ -239,19 +258,29 @@ pub extern "C" fn bracha_new(
     n: usize,
     t: usize,
     bracha_pointer: *mut *mut BrachaOpaque,
+    output_rx: *mut *mut BrachaOutputReceiverOpaque,
 ) -> RbcErrorCode {
-    // k is unused in bracha
-    let res = Bracha::new(id, n, t, 0);
-    match res {
-        Ok(b) => {
-            let ptr = Box::into_raw(Box::new(b)) as *mut BrachaOpaque;
-            unsafe {
-                *bracha_pointer = ptr;
-            }
-        }
+    // Create channel for Bracha completion events
+    let (tx, rx) = tokio::sync::mpsc::channel::<SessionId>(256);
+
+    // k is unused in Bracha, pass 0
+    let bracha = match Bracha::new(id, n, t, 0, tx) {
+        Ok(b) => b,
         Err(e) => return e.into(),
+    };
+
+    // Store Bracha
+    let bracha_ptr = Box::into_raw(Box::new(bracha)) as *mut BrachaOpaque;
+
+    // Store Receiver separately
+    let rx_ptr = Box::into_raw(Box::new(rx)) as *mut BrachaOutputReceiverOpaque;
+
+    unsafe {
+        *bracha_pointer = bracha_ptr;
+        *output_rx = rx_ptr;
     }
-    return RbcErrorCode::RbcSuccess;
+
+    RbcErrorCode::RbcSuccess
 }
 
 #[no_mangle]
@@ -502,18 +531,28 @@ pub extern "C" fn avid_new(
     t: usize,
     k: usize,
     avid_pointer: *mut *mut AvidOpaque,
+    output_rx: *mut *mut AvidOutputReceiverOpaque,
 ) -> RbcErrorCode {
-    let res = Avid::new(id, n, t, k);
-    match res {
-        Ok(a) => {
-            let ptr = Box::into_raw(Box::new(a)) as *mut AvidOpaque;
-            unsafe {
-                *avid_pointer = ptr;
-            }
-        }
+    // Create the channel here
+    let (tx, rx) = tokio::sync::mpsc::channel::<SessionId>(256);
+
+    let avid = match Avid::new(id, n, t, k, tx) {
+        Ok(a) => a,
         Err(e) => return e.into(),
+    };
+
+    // Store Avid
+    let avid_ptr = Box::into_raw(Box::new(avid)) as *mut AvidOpaque;
+
+    // Store Receiver separately (opaque)
+    let rx_ptr = Box::into_raw(Box::new(rx)) as *mut AvidOutputReceiverOpaque;
+
+    unsafe {
+        *avid_pointer = avid_ptr;
+        *output_rx = rx_ptr;
     }
-    return RbcErrorCode::RbcSuccess;
+
+    RbcErrorCode::RbcSuccess
 }
 
 #[no_mangle]
@@ -760,18 +799,25 @@ pub extern "C" fn aba_new(
     t: usize,
     k: usize,
     aba_pointer: *mut *mut AbaOpaque,
+    output_rx: *mut *mut AbaOutputReceiverOpaque,
 ) -> RbcErrorCode {
-    let res = ABA::new(id, n, t, k);
-    match res {
-        Ok(a) => {
-            let ptr = Box::into_raw(Box::new(a)) as *mut AbaOpaque;
-            unsafe {
-                *aba_pointer = ptr;
-            }
-        }
+    // Create channel for ABA output events
+    let (tx, rx) = tokio::sync::mpsc::channel::<SessionId>(256);
+
+    let aba = match ABA::new(id, n, t, k, tx) {
+        Ok(a) => a,
         Err(e) => return e.into(),
+    };
+
+    let aba_ptr = Box::into_raw(Box::new(aba)) as *mut AbaOpaque;
+    let rx_ptr = Box::into_raw(Box::new(rx)) as *mut AbaOutputReceiverOpaque;
+
+    unsafe {
+        *aba_pointer = aba_ptr;
+        *output_rx = rx_ptr;
     }
-    return RbcErrorCode::RbcSuccess;
+
+    RbcErrorCode::RbcSuccess
 }
 
 #[no_mangle]

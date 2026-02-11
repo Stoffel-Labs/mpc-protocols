@@ -3,8 +3,8 @@ use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use stoffelnet::network_utils::{ClientId, NetworkError};
-use tokio::{time::error::Elapsed, sync::watch::error::RecvError};
 use thiserror::Error;
+use tokio::{sync::watch::error::RecvError, time::error::Elapsed};
 
 pub mod input;
 
@@ -29,12 +29,9 @@ pub enum InputError {
     #[error("error while waiting for all inputs")]
     WaitingError(#[from] RecvError),
     #[error("client {0:?} did not sent input in time")]
-    Timeout(#[from] Elapsed)
-}
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-pub enum InputMessageType {
-    MaskShare,
-    MaskedInput,
+    Timeout(#[from] Elapsed),
+    #[error("Channel closed")]
+    Abort,
 }
 
 /// Message sent in the Random Double Sharing protocol.
@@ -43,17 +40,11 @@ pub struct InputMessage {
     /// ID of the sender of the message or the client
     pub sender_id: usize,
     /// Type of the message according to the handler.
-    pub msg_type: InputMessageType,
-
     pub payload: Vec<u8>,
 }
 
 impl InputMessage {
-    pub fn new(sender_id: usize, msg_type: InputMessageType, payload: Vec<u8>) -> InputMessage {
-        Self {
-            sender_id,
-            msg_type,
-            payload,
-        }
+    pub fn new(sender_id: usize, payload: Vec<u8>) -> InputMessage {
+        Self { sender_id, payload }
     }
 }

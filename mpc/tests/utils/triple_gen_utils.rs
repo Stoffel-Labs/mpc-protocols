@@ -9,10 +9,12 @@ use stoffelmpc_mpc::{
         triple_gen::triple_generation::TripleGenNode, SessionId, WrappedMessage,
     },
 };
-use stoffelmpc_network::fake_network::FakeNetwork;
+use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+
+use crate::utils::test_utils::fan_in_inboxes;
 
 pub fn create_nodes(
     n_parties: usize,
@@ -96,22 +98,28 @@ pub fn get_triple_init_test_shares(
 /// For the rest of the errors, we panic
 pub fn spawn_receiver_tasks(
     nodes: &[Arc<Mutex<TripleGenNode<Fr>>>],
-    mut receivers: Vec<Receiver<Vec<u8>>>,
-    network: Arc<FakeNetwork>,
+    mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
+    network: Vec<Arc<FakeNetwork>>,
 ) {
-    for node in nodes {
+    for (i, node) in nodes.iter().enumerate() {
         let triple_gen_node = Arc::clone(&node);
-        let mut receiver = receivers.remove(0);
+        let receiver = receivers.remove(0);
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+        let mut merged_rx = fan_in_inboxes(inbox);
 
-        let net_clone = Arc::clone(&network);
+        let net_clone = network[i].clone();
         // spawn tasks to process received messages
         tokio::spawn(async move {
             loop {
-                let msg = match receiver.recv().await {
+                let msg = match merged_rx.recv().await {
                     Some(msg) => msg,
                     None => break,
                 };
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg) {
+                let wrapped: WrappedMessage = match bincode::deserialize(&msg.1) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("Malformed or unrecognized message format.");

@@ -169,6 +169,9 @@ where
             session_id = recv_message.session_id.as_u64(),
             "party {:?} received double shares from {:?}", self.id, recv_message.sender_id,
         );
+        if recv_message.sender_id >= self.n_parties {
+            return Err(DouShaError::InvalidPartyId);
+        }
         dousha_storage.reception_tracker[recv_message.sender_id] = true;
 
         // Check if the protocol has reached an end

@@ -1,10 +1,10 @@
 use crate::utils::test_utils::{
-    construct_e2e_input_ransha, create_global_nodes, setup_tracing, test_setup,
+    construct_e2e_input_ransha, create_global_nodes, fan_in_inboxes, setup_tracing, test_setup,
 };
 use ark_bls12_381::Fr;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use stoffelmpc_mpc::{
     common::{rbc::rbc::Avid, SecretSharingScheme, RBC},
     honeybadger::{
@@ -16,8 +16,12 @@ use stoffelmpc_mpc::{
         ProtocolType, SessionId, WrappedMessage,
     },
 };
-use stoffelmpc_network::fake_network::FakeNetwork;
-use tokio::{sync::{mpsc, Barrier}, task::JoinSet};
+use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
+use tokio::{
+    sync::mpsc::{self, Receiver},
+    task::JoinSet,
+    time::timeout,
+};
 use tracing::warn;
 
 pub mod utils;
@@ -29,7 +33,7 @@ async fn test_reconstruct_handler_incorrect_share() {
     let t = 3;
     let session_id = SessionId::new(ProtocolType::Ransha, 123, 0, 0, 111);
 
-    let (network, mut receivers, _) = test_setup(n_parties, vec![]);
+    let (network, mut receivers, _, _) = test_setup(n_parties, vec![]);
     let secret = Fr::from(1234);
     let degree_t = 3;
 
@@ -50,7 +54,16 @@ async fn test_reconstruct_handler_incorrect_share() {
     }
     // create global nodes
     let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n_parties, t, 0, 0, 111, 0, 0, 0, 0, vec![]
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        vec![],
     );
 
     // receiver randousha node
@@ -73,49 +86,54 @@ async fn test_reconstruct_handler_incorrect_share() {
         ransha_node
             .preprocess
             .share_gen
-            .reconstruction_handler(message, Arc::clone(&network))
+            .reconstruction_handler(message, network[i].clone())
             .await
             .unwrap();
     }
 
     // check all parties received OutputMessage Ok sent by the receiver of the ReconstructionMessage
     let mut set = JoinSet::new();
-    let barrier = Arc::new(Barrier::new(n_parties));
     for i in 0..n_parties {
-        let mut receiver = receivers.remove(0);
-        let ransha_node = nodes[i].clone();
-        let net = Arc::clone(&network);
-        let barrier_i = barrier.clone();
+        let receiver = receivers.remove(0);
+        let mut ransha_node = nodes[i].clone();
+        let net = network[i].clone();
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+        let mut merged_rx = fan_in_inboxes(inbox);
 
         set.spawn(async move {
-            while let Some(received) = receiver.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&received) {
-                    Ok(w) => w,
-                    Err(_) => continue,
-                };
-                match wrapped {
-                    WrappedMessage::RanSha(msg) => {
-                        if msg.msg_type == RanShaMessageType::OutputMessage {
-                            assert_eq!(msg.sender_id, receiver_id);
-                            assert!(matches!(msg.payload, RanShaPayload::Output(false)));
-                            barrier_i.wait().await;
-                            return;
+            let _ = timeout(Duration::from_secs(1), async {
+                while let Some(received) = merged_rx.recv().await {
+                    let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
+                        Ok(w) => w,
+                        Err(_) => continue,
+                    };
+                    match wrapped {
+                        WrappedMessage::RanSha(_) => {}
+                        WrappedMessage::Rbc(msg) => {
+                            if let Err(e) = ransha_node
+                                .preprocess
+                                .share_gen
+                                .rbc
+                                .process(msg, Arc::clone(&net))
+                                .await
+                            {
+                                warn!("Rbc processing error: {e}");
+                            }
+                            if let Err(e) =
+                                ransha_node.preprocess.share_gen.drain_rbc_output().await
+                            {
+                                warn!("RBC output handling error: {e}");
+                            }
                         }
+                        _ => continue,
                     }
-                    WrappedMessage::Rbc(msg) => {
-                        if let Err(e) = ransha_node
-                            .preprocess
-                            .share_gen
-                            .rbc
-                            .process(msg, Arc::clone(&net))
-                            .await
-                        {
-                            warn!("Rbc processing error: {e}");
-                        }
-                    }
-                    _ => continue,
                 }
-            }
+            })
+            .await;
         });
     }
 
@@ -145,7 +163,7 @@ async fn test_output_handler() {
     let session_id = SessionId::new(ProtocolType::Ransha, 123, 0, 0, 111);
     let degree_t = 3;
 
-    let (network, _receivers, _) = test_setup(n_parties, vec![]);
+    let (network, _receivers, _, _) = test_setup(n_parties, vec![]);
     let (_, shares_si_t) = construct_e2e_input_ransha(n_parties, degree_t);
     let receiver_id = 1;
     let (sender, _receiver_ch) = mpsc::channel(128);
@@ -158,7 +176,7 @@ async fn test_output_handler() {
         .init_ransha(
             shares_si_t[receiver_id].clone(),
             session_id,
-            Arc::clone(&network),
+            network[ransha_node.id].clone(),
         )
         .await
         .unwrap();

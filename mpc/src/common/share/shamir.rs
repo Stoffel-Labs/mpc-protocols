@@ -203,7 +203,15 @@ impl<F: FftField> SecretSharingScheme<F> for NonRobustShare<F> {
             GeneralEvaluationDomain::<F>::new(n).ok_or_else(|| ShareError::NoSuitableDomain(n))?;
         let (x_vals, y_vals): (Vec<F>, Vec<F>) = shares
             .iter()
-            .map(|share| (domain.element(share.id), share.share[0]))
+            .map(|s| {
+                if s.id >= n {
+                    Err(ShareError::InvalidInput)
+                } else {
+                    Ok((domain.element(s.id), s.share[0]))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .unzip();
 
         let result_poly = lagrange_interpolate(&x_vals, &y_vals)?;

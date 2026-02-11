@@ -66,7 +66,7 @@ where
         threshold: usize,
         protocol_output: Sender<SessionId>,
     ) -> Result<Self, RandBitError> {
-        let batch_recon_node = BatchReconNode::new(id, n_parties, threshold,threshold)?;
+        let batch_recon_node = BatchReconNode::new(id, n_parties, threshold, threshold)?;
         let mult_node = Multiply::new(id, n_parties, threshold)?;
         Ok(Self {
             id,
@@ -127,7 +127,10 @@ where
             .init(session_id, a, a_copy, mult_triple, network.clone())
             .await?;
 
-        let a_square_share = self.mult_node.wait_for_result(session_id, Duration::from_millis(500)).await?;
+        let a_square_share = self
+            .mult_node
+            .wait_for_result(session_id, Duration::from_millis(500))
+            .await?;
 
         tracing::info!("Multiplication at Rand_bit done: {0:?}", self.id);
 

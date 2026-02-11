@@ -24,7 +24,7 @@ async fn test_triple_gen_e2e() {
     let session_id = SessionId::new(ProtocolType::Triple, 123, 0, 0, 111);
     let (random_shares_a, random_shares_b, randousha_pairs, a_values, b_values, _) =
         get_triple_init_test_shares(n_shares, n_parties, threshold);
-    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
     let (nodes, mut triple_finish_receivers) = create_nodes(n_parties, threshold);
 
     for (i, node) in nodes.iter().enumerate() {
@@ -35,7 +35,7 @@ async fn test_triple_gen_e2e() {
                 random_shares_b[i].clone(),
                 randousha_pairs[i].clone(),
                 session_id,
-                network.clone(),
+                network[i].clone(),
             )
             .await
             .unwrap();

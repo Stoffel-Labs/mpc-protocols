@@ -41,6 +41,8 @@ pub enum RanShaError {
     Abort,
     #[error("waiting for more confirmations")]
     WaitForOk,
+    #[error("Party Id is out of bounds")]
+    InvalidPartyId,
 }
 
 #[derive(Clone, Debug)]

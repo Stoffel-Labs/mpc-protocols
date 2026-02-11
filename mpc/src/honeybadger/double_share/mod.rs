@@ -43,6 +43,8 @@ pub enum DouShaError {
     SendError(#[from] SendError<SessionId>),
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
+    #[error("Party Id is out of bounds")]
+    InvalidPartyId,
 }
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
@@ -67,7 +69,7 @@ impl<F: FftField> DoubleShamirShare<F> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DouShaMessage {
     /// ID of the sender.
-    sender_id: PartyId,
+    pub sender_id: PartyId,
     /// ID of the session.
     pub session_id: SessionId,
     /// Payload of the message.

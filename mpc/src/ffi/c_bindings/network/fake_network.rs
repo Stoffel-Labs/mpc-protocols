@@ -3,13 +3,13 @@ use crate::ffi::c_bindings::{
     ByteSlice, UsizeSlice,
 };
 use std::{collections::HashMap, mem::ManuallyDrop, sync::Arc};
-use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
 use stoffelnet::network_utils::ClientId;
 use tokio::sync::mpsc::Receiver;
 
 // struct that includes receivers of the FakeNetwork
 pub struct FakeNetworkReceivers {
-    pub node_receivers: Vec<Receiver<Vec<u8>>>,
+    pub node_receivers: Vec<Vec<Receiver<Vec<u8>>>>,
     pub client_receivers: HashMap<ClientId, Receiver<Vec<u8>>>,
 }
 
@@ -40,15 +40,21 @@ pub extern "C" fn new_fake_network(
         }
     };
 
-    let (network, node_receivers, client_receivers) = FakeNetwork::new(n_nodes, n_clients, config);
-    // return the receivers
+    // build inner network once
+    let (inner, node_receivers, client_receivers) =
+        FakeInnerNetwork::new(n_nodes, n_clients, config);
+
+    //  return receivers (now 2-D)
     let receivers = FakeNetworkReceivers {
         node_receivers,
         client_receivers,
     };
     unsafe {
         *returned_receivers = Box::into_raw(Box::new(receivers)) as *mut FakeNetworkReceiversOpaque;
-    };
+    }
+    // create network handle for node 0 by default
+    // (C side can clone / create others later if needed)
+    let network = FakeNetwork::new(0, inner);
 
     let network = GenericNetwork::FakeNetwork(Arc::new(network));
 
@@ -58,10 +64,11 @@ pub extern "C" fn new_fake_network(
 #[no_mangle]
 pub extern "C" fn node_receiver_recv_sync(
     receivers: *mut FakeNetworkReceiversOpaque,
-    node_index: usize,
+    to_node: usize,
+    from_node: usize,
 ) -> ByteSlice {
     let receivers = unsafe { &mut *(receivers as *mut FakeNetworkReceivers) };
-    let receiver = &mut receivers.node_receivers[node_index];
+    let receiver = &mut receivers.node_receivers[to_node][from_node];
     let msg = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(receiver.recv());

@@ -8,7 +8,7 @@ use crate::{
         },
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         triple_gen::ShamirBeaverTriple,
-        SessionId, WrappedMessage,
+        SessionId,
     },
 };
 use ark_ff::FftField;
@@ -20,7 +20,10 @@ use std::{
     sync::Arc,
 };
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::Mutex;
+use tokio::sync::{
+    mpsc::{self, Receiver},
+    Mutex,
+};
 use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn};
 
@@ -58,6 +61,16 @@ fn finalize_mul<F: FftField>(storage: &MultStorage<F>) -> Result<Vec<RobustShare
     let mut concatenated_mult2: Vec<F> = concat_sorted(&storage.output_open_mult2);
     concatenated_mult2.extend(openings.1.clone());
 
+    let expected_len = storage.share_mult_from_triple.len();
+    if concatenated_mult1.len() != expected_len
+        || concatenated_mult2.len() != expected_len
+        || storage.inputs.0.len() != expected_len
+        || storage.inputs.1.len() != expected_len
+    {
+        return Err(MulError::InvalidInput(
+            "Inconsistent lengths in finalize_mul".to_string(),
+        ));
+    }
     let mut shares_mult = Vec::with_capacity(storage.share_mult_from_triple.len());
     for (triple_mult, input_a, input_b, subtraction_a, subtraction_b) in izip!(
         &storage.share_mult_from_triple,
@@ -96,6 +109,7 @@ fn reconstruct_rbc<F: FftField>(
     for (id, (a, b)) in received_shares.iter() {
         if a.len() != share_len || b.len() != share_len {
             warn!("Node {} did not send right number of shares to reconstruct using RBC (sent {} for a-x and {} for b-y)", id, a.len(), b.len());
+            continue;
         }
 
         for i in 0..share_len {
@@ -122,12 +136,14 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub mult_storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<MultStorage<F>>>>>>,
     pub batch_recon: BatchReconNode<F>,
     pub rbc: R,
+    pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 impl<F: FftField, R: RBC> Multiply<F, R> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
+        let (rbc_sender, rbc_receiver) = mpsc::channel(200);
         let batch_recon = BatchReconNode::<F>::new(id, n, threshold, threshold)?;
-        let rbc = R::new(id, n, threshold, threshold + 1)?;
+        let rbc = R::new(id, n, threshold, threshold + 1, rbc_sender)?;
         Ok(Self {
             id,
             n,
@@ -135,6 +151,31 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             mult_storage: Arc::new(Mutex::new(HashMap::new())),
             batch_recon,
             rbc,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
+        })
+    }
+    pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {
+        Ok(loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(MulError::Abort);
+                    }
+                }
+            };
+
+            let output = self.rbc.get_store(id).await?;
+            let msg: MultMessage = bincode::deserialize(&output)?;
+
+            match self.open_mult_handler(msg).await {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
         })
     }
     pub async fn clear_store(&self) {
@@ -318,8 +359,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
                 session_id.instance_id(),
             );
 
-            let wrapped =
-                WrappedMessage::Mul(MultMessage::new(self.id, sessionid, bytes_rec_message));
+            let wrapped = MultMessage::new(self.id, sessionid, bytes_rec_message);
             let bytes_wrapped = bincode::serialize(&wrapped)?;
 
             self.rbc
@@ -516,8 +556,11 @@ pub mod tests {
     use ark_ff::UniformRand;
     use ark_std::test_rng;
     use rand::{prelude::SliceRandom, thread_rng};
-    use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-    use tokio::time::{sleep, Duration};
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+    use tokio::{
+        sync::mpsc::{self, Receiver},
+        time::{sleep, Duration},
+    };
 
     async fn construct_input_mul(
         n_parties: usize,
@@ -567,7 +610,21 @@ pub mod tests {
         }
         ((secrets_a, secrets_b, secrets_c), per_party_triples)
     }
+    fn fan_in_inboxes(inboxes: Vec<Receiver<Vec<u8>>>) -> Receiver<(usize, Vec<u8>)> {
+        let (tx, rx) = mpsc::channel(300);
 
+        for (from, mut rx_i) in inboxes.into_iter().enumerate() {
+            let tx_i = tx.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = rx_i.recv().await {
+                    // ignore send errors (receiver dropped)
+                    let _ = tx_i.send((from, msg)).await;
+                }
+            });
+        }
+
+        rx
+    }
     /// `2t+1` nodes send random shares to the client, which reconstructs the random value and
     /// broadcasts the masked input. Some node, which is not one of the `2t+1` has not sent its
     /// random share and receives the masked input before even having called `InputServer::init`.
@@ -655,8 +712,10 @@ pub mod tests {
         }
 
         let config = FakeNetworkConfig::new(500);
-        let (network, mut receivers, _) = FakeNetwork::new(n, None, config);
-        let network = Arc::new(network);
+        let (inner, mut receivers, _) = FakeInnerNetwork::new(n, None, config);
+        let network: Vec<_> = (0..n)
+            .map(|id| Arc::new(FakeNetwork::new(id, inner.clone())))
+            .collect();
 
         let mut nodes: Vec<_> = (0..n)
             .map(|i| Multiply::<Fr, Avid>::new(i, n, t).unwrap())
@@ -681,7 +740,7 @@ pub mod tests {
                         x_inputs_per_node,
                         y_inputs_per_node,
                         beaver_triples,
-                        network
+                        network[i].clone()
                     )
                     .await
                     .is_ok());
@@ -689,31 +748,32 @@ pub mod tests {
         }
 
         // run RBC for masked input and eventually process it
-        for node in nodes.iter_mut() {
+        for (i, node) in nodes.iter_mut().enumerate() {
             let network = network.clone();
             let mut node = node.clone();
-            let mut receiver = receivers.remove(0);
-
+            let receiver = receivers.remove(0);
+            let mut merged_rx = fan_in_inboxes(receiver);
             tokio::spawn(async move {
-                while let Some(raw_msg) = receiver.recv().await {
+                while let Some(raw_msg) = merged_rx.recv().await {
                     let wrapped: WrappedMessage =
-                        bincode::deserialize(&raw_msg).expect("deserialization error");
+                        bincode::deserialize(&raw_msg.1).expect("deserialization error");
 
                     match wrapped {
                         WrappedMessage::BatchRecon(batchrecon_msg) => {
                             node.batch_recon
-                                .process(batchrecon_msg, network.clone())
+                                .process(batchrecon_msg, network[i].clone())
                                 .await
                                 .unwrap();
                         }
                         WrappedMessage::Rbc(rbc_msg) => {
-                            match node.rbc.process(rbc_msg, network.clone()).await {
+                            match node.rbc.process(rbc_msg, network[i].clone()).await {
                                 Ok(()) => {}
                                 Err(RbcError::SessionEnded(_)) => {}
                                 Err(e) => {
                                     panic!("unexpected error during RBC: {e}");
                                 }
                             }
+                            let _ = node.drain_rbc_output().await;
                         }
                         WrappedMessage::Mul(input_msg) => {
                             let _ = node.process(input_msg).await;
@@ -752,7 +812,7 @@ pub mod tests {
                 x_inputs_per_node[node_id].clone(),
                 y_inputs_per_node[node_id].clone(),
                 beaver_triples[node_id].clone(),
-                network
+                network[node_id].clone()
             )
             .await
             .is_ok());

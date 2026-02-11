@@ -101,6 +101,22 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShare<F> {
             return Err(InterpolateError::ShareError(ShareError::DegreeMismatch));
         };
 
+        let mut seen = HashSet::new();
+        if !shares.iter().all(|s| seen.insert(s.id)) {
+            return Err(InterpolateError::InvalidInput(
+                "Duplicate share Ids".to_string(),
+            ));
+        }
+
+        for s in shares {
+            if s.id >= n {
+                return Err(InterpolateError::InvalidInput(format!(
+                    "Share id {} is out of range: expected 0 <= id < n (n = {})",
+                    s.id, n
+                )));
+            }
+        }
+
         let share_len = shares.len();
         if share_len < degree + t + 1 {
             return Err(InterpolateError::InvalidInput(format!(

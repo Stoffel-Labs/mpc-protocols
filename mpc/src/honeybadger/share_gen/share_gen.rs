@@ -4,7 +4,10 @@ use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::{mpsc::Sender, Mutex};
+use tokio::sync::{
+    mpsc::{self, Receiver, Sender},
+    Mutex,
+};
 use tracing::info;
 
 use crate::{
@@ -28,6 +31,7 @@ pub struct RanShaNode<F: FftField, R: RBC> {
     pub threshold: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanShaStore<F>>>>>>,
     pub rbc: R,
+    pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
     pub output_sender: Sender<SessionId>,
 }
 
@@ -43,17 +47,44 @@ where
         k: usize,
         output_sender: Sender<SessionId>,
     ) -> Result<Self, RanShaError> {
-        let rbc = R::new(id, n_parties, threshold, k)?;
+        let (rbc_sender, rbc_receiver) = mpsc::channel(200);
+        let rbc = R::new(id, n_parties, threshold, k, rbc_sender)?;
         Ok(Self {
             id,
             n_parties,
             threshold,
             store: Arc::new(Mutex::new(HashMap::new())),
             rbc,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             output_sender,
         })
     }
 
+    pub async fn drain_rbc_output(&mut self) -> Result<(), RanShaError> {
+        Ok(loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(RanShaError::Abort);
+                    }
+                }
+            };
+
+            let output = self.rbc.get_store(id).await?;
+            let msg: RanShaMessage = bincode::deserialize(&output)?;
+
+            match self.output_handler(msg).await {
+                Ok(()) => {}
+                Err(RanShaError::WaitForOk) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        })
+    }
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
@@ -130,6 +161,10 @@ where
             session_id = msg.session_id.as_u64(),
             "party {:?} received shares from {:?}", self.id, msg.sender_id,
         );
+
+        if msg.sender_id >= self.n_parties {
+            return Err(RanShaError::InvalidPartyId);
+        }
         ransha_storage.reception_tracker[msg.sender_id] = true;
 
         // Check if the protocol has reached an end
@@ -235,12 +270,12 @@ where
                 Err(_) => ok = false,
             }
 
-            let result = WrappedMessage::RanSha(RanShaMessage::new(
+            let result = RanShaMessage::new(
                 self.id,
                 RanShaMessageType::OutputMessage,
                 msg.session_id,
                 RanShaPayload::Output(ok),
-            ));
+            );
             let bytes = bincode::serialize(&result)?;
             let sessionid = SessionId::new(
                 ProtocolType::Ransha,
@@ -304,7 +339,7 @@ where
                 self.receive_shares_handler(msg, network).await?;
                 Ok(())
             }
-            RanShaMessageType::OutputMessage => Ok(self.output_handler(msg).await?),
+            RanShaMessageType::OutputMessage => Ok(()),
             RanShaMessageType::ReconstructMessage => {
                 self.reconstruction_handler(msg, network).await?;
                 Ok(())

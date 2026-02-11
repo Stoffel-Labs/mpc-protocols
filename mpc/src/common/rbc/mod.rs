@@ -49,4 +49,7 @@ pub enum RbcError {
 
     #[error("inner error: {0}")]
     ShardError(#[from] ShardError),
+
+    #[error("error sending the output of the rbc execution")]
+    SendError,
 }

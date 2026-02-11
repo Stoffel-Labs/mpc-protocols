@@ -15,14 +15,14 @@ use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
-use messages::{RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage};
+use messages::{RanDouShaMessage, ReconstructionMessage};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
 };
 use thiserror::Error;
 use tokio::sync::{
-    mpsc::{error::SendError, Sender},
+    mpsc::{self, error::SendError, Receiver, Sender},
     Mutex,
 };
 
@@ -46,7 +46,7 @@ pub enum RanDouShaError {
     #[error("Interpolate error: {0}")]
     InterpolateError(#[from] InterpolateError),
     /// The protocol received an abort signal.
-    #[error("received abort singal")]
+    #[error("received abort signal")]
     Abort,
     /// The party is waiting for confirmations.
     #[error("waiting for more confirmations")]
@@ -55,6 +55,8 @@ pub enum RanDouShaError {
     SendError(#[from] SendError<SessionId>),
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
+    #[error("Share ID and Sender ID doesn't match")]
+    IncorrectID,
 }
 
 /// Storage for the Random Double Sharing protocol.
@@ -118,6 +120,7 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     pub output_sender: Sender<SessionId>,
     ///Avid instance for RBC
     pub rbc: R,
+    pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 impl<F, R> RanDouShaNode<F, R>
@@ -132,7 +135,8 @@ where
         threshold: usize,
         k: usize, // for RBC init
     ) -> Result<Self, RanDouShaError> {
-        let rbc = R::new(id, n_parties, threshold, k)?;
+        let (rbc_sender, rbc_receiver) = mpsc::channel(200);
+        let rbc = R::new(id, n_parties, threshold, k, rbc_sender)?;
         Ok(Self {
             id,
             n_parties,
@@ -140,6 +144,7 @@ where
             store: Arc::new(Mutex::new(BTreeMap::new())),
             output_sender,
             rbc,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
 
@@ -176,6 +181,34 @@ where
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(RanDouShaStore::empty())))
             .clone()
+    }
+
+    pub async fn drain_rbc_output(&mut self) -> Result<(), RanDouShaError> {
+        loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(RanDouShaError::Abort);
+                    }
+                }
+            };
+
+            let output = self.rbc.get_store(id).await?;
+            let msg: RanDouShaMessage = bincode::deserialize(&output)?;
+
+            match self.output_handler(msg).await {
+                Ok(()) => {}
+                Err(RanDouShaError::WaitForOk) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Implements the initialization phase of the Random double share protocol. In particular,
@@ -233,7 +266,6 @@ where
                 reconst_message.serialize_compressed(&mut bytes_rec_message)?;
                 let rds_message = RanDouShaMessage::new(
                     self.id,
-                    RanDouShaMessageType::ReconstructMessage,
                     session_id,
                     RanDouShaPayload::Reconstruct(bytes_rec_message),
                 );
@@ -282,10 +314,13 @@ where
         // one for degree t and one for degree 2t.
         // These shares originate from the *sender* of the message, but they are components of the 'r_j'
 
+        let sender_id = msg.sender_id;
+        if rec_msg.r_share_deg_t.id != sender_id || rec_msg.r_share_deg_2t.id != sender_id {
+            return Err(RanDouShaError::IncorrectID);
+        }
         let binding = self.get_or_create_store(msg.session_id).await;
         let mut store = binding.lock().await;
 
-        let sender_id = msg.sender_id;
         store
             .received_r_shares_degree_t
             .insert(sender_id, rec_msg.r_share_deg_t.clone());
@@ -332,14 +367,10 @@ where
                     && (2 * self.threshold == poly2.degree())
                     && (reconstructed_r_t.1 == reconstructed_r_2t.1);
 
-                let wrapped = WrappedMessage::RanDouSha(RanDouShaMessage::new(
-                    self.id,
-                    RanDouShaMessageType::OutputMessage,
-                    msg.session_id,
-                    RanDouShaPayload::Output(ok),
-                ));
+                let msg =
+                    RanDouShaMessage::new(self.id, msg.session_id, RanDouShaPayload::Output(ok));
 
-                let bytes_wrapped = bincode::serialize(&wrapped)?;
+                let bytes_msg = bincode::serialize(&msg)?;
 
                 // if the verification succeeds, broadcast true (aka. OK)
                 let sessionid = SessionId::new(
@@ -351,7 +382,7 @@ where
                 );
                 self.rbc
                     .init(
-                        bytes_wrapped,
+                        bytes_msg,
                         sessionid, // A unique session id per node
                         Arc::clone(&network),
                     )
@@ -424,15 +455,6 @@ where
     where
         N: Network + Send + Sync,
     {
-        match msg.msg_type {
-            messages::RanDouShaMessageType::OutputMessage => {
-                self.output_handler(msg).await?;
-                return Ok(());
-            }
-            messages::RanDouShaMessageType::ReconstructMessage => {
-                self.reconstruction_handler(msg, network).await?;
-                return Ok(());
-            }
-        }
+        self.reconstruction_handler(msg, network).await
     }
 }
