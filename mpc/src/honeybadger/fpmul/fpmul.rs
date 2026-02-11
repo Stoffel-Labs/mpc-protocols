@@ -1,3 +1,4 @@
+use crate::honeybadger::fpmul::ProtocolState;
 use crate::{
     common::{types::fixed::SecretFixedPoint, RBC},
     honeybadger::{
@@ -9,6 +10,7 @@ use crate::{
     },
 };
 use ark_ff::PrimeField;
+use std::collections::HashMap;
 use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use thiserror::Error;
@@ -45,9 +47,30 @@ where
     pub threshold: usize,
     pub mult_node: Multiply<F, R>,
     pub trunc_node: TruncPrNode<F, R>,
+    pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<FPMulStorage<F>>>>>>,
     pub trunc_output: Arc<Mutex<Receiver<SessionId>>>,
-    pub protocol_output: Option<SecretFixedPoint<F, RobustShare<F>>>,
     pub output_channel: Sender<SessionId>,
+}
+
+#[derive(Debug)]
+pub struct FPMulStorage<F>
+where
+    F: PrimeField,
+{
+    pub protocol_state: ProtocolState,
+    pub protocol_output: Option<SecretFixedPoint<F, RobustShare<F>>>,
+}
+
+impl<F> FPMulStorage<F>
+where
+    F: PrimeField,
+{
+    pub fn empty() -> Self {
+        Self {
+            protocol_state: ProtocolState::NotInitialized,
+            protocol_output: None,
+        }
+    }
 }
 
 impl<F, R> FPMulNode<F, R>
@@ -71,10 +94,22 @@ where
             threshold,
             mult_node,
             trunc_output: Arc::new(Mutex::new(trunc_receiver)),
+            storage: Arc::new(Mutex::new(HashMap::new())),
             trunc_node,
-            protocol_output: None,
             output_channel,
         })
+    }
+
+    pub async fn get_or_create_store(&mut self, session: SessionId) -> Arc<Mutex<FPMulStorage<F>>> {
+        let mut map = self.storage.lock().await;
+        map.entry(session)
+            .or_insert((|| Arc::new(Mutex::new(FPMulStorage::empty())))())
+            .clone()
+    }
+
+    pub async fn clear_store(&self) {
+        let mut store = self.storage.lock().await;
+        store.clear();
     }
 
     pub async fn init<N: Network + Send + Sync + 'static>(
@@ -92,6 +127,12 @@ where
         } else {
             return Err(FPError::IncompatiblePrecision);
         };
+
+        {
+            let store = self.get_or_create_store(session_id).await;
+            let mut store_guard = store.lock().await;
+            store_guard.protocol_state = ProtocolState::Initialized;
+        }
 
         self.mult_node
             .init(
@@ -121,13 +162,15 @@ where
             )
             .await?;
 
+        let fpmul_store = self.get_or_create_store(session_id).await;
+        let mut fpmul_store_guard = fpmul_store.lock().await;
         let mut rx = self.trunc_output.lock().await;
         if let Some(id) = rx.recv().await {
             if id == session_id {
                 let mut trunc_store = self.trunc_node.store.lock().await;
                 let trunc_lock = trunc_store.remove(&id).unwrap();
                 let store = trunc_lock.lock().await;
-                self.protocol_output = Some(SecretFixedPoint::new(
+                fpmul_store_guard.protocol_output = Some(SecretFixedPoint::new(
                     store.share_d.clone().ok_or_else(|| {
                         FPError::TruncPrError(TruncPrError::NotSet(
                             "Output not set for truncation".to_string(),
@@ -135,6 +178,7 @@ where
                     })?,
                 ));
                 self.output_channel.send(session_id).await?;
+                fpmul_store_guard.protocol_state = ProtocolState::Finished;
                 return Ok(());
             }
         }

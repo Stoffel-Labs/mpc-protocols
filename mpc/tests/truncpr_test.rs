@@ -5,13 +5,13 @@ use crate::utils::truncpr_utils::{
 };
 use ark_bls12_381::Fr;
 use ark_ff::One;
-use num_integer::binomial;
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::SecretSharingScheme;
 use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
 use stoffelmpc_mpc::honeybadger::fpmul::ProtocolState;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
+use tracing::info;
 
 mod utils;
 
@@ -20,20 +20,18 @@ async fn truncpr_e2e() {
     setup_tracing();
     let num_parties = 5;
     let threshold = 1;
-    let k = 16;
-    let m = 10;
+    let k = 10;
+    let m = 8;
     let kappa = 20;
-    let nu = f64::log2(binomial(num_parties, threshold) as f64).ceil() as usize;
-    let l = k + kappa + nu;
 
     let session_id = SessionId::new(ProtocolType::Trunc, 123, 0, 0, 111);
 
     // Generate the inputs for the protocol.
-    let (a, a_input_shares) = generate_input_integer(num_parties, threshold);
+    let (a, a_input_shares) = generate_input_integer(num_parties, threshold, k);
     let r_bits = generate_random_shared_bits(num_parties, threshold, m);
-    let r_int = generate_random_shared_int(num_parties, threshold, m);
+    let r_int = generate_random_shared_int(num_parties, threshold, (kappa + k - m) as u64);
 
-    // Build a fake network.
+    // build a fake network.
     let (network, receivers, _) = test_setup(num_parties, vec![]);
 
     let (protocol_out_tx, _protocol_out_rx) = tokio::sync::mpsc::channel(128);
@@ -72,6 +70,8 @@ async fn truncpr_e2e() {
     let (_, result) = RobustShare::recover_secret(&result_shares, num_parties).unwrap();
 
     // Compute the real result.
-    let real_result = a / Fr::from(1 << m);
-    assert!(real_result == result || real_result + Fr::one() == result);
+    let real_result = a / (1 << m);
+    let real_result_field = Fr::from(real_result as u32);
+    info!("real result: {}, result: {}", real_result_field, result);
+    assert!(real_result_field == result || real_result_field + Fr::one() == result);
 }

@@ -10,7 +10,7 @@ use stoffelmpc_mpc::honeybadger::WrappedMessage;
 use stoffelmpc_network::fake_network::FakeNetwork;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
-use tracing::error;
+use tracing::{error, warn};
 
 pub async fn spawn_receiver_tasks<F, R>(
     num_parties: usize,
@@ -35,9 +35,10 @@ where
                     WrappedMessage::Trunc(msg) => {
                         node.process(msg, net.clone()).await.unwrap();
                     }
-                    WrappedMessage::Rbc(msg) => {
-                        node.rbc.process(msg, net.clone()).await.unwrap();
-                    }
+                    WrappedMessage::Rbc(msg) => match node.rbc.process(msg, net.clone()).await {
+                        Ok(()) => {}
+                        Err(e) => warn!("Error processing RBC message: {:?}", e),
+                    },
                     message => {
                         error!("Unexpected message type: {:?}", message)
                     }
@@ -48,6 +49,7 @@ where
     set
 }
 
+/// Generates shares of m random bits.
 pub fn generate_random_shared_bits<F>(
     num_parties: usize,
     threshold: usize,
@@ -70,31 +72,38 @@ where
     shares_bit_all_parties
 }
 
+/// Generates shares of a random integer in the range [0, 2^{k + nu}), where nu = ceil(log(C(n, t)))
 pub fn generate_random_shared_int<F>(
     num_parties: usize,
     threshold: usize,
-    k: usize,
+    k: u64,
 ) -> Vec<RobustShare<F>>
 where
     F: PrimeField,
 {
-    let nu = f64::log2(binomial(num_parties, threshold) as f64).ceil() as usize;
+    let nu = f64::log2(binomial(num_parties, threshold) as f64).ceil() as u64;
     let mut rng = test_rng();
     let rand_int = rng.gen_range(0..(1 << k + nu));
-    let rand_int_field = F::from(rand_int as u32);
+    let rand_int_field = F::from(rand_int as u64);
     let shares =
         RobustShare::compute_shares(rand_int_field, num_parties, threshold, None, &mut rng)
             .unwrap();
     shares
 }
 
-pub fn generate_input_integer<F>(num_parties: usize, threshold: usize) -> (F, Vec<RobustShare<F>>)
+pub fn generate_input_integer<F>(
+    num_parties: usize,
+    threshold: usize,
+    k: usize,
+) -> (u32, Vec<RobustShare<F>>)
 where
     F: PrimeField,
 {
     let mut rng = test_rng();
-    let rand_int = F::rand(&mut rng);
+    let rand_int = rng.gen_range(0..(1 << (k - 1) - 1));
+    let rand_int_field = F::from(rand_int as u32);
     let shares =
-        RobustShare::compute_shares(rand_int, num_parties, threshold, None, &mut rng).unwrap();
+        RobustShare::compute_shares(rand_int_field, num_parties, threshold, None, &mut rng)
+            .unwrap();
     (rand_int, shares)
 }

@@ -30,6 +30,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use async_trait::async_trait;
 use std::fmt;
+use std::fmt::Debug;
 use std::{
     marker::PhantomData,
     ops::{Add, Mul, Sub},
@@ -57,7 +58,7 @@ pub trait SecretSharingScheme<F: FftField>:
     /// Secret type used in the Share
     type SecretType;
 
-    type Error;
+    type Error: Debug;
 
     fn compute_shares(
         secret: Self::SecretType,

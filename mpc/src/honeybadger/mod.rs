@@ -1050,12 +1050,14 @@ where
         let mut rx = self.outputchannels.fpmul_channel.lock().await;
         while let Some(id) = rx.recv().await {
             if id == session_id {
-                let output = self
-                    .type_ops
-                    .fpmul
-                    .protocol_output
-                    .clone()
-                    .ok_or(FPError::Failed)?;
+                let output = {
+                    let storage = self.type_ops.fpmul.get_or_create_store(session_id).await;
+                    let storage_guard = storage.lock().await;
+                    storage_guard
+                        .protocol_output
+                        .clone()
+                        .ok_or(FPError::Failed)?
+                };
 
                 return Ok(output);
             }
