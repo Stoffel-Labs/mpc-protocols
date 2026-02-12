@@ -1,23 +1,31 @@
 pub mod utils;
+use crate::utils::fpmul_utils::{generate_beaver_triple, initialize_nodes, spawn_receiver_tasks};
 use crate::utils::test_utils::{setup_tracing, test_setup};
+use crate::utils::truncpr_utils::{
+    generate_input_integer_z_k, generate_random_shared_bits, generate_random_shared_int,
+};
 use ark_bls12_381::Fr as G;
-use ark_bn254::Fr as F;
-use ark_ff::Field;
+use ark_bn254::{Fr as F, Fr};
+use ark_ff::{Field, One};
 use ark_std::test_rng;
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
+use stoffelmpc_mpc::common::types::fixed::{FixedPointPrecision, SecretFixedPoint};
 use stoffelmpc_mpc::common::{SecretSharingScheme, ShamirShare, RBC};
+use stoffelmpc_mpc::honeybadger::fpmul::fpmul::FPMulNode;
 use stoffelmpc_mpc::honeybadger::fpmul::gf_256::{
     build_all_f_polys_2_8, lagrange_interpolate_f2_8, GF256Domain, GF256,
 };
 use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitDNode;
 use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
+use stoffelmpc_mpc::honeybadger::fpmul::ProtocolState;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::{Robust, RobustShare};
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use tokio::sync::mpsc::{self, Sender};
 use tokio::task::JoinSet;
+use tracing::info;
 
 #[tokio::test]
 async fn test_prandbitd_end_to_end() {
@@ -113,8 +121,9 @@ async fn test_prandbitd_end_to_end() {
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
         let store = binding.lock().await;
-        assert!(
-            store.share_b_2.len() == batch_size,
+        assert_eq!(
+            store.share_b_2.len(),
+            batch_size,
             "Node {:?} missing share_b_2",
             node.id
         );
@@ -143,8 +152,9 @@ async fn test_prandbitd_end_to_end() {
         {
             let store = binding.lock().await;
 
-            assert!(
-                store.share_b_p.len() == batch_size,
+            assert_eq!(
+                store.share_b_p.len(),
+                batch_size,
                 "Node {:?} missing share_b_p",
                 node.id
             );
@@ -460,4 +470,113 @@ async fn test_truncpr_end_to_end() {
         expected,
         expected_plus1
     );
+}
+
+#[tokio::test]
+async fn fpmul_e2e() {
+    setup_tracing();
+    let num_parties = 5;
+    let threshold = 1;
+    let f = 2;
+    let k = 10;
+    let kappa = 10;
+
+    let precision = FixedPointPrecision::new(k, f);
+
+    let session_id = SessionId::new(ProtocolType::FpMul, 123, 0, 0, 111);
+
+    // Build a fake network.
+    let (network, receivers, _) = test_setup(num_parties, vec![]);
+
+    // Create nodes for the protocol.
+    let (protocol_out_tx, _protocol_out_rx) = tokio::sync::mpsc::channel(128);
+    let mut nodes: Vec<FPMulNode<Fr, Avid>> = (0..num_parties)
+        .map(|node_id| {
+            FPMulNode::new(node_id, num_parties, threshold, protocol_out_tx.clone()).unwrap()
+        })
+        .collect();
+
+    // Generate inputs for the protocol.
+    let (a, a_input_int_shares) = generate_input_integer_z_k(num_parties, threshold, k);
+    let (b, b_input_int_shares) = generate_input_integer_z_k(num_parties, threshold, k);
+
+    assert_eq!(
+        a_input_int_shares.len(),
+        num_parties,
+        "Incorrect number of a inputs"
+    );
+    assert_eq!(
+        b_input_int_shares.len(),
+        num_parties,
+        "Incorrect number of b inputs"
+    );
+
+    let mut a_input_shares = Vec::with_capacity(num_parties);
+    let mut b_input_shares = Vec::with_capacity(num_parties);
+    for share in a_input_int_shares.iter() {
+        a_input_shares.push(SecretFixedPoint::new_with_precision(
+            share.clone(),
+            precision.clone(),
+        ));
+    }
+    for share in b_input_int_shares.iter() {
+        b_input_shares.push(SecretFixedPoint::new_with_precision(
+            share.clone(),
+            precision.clone(),
+        ));
+    }
+
+    let r_bits_shares = generate_random_shared_bits(num_parties, threshold, f);
+    let r_int_shares =
+        generate_random_shared_int(num_parties, threshold, (kappa + 2 * k - f) as u64);
+    let mult_triple = generate_beaver_triple(num_parties, threshold);
+
+    info!("kappa + 2 * k - f: {}", kappa + 2 * k - f);
+
+    // Spawn the receiver tasks to forward the messages.
+    let _set = spawn_receiver_tasks(num_parties, receivers, nodes.clone(), network.clone()).await;
+
+    // Initialize the nodes.
+    let mut init_set = initialize_nodes(
+        num_parties,
+        a_input_shares,
+        b_input_shares,
+        mult_triple,
+        r_bits_shares,
+        r_int_shares,
+        session_id,
+        nodes.clone(),
+        network.clone(),
+    )
+    .await;
+
+    while let Some(init_task) = init_set.join_next().await {
+        init_task.unwrap();
+    }
+
+    // Wait for all the protocols to finish.
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    // Compute the expected result.
+    let mult = a * b;
+    let trunc_mult = mult >> f;
+    let expected_result = Fr::from(trunc_mult);
+    let expected_result_plus_one = Fr::from((trunc_mult + 1) as u64);
+
+    // Reconstruct the output from the protocol.
+    let mut result_shares = Vec::with_capacity(num_parties);
+    for node in &mut nodes {
+        let storage = node.get_or_create_store(session_id).await;
+        let storage_guard = storage.lock().await;
+        assert_eq!(storage_guard.protocol_state, ProtocolState::Finished);
+        let output_share = storage_guard.protocol_output.clone().unwrap();
+        result_shares.push(output_share.value().clone());
+    }
+
+    let (_, result) = RobustShare::recover_secret(&result_shares, num_parties).unwrap();
+    info!(
+        "expected: {}, result: {}, a: {}, b: {}",
+        expected_result, result, a, b
+    );
+    assert!(expected_result == result || expected_result_plus_one == result);
 }

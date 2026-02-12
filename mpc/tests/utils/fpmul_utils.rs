@@ -93,26 +93,6 @@ where
     init_set
 }
 
-pub fn generate_random_input<F, S>(
-    num_parties: usize,
-    threshold: usize,
-    k: usize,
-) -> (u32, Vec<SecretFixedPoint<F, S>>)
-where
-    F: FftField + PrimeField,
-    S: SecretSharingScheme<F, SecretType = F>,
-{
-    let mut rng = test_rng();
-    let rand_int = rng.gen_range(0..(1 << k));
-    let rand_int_field = F::from(rand_int as u32);
-    let shares = S::compute_shares(rand_int_field, num_parties, threshold, None, &mut rng).unwrap();
-    let fp_shares = shares
-        .into_iter()
-        .map(|s| SecretFixedPoint::new(s))
-        .collect();
-    (rand_int, fp_shares)
-}
-
 pub fn generate_beaver_triple<F>(num_parties: usize, threshold: usize) -> Vec<ShamirBeaverTriple<F>>
 where
     F: FftField + PrimeField,

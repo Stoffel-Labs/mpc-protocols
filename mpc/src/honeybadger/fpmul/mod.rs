@@ -280,21 +280,29 @@ impl<F: PrimeField> TruncPrStore<F> {
 
 // ---------- helpers ----------
 
-pub fn pow2_f<F: PrimeField>(e: usize) -> F {
-    F::from(2u64).pow(&[e as u64])
+/// Computes `2^e` in the field.
+pub fn pow_2_power<F: PrimeField>(e: u64) -> F {
+    F::from(2u64).pow(&[e])
 }
 
-pub fn mod_pow2_from_field<F: PrimeField>(x: F, m: usize) -> F {
+/// Computes `x mod 2^m` in the field. This is another way to say that all the bits above the `m`-th
+/// bit will be set to zero.
+pub fn mod_pow_2_from_field<F: PrimeField>(x: F, m: usize) -> F {
     let bigint = x.into_bigint();
     let mut bytes = bigint.to_bytes_le();
 
-    // Zero out any bits above m
     let full_bytes = m / 8;
     let extra_bits = m % 8;
 
+    let usable_bytes = if extra_bits == 0 {
+        full_bytes
+    } else {
+        full_bytes + 1
+    };
+
     // Truncate extra bytes
-    if bytes.len() > full_bytes {
-        bytes.truncate(full_bytes + 1);
+    if bytes.len() > usable_bytes {
+        bytes.truncate(usable_bytes);
     }
 
     if extra_bits > 0 && !bytes.is_empty() {
@@ -302,6 +310,6 @@ pub fn mod_pow2_from_field<F: PrimeField>(x: F, m: usize) -> F {
         bytes[full_bytes] &= mask;
     }
 
-    // Interpret as an integer modulo q, return as field element
+    // Interpret as an integer modulo q and return it as a field element.
     F::from_le_bytes_mod_order(&bytes)
 }

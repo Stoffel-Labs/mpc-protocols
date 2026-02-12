@@ -82,16 +82,20 @@ where
     F: PrimeField,
 {
     let nu = f64::log2(binomial(num_parties, threshold) as f64).ceil() as u64;
+    let bin_coeff = binomial(num_parties, threshold);
     let mut rng = test_rng();
-    let rand_int = rng.gen_range(0..(1 << k + nu));
-    let rand_int_field = F::from(rand_int as u64);
+    let mut rand_value = F::zero();
+    for _ in 0..bin_coeff {
+        let rand_int: u64 = rng.gen_range(0..(1 << k));
+        rand_value = rand_value + F::from(rand_int);
+    }
     let shares =
-        RobustShare::compute_shares(rand_int_field, num_parties, threshold, None, &mut rng)
-            .unwrap();
+        RobustShare::compute_shares(rand_value, num_parties, threshold, None, &mut rng).unwrap();
     shares
 }
 
-pub fn generate_input_integer<F>(
+/// Generates shares of a random integer in the range `[0, 2^{k - 1} - 1)`.
+pub fn generate_input_integer_z_k<F>(
     num_parties: usize,
     threshold: usize,
     k: usize,
@@ -100,7 +104,7 @@ where
     F: PrimeField,
 {
     let mut rng = test_rng();
-    let rand_int = rng.gen_range(0..(1 << (k - 1) - 1));
+    let rand_int = rng.gen_range(0..((1 << (k - 1)) - 1));
     let rand_int_field = F::from(rand_int as u32);
     let shares =
         RobustShare::compute_shares(rand_int_field, num_parties, threshold, None, &mut rng)

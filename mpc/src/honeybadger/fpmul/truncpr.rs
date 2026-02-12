@@ -1,14 +1,16 @@
 use crate::honeybadger::fpmul::ProtocolState;
+use crate::honeybadger::mul::concat_sorted;
 use crate::{
     common::{ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
-        fpmul::{mod_pow2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore},
+        fpmul::{mod_pow_2_from_field, pow_2_power, TruncPrError, TruncPrMessage, TruncPrStore},
         robust_interpolate::robust_interpolate::RobustShare,
         SessionId, WrappedMessage,
     },
 };
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use itertools::sorted;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use tokio::sync::{mpsc::Sender, Mutex};
@@ -89,17 +91,17 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         s.protocol_state = ProtocolState::Initialized;
 
         // b = 2^{k-1} + [a]   (2^{k-1} is a public constant in the field)
-        let b = (a + pow2_f::<F>(k - 1))?;
+        let b = (a + pow_2_power::<F>((k - 1) as u64))?;
 
         // [r'] = sum_{i=0}^{m-1} 2^i [r_i]
         let mut r_dash = RobustShare::new(F::zero(), self.id, self.t);
         for (i, bit_share) in r_bits.iter().take(m).enumerate() {
-            r_dash = (r_dash + (bit_share.clone() * pow2_f::<F>(i))?)?;
+            r_dash = (r_dash + (bit_share.clone() * pow_2_power::<F>(i as u64))?)?;
         }
         s.r_dash = Some(r_dash.clone());
         drop(s);
         // [r] = 2^m [r''] + [r']
-        let r = ((r_int * pow2_f::<F>(m))? + r_dash)?;
+        let r = ((r_int * pow_2_power::<F>(m as u64))? + r_dash)?;
 
         // share of (b + r)
         let open_share = (b + r)?;
@@ -139,11 +141,11 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         let store = self.get_or_create_store(msg.session_id).await;
         let mut s = store.lock().await;
 
-        // Deserialize incoming share of (b + r)
+        // Deserialize incoming share of (b + r).
         let share_i: RobustShare<F> =
             CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 
-        // dedup
+        // Deduplicate.
         if s.open_buf.contains_key(&msg.sender_id) {
             return Err(TruncPrError::Duplicate(msg.sender_id));
         }
@@ -156,7 +158,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
             // c' = c mod 2^m  (public integer)
             let m = s.m;
-            let c_mod = mod_pow2_from_field::<F>(c, m);
+            let c_mod = mod_pow_2_from_field::<F>(c, m);
 
             // [a'] = c' - [r']  (work in the field; lift c' into F)
             let r_dash = s
@@ -170,7 +172,9 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
                 .share_a
                 .clone()
                 .ok_or(TruncPrError::NotSet("share_a".to_string()))?;
-            let inv_2m = pow2_f::<F>(m).inverse().expect("2^m invertible mod q");
+            let inv_2m = pow_2_power::<F>(m as u64)
+                .inverse()
+                .expect("2^m is invertible mod q");
             let d = ((a - a_prime)? * inv_2m)?;
 
             s.share_d = Some(d);
