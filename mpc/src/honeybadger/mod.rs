@@ -693,23 +693,23 @@ where
                     ));
                 }
                 match rs_msg.session_id.calling_protocol() {
-
-                Some(ProtocolType::Ransha) => {
-                    self.preprocess.share_gen.process(rs_msg, net).await?
+                    Some(ProtocolType::Ransha) => {
+                        self.preprocess.share_gen.process(rs_msg, net).await?
+                    }
+                    Some(ProtocolType::RanShaSmallField) => {
+                        self.preprocess
+                            .small_field_share_gen
+                            .process(rs_msg, net)
+                            .await?
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in RANSHA",
+                            rs_msg.session_id
+                        );
+                    }
                 }
-                Some(ProtocolType::RanShaSmallField) => {
-                    self.preprocess
-                        .small_field_share_gen
-                        .process(rs_msg, net)
-                        .await?
-                }
-                _ => {
-                    warn!(
-                        "Unknown protocol ID in session ID: {:?} in RANSHA",
-                        rs_msg.session_id
-                    );
-                }}
-                },
+            }
             WrappedMessage::Dousha(ds_msg) => {
                 if ds_msg.session_id.instance_id() != self.params.instance_id {
                     return Err(HoneyBadgerError::InstanceIdError(
