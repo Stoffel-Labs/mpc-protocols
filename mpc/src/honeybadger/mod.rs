@@ -801,30 +801,6 @@ where
                 }
             }
             WrappedMessage::Output(_) => error!("Incorrect message recieved at process function"),
-            WrappedMessage::Avss(avss_message) => {
-                match avss_message.session_id.calling_protocol() {
-                    Some(avss_mpc::ProtocolType::Avss) => {
-                        self.preprocess
-                            .share_gen_avss
-                            .avss
-                            .process(avss_message)
-                            .await?;
-                    }
-                    Some(protocol) => {
-                        warn!(
-                            "Unknown protocol ID in session ID: {:?} at truncation - Protocol Type: {:?}",
-                            avss_message.session_id,
-                            protocol,
-                        );
-                    }
-                    None => {
-                        error!(
-                            "There is no calling protocol in session ID {:?}",
-                            avss_message.session_id
-                        );
-                    }
-                }
-            }
         }
 
         Ok(())
