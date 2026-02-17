@@ -112,7 +112,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         let wrapped = WrappedMessage::Trunc(TruncPrMessage::new(self.id, session, payload));
         let bytes_wrapped = bincode::serialize(&wrapped)?;
 
-        let sessionid = SessionId::new(
+        let session_id_rbc = SessionId::new(
             calling_proto,
             SessionId::pack_slot24(session.exec_id(), 0, self.id as u8),
             session.instance_id(),

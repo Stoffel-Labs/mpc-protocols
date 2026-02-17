@@ -1,3 +1,5 @@
+use crate::avss_mpc::AvssSessionId;
+use crate::common::ProtocolSessionId;
 use crate::{
     common::{
         share::{
@@ -7,10 +9,7 @@ use crate::{
         },
         ShamirShare, RBC,
     },
-    honeybadger::{
-        share_gen::{RanShaError, RanShaState},
-        SessionId,
-    },
+    honeybadger::share_gen::{RanShaError, RanShaState},
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -24,20 +23,20 @@ use tokio::sync::{
 use tracing::info;
 
 #[derive(Clone, Debug)]
-pub struct RanShaAvssNode<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
+pub struct RanShaAvssNode<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanShaAvssStore<F, G>>>>>>,
+    pub store: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<RanShaAvssStore<F, G>>>>>>,
     pub avss: AvssNode<F, R, G>,
     pub rbc: R,
-    pub output_sender: Sender<SessionId>,
-    pub avss_output: Arc<Mutex<Receiver<SessionId>>>,
+    pub output_sender: Sender<AvssSessionId>,
+    pub avss_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct RanShaAvssStore<F: FftField, G: CurveGroup<ScalarField = F>> {
-    pub initial_shares: HashMap<usize, FeldmanShamirShare<F, G>>,
+    pub initial_shares: HashMap<usize, Vec<FeldmanShamirShare<F, G>>>,
     pub reception_tracker: Vec<bool>,
     pub computed_r_shares: Vec<FeldmanShamirShare<F, G>>,
     pub state: RanShaState,
@@ -59,7 +58,7 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> RanShaAvssStore<F, G> {
 impl<F, R, C> RanShaAvssNode<F, R, C>
 where
     F: FftField,
-    R: RBC,
+    R: RBC<Id = AvssSessionId>,
     C: CurveGroup<ScalarField = F> + Send + Sync,
 {
     pub fn new(
@@ -69,7 +68,7 @@ where
         k: usize,
         sk_i: F,
         pk_map: Arc<Vec<C>>,
-        output_sender: Sender<SessionId>,
+        output_sender: Sender<AvssSessionId>,
     ) -> Result<Self, RanShaError> {
         let rbc = R::new(id, n_parties, threshold, k)?;
         let (avss_sender, avss_receiver) = mpsc::channel(128);
@@ -88,7 +87,7 @@ where
 
     pub async fn get_or_create_store(
         &mut self,
-        session_id: SessionId,
+        session_id: AvssSessionId,
     ) -> Arc<Mutex<RanShaAvssStore<F, C>>> {
         let mut storage = self.store.lock().await;
         storage
@@ -97,7 +96,7 @@ where
             .clone()
     }
 
-    pub async fn output(&mut self, session_id: SessionId) -> Vec<FeldmanShamirShare<F, C>> {
+    pub async fn output(&mut self, session_id: AvssSessionId) -> Vec<FeldmanShamirShare<F, C>> {
         let mut share_store = self.store.lock().await;
         let store_lock = share_store.remove(&session_id).unwrap();
         let store = store_lock.lock().await;
@@ -106,7 +105,8 @@ where
 
     pub async fn init<N, G>(
         &mut self,
-        session_id: SessionId,
+        secrets: Vec<F>,
+        session_id: AvssSessionId,
         rng: &mut G,
         network: Arc<N>,
     ) -> Result<(), RanShaError>
@@ -115,17 +115,9 @@ where
         G: Rng + Send,
     {
         info!("Receiving init for share from {0:?}", self.id);
-        let secret = F::rand(rng);
 
-        let avss_sessionid = SessionId::new(
-            session_id.calling_protocol().unwrap(),
-            session_id.exec_id(),
-            self.id as u8,
-            session_id.round_id(),
-            session_id.instance_id(),
-        );
         self.avss
-            .init(secret, avss_sessionid, rng, network.clone())
+            .init(secrets, session_id, rng, network.clone())
             .await?;
 
         while let Some(id) = {
@@ -155,17 +147,18 @@ where
                     .all(|&received| received)
                 {
                     ransha_storage.state = RanShaState::FinishedInitialSharing;
-                    let mut shares_deg_t: Vec<(usize, FeldmanShamirShare<F, C>)> = ransha_storage
-                        .initial_shares
-                        .iter()
-                        .map(|(sid, s)| (*sid, s.clone()))
-                        .collect();
+                    let mut shares_deg_t: Vec<(usize, Vec<FeldmanShamirShare<F, C>>)> =
+                        ransha_storage
+                            .initial_shares
+                            .iter()
+                            .map(|(sid, s)| (*sid, s.clone()))
+                            .collect();
                     drop(ransha_storage);
                     // sort by sender_id
                     shares_deg_t.sort_by_key(|(sid, _)| *sid);
 
                     // drop the ids, keep only shares
-                    let shares_deg_t: Vec<FeldmanShamirShare<F, C>> =
+                    let shares_deg_t: Vec<Vec<FeldmanShamirShare<F, C>>> =
                         shares_deg_t.into_iter().map(|(_, s)| s).collect();
                     self.ransha_gen(shares_deg_t, session_id).await?;
                     break;
@@ -183,7 +176,7 @@ where
     pub async fn ransha_gen(
         &mut self,
         shares_deg_t: Vec<FeldmanShamirShare<F, C>>,
-        session_id: SessionId,
+        session_id: AvssSessionId,
     ) -> Result<(), RanShaError> {
         info!(
             "party {:?} received shares for Random sharing generation",

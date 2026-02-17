@@ -1,5 +1,9 @@
+use crate::avss_mpc::AvssSessionId;
+pub(crate) use crate::common::share::feldman::FeldmanShamirShare;
+use crate::common::share::ShareError;
+use crate::common::{ProtocolSessionId, RbcWrapFn};
 use crate::{
-    common::{rbc::RbcError, share::shamir::Shamirshare, SecretKey, RBC},
+    common::{rbc::RbcError, share::shamir::Shamirshare, SecretKey, SecretSharingScheme, RBC},
     honeybadger::{SessionId, WrappedMessage},
 };
 use ark_ec::CurveGroup;
@@ -16,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;
 
@@ -42,25 +47,10 @@ pub enum AvssError {
     #[error("share error")]
     ShareError(#[from] crate::common::share::ShareError),
     #[error("send error")]
-    SendError(#[from] tokio::sync::mpsc::error::SendError<SessionId>),
+    SendError,
 }
 
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct FeldmanShamirShare<F: FftField, G: CurveGroup<ScalarField = F>> {
-    pub feldmanshare: Shamirshare<F>,
-    pub commitments: Vec<G>,
-}
-
-impl<F: FftField, G: CurveGroup<ScalarField = F>> FeldmanShamirShare<F, G> {
-    pub fn new(share: F, id: usize, degree: usize, commitments: Vec<G>) -> Self {
-        let shamirshare = Shamirshare::new(share, id, degree);
-        FeldmanShamirShare {
-            feldmanshare: shamirshare,
-            commitments: commitments,
-        }
-    }
-}
-impl<F, G> SecretKey<F,Shamirshare<F>,G> for FeldmanShamirShare<F, G>
+impl<F, G> SecretKey<F, Shamirshare<F>, G> for FeldmanShamirShare<F, G>
 where
     F: FftField,
     G: CurveGroup<ScalarField = F>,
@@ -94,7 +84,6 @@ where
         Self {
             sender_id: sender,
             session_id,
-            shares,
             dealer_pk,
             encrypted_shares,
         }
@@ -157,31 +146,32 @@ fn decrypt(key32: [u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>, AvssError> {
         .map_err(|_| AvssError::InvalidShare)
 }
 
+pub type AvssWrapFn<Id> =
+    Arc<dyn Fn(AvssMessage<Id>) -> Result<Vec<u8>, RbcError> + Send + Sync + 'static>;
+
 #[derive(Clone)]
-pub struct AvssNode<F, R, G, Id>
+pub struct AvssNode<F, R, G>
 where
     F: FftField,
-    R: RBC,
+    R: RBC<Id = AvssSessionId>,
     G: CurveGroup<ScalarField = F>,
-    Id: ProtocolSessionId,
 {
     pub id: PartyId,
     pub n_parties: usize,
     pub t: usize,
     pub sk_i: F,
     pub pk_map: Arc<Vec<G>>,
-    pub shares: Arc<Mutex<BTreeMap<Id, Option<Vec<FeldmanShamirShare<F, G>>>>>>,
+    pub shares: Arc<Mutex<BTreeMap<AvssSessionId, Option<Vec<FeldmanShamirShare<F, G>>>>>>,
     pub rbc: R,
-    pub output_sender: Sender<Id>,
-    pub wrapper: AvssWrapFn<Id>,
+    pub output_sender: Sender<AvssSessionId>,
+    pub wrapper: AvssWrapFn<AvssSessionId>,
 }
 
-impl<F, R, G, Id> std::fmt::Debug for AvssNode<F, R, G, Id>
+impl<F, R, G> std::fmt::Debug for AvssNode<F, R, G>
 where
     F: FftField,
-    R: RBC + std::fmt::Debug,
+    R: RBC<Id = AvssSessionId> + std::fmt::Debug,
     G: CurveGroup<ScalarField = F>,
-    Id: ProtocolSessionId,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AvssNode")
@@ -195,12 +185,11 @@ where
     }
 }
 
-impl<F, R, G, Id> AvssNode<F, R, G, Id>
+impl<F, R, G> AvssNode<F, R, G>
 where
     F: FftField,
-    R: RBC<Id = Id>,
+    R: RBC<Id = AvssSessionId>,
     G: CurveGroup<ScalarField = F>,
-    Id: ProtocolSessionId,
 {
     pub fn new(
         id: PartyId,
@@ -208,9 +197,9 @@ where
         t: usize,
         sk_i: F,
         pk_map: Arc<Vec<G>>,
-        output_sender: Sender<Id>,
-        rbc_wrapper: RbcWrapFn<Id>,
-        avss_wrapper: AvssWrapFn<Id>,
+        output_sender: Sender<AvssSessionId>,
+        rbc_wrapper: RbcWrapFn<AvssSessionId>,
+        avss_wrapper: AvssWrapFn<AvssSessionId>,
     ) -> Result<Self, AvssError> {
         let rbc = R::new(id, n_parties, t, t + 1, rbc_wrapper)?;
         Ok(Self {
@@ -229,7 +218,7 @@ where
     pub async fn init<Rnd, N>(
         &mut self,
         secrets: Vec<F>,
-        session_id: Id,
+        session_id: AvssSessionId,
         rng: &mut Rnd,
         net: Arc<N>,
     ) -> Result<(), AvssError>
@@ -280,7 +269,7 @@ where
         //Broadcast to servers
         let msg = AvssMessage {
             sender_id: self.id,
-            session_id: session_id,
+            session_id,
             dealer_pk: pk_d_bytes,
             encrypted_shares: encrypted,
         };
@@ -291,7 +280,7 @@ where
         Ok(())
     }
 
-    pub async fn process(&mut self, msg: AvssMessage<Id>) -> Result<(), AvssError> {
+    pub async fn process(&mut self, msg: AvssMessage<AvssSessionId>) -> Result<(), AvssError> {
         info!(
             party_id = ?self.id,
             session_id = msg.session_id.as_u64(),

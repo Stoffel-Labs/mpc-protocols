@@ -212,11 +212,11 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         let batch_size = store
             .batch_size
             .ok_or_else(|| PRandError::NotSet("Batch size not set at RISS handler".to_string()))?;
-        let total_tsets = store.no_of_tsets.ok_or_else(|| {
-            PRandError::NotSet(format!("No of T sets not set {:?}", calling_proto))
-        })?;
 
         // Check if I have all the shares r_T for all the T sets. If not, we must wait.
+        let total_t_sets = store.no_of_tsets.ok_or_else(|| {
+            PRandError::NotSet(format!("No of T sets not set {:?}", calling_proto))
+        })?;
         if store.r_t.len() == total_t_sets {
             info!(node_id = self.id, "Constructing Polynomials");
 

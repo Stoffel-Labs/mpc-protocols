@@ -16,12 +16,9 @@ pub mod math;
 
 pub mod types;
 
-use crate::{
-    common::{
-        rbc::{rbc_store::Msg, RbcError},
-        share::ShareError,
-    },
-    honeybadger::SessionId,
+use crate::common::{
+    rbc::{rbc_store::Msg, RbcError},
+    share::ShareError,
 };
 use ark_ec::CurveGroup;
 use ark_ff::{FftField, Zero};
@@ -298,7 +295,7 @@ pub trait RBC: Send + Sync {
 /// Given an underlying secret sharing protocol and a reliable broadcast protocol,
 /// you can define an MPC protocol.
 #[async_trait]
-pub trait MPCProtocol<F, S, N>
+pub trait MPCProtocol<F, S, N, G>
 where
     F: FftField,
     S: SecretSharingScheme<F>,
@@ -312,8 +309,6 @@ where
         id: PartyId,
         params: Self::MPCOpts,
         input_ids: Vec<ClientId>,
-        sk_i: F,
-        pk_map: Arc<Vec<G>>,
     ) -> Result<Self, Self::Error>
     where
         Self: Sized;
@@ -452,21 +447,12 @@ where
     /// PUBLIC SCALAR MULTIPLICATION PROTOCOL
     ///
     /// Computes pk = sk_shared * G  (G is public)
-    async fn scalar_mul_basepoint(
-        &mut self,
-        sk_shared: S,
-    ) -> Result<G, Self::Error>;
+    async fn scalar_mul_basepoint(&mut self, sk_shared: S) -> Result<G, Self::Error>;
 
-    async fn open_point(
-        &self,
-        point: Vec<G>,
-        net: Arc<N>,
-    ) -> Result<G, Self::Error>;
-
+    async fn open_point(&self, point: Vec<G>, net: Arc<N>) -> Result<G, Self::Error>;
 }
 
 /// A protocol identifier that fits into 8 bits.
-///
 pub trait ProtocolTag:
     Copy + Clone + Eq + Ord + std::hash::Hash + Send + Sync + fmt::Debug
 {

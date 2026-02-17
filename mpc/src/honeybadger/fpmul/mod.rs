@@ -1,3 +1,4 @@
+use crate::honeybadger::mul::MulError;
 use crate::{
     common::{lagrange_interpolate, rbc::RbcError, share::ShareError},
     honeybadger::{

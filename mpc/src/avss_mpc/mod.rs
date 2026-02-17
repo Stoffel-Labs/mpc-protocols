@@ -232,7 +232,7 @@ impl SubProtocolCounters {
 }
 
 #[async_trait]
-impl<F, R, N, G> MPCProtocol<F, FeldmanShamirShare<F, G>, N> for AdkgNode<F, R, G>
+impl<F, R, N, G> MPCProtocol<F, FeldmanShamirShare<F, G>, N, G> for AdkgNode<F, R, G>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
@@ -386,7 +386,7 @@ where
 }
 
 #[async_trait]
-impl<F, R, N, C> PreprocessingMPCProtocol<F, FeldmanShamirShare<F, C>, N> for AdkgNode<F, R, C>
+impl<F, R, N, C> PreprocessingMPCProtocol<F, FeldmanShamirShare<F, C>, N, C> for AdkgNode<F, R, C>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
@@ -653,12 +653,12 @@ impl ProtocolSessionId for AvssSessionId {
         ProtocolType::from_u8(val)
     }
 
-    fn slot24(self) -> u32 {
-        ((self.0 >> 32) & 0xFF_FFFF) as u32
-    }
-
     fn instance_id(self) -> u32 {
         self.0 as u32
+    }
+
+    fn slot24(self) -> u32 {
+        ((self.0 >> 32) & 0xFF_FFFF) as u32
     }
 
     fn as_u64(self) -> u64 {

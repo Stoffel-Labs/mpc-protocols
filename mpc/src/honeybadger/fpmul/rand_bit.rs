@@ -16,7 +16,6 @@
 //! this protocol is secure.
 
 use crate::common::share::ShareError;
-use crate::common::RBC;
 use crate::common::{ProtocolSessionId, RBC};
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
 use crate::honeybadger::batch_recon::BatchReconError;
@@ -34,7 +33,6 @@ use std::collections::HashMap;
 use std::ops::{Add, Mul};
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::mpsc::Sender;
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::Sender;
@@ -72,6 +70,10 @@ pub enum RandBitError {
     SenderError(#[from] SendError<SessionId>),
     #[error("the session ID has not been set")]
     SessionIdNotSet,
+    #[error("unknown calling protocol in session ID {0:?}")]
+    SessionIdError(SessionId),
+    #[error("storage limit exceeded: {0}")]
+    LimitError(String),
 }
 
 /// A message sent in the RandBit protocol.
@@ -228,9 +230,10 @@ where
 
         assert!(session_id.calling_protocol().is_some());
 
-
         if a_shares.len() != mult_triples.len() {
-            error!("The length of the array a is not the same as the number of multiplication triples");
+            error!(
+                "The length of the array a is not the same as the number of multiplication triples"
+            );
             return Err(RandBitError::Incompatible);
         }
 

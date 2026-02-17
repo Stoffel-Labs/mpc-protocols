@@ -8,6 +8,7 @@ use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 
+use crate::avss_mpc::AvssSessionId;
 use crate::{
     common::{
         rbc::RbcError,
@@ -55,6 +56,8 @@ pub enum RanShaError {
     SessionIdError(SessionId),
     #[error("limit reached")]
     LimitError,
+    #[error("Send error in AVSS protocol: {0:?}")]
+    AvssSendError(#[from] SendError<AvssSessionId>),
 }
 
 #[derive(Clone, Debug)]

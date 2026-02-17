@@ -27,7 +27,9 @@ pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
 
+use crate::avss_mpc::{self, AvssSessionId};
 use crate::common::math::goldilocks::GoldilocksField;
+use crate::common::{ProtocolSessionId, ProtocolTag};
 use crate::honeybadger::fpmul::rand_bit::{RandBitError, RandBitMessage};
 use crate::{
     common::{
@@ -252,7 +254,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>
 pub struct OutputChannels {
     pub share_gen_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub share_gen_small_field_channel: Arc<Mutex<Receiver<SessionId>>>,
-    pub share_gen_avss_channel: Arc<Mutex<Receiver<SessionId>>>,
+    pub share_gen_avss_channel: Arc<Mutex<Receiver<AvssSessionId>>>,
     pub dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
     pub triple_channel: Arc<Mutex<Receiver<SessionId>>>,
@@ -398,7 +400,7 @@ where
 }
 
 #[async_trait]
-impl<F, R, N, G> MPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R, G>
+impl<F, R, N, G> MPCProtocol<F, RobustShare<F>, N, G> for HoneyBadgerMPCNode<F, R, G>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
@@ -514,88 +516,6 @@ where
             },
             counters: SubProtocolCounters::new(),
         })
-    }
-
-    async fn mul(
-        &mut self,
-        x: Vec<RobustShare<F>>,
-        y: Vec<RobustShare<F>>,
-        network: Arc<N>,
-    ) -> Result<Vec<RobustShare<F>>, Self::Error> {
-        // Both lists must have the same length.
-        assert_eq!(x.len(), y.len());
-
-        let (no_triples, _, _, _, _) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-        if no_triples < x.len() {
-            //Run preprocessing
-            let mut rng = StdRng::from_rng(OsRng).unwrap();
-            self.run_preprocessing(network.clone(), &mut rng).await?;
-        }
-        // Extract the preprocessing triple.
-        let beaver_triples = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_beaver_triples(x.len())?;
-
-        let session_id = SessionId::new(
-            ProtocolType::Mul,
-            SessionId::pack_slot24(self.counters.mul_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
-
-        // Call the mul function
-        self.operations
-            .mul
-            .init(session_id, x, y, beaver_triples, network)
-            .await?;
-
-        self.operations
-            .mul
-            .wait_for_result(session_id, Duration::MAX)
-            .await
-            .map_err(HoneyBadgerError::from)
-    }
-
-    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
-        let (_, no_rand, _, _) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-        if no_rand == 0 {
-            //Run preprocessing
-            let mut rng = StdRng::from_rng(OsRng).unwrap();
-            self.run_preprocessing(network.clone(), &mut rng).await?;
-        }
-        // Extract the preprocessing triple.
-        let rand_value = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(1)?;
-        Ok(rand_value[0].clone())
-    }
-
-    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
-        let (_, no_rand, _, _, _) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-        if no_rand == 0 {
-            //Run preprocessing
-            let mut rng = StdRng::from_rng(OsRng).unwrap();
-            self.run_preprocessing(network.clone(), &mut rng).await?;
-        }
-        // Extract the preprocessing triple.
-        let rand_value = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(1)?;
-        Ok(rand_value[0].clone())
     }
 
     async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
@@ -878,27 +798,67 @@ where
         Ok(())
     }
 
-    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
-        // Check if we have a random share available
-        let (_, n_random, _, _) = {
+    async fn mul(
+        &mut self,
+        x: Vec<RobustShare<F>>,
+        y: Vec<RobustShare<F>>,
+        network: Arc<N>,
+    ) -> Result<Vec<RobustShare<F>>, Self::Error> {
+        // Both lists must have the same length.
+        assert_eq!(x.len(), y.len());
+
+        let (no_triples, _, _, _, _) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
-
-        // If no random shares available, generate some
-        if n_random == 0 {
+        if no_triples < x.len() {
+            //Run preprocessing
             let mut rng = StdRng::from_rng(OsRng).unwrap();
-            self.ensure_random_shares(network, &mut rng, 1).await?;
+            self.run_preprocessing(network.clone(), &mut rng).await?;
         }
+        // Extract the preprocessing triple.
+        let beaver_triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(x.len())?;
 
-        // Take one random share from the preprocessing material
-        let shares = self
+        let session_id = SessionId::new(
+            ProtocolType::Mul,
+            SessionId::pack_slot24(self.counters.mul_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        // Call the mul function
+        self.operations
+            .mul
+            .init(session_id, x, y, beaver_triples, network)
+            .await?;
+
+        self.operations
+            .mul
+            .wait_for_result(session_id, Duration::MAX)
+            .await
+            .map_err(HoneyBadgerError::from)
+    }
+
+    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
+        let (_, no_rand, _, _, _) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        if no_rand == 0 {
+            //Run preprocessing
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(network.clone(), &mut rng).await?;
+        }
+        // Extract the preprocessing triple.
+        let rand_value = self
             .preprocessing_material
             .lock()
             .await
             .take_random_shares(1)?;
-
-        Ok(shares.into_iter().next().unwrap())
+        Ok(rand_value[0].clone())
     }
 }
 
@@ -908,7 +868,7 @@ impl<F, N, R, G> ADKG<F, FeldmanShamirShare<F, G>, Shamirshare<F>, N, G>
 where
     F: PrimeField,
     N: Network + Send + Sync + 'static,
-    R: RBC,
+    R: RBC<Id = SessionId>,
     G: CurveGroup<ScalarField = F>,
 {
     type Error = HoneyBadgerError;
@@ -1230,7 +1190,7 @@ where
 }
 
 #[async_trait]
-impl<F, R, N, C> PreprocessingMPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R, C>
+impl<F, R, N, C> PreprocessingMPCProtocol<F, RobustShare<F>, N, C> for HoneyBadgerMPCNode<F, R, C>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
@@ -1378,7 +1338,7 @@ where
                 }
 
                 if round_id == 255 {
-                    triple_counter = self.counters.triple_counter.get_next().await.unwrap();
+                    triple_counter = self.counters.triple_counter.get_next().await?;
                     round_id = 0;
                 } else {
                     round_id += 1;
@@ -1409,6 +1369,7 @@ impl<F, R, C> HoneyBadgerMPCNode<F, R, C>
 where
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    C: CurveGroup<ScalarField = F>,
 {
     /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
     async fn ensure_random_shares_small_field<G, N>(
@@ -1425,16 +1386,17 @@ where
         let batch = self.params.n_parties - 2 * self.params.threshold;
         let run = (needed + batch - 1) / batch; // ceil(missing / batch)
         let mut round_id = 0u8;
-        let mut ran_sha_counter = self.counters.ran_sha_small_field_counter.get_next();
 
         for i in 0..run {
             info!("Random share generation run {}", i);
 
             let sessionid = SessionId::new(
                 ProtocolType::RanShaSmallField,
-                ran_sha_counter,
-                0,
-                round_id,
+                SessionId::pack_slot24(
+                    self.counters.ran_sha_small_field_counter.get_next().await?,
+                    0,
+                    0,
+                ),
                 self.params.instance_id,
             );
 
@@ -1464,13 +1426,6 @@ where
                         None,
                     );
                 }
-            }
-
-            if round_id == 255 {
-                ran_sha_counter = self.counters.ran_sha_small_field_counter.get_next();
-                round_id = 0;
-            } else {
-                round_id += 1;
             }
         }
 
@@ -1895,11 +1850,9 @@ where
 
         for i in 0..run {
             info!("Verifiable random share generation run {}", i);
-            let sessionid = SessionId::new(
-                ProtocolType::Avss,
-                v_ran_sha_counter,
-                0,
-                round_id,
+            let sessionid = AvssSessionId::new(
+                avss_mpc::ProtocolType::Avss,
+                SessionId::pack_slot24(self.counters.ran_sha_avss_counter.get_next().await?, 0, 0),
                 self.params.instance_id,
             );
 
@@ -1960,7 +1913,7 @@ pub enum WrappedMessage {
     RandBit(RandBitMessage),
     Trunc(TruncPrMessage),
     PRandBit(PRandBitDMessage),
-    Avss(AvssMessage),
+    Avss(AvssMessage<SessionId>),
 }
 
 impl WrappedMessage {
@@ -2169,13 +2122,13 @@ impl ProtocolSessionId for SessionId {
         ProtocolType::from_u8(val)
     }
 
-    fn slot24(self) -> u32 {
-        ((self.0 >> 32) & 0xFF_FFFF) as u32
-    }
-
     //Last 32 bits
     fn instance_id(self) -> u32 {
         self.0 as u32
+    }
+
+    fn slot24(self) -> u32 {
+        ((self.0 >> 32) & 0xFF_FFFF) as u32
     }
 
     fn as_u64(self) -> u64 {
