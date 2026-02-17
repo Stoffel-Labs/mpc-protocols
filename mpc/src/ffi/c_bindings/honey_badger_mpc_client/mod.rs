@@ -47,6 +47,7 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerLimitError,
     HoneyBadgerInstanceIdError,
     HoneyBadgerAvssError,
+    HoneyBadgerRanShaAvssError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -78,6 +79,7 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::InstanceIdError(_) => Self::HoneyBadgerInstanceIdError,
             HoneyBadgerError::AlreadyReserved => Self::HoneyBadgerAlreadyReservedError,
             HoneyBadgerError::AvssError(_) => Self::HoneyBadgerAvssError,
+            HoneyBadgerError::RanShaAvssError(_) => Self::HoneyBadgerRanShaAvssError,
         }
     }
 }

@@ -21,7 +21,6 @@ use crate::{
 };
 
 pub mod share_gen;
-pub mod share_gen_avss;
 
 /// Error type for the Random Single Share (RanSha) protocol.
 #[derive(Debug, Error)]

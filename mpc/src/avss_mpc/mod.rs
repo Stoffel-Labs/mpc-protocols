@@ -170,7 +170,7 @@ where
 
 /// Information pertaining a AdkgMPCNode protocol participant.
 #[derive(Clone, Debug)]
-pub struct AdkgNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
+pub struct AdkgNode<F: PrimeField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> {
     /// ID of the current execution node.
     pub id: PartyId,
     /// Preprocessing material used in the protocol execution.

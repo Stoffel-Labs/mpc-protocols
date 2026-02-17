@@ -20,12 +20,12 @@ use tokio::sync::{
 use tracing::info;
 
 #[derive(Clone, Debug)]
-pub struct RanShaAvssNode<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
+pub struct RanShaAvssNode<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
     pub store: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<RanShaAvssStore<F, G>>>>>>,
-    pub avss: AvssNode<F, R, G, AvssSessionId>,
+    pub avss: AvssNode<F, R, G>,
     pub rbc: R,
     pub output_sender: Sender<AvssSessionId>,
     pub avss_output: Arc<Mutex<Receiver<AvssSessionId>>>,
@@ -154,7 +154,7 @@ where
                     // drop the ids, keep only shares
                     let shares_deg_t: Vec<FeldmanShamirShare<F, C>> =
                         shares_deg_t.into_iter().map(|(_, s)| s).collect();
-                    self.ransha_gen(shares_deg_t, session_id).await?;
+                    self.ran_sha_gen(shares_deg_t, session_id).await?;
                     break;
                 }
             }
@@ -162,7 +162,7 @@ where
         Ok(())
     }
 
-    pub async fn ransha_gen(
+    pub async fn ran_sha_gen(
         &mut self,
         shares_deg_t: Vec<FeldmanShamirShare<F, C>>,
         session_id: AvssSessionId,

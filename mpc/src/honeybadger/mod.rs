@@ -27,6 +27,8 @@ pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
 
+use crate::avss_mpc::share_gen::share_gen_avss::RanShaAvssNode;
+use crate::avss_mpc::share_gen::RanShaAvssError;
 use crate::avss_mpc::{self, AvssSessionId};
 use crate::common::math::goldilocks::GoldilocksField;
 use crate::common::{ProtocolSessionId, ProtocolTag};
@@ -68,9 +70,7 @@ use crate::{
         preprocessing::HoneyBadgerMPCNodePreprocMaterial,
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
-        share_gen::{
-            share_gen::RanShaNode, share_gen_avss::RanShaAvssNode, RanShaError, RanShaMessage,
-        },
+        share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
         triple_gen::{TripleGenError, TripleGenMessage},
     },
 };
@@ -100,7 +100,7 @@ use tokio::{
     },
     time::Duration,
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use triple_gen::triple_generation::TripleGenNode;
 
 #[derive(Error, Debug)]
@@ -109,6 +109,8 @@ pub enum HoneyBadgerError {
     NetworkError(#[from] NetworkError),
     #[error("error in share generation: {0:?}")]
     RanShaError(#[from] RanShaError),
+    #[error("error in share generation using AVSS: {0:?}")]
+    RanShaAvssError(#[from] RanShaAvssError),
     #[error("error in avss generation: {0:?}")]
     AvssError(#[from] AvssError),
     #[error("error in Input share generation: {0:?}")]
@@ -210,14 +212,19 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
 
 /// Information pertaining a HoneyBadgerMPCNode protocol participant.
 #[derive(Clone, Debug)]
-pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
+pub struct HoneyBadgerMPCNode<
+    F: PrimeField,
+    R: RBC<Id = SessionId>,
+    RA: RBC<Id = AvssSessionId>,
+    G: CurveGroup<ScalarField = F>,
+> {
     /// ID of the current execution node.
     pub id: PartyId,
     /// Preprocessing material used in the protocol execution.
     pub preprocessing_material: Arc<Mutex<HoneyBadgerMPCNodePreprocMaterial<F, G>>>,
     // Preprocessing parameters.
     pub params: HoneyBadgerMPCNodeOpts<F, G>,
-    pub preprocess: PreprocessNodes<F, R, G>,
+    pub preprocess: PreprocessNodes<F, R, RA, G>,
     pub operations: Operation<F, R>,
     pub type_ops: TypeOperations<F, R>,
     pub output: OutputServer,
@@ -237,12 +244,17 @@ pub struct TypeOperations<F: PrimeField, R: RBC> {
 }
 
 #[derive(Clone, Debug)]
-pub struct PreprocessNodes<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
+pub struct PreprocessNodes<
+    F: PrimeField,
+    R: RBC<Id = SessionId>,
+    RA: RBC<Id = AvssSessionId>,
+    G: CurveGroup<ScalarField = F>,
+> {
     // Nodes for subprotocols.
     pub input: InputServer<F, R>,
     pub share_gen: RanShaNode<F, R>,
     pub small_field_share_gen: RanShaNode<GoldilocksField, R>,
-    pub share_gen_avss: RanShaAvssNode<F, R, G>,
+    pub share_gen_avss: RanShaAvssNode<F, RA, G>,
     pub dou_sha: DoubleShareNode<F>,
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
@@ -400,11 +412,12 @@ where
 }
 
 #[async_trait]
-impl<F, R, N, G> MPCProtocol<F, RobustShare<F>, N, G> for HoneyBadgerMPCNode<F, R, G>
+impl<F, R, RA, N, G> MPCProtocol<F, RobustShare<F>, N, G> for HoneyBadgerMPCNode<F, R, RA, G>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    RA: RBC<Id = AvssSessionId>,
     G: CurveGroup<ScalarField = F>,
 {
     type MPCOpts = HoneyBadgerMPCNodeOpts<F, G>;
@@ -586,19 +599,14 @@ where
                             .process(rbc_msg, net)
                             .await?
                     }
-                    Some(ProtocolType::Avss) => {
-                        self.preprocess
-                            .share_gen_avss
-                            .avss
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?
-                    }
-                    _ => {
+                    Some(protocol) => {
                         warn!(
-                            "Unknown protocol ID in session ID: {:?} in RBC",
-                            rbc_msg.session_id
+                            "Unknown protocol ID in session ID: {:?} at RBC - Protocol Type: {:?}",
+                            rbc_msg.session_id, protocol,
                         );
+                    }
+                    None => {
+                        error!("There is no calling protocol: {:?}", rbc_msg.session_id);
                     }
                 }
             }
@@ -777,21 +785,45 @@ where
                             .process(trunc_message, net)
                             .await?;
                     }
-                    _ => {
+                    Some(protocol) => {
                         warn!(
-                            "Unknown protocol ID in session ID: {:?} at truncation",
+                            "Unknown protocol ID in session ID: {:?} at truncation - Protocol Type: {:?}",
+                            trunc_message.session_id,
+                            protocol,
+                        );
+                    }
+                    None => {
+                        error!(
+                            "There is no calling protocol in session ID {:?}",
                             trunc_message.session_id
                         );
                     }
                 }
             }
-            WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
+            WrappedMessage::Output(_) => error!("Incorrect message recieved at process function"),
             WrappedMessage::Avss(avss_message) => {
-                self.preprocess
-                    .share_gen_avss
-                    .avss
-                    .process(avss_message)
-                    .await?;
+                match avss_message.session_id.calling_protocol() {
+                    Some(avss_mpc::ProtocolType::Avss) => {
+                        self.preprocess
+                            .share_gen_avss
+                            .avss
+                            .process(avss_message)
+                            .await?;
+                    }
+                    Some(protocol) => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} at truncation - Protocol Type: {:?}",
+                            avss_message.session_id,
+                            protocol,
+                        );
+                    }
+                    None => {
+                        error!(
+                            "There is no calling protocol in session ID {:?}",
+                            avss_message.session_id
+                        );
+                    }
+                }
             }
         }
 
@@ -863,12 +895,13 @@ where
 }
 
 #[async_trait]
-impl<F, N, R, G> ADKG<F, FeldmanShamirShare<F, G>, Shamirshare<F>, N, G>
-    for HoneyBadgerMPCNode<F, R, G>
+impl<F, N, R, RA, G> ADKG<F, FeldmanShamirShare<F, G>, Shamirshare<F>, N, G>
+    for HoneyBadgerMPCNode<F, R, RA, G>
 where
     F: PrimeField,
     N: Network + Send + Sync + 'static,
     R: RBC<Id = SessionId>,
+    RA: RBC<Id = AvssSessionId>,
     G: CurveGroup<ScalarField = F>,
 {
     type Error = HoneyBadgerError;
@@ -906,11 +939,12 @@ where
 }
 
 #[async_trait]
-impl<F, N, R, G> MPCTypeOps<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R, G>
+impl<F, N, R, RA, G> MPCTypeOps<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R, RA, G>
 where
     F: PrimeField,
     N: Network + Send + Sync + 'static,
     R: RBC<Id = SessionId>,
+    RA: RBC<Id = AvssSessionId>,
     G: CurveGroup<ScalarField = F>,
 {
     type Error = HoneyBadgerError;
@@ -1190,11 +1224,13 @@ where
 }
 
 #[async_trait]
-impl<F, R, N, C> PreprocessingMPCProtocol<F, RobustShare<F>, N, C> for HoneyBadgerMPCNode<F, R, C>
+impl<F, R, RA, N, C> PreprocessingMPCProtocol<F, RobustShare<F>, N, C>
+    for HoneyBadgerMPCNode<F, R, RA, C>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    RA: RBC<Id = AvssSessionId>,
     C: CurveGroup<ScalarField = F>,
 {
     /// Runs preprocessing to produce Random shares and Beaver triples
@@ -1365,10 +1401,11 @@ where
         Ok(())
     }
 }
-impl<F, R, C> HoneyBadgerMPCNode<F, R, C>
+impl<F, R, RA, C> HoneyBadgerMPCNode<F, R, RA, C>
 where
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    RA: RBC<Id = AvssSessionId>,
     C: CurveGroup<ScalarField = F>,
 {
     /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
@@ -1913,7 +1950,7 @@ pub enum WrappedMessage {
     RandBit(RandBitMessage),
     Trunc(TruncPrMessage),
     PRandBit(PRandBitDMessage),
-    Avss(AvssMessage<SessionId>),
+    Avss(AvssMessage<AvssSessionId>),
 }
 
 impl WrappedMessage {

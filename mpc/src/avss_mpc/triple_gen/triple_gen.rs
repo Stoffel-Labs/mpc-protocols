@@ -20,11 +20,11 @@ use tokio::sync::{
 use tracing::info;
 
 #[derive(Clone, Debug)]
-pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
+pub struct TripleGenNode<F: FftField, R: RBC<Id = AvssSessionId>, C: CurveGroup<ScalarField = F>> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub avss: AvssNode<F, R, C, AvssSessionId>,
+    pub avss: AvssNode<F, R, C>,
     pub avss_output: Arc<Mutex<mpsc::Receiver<AvssSessionId>>>,
     pub store: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<TripleGenStore<F, C>>>>>>,
     pub output_channel: Sender<AvssSessionId>,
