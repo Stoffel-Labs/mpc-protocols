@@ -14,10 +14,7 @@ use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
-use tokio::sync::{
-    mpsc::{self, Receiver, Sender},
-    Mutex,
-};
+use tokio::time::Duration;
 
 #[derive(Error, Debug)]
 pub enum FPDivConstError {
@@ -45,9 +42,6 @@ where
     pub n_parties: usize,
     pub threshold: usize,
     pub trunc_node: TruncPrNode<F, R>,
-    pub trunc_output: Arc<Mutex<Receiver<SessionId>>>,
-    pub protocol_output: Option<SecretFixedPoint<F, RobustShare<F>>>,
-    pub output_channel: Sender<SessionId>,
 }
 
 impl<F, R> FPDivConstNode<F, R>
@@ -55,21 +49,12 @@ where
     F: PrimeField,
     R: RBC<Id = SessionId>,
 {
-    pub fn new(
-        id: usize,
-        n_parties: usize,
-        threshold: usize,
-        output_channel: Sender<SessionId>,
-    ) -> Result<Self, FPDivConstError> {
-        let (trunc_sender, trunc_receiver) = mpsc::channel(128);
+    pub fn new(id: usize, n_parties: usize, threshold: usize) -> Result<Self, FPDivConstError> {
         Ok(Self {
             id,
             n_parties,
             threshold,
-            trunc_node: TruncPrNode::new(id, n_parties, threshold, trunc_sender)?,
-            trunc_output: Arc::new(Mutex::new(trunc_receiver)),
-            protocol_output: None,
-            output_channel,
+            trunc_node: TruncPrNode::new(id, n_parties, threshold)?,
         })
     }
 
@@ -81,7 +66,7 @@ where
         r_int: RobustShare<F>,
         session_id: SessionId,
         net: Arc<N>,
-    ) -> Result<(), FPDivConstError> {
+    ) -> Result<SecretFixedPoint<F, RobustShare<F>>, FPDivConstError> {
         // build w = int_f(1/denom)
         if denom.value().is_zero() {
             return Err(FPDivConstError::InvalidDivisor);
@@ -105,19 +90,10 @@ where
             )
             .await?;
 
-        let mut rx = self.trunc_output.lock().await;
-        while let Some(id) = rx.recv().await {
-            if id == session_id {
-                let mut trunc_store = self.trunc_node.store.lock().await;
-                let trunc_lock = trunc_store.remove(&id).unwrap();
-                let store = trunc_lock.lock().await;
-                self.protocol_output = Some(SecretFixedPoint::new(
-                    store.share_d.clone().ok_or(FPDivConstError::Failed)?,
-                ));
-                self.output_channel.send(session_id).await?;
-                return Ok(());
-            }
-        }
-        Err(FPDivConstError::Failed)
+        let output = self
+            .trunc_node
+            .wait_for_result(session_id, Duration::from_millis(500))
+            .await?;
+        Ok(SecretFixedPoint::new(output))
     }
 }

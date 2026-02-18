@@ -5,7 +5,7 @@ use crate::utils::{
 };
 use ark_bls12_381::Fr;
 use itertools::izip;
-use std::matches;
+use std::{matches, time::Duration};
 use stoffelmpc_mpc::{
     common::{share::shamir::NonRobustShare, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
@@ -24,7 +24,7 @@ async fn test_triple_gen_e2e() {
     let (random_shares_a, random_shares_b, randousha_pairs, a_values, b_values, _) =
         get_triple_init_test_shares(n_shares, n_parties, threshold);
     let (network, receivers, _) = test_setup(n_parties, vec![]);
-    let (nodes, mut triple_finish_receivers) = create_nodes(n_parties, threshold);
+    let nodes = create_nodes(n_parties, threshold);
 
     for (i, node) in nodes.iter().enumerate() {
         node.lock()
@@ -40,16 +40,16 @@ async fn test_triple_gen_e2e() {
             .unwrap();
     }
     spawn_receiver_tasks(&nodes, receivers, network.clone());
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // vec[[a_1_1, a_1_2,..., a_1_nparties],..., [a_nshares_1, ... , a_nshares_nparties]]
     let mut a_shares = vec![vec![RobustShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
     let mut b_shares = vec![vec![RobustShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
     let mut ab_shares = vec![vec![RobustShare::new(Fr::from(0), 0, 0); n_parties]; n_shares];
     for p in 0..n_parties {
-        let session = triple_finish_receivers[p].recv().await.unwrap();
         let node = nodes[p].lock().await;
         let storage = node.storage.lock().await;
-        let triple_data = storage.get(&session).unwrap().lock().await;
+        let triple_data = storage.get(&session_id).unwrap().lock().await;
         assert!(matches!(
             triple_data.protocol_state,
             ProtocolState::Finished

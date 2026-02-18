@@ -4,7 +4,7 @@ use crate::utils::test_utils::{
 use ark_bls12_381::Fr;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use stoffelmpc_mpc::{
     common::{rbc::rbc::Avid, ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
@@ -17,10 +17,7 @@ use stoffelmpc_mpc::{
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
-use tokio::{
-    sync::{mpsc, Barrier},
-    task::JoinSet,
-};
+use tokio::{sync::Barrier, task::JoinSet};
 use tracing::warn;
 
 pub mod utils;
@@ -62,6 +59,7 @@ async fn test_reconstruct_handler_incorrect_share() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -136,15 +134,13 @@ async fn test_reconstruct_handler_incorrect_share() {
     }
 
     // check the store
-    let store = ransha_node
+    let binding = ransha_node
         .preprocess
         .share_gen
         .get_or_create_store(session_id)
         .await
-        .unwrap()
-        .lock()
-        .await
-        .clone();
+        .unwrap();
+    let store = binding.lock().await;
     assert_eq!(store.received_r_shares.len(), n_parties);
     assert_eq!(store.received_ok_msg.len(), 0);
     assert_eq!(store.state, RanShaState::Reconstruction);
@@ -161,11 +157,10 @@ async fn test_output_handler() {
     let (network, _receivers, _) = test_setup(n_parties, vec![]);
     let (_, shares_si_t) = construct_e2e_input_ransha(n_parties, degree_t);
     let receiver_id = 1;
-    let (sender, _receiver_ch) = mpsc::channel(128);
 
     // create receiver randousha node
     let mut ransha_node: RanShaNode<Fr, Avid<SessionId>> =
-        RanShaNode::new(receiver_id, n_parties, threshold, threshold + 1, sender).unwrap();
+        RanShaNode::new(receiver_id, n_parties, threshold, threshold + 1).unwrap();
     // call init_handler to create random share
     ransha_node
         .init_ransha(

@@ -1,6 +1,5 @@
 use ark_bls12_381::Fr;
 use std::sync::Arc;
-use stoffelmpc_mpc::honeybadger::SessionId;
 use stoffelmpc_mpc::honeybadger::{
     double_share::{
         double_share_generation::{DoubleShareNode, ProtocolState},
@@ -13,18 +12,9 @@ use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::{error, warn};
 
 /// Initializes all RanDouSha nodes and returns them wrapped in `Arc<Mutex<_>>`.
-pub fn create_nodes(
-    n_parties: usize,
-    threshold: usize,
-    senders: Vec<Sender<SessionId>>,
-) -> Vec<Arc<Mutex<DoubleShareNode<Fr>>>> {
+pub fn create_nodes(n_parties: usize, threshold: usize) -> Vec<Arc<Mutex<DoubleShareNode<Fr>>>> {
     (0..n_parties)
-        .zip(senders.into_iter())
-        .map(|(id, sender)| {
-            Arc::new(Mutex::new(DoubleShareNode::new(
-                id, n_parties, threshold, sender,
-            )))
-        })
+        .map(|id| Arc::new(Mutex::new(DoubleShareNode::new(id, n_parties, threshold))))
         .collect()
 }
 

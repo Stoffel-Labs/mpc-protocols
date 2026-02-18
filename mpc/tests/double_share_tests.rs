@@ -23,15 +23,8 @@ async fn generate_faulty_double_shares_e2e() {
 
     let (network, receivers, _) = test_setup(n_parties, vec![]);
 
-    let mut sender_channels = Vec::new();
-    let mut receiver_channels = Vec::new();
-    for _ in 0..n_parties {
-        let (sender, receiver) = mpsc::channel(128);
-        sender_channels.push(sender);
-        receiver_channels.push(receiver);
-    }
 
-    let dou_sha_nodes = create_nodes(n_parties, threshold, sender_channels);
+    let dou_sha_nodes = create_nodes(n_parties, threshold);
     let mut rng = test_rng();
 
     let (final_result_sender, mut final_result_receiver) = mpsc::channel(1024);

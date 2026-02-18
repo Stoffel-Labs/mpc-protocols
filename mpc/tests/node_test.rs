@@ -71,6 +71,7 @@ async fn randousha_e2e() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         vec![],
     );
     // spawn tasks to process received messages
@@ -151,6 +152,7 @@ async fn ransha_e2e() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         vec![],
     );
     // spawn tasks to process received messages
@@ -221,6 +223,7 @@ async fn test_input_protocol_e2e() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         clientid.clone(),
     );
 
@@ -309,6 +312,7 @@ async fn gen_masks_for_input_e2e() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         clientid.clone(),
     );
     //Create nodes for InputClient
@@ -475,6 +479,7 @@ async fn mul_e2e_bad_net() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -606,6 +611,7 @@ async fn mul_e2e() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -707,7 +713,7 @@ async fn mul_e2e_with_preprocessing_bad_net() {
         net_rx,
         node_channels.clone(),
         StdRng::seed_from_u64(1u64),
-        Uniform::new(1, 10),
+        Uniform::new(10, 50),
     );
 
     //----------------------------------------SETUP NODES----------------------------------------
@@ -722,6 +728,7 @@ async fn mul_e2e_with_preprocessing_bad_net() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         vec![clientid[0]],
     );
 
@@ -906,6 +913,7 @@ async fn mul_e2e_with_preprocessing() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         vec![clientid[0]],
     );
 
@@ -1092,6 +1100,7 @@ async fn preprocessing_e2e() {
         n_prandint,
         l,
         k,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -1169,6 +1178,7 @@ async fn preprocessing_e2e_big() {
         n_prandint,
         l,
         k,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -1233,7 +1243,7 @@ async fn preprocessing_e2e_bad_net() {
         net_rx,
         node_channels.clone(),
         StdRng::seed_from_u64(1u64),
-        Uniform::new_inclusive(1, 3),
+        Uniform::new_inclusive(10, 50),
     );
 
     //----------------------------------------SETUP NODES----------------------------------------
@@ -1248,6 +1258,7 @@ async fn preprocessing_e2e_bad_net() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -1406,6 +1417,7 @@ async fn test_rand_bit() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -1436,7 +1448,13 @@ async fn test_rand_bit() {
         let handle = tokio::spawn(async move {
             {
                 prand_bit_node
-                    .init(a_value, mult_triple, session_id, net.clone())
+                    .init(
+                        a_value,
+                        mult_triple,
+                        session_id,
+                        Duration::from_secs(30),
+                        net.clone(),
+                    )
                     .await
                     .expect("rand bit init failed");
             }
@@ -1463,8 +1481,7 @@ async fn test_rand_bit() {
             .cloned();
         if let Some(store) = store {
             let store_lock = store.lock().await;
-            let store2 = store_lock.clone();
-            let protocol_output = store2.protocol_output.clone();
+            let protocol_output = store_lock.protocol_output.clone();
             assert!(protocol_output.is_some());
             bit_shares.push(protocol_output.unwrap().clone());
         }
@@ -1549,6 +1566,7 @@ async fn fpmul_e2e() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -1662,6 +1680,7 @@ async fn fpmul_e2e_with_preprocessing() {
         n_prandint,
         bound_l,
         security_k,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -1755,6 +1774,7 @@ async fn add_fixed_e2e() {
         0,
         8,
         4,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -1828,6 +1848,7 @@ async fn sub_fixed_e2e() {
         0,
         8,
         4,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -1890,6 +1911,7 @@ async fn add_int_e2e() {
         0,
         8,
         4,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -1952,6 +1974,7 @@ async fn sub_int_e2e() {
         0,
         8,
         4,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -2012,6 +2035,7 @@ async fn mul_int_e2e_with_preprocessing() {
         /*prandint*/ 0,
         0,
         0,
+        Duration::from_secs(30),
         vec![],
     );
 
@@ -2136,6 +2160,7 @@ async fn fpdiv_const_e2e() {
         0,
         0,
         0,
+        Duration::from_secs(30),
         vec![],
     );
 

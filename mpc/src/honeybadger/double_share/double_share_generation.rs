@@ -11,7 +11,10 @@ use ark_std::rand::Rng;
 use itertools::izip;
 use std::{collections::BTreeMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::{mpsc::Sender, Mutex};
+use tokio::{
+    sync::Mutex,
+    time::{timeout, Duration},
+};
 use tracing::{info, warn};
 
 use super::DoubleShamirShare;
@@ -37,7 +40,6 @@ where
     pub threshold: usize,
     /// Storage of the party.
     pub storage: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<DouShaStorage<F>>>>>>,
-    pub output_sender: Sender<SessionId>,
 }
 
 impl<F> DoubleShareNode<F>
@@ -72,18 +74,12 @@ where
     }
 
     /// Creates a new node for the faulty double share protocol.
-    pub fn new(
-        id: PartyId,
-        n_parties: usize,
-        threshold: usize,
-        output_sender: Sender<SessionId>,
-    ) -> Self {
+    pub fn new(id: PartyId, n_parties: usize, threshold: usize) -> Self {
         Self {
             id,
             n_parties,
             threshold,
             storage: Arc::new(Mutex::new(BTreeMap::new())),
-            output_sender,
         }
     }
 
@@ -99,7 +95,35 @@ where
             .or_insert(Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))))
             .clone()
     }
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        let mut store = self.storage.lock().await;
+        store.remove(&session_id).is_some()
+    }
+    pub async fn wait_for_result(
+        &self,
+        session_id: SessionId,
+        duration: Duration,
+    ) -> Result<Vec<DoubleShamirShare<F>>, DouShaError> {
+        let output_receiver = {
+            let storage = self.storage.lock().await;
+            let storage_bind = match storage.get(&session_id) {
+                Some(value) => value,
+                None => return Err(DouShaError::NoSuchSessionId(session_id)),
+            };
+            let mut storage = storage_bind.lock().await;
 
+            storage
+                .output_receiver
+                .take()
+                .ok_or(DouShaError::ResultAlreadyReceived(session_id))?
+        };
+
+        match timeout(duration, output_receiver).await {
+            Err(_) => Err(DouShaError::Timeout(session_id)),
+            Ok(Err(_)) => Err(DouShaError::ReceiveError(session_id)),
+            Ok(Ok(shares)) => Ok(shares),
+        }
+    }
     pub async fn init<N, R>(
         &mut self,
         session_id: SessionId,
@@ -152,6 +176,10 @@ where
             CanonicalDeserialize::deserialize_compressed(recv_message.payload.as_slice())?;
         let binding = self.get_or_create_store(recv_message.session_id).await;
         let mut dousha_storage = binding.lock().await;
+
+        if dousha_storage.state == ProtocolState::Finished {
+            return Ok(());
+        }
         //todo: Better handle duplicate messages from a sender, check the shares
         if dousha_storage.share.contains_key(&recv_message.sender_id) {
             warn!(
@@ -177,13 +205,19 @@ where
             .iter()
             .all(|&received| received)
         {
-            dousha_storage.protocol_output = dousha_storage
+            let output: Vec<DoubleShamirShare<F>> = dousha_storage
                 .share
                 .iter()
                 .map(|(_, v)| v.clone())
                 .collect();
+            dousha_storage.protocol_output = output.clone();
             dousha_storage.state = ProtocolState::Finished;
-            self.output_sender.send(recv_message.session_id).await?;
+
+            let taken_output_sender = dousha_storage.output_sender.take().unwrap();
+
+            taken_output_sender
+                .send(output)
+                .map_err(|_| DouShaError::SendError(recv_message.session_id))?;
         }
 
         Ok(())

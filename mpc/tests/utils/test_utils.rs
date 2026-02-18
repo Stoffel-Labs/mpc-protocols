@@ -6,6 +6,7 @@ use ark_std::test_rng;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::time::Duration;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::rbc::RbcError;
@@ -165,21 +166,18 @@ pub fn initialize_node(
     n: usize,
     t: usize,
     k: usize,
-    output_sender: Sender<SessionId>,
 ) -> RanDouShaNode<Fr, Avid<SessionId>> {
-    RanDouShaNode::new(node_id, output_sender, n, t, k).unwrap()
+    RanDouShaNode::new(node_id, n, t, k).unwrap()
 }
 
 /// Initializes all RanDouSha nodes and returns them wrapped in `Arc<Mutex<_>>`.
 pub fn create_nodes(
     n_parties: usize,
-    senders: Vec<Sender<SessionId>>,
     t: usize,
     k: usize,
 ) -> Vec<Arc<Mutex<RanDouShaNode<Fr, Avid<SessionId>>>>> {
     (0..n_parties)
-        .zip(senders)
-        .map(|(id, sender)| Arc::new(Mutex::new(initialize_node(id, n_parties, t, k, sender))))
+        .map(|id| Arc::new(Mutex::new(initialize_node(id, n_parties, t, k))))
         .collect()
 }
 
@@ -415,6 +413,7 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     n_prandint: usize,
     l: usize,
     k: usize,
+    timeout: Duration,
     input_ids: Vec<ClientId>,
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
@@ -432,6 +431,7 @@ where
         n_prandint,
         l,
         k,
+        timeout,
     );
     (0..n_parties)
         .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), input_ids.clone()).unwrap())

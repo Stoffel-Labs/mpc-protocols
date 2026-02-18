@@ -6,29 +6,22 @@ use stoffelmpc_mpc::{
     common::{share::shamir::NonRobustShare, SecretSharingScheme},
     honeybadger::{
         double_share::DoubleShamirShare, robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::triple_generation::TripleGenNode, SessionId, WrappedMessage,
+        triple_gen::triple_generation::TripleGenNode, WrappedMessage,
     },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-pub fn create_nodes(
-    n_parties: usize,
-    threshold: usize,
-) -> (Vec<Arc<Mutex<TripleGenNode<Fr>>>>, Vec<Receiver<SessionId>>) {
-    let mut receivers = vec![];
+pub fn create_nodes(n_parties: usize, threshold: usize) -> Vec<Arc<Mutex<TripleGenNode<Fr>>>> {
     let triple_gen_nodes = (0..n_parties)
         .map(|id| {
-            let (triple_sender, triple_receiver) = mpsc::channel(128);
-            let triple_gen_node =
-                TripleGenNode::new(id, n_parties, threshold, triple_sender).unwrap();
-            receivers.push(triple_receiver);
+            let triple_gen_node = TripleGenNode::new(id, n_parties, threshold).unwrap();
             Arc::new(Mutex::new(triple_gen_node))
         })
         .collect();
-    (triple_gen_nodes, receivers)
+    triple_gen_nodes
 }
 
 // Return vectors that contain vectors of inputs of init_handler for each node

@@ -13,9 +13,8 @@ use std::collections::HashMap;
 use std::ops::{Add, Mul};
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
-use tokio::time::Duration;
+use tokio::time::{timeout, Duration};
 
 /// Represents the random bit generation protocol.
 ///
@@ -47,8 +46,6 @@ where
     pub threshold: usize,
     /// Storage for the protocol.
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RandBitStorage<F>>>>>>,
-    /// Channel to send session ID of the current session once the protocol finishes its execution.
-    pub output_channel: Sender<SessionId>,
     /// Node to execute a secure multiplication.
     pub mult_node: Multiply<F, R>,
     /// Batch reconstruction node to reconstruct `a^2 mod p`.
@@ -60,12 +57,7 @@ where
     F: FftField,
     R: RBC<Id = SessionId>,
 {
-    pub fn new(
-        id: PartyId,
-        n_parties: usize,
-        threshold: usize,
-        protocol_output: Sender<SessionId>,
-    ) -> Result<Self, RandBitError> {
+    pub fn new(id: PartyId, n_parties: usize, threshold: usize) -> Result<Self, RandBitError> {
         let batch_recon_node = BatchReconNode::new(id, n_parties, threshold)?;
         let mult_node = Multiply::new(id, n_parties, threshold)?;
         Ok(Self {
@@ -73,7 +65,6 @@ where
             n_parties,
             threshold,
             storage: Arc::new(Mutex::new(HashMap::new())),
-            output_channel: protocol_output,
             mult_node,
             batch_recon: batch_recon_node,
         })
@@ -104,11 +95,38 @@ where
             .clone())
     }
 
+    pub async fn wait_for_result(
+        &self,
+        session_id: SessionId,
+        duration: Duration,
+    ) -> Result<Vec<RobustShare<F>>, RandBitError> {
+        let output_receiver = {
+            let storage = self.storage.lock().await;
+            let storage_bind = match storage.get(&session_id) {
+                Some(value) => value,
+                None => return Err(RandBitError::NoSuchSessionId(session_id)),
+            };
+            let mut storage = storage_bind.lock().await;
+
+            storage
+                .output_receiver
+                .take()
+                .ok_or(RandBitError::ResultAlreadyReceived(session_id))?
+        };
+
+        match timeout(duration, output_receiver).await {
+            Err(_) => Err(RandBitError::Timeout(session_id)),
+            Ok(Err(_)) => Err(RandBitError::ReceiveError(session_id)),
+            Ok(Ok(shares)) => Ok(shares),
+        }
+    }
+
     pub async fn init<N>(
         &mut self,
         a: Vec<RobustShare<F>>,
         mult_triple: Vec<ShamirBeaverTriple<F>>,
         session_id: SessionId,
+        duration: Duration,
         network: Arc<N>,
     ) -> Result<(), RandBitError>
     where
@@ -134,10 +152,7 @@ where
             .init(session_id, a, a_copy, mult_triple, network.clone())
             .await?;
 
-        let a_square_share = self
-            .mult_node
-            .wait_for_result(session_id, Duration::from_millis(500))
-            .await?;
+        let a_square_share = self.mult_node.wait_for_result(session_id, duration).await?;
 
         tracing::info!("Multiplication at Rand_bit done: {0:?}", self.id);
 
@@ -158,7 +173,7 @@ where
     async fn square_reconstruction_handler(
         &self,
         message: RandBitMessage,
-    ) -> Result<Vec<RobustShare<F>>, RandBitError> {
+    ) -> Result<(), RandBitError> {
         tracing::info!(
             "Rand_bit reconstruction msg received from node: {0:?}",
             message.sender
@@ -167,7 +182,7 @@ where
         let calling_proto = match message.session_id.calling_protocol() {
             Some(proto) => proto,
             None => {
-                return Err(RandBitError::SessionIdError(message.session_id));
+                return Err(RandBitError::NoSuchSessionId(message.session_id));
             }
         };
 
@@ -178,6 +193,9 @@ where
         );
         let storage_bind = self.get_or_create_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
+        if storage.protocol_state == ProtocolState::Finished {
+            return Ok(());
+        }
         let a = storage
             .a_share
             .clone()
@@ -251,12 +269,15 @@ where
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Finished;
             storage.protocol_output = Some(d_share_array.clone());
+
+            let taken_output_sender = storage.output_sender.take().unwrap();
+
+            taken_output_sender
+                .send(d_share_array)
+                .map_err(|_| RandBitError::SendError(session_id))?;
         }
 
-        // You send the current session ID as finished to the sender channel.
-        self.output_channel.send(session_id).await?;
-
-        Ok(d_share_array)
+        Ok(())
     }
 
     pub async fn process(&mut self, message: RandBitMessage) -> Result<(), RandBitError> {
@@ -270,12 +291,10 @@ mod tests {
     use super::*;
     use crate::common::rbc::rbc::Avid;
     use ark_bls12_381::Fr;
-    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_randbit_storage_limit() {
-        let (tx, _rx) = mpsc::channel(1);
-        let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1, tx).unwrap();
+        let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
 
         // Fill up storage to the limit (256 sessions)
         for i in 0u8..=255 {
