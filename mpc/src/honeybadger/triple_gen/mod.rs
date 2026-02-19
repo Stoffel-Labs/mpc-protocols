@@ -4,7 +4,10 @@ use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
-use tokio::{sync::mpsc::error::SendError, task::JoinError};
+use tokio::{
+    sync::oneshot::{channel, Receiver, Sender},
+    task::JoinError,
+};
 
 use crate::{
     common::share::ShareError,
@@ -49,16 +52,24 @@ pub enum TripleGenError {
     /// The session ID of the parameters and the received message does not match.
     #[error("the session IDs do not match")]
     SessionIdMismatch,
-    #[error("error sending the thread asynchronously")]
-    SendError(#[from] SendError<SessionId>),
+    #[error("error sending the result: {0:?}")]
+    SendError(SessionId),
+    #[error("error receiving the result: {0:?}")]
+    ReceiveError(SessionId),
     #[error("session ID {0:?} malformed")]
     SessionIdError(SessionId),
     #[error("limit reached")]
-    LimitError
+    LimitError,
+    #[error("no such session ID exists: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("result already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("multiplication {0:?} did not complete in time")]
+    Timeout(SessionId),
 }
 
 /// Represents a Beaver triple of non-robust Shamir shares.
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct ShamirBeaverTriple<F: FftField> {
     /// First random value of the triple.
     pub a: RobustShare<F>,
@@ -74,17 +85,13 @@ where
 {
     /// Creates a new Shamir Beaver triple with `a` and `b` being the random values of the triple
     /// and `mult` is the multiplication of `a` and `b`.
-    pub fn new(
-        a: RobustShare<F>,
-        b: RobustShare<F>,
-        mult: RobustShare<F>,
-    ) -> Self {
+    pub fn new(a: RobustShare<F>, b: RobustShare<F>, mult: RobustShare<F>) -> Self {
         Self { a, b, mult }
     }
 }
 
 /// Storage necessary for the triple generation protocol.
-#[derive(Clone,Debug)]
+#[derive(Debug)]
 pub struct TripleGenStorage<F>
 where
     F: FftField,
@@ -95,6 +102,8 @@ where
     pub random_shares_a_input: Vec<RobustShare<F>>,
     pub random_shares_b_input: Vec<RobustShare<F>>,
     pub protocol_output: Vec<ShamirBeaverTriple<F>>,
+    pub output_sender: Option<Sender<Vec<ShamirBeaverTriple<F>>>>,
+    pub output_receiver: Option<Receiver<Vec<ShamirBeaverTriple<F>>>>,
 }
 
 impl<F> TripleGenStorage<F>
@@ -103,12 +112,16 @@ where
 {
     /// Creates an empty state for the protocol.
     pub fn empty() -> Self {
+        let (output_sender, output_receiver) = channel();
+
         Self {
             protocol_state: ProtocolState::NotInitialized,
             randousha_pairs: Vec::new(),
             random_shares_a_input: Vec::new(),
             random_shares_b_input: Vec::new(),
             protocol_output: Vec::new(),
+            output_sender: Some(output_sender),
+            output_receiver: Some(output_receiver),
         }
     }
 }
@@ -119,7 +132,7 @@ where
 /// execution. Any message that is sent in the protocol is converted into bytes that are placed in
 /// the `payload`. Once a party receives a message, it takes the payload and deserialize it to the
 /// specific message sent during the protocol execution.
-#[derive(Clone,Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TripleGenMessage {
     /// The ID of the party.
     pub sender_id: PartyId,

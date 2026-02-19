@@ -19,7 +19,7 @@ use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
 use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use stoffelmpc_network::fake_network::SenderId;
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::{info, warn};
@@ -37,24 +37,11 @@ async fn test_init_reconstruct_flow() {
     let (_, shares_si_t, shares_si_2t) = construct_e2e_input(n_parties, degree_t);
 
     let sender_id = 0;
-    let mut sender_channels = Vec::new();
-    let mut receiver_channels = Vec::new();
-    for _ in 0..n_parties {
-        let (sender, receiver) = mpsc::channel(128);
-        sender_channels.push(sender);
-        receiver_channels.push(receiver);
-    }
 
     // create randousha nodes
     let mut randousha_nodes = vec![];
-    for (i, sender_ch) in (0..n_parties).zip(sender_channels) {
-        randousha_nodes.push(initialize_node(
-            i,
-            n_parties,
-            degree_t,
-            threshold + 1,
-            sender_ch,
-        ));
+    for i in 0..n_parties {
+        randousha_nodes.push(initialize_node(i, n_parties, degree_t, threshold + 1));
     }
 
     let mut sender = randousha_nodes.get(sender_id).unwrap().clone();
@@ -93,16 +80,9 @@ async fn test_init_reconstruct_flow() {
         }
 
         // check all stores should be empty except for the sender's store
-        let store = randousha_nodes
-            .get(i)
-            .unwrap()
-            .clone()
-            .get_or_create_store(session_id)
-            .await
-            .unwrap()
-            .lock()
-            .await
-            .clone();
+        let mut node = randousha_nodes.get(i).unwrap().clone();
+        let store_bind = node.get_or_create_store(session_id).await.unwrap();
+        let store = store_bind.lock().await;
         if i != sender_id {
             assert!(store.computed_r_shares_degree_t.len() == 0);
             assert!(store.computed_r_shares_degree_2t.len() == 0);
@@ -134,24 +114,10 @@ async fn test_reconstruct_handler() {
     let (network, mut receivers, _, _) = test_setup(n_parties, vec![]);
     let (_, shares_ri_t, shares_ri_2t) = get_reconstruct_input(n_parties, degree_t);
 
-    let mut sender_channels = Vec::new();
-    let mut receiver_channels = Vec::new();
-    for _ in 0..n_parties {
-        let (sender, receiver) = mpsc::channel(128);
-        sender_channels.push(sender);
-        receiver_channels.push(receiver);
-    }
-
     // initialize RanDouShaNode
     let mut randousha_nodes = vec![];
-    for (i, sender_ch) in (0..n_parties).zip(sender_channels) {
-        randousha_nodes.push(initialize_node(
-            i,
-            n_parties,
-            threshold,
-            threshold + 1,
-            sender_ch,
-        ));
+    for i in 0..n_parties {
+        randousha_nodes.push(initialize_node(i, n_parties, threshold, threshold + 1));
     }
 
     // receiver id receives reconstruct messages from other party
@@ -217,13 +183,12 @@ async fn test_reconstruct_handler() {
     }
 
     // check the store
-    let store = randousha_node
+    let binding = randousha_node
         .get_or_create_store(session_id)
         .await
-        .unwrap()
-        .lock()
-        .await
-        .clone();
+        .unwrap();
+    let store = binding.lock().await;
+
     assert!(store.received_r_shares_degree_t.len() == 2 * threshold + 1);
     assert!(store.received_r_shares_degree_2t.len() == 2 * threshold + 1);
     assert!(store.received_ok_msg.len() == 0);
@@ -242,8 +207,6 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let degree_t = 3;
     let degree_2t = 6;
 
-    let (sender_ch, _receiver_ch) = mpsc::channel(128);
-
     // receiver id receives recconstruct messages from other party
     let receiver_id = threshold + 2;
 
@@ -257,13 +220,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     // initialize RanDouShaNode
     let mut randousha_nodes = vec![];
     for i in 0..n_parties {
-        randousha_nodes.push(initialize_node(
-            i,
-            n_parties,
-            threshold,
-            threshold + 1,
-            sender_ch.clone(),
-        ));
+        randousha_nodes.push(initialize_node(i, n_parties, threshold, threshold + 1));
     }
 
     // receiver randousha node
@@ -334,13 +291,11 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     }
 
     // check the store
-    let store = randousha_node
+    let binding = randousha_node
         .get_or_create_store(session_id)
         .await
-        .unwrap()
-        .lock()
-        .await
-        .clone();
+        .unwrap();
+    let store = binding.lock().await;
     assert_eq!(store.received_r_shares_degree_t.len(), n_parties);
     assert_eq!(store.received_r_shares_degree_2t.len(), n_parties);
     assert_eq!(store.received_ok_msg.len(), 0);
@@ -358,11 +313,9 @@ async fn test_output_handler() {
     let (_, shares_si_t, shares_si_2t) = construct_e2e_input(n_parties, degree_t);
     let receiver_id = 1;
 
-    let (sender_ch, _receiver_ch) = mpsc::channel(128);
-
     // create receiver randousha node
     let mut randousha_node: RanDouShaNode<Fr, Avid> =
-        RanDouShaNode::new(receiver_id, sender_ch, n_parties, threshold, threshold + 1).unwrap();
+        RanDouShaNode::new(receiver_id, n_parties, threshold, threshold + 1).unwrap();
     // call init_handler to create random share
     randousha_node
         .init(
@@ -374,7 +327,10 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
-    let node_store = randousha_node.get_or_create_store(session_id).await.unwrap();
+    let node_store = randousha_node
+        .get_or_create_store(session_id)
+        .await
+        .unwrap();
 
     // first n-(t+1)-1 message should return error
     for i in 0..n_parties - (threshold + 2) {
@@ -414,7 +370,10 @@ async fn test_output_handler() {
         .await
         .expect("output handler should not fail");
     {
-        let storage_mutex = randousha_node.get_or_create_store(session_id).await.unwrap();
+        let storage_mutex = randousha_node
+            .get_or_create_store(session_id)
+            .await
+            .unwrap();
         let storage = storage_mutex.lock().await;
         let output = storage.protocol_output.clone();
 
@@ -440,18 +399,10 @@ async fn randousha_e2e() {
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
     let (_, n_shares_t, n_shares_2t) = construct_e2e_input(n_parties, degree_t);
 
-    let mut sender_channels = Vec::new();
-    let mut receiver_channels = Vec::new();
-    for _ in 0..n_parties {
-        let (sender, receiver) = mpsc::channel(128);
-        sender_channels.push(sender);
-        receiver_channels.push(receiver);
-    }
-
     info!("channels created");
 
     // create randousha nodes
-    let randousha_nodes = create_nodes(n_parties, sender_channels, threshold, threshold + 1);
+    let randousha_nodes = create_nodes(n_parties, threshold, threshold + 1);
     // spawn tasks to process received messages
     let _set = spawn_receiver_tasks(randousha_nodes.clone(), receivers, network.clone(), None);
 
@@ -505,16 +456,8 @@ async fn test_e2e_reconstruct_mismatch() {
     n_shares_t[0][0] =
         NonRobustShare::new(Fr::rand(rng), n_shares_t[0][0].id, n_shares_t[0][0].degree);
 
-    let mut sender_channels = Vec::new();
-    let mut receiver_channels = Vec::new();
-    for _ in 0..n_parties {
-        let (sender, receiver) = mpsc::channel(128);
-        sender_channels.push(sender);
-        receiver_channels.push(receiver);
-    }
-
     // create randousha nodes
-    let randousha_nodes = create_nodes(n_parties, sender_channels, threshold, threshold + 1);
+    let randousha_nodes = create_nodes(n_parties, threshold, threshold + 1);
 
     // Keep track of aborts
     let abort_count = Arc::new(AtomicUsize::new(0));
@@ -571,14 +514,7 @@ async fn test_e2e_wrong_degree() {
             secrets[idx_mod] + id_fr.pow([0, 0, 0, 2]) * n_shares_t[j][idx_mod].share[0];
     }
 
-    let mut sender_channels = Vec::new();
-    let mut receiver_channels = Vec::new();
-    for _ in 0..n_parties {
-        let (sender, receiver) = mpsc::channel(128);
-        sender_channels.push(sender);
-        receiver_channels.push(receiver);
-    }
-    let randousha_nodes = create_nodes(n_parties, sender_channels, threshold, threshold + 1);
+    let randousha_nodes = create_nodes(n_parties, threshold, threshold + 1);
 
     // Keep track of aborts
     let abort_count = Arc::new(AtomicUsize::new(0));

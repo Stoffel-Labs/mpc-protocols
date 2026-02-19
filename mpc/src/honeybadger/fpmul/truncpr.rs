@@ -1,7 +1,9 @@
 use crate::{
     common::{SecretSharingScheme, RBC},
     honeybadger::{
-        fpmul::{mod_pow2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore},
+        fpmul::{
+            mod_pow2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore, TruncState,
+        },
         robust_interpolate::robust_interpolate::RobustShare,
         SessionId,
     },
@@ -10,9 +12,12 @@ use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
-use tokio::sync::{
-    mpsc::{self, Receiver, Sender},
-    Mutex,
+use tokio::{
+    sync::{
+        mpsc::{self, Receiver},
+        Mutex,
+    },
+    time::{timeout, Duration},
 };
 use tracing::info;
 
@@ -22,18 +27,12 @@ pub struct TruncPrNode<F: PrimeField, R: RBC> {
     pub n: usize,
     pub t: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TruncPrStore<F>>>>>>,
-    pub output_channel: Sender<SessionId>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
-    pub fn new(
-        id: usize,
-        n: usize,
-        t: usize,
-        output_channel: Sender<SessionId>,
-    ) -> Result<Self, TruncPrError> {
+    pub fn new(id: usize, n: usize, t: usize) -> Result<Self, TruncPrError> {
         let (rbc_sender, rbc_receiver) = mpsc::channel(200);
         let rbc = R::new(id, n, t, t + 1, rbc_sender)?;
         Ok(Self {
@@ -41,7 +40,6 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
             n,
             t,
             store: Arc::new(Mutex::new(HashMap::new())),
-            output_channel,
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
@@ -87,6 +85,33 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
         self.rbc.clear_store().await;
         store.clear();
     }
+
+    pub async fn wait_for_result(
+        &self,
+        session_id: SessionId,
+        duration: Duration,
+    ) -> Result<RobustShare<F>, TruncPrError> {
+        let output_receiver = {
+            let storage = self.store.lock().await;
+            let storage_bind = match storage.get(&session_id) {
+                Some(value) => value,
+                None => return Err(TruncPrError::NoSuchSessionId(session_id)),
+            };
+            let mut storage = storage_bind.lock().await;
+
+            storage
+                .output_receiver
+                .take()
+                .ok_or(TruncPrError::ResultAlreadyReceived(session_id))?
+        };
+
+        match timeout(duration, output_receiver).await {
+            Err(_) => Err(TruncPrError::Timeout(session_id)),
+            Ok(Err(_)) => Err(TruncPrError::ReceiveError(session_id)),
+            Ok(Ok(shares)) => Ok(shares),
+        }
+    }
+
     /// Start TruncPr:
     /// - builds [r'] and [r] from preseeded randomness,
     /// - forms share of (b + r) where b = 2^{k-1} + [a],
@@ -125,6 +150,7 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
             r_dash = (r_dash + (bit_share.clone() * pow2_f::<F>(i))?)?;
         }
         s.r_dash = Some(r_dash.clone());
+        s.state = TruncState::Initialized;
         drop(s);
         // [r] = 2^m [r''] + [r']
         let r = ((r_int * pow2_f::<F>(m))? + r_dash)?;
@@ -169,6 +195,9 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
         let store = self.get_or_create_store(msg.session_id).await;
         let mut s = store.lock().await;
 
+        if s.state == TruncState::Finished {
+            return Ok(());
+        }
         // de-serialize incoming share of (b + r)
         let share_i: RobustShare<F> =
             CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
@@ -203,9 +232,14 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
             let inv_2m = pow2_f::<F>(m).inverse().expect("2^m invertible mod q");
             let d = ((a - a_prime)? * inv_2m)?;
 
-            s.share_d = Some(d);
+            s.share_d = Some(d.clone());
             s.open_buf.clear();
-            self.output_channel.send(msg.session_id).await?;
+            s.state = TruncState::Finished;
+            let taken_output_sender = s.output_sender.take().unwrap();
+            drop(s);
+            taken_output_sender
+                .send(d)
+                .map_err(|_| TruncPrError::SendError(msg.session_id))?;
         }
 
         Ok(())
@@ -215,18 +249,16 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use crate::common::rbc::rbc::Avid;
+    use crate::honeybadger::fpmul::{TruncPrError, TruncPrMessage};
+    use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use crate::honeybadger::SessionId;
-    use crate::honeybadger::fpmul::{TruncPrMessage, TruncPrError};
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
-    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_truncpr_handle_open_invalid_sub_id() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = TruncPrNode::<Fr, Avid>::new(0, 5, 1, tx).unwrap();
+        let mut node = TruncPrNode::<Fr, Avid>::new(0, 5, 1).unwrap();
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(crate::honeybadger::ProtocolType::Trunc, 0, 1, 0, 111);

@@ -4,13 +4,13 @@ use ark_std::test_rng;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::time::Duration;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::rbc::RbcError;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
 use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme, RBC};
-use stoffelmpc_mpc::honeybadger::double_share::DoubleShamirShare;
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
+use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::share_gen::RanShaError;
 use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
@@ -212,26 +212,18 @@ pub fn construct_e2e_input(
     return (secrets, n_shares_t, n_shares_2t);
 }
 
-pub fn initialize_node(
-    node_id: usize,
-    n: usize,
-    t: usize,
-    k: usize,
-    output_sender: Sender<SessionId>,
-) -> RanDouShaNode<Fr, Avid> {
-    RanDouShaNode::new(node_id, output_sender, n, t, k).unwrap()
+pub fn initialize_node(node_id: usize, n: usize, t: usize, k: usize) -> RanDouShaNode<Fr, Avid> {
+    RanDouShaNode::new(node_id, n, t, k).unwrap()
 }
 
 /// Initializes all RanDouSha nodes and returns them wrapped in `Arc<Mutex<_>>`.
 pub fn create_nodes(
     n_parties: usize,
-    senders: Vec<Sender<SessionId>>,
     t: usize,
     k: usize,
 ) -> Vec<Arc<Mutex<RanDouShaNode<Fr, Avid>>>> {
     (0..n_parties)
-        .zip(senders)
-        .map(|(id, sender)| Arc::new(Mutex::new(initialize_node(id, n_parties, t, k, sender))))
+        .map(|id| Arc::new(Mutex::new(initialize_node(id, n_parties, t, k))))
         .collect()
 }
 
@@ -519,6 +511,7 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     n_prandint: usize,
     l: usize,
     k: usize,
+    timeout: Duration,
     input_ids: Vec<ClientId>,
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
@@ -536,6 +529,7 @@ where
         n_prandint,
         l,
         k,
+        timeout,
     )
     .unwrap();
     (0..n_parties)

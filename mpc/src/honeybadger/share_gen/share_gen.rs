@@ -4,10 +4,8 @@ use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::{
-    mpsc::{self, Receiver, Sender},
-    Mutex,
-};
+use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 use tracing::info;
 
 use crate::{
@@ -31,8 +29,7 @@ pub struct RanShaNode<F: FftField, R: RBC> {
     pub threshold: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanShaStore<F>>>>>>,
     pub rbc: R,
-    pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
-    pub output_sender: Sender<SessionId>,
+    pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
 }
 
 pub static MAX_SHARE_GEN_SESSIONS: usize = 1024;
@@ -47,9 +44,8 @@ where
         n_parties: usize,
         threshold: usize,
         k: usize,
-        output_sender: Sender<SessionId>,
     ) -> Result<Self, RanShaError> {
-        let (rbc_sender, rbc_receiver) = mpsc::channel(200);
+        let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
         let rbc = R::new(id, n_parties, threshold, k, rbc_sender)?;
         Ok(Self {
             id,
@@ -58,7 +54,6 @@ where
             store: Arc::new(Mutex::new(HashMap::new())),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
-            output_sender,
         })
     }
 
@@ -103,6 +98,35 @@ where
             .clone())
     }
 
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        let mut store = self.store.lock().await;
+        store.remove(&session_id).is_some()
+    }
+    pub async fn wait_for_result(
+        &self,
+        session_id: SessionId,
+        duration: Duration,
+    ) -> Result<Vec<RobustShare<F>>, RanShaError> {
+        let output_receiver = {
+            let storage = self.store.lock().await;
+            let storage_bind = match storage.get(&session_id) {
+                Some(value) => value,
+                None => return Err(RanShaError::NoSuchSessionId(session_id)),
+            };
+            let mut storage = storage_bind.lock().await;
+
+            storage
+                .output_receiver
+                .take()
+                .ok_or(RanShaError::ResultAlreadyReceived(session_id))?
+        };
+
+        match timeout(duration, output_receiver).await {
+            Err(_) => Err(RanShaError::Timeout(session_id)),
+            Ok(Err(_)) => Err(RanShaError::ReceiveError(session_id)),
+            Ok(Ok(shares)) => Ok(shares),
+        }
+    }
     pub async fn init<N, G>(
         &mut self,
         session_id: SessionId,
@@ -326,6 +350,9 @@ where
 
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
+        if store.state == RanShaState::Finished {
+            return Ok(());
+        }
         store.state = RanShaState::Output;
 
         if !store.received_ok_msg.contains(&msg.sender_id) {
@@ -342,9 +369,14 @@ where
 
         let output = store.computed_r_shares[2 * self.threshold..].to_vec();
         store.state = RanShaState::Finished;
-        store.protocol_output = output;
+        store.protocol_output = output.clone();
+
+        let taken_output_sender = store.output_sender.take().unwrap();
         drop(store);
-        self.output_sender.send(msg.session_id).await?;
+        taken_output_sender
+            .send(output)
+            .map_err(|_| RanShaError::SendError(msg.session_id))?;
+
         Ok(())
     }
 
@@ -381,12 +413,10 @@ mod tests {
     use ark_serialize::CanonicalSerialize;
     use std::sync::Arc;
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
-    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_receive_shares_handler() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2).unwrap();
         let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
         let net = Arc::new(FakeNetwork::new(0, inner));
 
@@ -437,8 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_reconstruction_handler() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2).unwrap();
         let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
         let net = Arc::new(FakeNetwork::new(0, inner));
 
@@ -489,8 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_output_handler() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2).unwrap();
 
         // Fill up the storage to the limit by calling output_handler with unique session IDs
         let mut exec = 0u8;
@@ -533,8 +561,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sharegen_receive_shares_handler_invalid_sub_id() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2).unwrap();
         let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
         let net = Arc::new(FakeNetwork::new(0, inner));
 
@@ -559,8 +586,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sharegen_reconstruction_handler_invalid_sub_id() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2).unwrap();
         let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
         let net = Arc::new(FakeNetwork::new(0, inner));
 
@@ -585,8 +611,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sharegen_output_handler_invalid_sub_id() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid>::new(0, 5, 1, 2).unwrap();
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(ProtocolType::Ransha, 0, 1, 0, 0);

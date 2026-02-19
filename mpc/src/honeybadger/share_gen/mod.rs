@@ -6,7 +6,7 @@ use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
-use tokio::sync::mpsc::error::SendError;
+use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 use crate::{
     common::{rbc::RbcError, share::ShareError},
@@ -35,8 +35,10 @@ pub enum RanShaError {
     RbcError(#[from] RbcError),
     #[error("Share error: {0:?}")]
     ShareError(#[from] ShareError),
-    #[error("error sending the output of the protocol execution: {0:?}")]
-    SendError(#[from] SendError<SessionId>),
+    #[error("error sending the result: {0:?}")]
+    SendError(SessionId),
+    #[error("error receiving the result: {0:?}")]
+    ReceiveError(SessionId),
     #[error("received abort signal")]
     Abort,
     #[error("waiting for more confirmations")]
@@ -46,10 +48,16 @@ pub enum RanShaError {
     #[error("session ID {0:?} malformed")]
     SessionIdError(SessionId),
     #[error("limit reached")]
-    LimitError
+    LimitError,
+    #[error("no such session ID exists: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("result already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("multiplication {0:?} did not complete in time")]
+    Timeout(SessionId),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RanShaStore<F: FftField> {
     pub initial_shares: HashMap<usize, RobustShare<F>>,
     pub reception_tracker: Vec<bool>,
@@ -58,6 +66,8 @@ pub struct RanShaStore<F: FftField> {
     pub received_ok_msg: Vec<usize>,
     pub state: RanShaState,
     pub protocol_output: Vec<RobustShare<F>>,
+    pub output_sender: Option<Sender<Vec<RobustShare<F>>>>,
+    pub output_receiver: Option<Receiver<Vec<RobustShare<F>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +81,7 @@ pub enum RanShaState {
 
 impl<F: FftField> RanShaStore<F> {
     pub fn empty(n_parties: usize) -> Self {
+        let (output_sender, output_receiver) = channel();
         Self {
             initial_shares: HashMap::new(),
             reception_tracker: vec![false; n_parties],
@@ -79,6 +90,8 @@ impl<F: FftField> RanShaStore<F> {
             received_ok_msg: Vec::new(),
             state: RanShaState::Initialized,
             protocol_output: Vec::new(),
+            output_sender: Some(output_sender),
+            output_receiver: Some(output_receiver),
         }
     }
 }

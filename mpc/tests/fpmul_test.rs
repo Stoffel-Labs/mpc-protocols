@@ -18,7 +18,7 @@ use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::{Robust, RobustShare};
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use stoffelmpc_network::fake_network::SenderId;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
 
 #[tokio::test]
@@ -34,25 +34,9 @@ async fn test_prandbitd_end_to_end() {
     // Build fake network
     let (network, mut recv, _, _) = test_setup(n, vec![]);
 
-    let sender_channels: Vec<Sender<_>> = (0..n)
-        .map(|_| {
-            let (sender, _) = mpsc::channel(128);
-            sender
-        })
-        .collect();
-
     // Initialize nodes
     let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
-        .map(|i| {
-            PRandBitNode::new(
-                i,
-                n,
-                t,
-                sender_channels[i].clone(),
-                sender_channels[i].clone(),
-            )
-            .unwrap()
-        })
+        .map(|i| PRandBitNode::new(i, n, t).unwrap())
         .collect();
 
     // Run distributed RISS generation
@@ -178,25 +162,9 @@ async fn test_prandbitd_r_reconstruction() {
     // Build fake network
     let (network, mut recv, _, _) = test_setup(n, vec![]);
 
-    let sender_channels: Vec<Sender<_>> = (0..n)
-        .map(|_| {
-            let (sender, _) = mpsc::channel(128);
-            sender
-        })
-        .collect();
-
     // Initialize nodes
     let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
-        .map(|i| {
-            PRandBitNode::new(
-                i,
-                n,
-                t,
-                sender_channels[i].clone(),
-                sender_channels[i].clone(),
-            )
-            .unwrap()
-        })
+        .map(|i| PRandBitNode::new(i, n, t).unwrap())
         .collect();
 
     // Run distributed RISS generation
@@ -382,10 +350,8 @@ async fn test_truncpr_end_to_end() {
     let (network, mut recv, _, _) = test_setup(n, vec![]);
 
     // === Initialize nodes ===
-    let (trunc_sender, _trunc_receiver) = mpsc::channel(128);
-    let mut nodes: Vec<TruncPrNode<F, Avid>> = (0..n)
-        .map(|i| TruncPrNode::new(i, n, t, trunc_sender.clone()).unwrap())
-        .collect();
+    let mut nodes: Vec<TruncPrNode<F, Avid>> =
+        (0..n).map(|i| TruncPrNode::new(i, n, t).unwrap()).collect();
 
     // === Input secret [a] (same across parties for test) ===
     let mut rng = test_rng();
