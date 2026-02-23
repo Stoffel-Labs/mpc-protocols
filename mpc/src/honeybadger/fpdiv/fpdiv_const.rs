@@ -64,6 +64,7 @@ where
         denom: ClearFixedPoint<F>,
         r_bits: Vec<RobustShare<F>>,
         r_int: RobustShare<F>,
+        duration: Duration,
         session_id: SessionId,
         net: Arc<N>,
     ) -> Result<SecretFixedPoint<F, RobustShare<F>>, FPDivConstError> {
@@ -92,7 +93,7 @@ where
 
         let output = self
             .trunc_node
-            .wait_for_result(session_id, Duration::from_millis(500))
+            .wait_for_result(session_id, duration)
             .await?;
         Ok(SecretFixedPoint::new(output))
     }

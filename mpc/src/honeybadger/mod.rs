@@ -865,7 +865,15 @@ where
         // 5. Call the division node ---------------------------------------
         self.type_ops
             .fpdiv_const
-            .init(x, y, r_bits_only, r_int[0].clone(), session_id, net.clone())
+            .init(
+                x,
+                y,
+                r_bits_only,
+                r_int[0].clone(),
+                self.params.timeout,
+                session_id,
+                net.clone(),
+            )
             .await
             .map_err(HoneyBadgerError::from)
     }

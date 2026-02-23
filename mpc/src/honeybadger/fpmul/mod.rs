@@ -36,8 +36,6 @@ pub enum RandBitError {
     SquareRoot,
     #[error("the inverse does not exist")]
     Inverse,
-    #[error("not initialized error")]
-    NotInitialized,
     #[error("number of random shares is not a multiple of (t+1)")]
     Incompatible,
     #[error("Duplicate input: {0}")]

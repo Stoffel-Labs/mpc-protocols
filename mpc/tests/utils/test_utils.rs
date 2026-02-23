@@ -279,7 +279,6 @@ pub fn spawn_receiver_tasks(
                                 }
                                 break;
                             }
-                            Err(RanDouShaError::WaitForOk) => {}
                             Err(RanDouShaError::NetworkError(NetworkError::SendError)) => {
                                 eprintln!(
                                     "Party {} encountered SendError (ignored)",

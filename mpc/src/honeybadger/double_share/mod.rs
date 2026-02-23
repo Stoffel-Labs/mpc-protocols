@@ -12,9 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
-use tokio::sync::{
-    oneshot::{channel, Receiver, Sender},
-};
+use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 pub mod double_share_generation;
 

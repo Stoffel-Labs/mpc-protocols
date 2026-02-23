@@ -23,7 +23,6 @@ async fn generate_faulty_double_shares_e2e() {
 
     let (network, receivers, _) = test_setup(n_parties, vec![]);
 
-
     let dou_sha_nodes = create_nodes(n_parties, threshold);
     let mut rng = test_rng();
 

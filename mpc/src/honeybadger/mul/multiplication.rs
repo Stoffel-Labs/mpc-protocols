@@ -413,10 +413,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         // 3.
-        let no_of_mul = storage.no_of_mul.ok_or(MulError::InvalidInput(format!(
-            "No. of multiplications not set for node (init not called yet) {}",
-            self.id
-        )))?;
+        let Some(no_of_mul) = storage.no_of_mul else {
+            // init not called yet: buffer-only mode
+            return Ok(());
+        };
         let no_of_batch = no_of_mul / (self.t + 1);
         let share_len = no_of_mul % (self.t + 1);
 

@@ -105,6 +105,39 @@ where
             Ok(Ok(shares)) => Ok(shares),
         }
     }
+    async fn try_finalize(&mut self, session_id: SessionId) -> Result<bool, RanShaError> {
+        // phase 1: decide + extract under lock
+        let output = {
+            let store_bind = self.get_or_create_store(session_id).await?;
+            let mut store = store_bind.lock().await;
+
+            if store.state == RanShaState::Finished {
+                return Ok(true);
+            }
+
+            if store.received_ok_msg.len() < 2 * self.threshold {
+                return Ok(false);
+            }
+            if store.computed_r_shares.len() < self.n_parties {
+                return Ok(false);
+            }
+
+            let output = store.computed_r_shares[2 * self.threshold..].to_vec();
+            store.state = RanShaState::Finished;
+            store.protocol_output = output.clone();
+
+            let sender = store.output_sender.take().unwrap();
+            (sender, output)
+        };
+
+        // phase 2: send outside lock (send is sync, but it’s still a good pattern)
+        let (sender, output) = output;
+        sender
+            .send(output)
+            .map_err(|_| RanShaError::SendError(session_id))?;
+        Ok(true)
+    }
+
     pub async fn init<N, G>(
         &mut self,
         session_id: SessionId,
@@ -119,7 +152,6 @@ where
 
         assert_eq!(session_id.sub_id(), 0);
 
-        let storage_access = self.get_or_create_store(session_id).await?;
         let secret = F::rand(rng);
 
         let shares_deg_t =
@@ -144,6 +176,7 @@ where
         }
 
         // Update the state of the protocol to Initialized.
+        let storage_access = self.get_or_create_store(session_id).await?;
         let mut storage = storage_access.lock().await;
         storage.state = RanShaState::Initialized;
         Ok(())
@@ -245,6 +278,7 @@ where
         let mut store = bind_store.lock().await;
         store.computed_r_shares = r_deg_t.clone();
         drop(store);
+        let _ = self.try_finalize(session_id).await?;
 
         for i in 0..2 * self.threshold {
             let share_deg_t = r_deg_t[i].clone();
@@ -288,6 +322,9 @@ where
         }
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
+        if store.state == RanShaState::Finished {
+            return Ok(());
+        }
         store.state = RanShaState::Reconstruction;
         store.received_r_shares.insert(msg.sender_id, share.clone());
 
@@ -346,33 +383,12 @@ where
 
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
-        if store.state == RanShaState::Finished {
-            return Ok(());
-        }
-        store.state = RanShaState::Output;
 
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
         }
-
-        if store.received_ok_msg.len() < 2 * self.threshold {
-            return Err(RanShaError::WaitForOk);
-        }
-
-        if store.computed_r_shares.len() < self.n_parties {
-            return Err(RanShaError::WaitForOk);
-        }
-
-        let output = store.computed_r_shares[2 * self.threshold..].to_vec();
-        store.state = RanShaState::Finished;
-        store.protocol_output = output.clone();
-
-        let taken_output_sender = store.output_sender.take().unwrap();
-
-        taken_output_sender
-            .send(output)
-            .map_err(|_| RanShaError::SendError(msg.session_id))?;
-
+        drop(store);
+        self.try_finalize(msg.session_id).await?;
         Ok(())
     }
 }

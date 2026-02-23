@@ -41,8 +41,6 @@ pub enum RanShaError {
     ReceiveError(SessionId),
     #[error("received abort signal")]
     Abort,
-    #[error("waiting for more confirmations")]
-    WaitForOk,
     #[error("session ID {0:?} malformed")]
     SessionIdError(SessionId),
     #[error("limit reached")]
@@ -73,7 +71,6 @@ pub enum RanShaState {
     Initialized,
     FinishedInitialSharing,
     Reconstruction,
-    Output,
     Finished,
 }
 
