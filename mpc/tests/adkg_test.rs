@@ -10,6 +10,7 @@ use ark_std::{
     test_rng,
 };
 use std::{collections::HashMap, sync::Arc};
+use stoffelmpc_mpc::honeybadger::SessionId;
 use stoffelmpc_mpc::{
     avss_mpc::{triple_gen::BeaverTriple, AdkgNode, AdkgNodeOpts, AvssSessionId},
     common::{
@@ -29,7 +30,7 @@ pub fn adkg_receive<F, R, S, N, G>(
     net: Arc<N>,
 ) where
     F: PrimeField,
-    R: RBC + 'static,
+    R: RBC<Id = AvssSessionId> + 'static,
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
     AdkgNode<F, R, G>: MPCProtocol<F, S, N>,
@@ -57,7 +58,7 @@ pub fn adkg_receive<F, R, S, N, G>(
     }
 }
 
-pub fn create_adkg_nodes<F: PrimeField, R: RBC + 'static, S, N, G>(
+pub fn create_adkg_nodes<F, R, S, N, G>(
     n_parties: usize,
     t: usize,
     n_v_random_shares: usize,
@@ -65,6 +66,8 @@ pub fn create_adkg_nodes<F: PrimeField, R: RBC + 'static, S, N, G>(
     instance_id: u32,
 ) -> Vec<AdkgNode<F, R, G>>
 where
+    R: RBC<Id = AvssSessionId> + 'static,
+    F: PrimeField,
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
     AdkgNode<F, R, G>: MPCProtocol<F, S, N, MPCOpts = AdkgNodeOpts<F, G>>,

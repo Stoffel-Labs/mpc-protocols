@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::types::fixed::{FixedPointPrecision, SecretFixedPoint};
-use stoffelmpc_mpc::common::{SecretSharingScheme, ShamirShare, RBC};
+use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC};
 use stoffelmpc_mpc::honeybadger::fpmul::fpmul::FPMulNode;
 use stoffelmpc_mpc::honeybadger::fpmul::gf_256::{
     build_all_f_polys_2_8, lagrange_interpolate_f2_8, GF256Domain, GF256,
@@ -483,14 +483,14 @@ async fn fpmul_e2e() {
 
     let precision = FixedPointPrecision::new(k, f);
 
-    let session_id = SessionId::new(ProtocolType::FpMul, 123, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::FpMul, SessionId::pack_slot24(123, 0, 0), 111);
 
     // Build a fake network.
     let (network, receivers, _) = test_setup(num_parties, vec![]);
 
     // Create nodes for the protocol.
     let (protocol_out_tx, _protocol_out_rx) = tokio::sync::mpsc::channel(128);
-    let mut nodes: Vec<FPMulNode<Fr, Avid>> = (0..num_parties)
+    let mut nodes: Vec<FPMulNode<Fr, Avid<SessionId>>> = (0..num_parties)
         .map(|node_id| {
             FPMulNode::new(node_id, num_parties, threshold, protocol_out_tx.clone()).unwrap()
         })

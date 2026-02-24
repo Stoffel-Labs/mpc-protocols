@@ -295,11 +295,10 @@ pub trait RBC: Send + Sync {
 /// Given an underlying secret sharing protocol and a reliable broadcast protocol,
 /// you can define an MPC protocol.
 #[async_trait]
-pub trait MPCProtocol<F, S, N, G>
+pub trait MPCProtocol<F, S, N>
 where
     F: FftField,
     S: SecretSharingScheme<F>,
-    G: CurveGroup<ScalarField = F>,
     N: Network,
 {
     type MPCOpts;
@@ -322,12 +321,11 @@ where
 }
 
 #[async_trait]
-pub trait PreprocessingMPCProtocol<F, S, N, G>: MPCProtocol<F, S, N, G>
+pub trait PreprocessingMPCProtocol<F, S, N>: MPCProtocol<F, S, N>
 where
     N: Network,
     F: FftField,
     S: SecretSharingScheme<F>,
-    G: CurveGroup<ScalarField = F>,
 {
     async fn run_preprocessing<R>(
         &mut self,

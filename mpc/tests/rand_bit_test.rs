@@ -4,7 +4,7 @@ use ark_ff::{AdditiveGroup, Field};
 use std::time::Duration;
 use stoffelmpc_mpc::common::math::goldilocks::GoldilocksField;
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::SecretSharingScheme;
+use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelmpc_mpc::honeybadger::fpmul::rand_bit::RandBit;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
@@ -20,14 +20,18 @@ async fn rand_bit_with_small_field_e2e() {
     let threshold = 1;
     let batch_size = threshold + 1;
 
-    let session_id = SessionId::new(ProtocolType::RandBit, 123, 0, 0, 111);
+    let session_id = SessionId::new(
+        ProtocolType::RandBit,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
 
     // === Build fake network ===
     let (network, receivers, _) = test_setup(num_parties, vec![]);
 
     // === Create RandBit nodes ===
     let (protocol_output_tx, _) = mpsc::channel(128);
-    let mut nodes: Vec<RandBit<GoldilocksField, Avid>> = (0..num_parties)
+    let mut nodes: Vec<RandBit<GoldilocksField, Avid<SessionId>>> = (0..num_parties)
         .map(|i| RandBit::new(i, num_parties, threshold, protocol_output_tx.clone()).unwrap())
         .collect();
 
@@ -61,7 +65,7 @@ async fn rand_bit_with_small_field_e2e() {
     let mut all_outputs = Vec::new();
 
     for node in &mut nodes {
-        let store = node.get_or_create_storage(session_id).await;
+        let store = node.get_or_create_storage(session_id).await.unwrap();
         let s = store.lock().await;
 
         assert!(

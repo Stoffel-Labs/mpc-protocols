@@ -6,7 +6,7 @@ use crate::utils::truncpr_utils::{
 use ark_bls12_381::Fr;
 use ark_ff::{Field, One, Zero};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::SecretSharingScheme;
+use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
 use stoffelmpc_mpc::honeybadger::fpmul::{mod_pow_2_from_field, ProtocolState};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -24,8 +24,7 @@ async fn truncpr_e2e() {
     let m = 2;
     let kappa = 10;
 
-    let session_id = SessionId::new(ProtocolType::Trunc, 123, 0, 0, 111);
-
+    let session_id = SessionId::new(ProtocolType::Trunc, SessionId::pack_slot24(123, 0, 0), 111);
     // Generate the inputs for the protocol.
     let (a, a_input_shares) = generate_input_integer_z_k(num_parties, threshold, k);
     let r_bits = generate_random_shared_bits(num_parties, threshold, m);
@@ -35,7 +34,7 @@ async fn truncpr_e2e() {
     let (network, receivers, _) = test_setup(num_parties, vec![]);
 
     let (protocol_out_tx, _protocol_out_rx) = tokio::sync::mpsc::channel(128);
-    let mut nodes: Vec<TruncPrNode<Fr, Avid>> = (0..num_parties)
+    let mut nodes: Vec<TruncPrNode<Fr, Avid<SessionId>>> = (0..num_parties)
         .map(|id| TruncPrNode::new(id, num_parties, threshold, protocol_out_tx.clone()).unwrap())
         .collect();
 

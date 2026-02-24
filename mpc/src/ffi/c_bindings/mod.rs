@@ -73,7 +73,6 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
-    Avss = 15,
     RanShaSmallField = 16,
 }
 
@@ -95,7 +94,6 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             ProtocolType::FpMul => crate::honeybadger::ProtocolType::FpMul,
             ProtocolType::Trunc => crate::honeybadger::ProtocolType::Trunc,
             ProtocolType::FpDivConst => crate::honeybadger::ProtocolType::FpDivConst,
-            ProtocolType::Avss => crate::honeybadger::ProtocolType::Avss,
             ProtocolType::RanShaSmallField => crate::honeybadger::ProtocolType::RanShaSmallField,
         }
     }
@@ -119,7 +117,6 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::FpMul => ProtocolType::FpMul,
             crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
             crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
-            crate::honeybadger::ProtocolType::Avss => ProtocolType::Avss,
             crate::honeybadger::ProtocolType::RanShaSmallField => ProtocolType::RanShaSmallField,
         }
     }

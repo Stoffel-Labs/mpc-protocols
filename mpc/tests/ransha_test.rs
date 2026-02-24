@@ -53,7 +53,7 @@ async fn test_reconstruct_handler_incorrect_share() {
         shares_ri_t[i].share[0] += Fr::from(7u64);
     }
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
@@ -263,7 +263,7 @@ async fn test_output_handler_goldilocks_field() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = SessionId::new(ProtocolType::Ransha, 123, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
     let degree_t = 3;
 
     let (network, _receivers, _) = test_setup(n_parties, vec![]);
@@ -272,7 +272,7 @@ async fn test_output_handler_goldilocks_field() {
     let (sender, _receiver_ch) = mpsc::channel(128);
 
     // create receiver randousha node
-    let mut ransha_node: RanShaNode<GoldilocksField, Avid> =
+    let mut ransha_node: RanShaNode<GoldilocksField, Avid<SessionId>> =
         RanShaNode::new(receiver_id, n_parties, threshold, threshold + 1, sender).unwrap();
     // call init_handler to create random share
     ransha_node
@@ -284,7 +284,7 @@ async fn test_output_handler_goldilocks_field() {
         .await
         .unwrap();
 
-    let node_store = ransha_node.get_or_create_store(session_id).await;
+    let node_store = ransha_node.get_or_create_store(session_id).await.unwrap();
 
     // first 2t-1 message should return error
     for i in 0..(2 * threshold - 1) {

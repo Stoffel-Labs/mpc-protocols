@@ -6,7 +6,7 @@ use std::sync::Arc;
 use stoffelmpc_mpc::common::{SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use stoffelmpc_mpc::honeybadger::WrappedMessage;
+use stoffelmpc_mpc::honeybadger::{SessionId, WrappedMessage};
 use stoffelmpc_network::fake_network::FakeNetwork;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
@@ -20,7 +20,7 @@ pub async fn spawn_receiver_tasks<F, R>(
 ) -> JoinSet<()>
 where
     F: PrimeField,
-    R: RBC + Clone + 'static,
+    R: RBC<Id = SessionId> + Clone + 'static,
 {
     let mut set = JoinSet::new();
     for i in 0..num_parties {

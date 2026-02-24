@@ -49,7 +49,7 @@ async fn test_avss_end_to_end() {
         .collect();
 
     // --- Initialize AVSS nodes ---
-    let mut nodes: Vec<AvssNode<Fr, Avid<AvssSessionId>, G, AvssSessionId>> = (0..n)
+    let mut nodes: Vec<AvssNode<Fr, Avid<AvssSessionId>, G>> = (0..n)
         .map(|i| {
             AvssNode::new(
                 i,

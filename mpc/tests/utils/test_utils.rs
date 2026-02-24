@@ -26,7 +26,7 @@ use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::FmtSubscriber;
 
@@ -373,17 +373,16 @@ pub fn generate_independent_shares<F: FftField>(
 
 //--------------------------NODE--------------------------
 
-pub fn receive<F, R, S, N, G>(
+pub fn receive<F, R, S, N>(
     mut receivers: Vec<Receiver<Vec<u8>>>,
-    mut nodes: Vec<HoneyBadgerMPCNode<F, R, G>>,
+    mut nodes: Vec<HoneyBadgerMPCNode<F, R>>,
     net: Arc<N>,
 ) where
     F: PrimeField,
-    R: RBC + 'static,
+    R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
-    HoneyBadgerMPCNode<F, R, G>: MPCProtocol<F, S, N>,
-    G: CurveGroup<ScalarField = F>,
+    HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N>,
 {
     assert_eq!(
         receivers.len(),
@@ -399,58 +398,45 @@ pub fn receive<F, R, S, N, G>(
         tokio::spawn(async move {
             while let Some(raw_msg) = rx.recv().await {
                 if let Err(e) = node.process(raw_msg, net_clone.clone()).await {
-                    tracing::error!("Node {i} failed to process message: {e:?}");
+                    error!("Node {i} failed to process message: {e:?}");
                 }
             }
-            tracing::info!("Receiver task for node {i} ended");
+            info!("Receiver task for node {i} ended");
         });
     }
 }
 
-pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N, G>(
+pub fn create_global_nodes<F, R, S, N>(
     n_parties: usize,
     t: usize,
     n_triples: usize,
     n_random_shares: usize,
-    n_v_random_shares: usize,
     instance_id: u32,
     n_prandbit: usize,
     n_prandint: usize,
+    n_small_field: usize,
     l: usize,
     k: usize,
     input_ids: Vec<ClientId>,
-) -> Vec<HoneyBadgerMPCNode<F, R, G>>
+) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
+    F: PrimeField,
+    R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
-    HoneyBadgerMPCNode<F, R, G>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts<F, G>>,
-    G: CurveGroup<ScalarField = F>,
+    HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts>,
 {
-    let mut rng = test_rng();
-
-    let mut sks = Vec::new();
-    let mut pks = Vec::new();
-    for _ in 0..n_parties {
-        let sk = F::rand(&mut rng);
-        let pk = G::generator() * sk;
-        sks.push(sk);
-        pks.push(pk);
-    }
-    let pk_map = Arc::new(pks);
-
     let parameters: Vec<_> = (0..n_parties)
-        .map(|i| {
+        .map(|_| {
             HoneyBadgerMPCNodeOpts::new(
                 n_parties,
                 t,
                 n_triples,
                 n_random_shares,
-                n_v_random_shares,
-                sks[i],
-                pk_map.clone(),
                 instance_id,
                 n_prandbit,
                 n_prandint,
+                n_small_field,
                 l,
                 k,
             )
@@ -463,8 +449,8 @@ where
 }
 
 /// Initializes all global nodes with their respective shares for randousha.
-pub async fn initialize_global_nodes_randousha<F, R, N, G>(
-    nodes: Vec<HoneyBadgerMPCNode<F, R, G>>,
+pub async fn initialize_global_nodes_randousha<F, R, N>(
+    nodes: Vec<HoneyBadgerMPCNode<F, R>>,
     n_shares_t: &[Vec<NonRobustShare<F>>],
     n_shares_2t: &[Vec<NonRobustShare<F>>],
     session_id: SessionId,
@@ -473,10 +459,9 @@ pub async fn initialize_global_nodes_randousha<F, R, N, G>(
     F: PrimeField,
     R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
-    G: CurveGroup<ScalarField = F>,
 {
-    assert!(nodes.len() == n_shares_t.len());
-    assert!(nodes.len() == n_shares_2t.len());
+    assert_eq!(nodes.len(), n_shares_t.len());
+    assert_eq!(nodes.len(), n_shares_2t.len());
 
     for node in nodes {
         let mut node_rds = node.preprocess.ran_dou_sha;
@@ -534,15 +519,14 @@ where
 }
 
 /// Initializes all global nodes with their respective shares for ransha.
-pub async fn initialize_global_nodes_ransha_small_field<F, R, N, G>(
-    nodes: Vec<HoneyBadgerMPCNode<F, R, G>>,
+pub async fn initialize_global_nodes_ransha_small_field<F, R, N>(
+    nodes: Vec<HoneyBadgerMPCNode<F, R>>,
     session_id: SessionId,
     network: Arc<N>,
 ) where
     F: PrimeField,
-    R: RBC + 'static,
+    R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
-    G: CurveGroup<ScalarField = F>,
 {
     let mut rng = StdRng::from_rng(OsRng).unwrap();
 
@@ -573,15 +557,14 @@ pub async fn initialize_global_nodes_ransha_small_field<F, R, N, G>(
 }
 
 /// Initializes all global nodes with their respective shares for ransha.
-pub async fn initialize_global_nodes_ransha<F, R, N, G>(
-    nodes: Vec<HoneyBadgerMPCNode<F, R, G>>,
+pub async fn initialize_global_nodes_ransha<F, R, N>(
+    nodes: Vec<HoneyBadgerMPCNode<F, R>>,
     session_id: SessionId,
     network: Arc<N>,
 ) where
     F: PrimeField,
     R: RBC<Id = SessionId> + 'static,
     N: Network + Send + Sync + 'static,
-    G: CurveGroup<ScalarField = F>,
 {
     let mut rng = StdRng::from_rng(OsRng).unwrap();
 

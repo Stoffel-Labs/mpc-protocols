@@ -16,12 +16,15 @@ use ark_std::{
     test_rng,
 };
 use futures::future::join_all;
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
+use stoffelmpc_mpc::avss_mpc::AvssSessionId;
 use stoffelmpc_mpc::common::math::goldilocks::GoldilocksField;
+use stoffelmpc_mpc::common::ProtocolSessionId;
 use stoffelmpc_mpc::{
     common::{
         rbc::rbc::Avid,
-        share::{avss::FeldmanShamirShare, shamir::Shamirshare},
+        share::shamir::Shamirshare,
         types::{
             fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
             integer::SecretInt,
@@ -64,10 +67,9 @@ async fn randousha_e2e() {
     let (network, receivers, _) = test_setup(n_parties, vec![]);
     let (_, n_shares_t, n_shares_2t) = construct_e2e_input(n_parties, degree_t);
     // create global nodes
-    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
         0,
         0,
         111,
@@ -75,10 +77,15 @@ async fn randousha_e2e() {
         0,
         0,
         0,
+        0,
         vec![],
     );
     // spawn tasks to process received messages
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     // init all randousha nodes
     initialize_global_nodes_randousha(
@@ -132,22 +139,18 @@ async fn ransha_e2e() {
     setup_tracing();
     let n_parties = 5;
     let t = 1;
-    let session_id = SessionId::new(
-        ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
     // create global nodes
-    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
         0,
-        0,
         111,
+        0,
         0,
         0,
         0,
@@ -155,7 +158,11 @@ async fn ransha_e2e() {
         vec![],
     );
     // spawn tasks to process received messages
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     // init all ransha nodes
     initialize_global_nodes_ransha(nodes.clone(), session_id, Arc::clone(&network)).await;
@@ -195,18 +202,22 @@ async fn ransha_e2e_small_field() {
     setup_tracing();
     let n_parties = 5;
     let t = 1;
-    let session_id = SessionId::new(ProtocolType::RanShaSmallField, 123, 0, 0, 111);
 
+    let session_id = SessionId::new(
+        ProtocolType::RanShaSmallField,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
     // create global nodes
-    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
         0,
-        0,
         111,
+        0,
         0,
         0,
         0,
@@ -215,7 +226,11 @@ async fn ransha_e2e_small_field() {
     );
 
     // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     // init all ransha nodes
     initialize_global_nodes_ransha_small_field(nodes.clone(), session_id, Arc::clone(&network))
@@ -229,7 +244,8 @@ async fn ransha_e2e_small_field() {
                 .preprocess
                 .small_field_share_gen
                 .get_or_create_store(session_id)
-                .await;
+                .await
+                .unwrap();
 
             loop {
                 let store = store.lock().await;
@@ -266,14 +282,15 @@ async fn test_input_protocol_e2e() {
 
     // Set up InputServers/InputClient
     let mut client =
-        InputClient::<Fr, Avid<SessionId>>::new(clientid[0], n, t, 111, input_values.clone()).unwrap();
-    let mut nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
+        InputClient::<Fr, Avid<SessionId>>::new(clientid[0], n, t, 111, input_values.clone())
+            .unwrap();
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n,
         t,
         0,
         0,
-        0,
         111,
+        0,
         0,
         0,
         0,
@@ -282,7 +299,11 @@ async fn test_input_protocol_e2e() {
     );
 
     //Receive at server
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(server_recv, nodes.clone(), net.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        server_recv,
+        nodes.clone(),
+        net.clone(),
+    );
     //Receive at client
     let net_clone2 = net.clone();
     let mut recv = client_recv.remove(&clientid[0]).unwrap();
@@ -352,13 +373,13 @@ async fn gen_masks_for_input_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     //Create global nodes for InputServers
-    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
         0,
-        0,
         111,
+        0,
         0,
         0,
         0,
@@ -377,7 +398,11 @@ async fn gen_masks_for_input_e2e() {
 
     //----------------------------------------RECIEVE----------------------------------------
     //At servers
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
     //At client
     let net_clone2 = network.clone();
     let mut recv = client_recv.remove(&clientid[0]).unwrap();
@@ -515,13 +540,13 @@ async fn mul_e2e_bad_net() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork>(
         n_parties,
         t,
         0,
         0,
-        0,
         111,
+        0,
         0,
         0,
         0,
@@ -531,7 +556,7 @@ async fn mul_e2e_bad_net() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork, G>(
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork>(
         receivers,
         nodes.clone(),
         network.clone(),
@@ -543,7 +568,6 @@ async fn mul_e2e_bad_net() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             Some(triple[pid].clone()),
-            None,
             None,
             None,
             None,
@@ -651,13 +675,13 @@ async fn mul_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
         0,
-        0,
         111,
+        0,
         0,
         0,
         0,
@@ -667,7 +691,11 @@ async fn mul_e2e() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
     //Load the triples
@@ -675,7 +703,6 @@ async fn mul_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             Some(triple[pid].clone()),
-            None,
             None,
             None,
             None,
@@ -768,13 +795,13 @@ async fn mul_e2e_with_preprocessing_bad_net() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork>(
         n_parties,
         t,
         no_of_triples,
         2,
-        0,
         111,
+        0,
         0,
         0,
         0,
@@ -786,9 +813,9 @@ async fn mul_e2e_with_preprocessing_bad_net() {
     let mut clients =
         create_clients::<Fr, Avid<SessionId>>(clientid.clone(), n_parties, t, 111, input_values, 2);
 
-    //----------------------------------------RECIEVE----------------------------------------
+    //----------------------------------------RECEIVE----------------------------------------
     //At servers
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork, G>(
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork>(
         receivers,
         nodes.clone(),
         network.clone(),
@@ -953,13 +980,13 @@ async fn mul_e2e_with_preprocessing() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         no_of_triples,
         2,
-        0,
         111,
+        0,
         0,
         0,
         0,
@@ -973,7 +1000,11 @@ async fn mul_e2e_with_preprocessing() {
 
     //----------------------------------------RECIEVE----------------------------------------
     //At servers
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     //At client
     receive_client(client_recv, clients.clone(), network.clone());
@@ -1127,85 +1158,10 @@ async fn preprocessing_e2e() {
     let k = 4;
     let no_of_triples = 7;
     let no_of_randomshares = 4;
-    let no_of_v_randomshares = 4;
     let instance_id = 111;
     let n_prandbit = 4;
     let n_prandint = 4;
-
-    //Setup
-    let (network, receivers, _) = test_setup(n_parties, vec![]);
-
-    //----------------------------------------SETUP NODES----------------------------------------
-    // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
-        n_parties,
-        t,
-        no_of_triples,
-        no_of_randomshares,
-        no_of_v_randomshares,
-        instance_id,
-        n_prandbit,
-        n_prandint,
-        l,
-        k,
-        vec![],
-    );
-
-    //----------------------------------------RECIEVE----------------------------------------
-    // spawn tasks to process received messages
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
-
-    //----------------------------------------RUN PROTOCOL----------------------------------------
-
-    // init all nodes
-    let mut handles = Vec::new();
-    for pid in 0..n_parties {
-        let mut node = nodes[pid].clone();
-        let net = network.clone();
-        let mut rng = StdRng::from_rng(OsRng).unwrap();
-
-        let handle = tokio::spawn(async move {
-            {
-                node.run_preprocessing(net, &mut rng)
-                    .await
-                    .expect("Preprocessing failed");
-            }
-        });
-        handles.push(handle);
-    }
-
-    // Wait for all mul tasks to finish
-    futures::future::join_all(handles).await;
-    std::thread::sleep(std::time::Duration::from_millis(300));
-
-    //----------------------------------------VALIDATE VALUES----------------------------------------
-
-    for pid in 0..n_parties {
-        let node = nodes[pid].clone();
-        let (n_triples, n_shares, n_v_shares, n_prandbit, n_prandint) =
-            node.preprocessing_material.lock().await.len();
-        assert_eq!(n_triples, 5); //>no_of_triples
-        assert_eq!(n_shares, 2); //>no_of_randomshares
-        assert_eq!(n_v_shares, 6);
-        assert_eq!(n_prandbit, 4);
-        assert_eq!(n_prandint, 4);
-    }
-}
-
-#[tokio::test]
-#[ignore] // ignored since it takes a long time
-async fn preprocessing_e2e_big() {
-    setup_tracing();
-    //----------------------------------------SETUP PARAMETERS----------------------------------------
-    let n_parties = 5;
-    let t = 1;
-    let l = 8;
-    let k = 4;
-    let no_of_triples = 20000;
-    let no_of_randomshares = 20000;
-    let instance_id = 111;
-    let n_prandbit = 0;
-    let n_prandint = 0;
+    let n_small_field = 2;
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
@@ -1220,6 +1176,7 @@ async fn preprocessing_e2e_big() {
         instance_id,
         n_prandbit,
         n_prandint,
+        n_small_field,
         l,
         k,
         vec![],
@@ -1260,54 +1217,54 @@ async fn preprocessing_e2e_big() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_shares, n_prandbit, n_prandint) =
+        let (n_triples, n_shares, n_prandbit, n_prandint, n_small_field) =
             node.preprocessing_material.lock().await.len();
-        info!("{}: {} {}", pid, n_triples, n_shares);
-        assert_eq!(n_triples, 20000); //>no_of_triples
-        assert_eq!(n_shares, 20000); //>no_of_randomshares
-        assert_eq!(n_prandbit, 0);
-        assert_eq!(n_prandint, 0);
+        assert_eq!(n_triples, 5); //>no_of_triples
+        assert_eq!(n_shares, 2); //>no_of_randomshares
+        assert_eq!(n_prandbit, 4);
+        assert_eq!(n_prandint, 4);
+        assert_eq!(n_small_field, 2);
     }
 }
 
 #[tokio::test]
-async fn preprocessing_e2e_bad_net() {
+#[ignore] // ignored since it takes a long time
+async fn preprocessing_e2e_big() {
     setup_tracing();
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 5;
     let t = 1;
-    let no_of_triples = 4;
-    let no_of_randomshares = 0;
+    let l = 8;
+    let k = 4;
+    let no_of_triples = 20000;
+    let no_of_randomshares = 20000;
+    let instance_id = 111;
+    let n_prandbit = 0;
+    let n_prandint = 0;
+    let n_small_field = 0;
 
     //Setup
-    let (network, net_rx, node_channels, receivers, _) = test_setup_bad(n_parties, vec![]);
-
-    BadFakeNetwork::start(
-        net_rx,
-        node_channels.clone(),
-        StdRng::seed_from_u64(1u64),
-        Uniform::new_inclusive(1, 3),
-    );
+    let (network, receivers, _) = test_setup(n_parties, vec![]);
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         no_of_triples,
         no_of_randomshares,
-        0,
-        111,
-        0,
-        0,
-        0,
-        0,
+        instance_id,
+        n_prandbit,
+        n_prandint,
+        l,
+        k,
+        n_small_field,
         vec![],
     );
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork, G>(
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         receivers,
         nodes.clone(),
         network.clone(),
@@ -1340,12 +1297,100 @@ async fn preprocessing_e2e_bad_net() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_random_shares, _, n_prandbit_shares, n_prandint_shares) =
+        let (n_triples, n_shares, n_prandbit, n_prandint, n_small_field) =
             node.preprocessing_material.lock().await.len();
+        info!("{}: {} {}", pid, n_triples, n_shares);
+        assert_eq!(n_triples, 20000); //>no_of_triples
+        assert_eq!(n_shares, 20000); //>no_of_randomshares
+        assert_eq!(n_prandbit, 0);
+        assert_eq!(n_prandint, 0);
+        assert_eq!(n_small_field, 0);
+    }
+}
+
+#[tokio::test]
+async fn preprocessing_e2e_bad_net() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 5;
+    let t = 1;
+    let no_of_triples = 4;
+    let no_of_randomshares = 0;
+
+    //Setup
+    let (network, net_rx, node_channels, receivers, _) = test_setup_bad(n_parties, vec![]);
+
+    BadFakeNetwork::start(
+        net_rx,
+        node_channels.clone(),
+        StdRng::seed_from_u64(1u64),
+        Uniform::new_inclusive(1, 3),
+    );
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    // create global nodes
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork>(
+        n_parties,
+        t,
+        no_of_triples,
+        no_of_randomshares,
+        111,
+        0,
+        0,
+        0,
+        0,
+        0,
+        vec![],
+    );
+
+    //----------------------------------------RECIEVE----------------------------------------
+    // spawn tasks to process received messages
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, BadFakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
+
+    //----------------------------------------RUN PROTOCOL----------------------------------------
+
+    // init all nodes
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let mut rng = StdRng::from_rng(OsRng).unwrap();
+
+        let handle = tokio::spawn(async move {
+            {
+                info!("Running preprocessing for node {}", pid);
+                node.run_preprocessing(net, &mut rng)
+                    .await
+                    .expect("Preprocessing failed");
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all mul tasks to finish
+    futures::future::join_all(handles).await;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        let (
+            n_triples,
+            n_random_shares,
+            n_prandbit_shares,
+            n_prandint_shares,
+            n_small_field_shares,
+        ) = node.preprocessing_material.lock().await.len();
         assert_eq!(n_triples, 6); //>no_of_triples
         assert_eq!(n_random_shares, 0); //>no_of_randomshares
         assert_eq!(n_prandbit_shares, 0);
         assert_eq!(n_prandint_shares, 0);
+        assert_eq!(n_small_field_shares, 0);
     }
 }
 
@@ -1410,11 +1455,10 @@ async fn test_output_protocol_e2e() {
         Ok(output) => output,
     };
 
-    assert!(
-        output_values == recovered,
+    assert_eq!(
+        output_values, recovered,
         "Recovered output {:?} not equal to expected values {:?}",
-        recovered,
-        output_values
+        recovered, output_values
     );
 }
 
@@ -1450,13 +1494,13 @@ async fn test_rand_bit() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         no_of_rand_bits,
         no_of_rand_bits,
-        0,
         111,
+        0,
         0,
         0,
         0,
@@ -1466,7 +1510,11 @@ async fn test_rand_bit() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     // init all nodes
     let mut handles = Vec::new();
@@ -1590,13 +1638,13 @@ async fn fpmul_e2e() {
     }
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
         0,
+        1,
         0,
-        111,
         0,
         0,
         0,
@@ -1606,7 +1654,11 @@ async fn fpmul_e2e() {
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
     //Load
@@ -1614,7 +1666,6 @@ async fn fpmul_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             Some(triple[pid].clone()),
-            None,
             None,
             None,
             Some(r_bits[pid].clone()),
@@ -1672,6 +1723,7 @@ async fn fpmul_e2e_with_preprocessing() {
     let n_random_shares = m; // no of random bits
     let n_prandbit = m;
     let n_prandint = 1;
+    let n_small_field = 3;
     let bound_l = 8;
     let security_k = 4;
 
@@ -1702,23 +1754,27 @@ async fn fpmul_e2e_with_preprocessing() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         n_triples,
         n_random_shares,
-        0,
         instance_id,
         n_prandbit,
         n_prandint,
         bound_l,
         security_k,
+        n_small_field,
         vec![],
     );
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
 
@@ -1792,13 +1848,13 @@ async fn add_fixed_e2e() {
     }
 
     //----------------------------------------SETUP NODES----------------------------------------
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
         0,
-        0,
         instance_id,
+        0,
         0,
         0,
         8,
@@ -1807,7 +1863,11 @@ async fn add_fixed_e2e() {
     );
 
     // Receiver loop
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     //----------------------------------------RUN ADDITION----------------------------------------
     let mut handles = Vec::new();
@@ -1862,13 +1922,13 @@ async fn sub_fixed_e2e() {
         ));
     }
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
         0,
-        0,
         instance_id,
+        0,
         0,
         0,
         8,
@@ -1876,7 +1936,11 @@ async fn sub_fixed_e2e() {
         vec![],
     );
 
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     let mut handles = Vec::new();
     for pid in 0..n_parties {
@@ -1921,13 +1985,13 @@ async fn add_int_e2e() {
         b_int.push(SecretInt::new(y[i].clone(), bitlen));
     }
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
         0,
-        0,
         instance_id,
+        0,
         0,
         0,
         8,
@@ -1935,7 +1999,11 @@ async fn add_int_e2e() {
         vec![],
     );
 
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     let mut handles = Vec::new();
     for pid in 0..n_parties {
@@ -1980,13 +2048,13 @@ async fn sub_int_e2e() {
         b_int.push(SecretInt::new(y[i].clone(), bitlen));
     }
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
         0,
-        0,
         instance_id,
+        0,
         0,
         0,
         8,
@@ -1994,7 +2062,11 @@ async fn sub_int_e2e() {
         vec![],
     );
 
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     let mut handles = Vec::new();
     for pid in 0..n_parties {
@@ -2037,15 +2109,15 @@ async fn mul_int_e2e_with_preprocessing() {
     let (network, receivers, _) = test_setup(n_parties, vec![]);
 
     //----------------------------------------SETUP NODES----------------------------------------
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         /*beaver triples*/ 2, // safe for one mul
         /*random shares */ 2,
-        0,
         instance_id,
         /*prandbit*/ 0,
         /*prandint*/ 0,
+        0,
         0,
         0,
         vec![],
@@ -2064,7 +2136,11 @@ async fn mul_int_e2e_with_preprocessing() {
     }
 
     //----------------------------------------RECEIVE LOOP----------------------------------------
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     //----------------------------------------RUN PREPROCESSING----------------------------------------
     let mut pre_handles = Vec::new();
@@ -2158,13 +2234,13 @@ async fn fpdiv_const_e2e() {
     }
 
     //----------------------------------------SETUP NODES----------------------------------------
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
         0,
-        0,
         222,
+        0,
         0,
         0,
         0,
@@ -2173,14 +2249,17 @@ async fn fpdiv_const_e2e() {
     );
 
     //----------------------------------------RECEIVE LOOP----------------------------------------
-    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
 
     //----------------------------------------LOAD PREPROCESSING----------------------------------------
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             None, // No Beaver triple needed
-            None,
             None,
             None,
             Some(r_bits[pid].clone()),      // PRandBit[]
@@ -2226,126 +2305,4 @@ async fn fpdiv_const_e2e() {
 
     // 2.75 * 2^4 = 44
     assert_eq!(rec, Fr::from(44u64));
-}
-
-#[tokio::test]
-async fn adkg_e2e() {
-    setup_tracing();
-    //----------------------------------------SETUP PARAMETERS----------------------------------------
-    let n_parties = 5;
-    let t = 1;
-    let no_of_keys = 3;
-    //Setup
-    let (network, receivers, _) = test_setup(n_parties, vec![]);
-
-    //----------------------------------------SETUP NODES----------------------------------------
-    // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(
-        n_parties,
-        t,
-        0,
-        0,
-        no_of_keys,
-        111,
-        0,
-        0,
-        0,
-        0,
-        vec![],
-    );
-
-    //----------------------------------------RECIEVE----------------------------------------
-    // spawn tasks to process received messages
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork, G>(receivers, nodes.clone(), network.clone());
-
-    //----------------------------------------RUN PROTOCOL----------------------------------------
-    // init all nodes
-    let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<FeldmanShamirShare<Fr, G>>)>(100);
-    let mut handles = Vec::new();
-    for pid in 0..n_parties {
-        let mut node = nodes[pid].clone();
-        let net = network.clone();
-        let fin_send = fin_send.clone();
-        let handle = tokio::spawn(async move {
-            {
-                let key_shares = node.secret_key(no_of_keys, net).await.expect("mul failed");
-                fin_send.send((pid, key_shares)).await.unwrap();
-            }
-        });
-        handles.push(handle);
-    }
-
-    // Wait for all mul tasks to finish
-    futures::future::join_all(handles).await;
-    let mut per_party: Vec<Option<Vec<FeldmanShamirShare<Fr, G>>>> = vec![None; n_parties];
-    while let Some((pid, shares)) = fin_recv.recv().await {
-        per_party[pid] = Some(shares);
-        if per_party.iter().all(|x| x.is_some()) {
-            break;
-        }
-    }
-
-    let mut per_key: Vec<Vec<FeldmanShamirShare<Fr, G>>> =
-        vec![Vec::with_capacity(n_parties); no_of_keys];
-
-    for pid in 0..n_parties {
-        let shares = per_party[pid].as_ref().unwrap();
-        assert_eq!(shares.len(), no_of_keys);
-
-        for k in 0..no_of_keys {
-            per_key[k].push(shares[k].clone());
-        }
-    }
-
-    //----------------------------------------VALIDATE EACH KEY----------------------------------------
-    for key_idx in 0..no_of_keys {
-        let feldman_shares = &per_key[key_idx];
-
-        // Reconstruct secret from t+1 shares
-        let shamir_shares: Vec<Shamirshare<Fr>> = feldman_shares
-            .iter()
-            .map(|fs| fs.feldmanshare.clone())
-            .collect();
-
-        let subset = shamir_shares[0..(t + 1)].to_vec();
-        let (_, secret_rec) =
-            Shamirshare::<Fr>::recover_secret(&subset, n_parties).expect("recover_secret failed");
-
-        //-------------------------------- PK checks --------------------------------
-        let pk_expected = G::generator() * secret_rec;
-
-        // Feldman invariant: pk == C_0
-        let c0 = feldman_shares[0].commitments[0];
-        assert_eq!(pk_expected, c0, "pk != Feldman C0 (key {})", key_idx);
-
-        // ADKG public_key API
-        let pk_from_method = nodes[0]
-            .public_key(vec![feldman_shares[0].clone()], network.clone())
-            .await
-            .expect("public_key failed")[0];
-
-        assert_eq!(
-            pk_from_method, pk_expected,
-            "public_key() != g^secret (key {})",
-            key_idx
-        );
-
-        //-------------------------------- Commitments consistency --------------------------------
-        let reference_commitments = &feldman_shares[0].commitments;
-
-        assert_eq!(
-            reference_commitments.len(),
-            t + 1,
-            "commitment length mismatch (key {})",
-            key_idx
-        );
-
-        for (pid, fs) in feldman_shares.iter().enumerate() {
-            assert_eq!(
-                fs.commitments, *reference_commitments,
-                "Feldman commitments mismatch at party {}, key {}",
-                pid, key_idx
-            );
-        }
-    }
 }

@@ -23,7 +23,7 @@ pub async fn spawn_receiver_tasks<F, R>(
 ) -> JoinSet<()>
 where
     F: FftField + PrimeField,
-    R: RBC + Clone + 'static,
+    R: RBC<Id = SessionId> + Clone + 'static,
 {
     let mut set = JoinSet::new();
     for i in 0..num_parties {
@@ -72,7 +72,7 @@ pub async fn initialize_nodes<F, R>(
 ) -> JoinSet<()>
 where
     F: FftField + PrimeField,
-    R: RBC + Clone + 'static,
+    R: RBC<Id = SessionId> + Clone + 'static,
 {
     let mut init_set = JoinSet::new();
     for i in 0..num_parties {

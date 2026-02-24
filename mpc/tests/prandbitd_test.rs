@@ -5,7 +5,7 @@ use ark_ff::{One, PrimeField, Zero};
 use num_integer::binomial;
 use std::time::Duration;
 use stoffelmpc_mpc::common::math::goldilocks::GoldilocksField;
-use stoffelmpc_mpc::common::SecretSharingScheme;
+use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelmpc_mpc::honeybadger::fpmul::gf_256::{lagrange_interpolate_f2_8, GF256Domain, GF256};
 use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitDNode;
 use stoffelmpc_mpc::honeybadger::fpmul::ProtocolState;
@@ -30,7 +30,11 @@ async fn prandbitd_correctness_e2e() {
 
     info!("l value: {}, Bits big field: {}", l, Fr::MODULUS_BIT_SIZE);
 
-    let session_id = SessionId::new(ProtocolType::PRandBit, 123, 0, 0, 111);
+    let session_id = SessionId::new(
+        ProtocolType::PRandBit,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
 
     // Build a fake network.
     let (network, receivers, _) = test_setup(num_parties, vec![]);
