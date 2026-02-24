@@ -40,7 +40,7 @@ pub async fn setup_network_and_parties<T: RBC<Id = SessionId>, N: Network>(
     buffer_size: usize,
 ) -> Result<(Vec<T>, Arc<FakeNetwork>, Vec<mpsc::Receiver<Vec<u8>>>), RbcError> {
     let config = FakeNetworkConfig::new(buffer_size);
-    let (network, receivers, _) = FakeNetwork::new(n as usize, None, config);
+    let (network, receivers, _) = FakeNetwork::new(n as usize, None, config, 0);
     let net = Arc::new(network);
 
     let mut parties = Vec::with_capacity(n as usize);
@@ -97,7 +97,7 @@ pub fn test_setup(
     HashMap<usize, Receiver<Vec<u8>>>,
 ) {
     let config = FakeNetworkConfig::new(500);
-    let (network, receivers, client_recv) = FakeNetwork::new(n, Some(clientid), config);
+    let (network, receivers, client_recv) = FakeNetwork::new(n, Some(clientid), config, 0);
     let network = Arc::new(network);
     (network, receivers, client_recv)
 }
@@ -114,7 +114,7 @@ pub fn test_setup_bad(
 ) {
     let config = BadFakeNetworkConfig::new(500);
     let (network, net_rx, node_channels, receivers, client_recv) =
-        BadFakeNetwork::new(n, Some(clientid), config);
+        BadFakeNetwork::new(n, Some(clientid), config, 0);
     let network = Arc::new(network);
     (network, net_rx, node_channels, receivers, client_recv)
 }

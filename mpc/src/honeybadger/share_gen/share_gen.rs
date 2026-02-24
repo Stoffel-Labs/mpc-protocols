@@ -408,7 +408,7 @@ mod tests {
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_receive_shares_handler() {
         let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10), 0).0);
 
         // Fill up the storage to the limit by calling receive_shares_handler with unique session IDs
         let mut exec = 0u8;
@@ -462,7 +462,7 @@ mod tests {
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_reconstruction_handler() {
         let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10), 0).0);
 
         // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
         let mut exec = 0u8;
@@ -563,7 +563,7 @@ mod tests {
     #[tokio::test]
     async fn test_sharegen_receive_shares_handler_invalid_sub_id() {
         let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10), 0).0);
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(0, 1, 0), 0);
@@ -587,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn test_sharegen_reconstruction_handler_invalid_sub_id() {
         let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10), 0).0);
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(0, 1, 0), 0);
