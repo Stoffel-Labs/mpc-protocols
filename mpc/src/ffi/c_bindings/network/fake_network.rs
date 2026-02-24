@@ -40,7 +40,7 @@ pub extern "C" fn new_fake_network(
         }
     };
 
-    let (network, node_receivers, client_receivers) = FakeNetwork::new(n_nodes, n_clients, config);
+    let (network, node_receivers, client_receivers) = FakeNetwork::new(n_nodes, n_clients, config, 0);
     // return the receivers
     let receivers = FakeNetworkReceivers {
         node_receivers,

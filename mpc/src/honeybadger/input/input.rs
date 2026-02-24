@@ -482,7 +482,7 @@ pub mod tests {
 
         let config = FakeNetworkConfig::new(500);
         let (network, mut receivers, mut client_recv_map) =
-            FakeNetwork::new(n, Some(vec![clientid]), config);
+            FakeNetwork::new(n, Some(vec![clientid]), config, 0);
         let mut client_recv = client_recv_map.remove(&clientid).unwrap();
         let network = Arc::new(network);
 

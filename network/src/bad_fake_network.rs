@@ -159,10 +159,13 @@ pub struct BadFakeNetwork {
     nodes: Vec<FakeBadNode>,
     /// Channels to send messages to clients.
     client_channels: HashMap<ClientId, Sender<Vec<u8>>>,
+    /// The local party id (for trait implementation - shared networks use 0).
+    local_id: PartyId,
 }
 
 impl BadFakeNetwork {
     /// Creates a new bad fake network for testing using the given number of nodes and configuration.
+    /// The `local_id` parameter is used for the trait implementation - shared networks typically use 0.
     /// Returns
     ///   1. a receiving endpoint to receive messages sent by nodes at the delaying thread
     ///   2. sending endpoints to deliver messages to nodes from the delaying thread, connected to
@@ -176,6 +179,7 @@ impl BadFakeNetwork {
         n_nodes: usize,
         n_clients: Option<Vec<ClientId>>,
         config: BadFakeNetworkConfig,
+        local_id: PartyId,
     ) -> (
         Self,
         Receiver<(PartyId, Vec<u8>)>,
@@ -215,6 +219,7 @@ impl BadFakeNetwork {
                 config,
                 nodes,
                 client_channels: client_channels.clone(),
+                local_id,
             },
             net_rx,
             node_channels,
@@ -386,6 +391,14 @@ impl Network for BadFakeNetwork {
     fn is_client_connected(&self, client: ClientId) -> bool {
         self.client_channels.contains_key(&client)
     }
+
+    fn local_party_id(&self) -> PartyId {
+        self.local_id
+    }
+
+    fn party_count(&self) -> usize {
+        self.nodes.len()
+    }
 }
 
 /// Represents a node in the BadFakeNetwork.
@@ -444,7 +457,7 @@ mod tests {
 
         let n_nodes = 5;
         let config = BadFakeNetworkConfig::new(100);
-        let (network, _, _, _, _) = BadFakeNetwork::new(n_nodes, None, config);
+        let (network, _, _, _, _) = BadFakeNetwork::new(n_nodes, None, config, 0);
 
         let channels = network.net_channels.clone();
 
@@ -465,7 +478,7 @@ mod tests {
         let n_nodes = 3;
         let config = BadFakeNetworkConfig::new(100);
         let (network, net_rx, node_channels, mut receivers, _) =
-            BadFakeNetwork::new(n_nodes, None, config);
+            BadFakeNetwork::new(n_nodes, None, config, 0);
 
         BadFakeNetwork::start(
             net_rx,
@@ -509,7 +522,7 @@ mod tests {
         let n_nodes = 3;
         let config = BadFakeNetworkConfig::new(100);
         let (network, net_rx, node_channels, mut receivers, _) =
-            BadFakeNetwork::new(n_nodes, None, config);
+            BadFakeNetwork::new(n_nodes, None, config, 0);
         let network = Arc::new(Mutex::new(network));
 
         BadFakeNetwork::start(
@@ -558,7 +571,7 @@ mod tests {
 
         let n_nodes = 2;
         let config = BadFakeNetworkConfig::new(100);
-        let (mut network, net_rx, node_channels, _, _) = BadFakeNetwork::new(n_nodes, None, config);
+        let (mut network, net_rx, node_channels, _, _) = BadFakeNetwork::new(n_nodes, None, config, 0);
 
         BadFakeNetwork::start(
             net_rx,
@@ -601,7 +614,7 @@ mod tests {
         let n_nodes = 2;
         let config = BadFakeNetworkConfig::new(500);
         let (network, net_rx, node_channels, mut receivers, _) =
-            BadFakeNetwork::new(n_nodes, None, config);
+            BadFakeNetwork::new(n_nodes, None, config, 0);
 
         BadFakeNetwork::start(
             net_rx,

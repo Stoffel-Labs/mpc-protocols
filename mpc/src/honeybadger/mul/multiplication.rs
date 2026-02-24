@@ -655,7 +655,7 @@ pub mod tests {
         }
 
         let config = FakeNetworkConfig::new(500);
-        let (network, mut receivers, _) = FakeNetwork::new(n, None, config);
+        let (network, mut receivers, _) = FakeNetwork::new(n, None, config, 0);
         let network = Arc::new(network);
 
         let mut nodes: Vec<_> = (0..n)

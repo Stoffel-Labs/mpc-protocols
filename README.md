@@ -94,7 +94,7 @@ async fn test_mul() {
 
     // ---------------- Network ----------------
     let config = FakeNetworkConfig::new(500);
-    let (network, receivers, _) = FakeNetwork::new(n, Some(vec![]), config);
+    let (network, receivers, _) = FakeNetwork::new(n, Some(vec![]), config, 0);
     let network: Arc<FakeNetwork> = Arc::new(network);
 
     // ---------------- Inputs ----------------
