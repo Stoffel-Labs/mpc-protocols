@@ -82,6 +82,67 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         }
     }
 
+    async fn try_finalize(
+        &self,
+        session_id: SessionId,
+        store_mutex: Arc<Mutex<TruncPrStore<F>>>,
+    ) -> Result<bool, TruncPrError> {
+        // ---- phase 1: decide + extract (no side effects) ----
+        let (shares, m, r_dash, a) = {
+            let s = store_mutex.lock().await;
+
+            if s.state == TruncState::Finished {
+                return Ok(true);
+            }
+
+            if s.share_a.is_none() || s.r_dash.is_none() {
+                return Ok(false);
+            }
+
+            if s.open_buf.len() < 2 * self.t + 1 {
+                return Ok(false);
+            }
+
+            let shares: Vec<RobustShare<F>> = s.open_buf.values().cloned().collect();
+            let m = s.m;
+            let r_dash = s.r_dash.clone().unwrap();
+            let a = s.share_a.clone().unwrap();
+
+            (shares, m, r_dash, a)
+        };
+
+        // ---- phase 2: compute outside lock ----
+        let (_, c) = RobustShare::recover_secret(&shares, self.n)?;
+        let c_mod = mod_pow2_from_field::<F>(c, m);
+
+        let a_prime = RobustShare::from_scalar_sub(c_mod, &r_dash);
+        let inv_2m = pow2_f::<F>(m).inverse().expect("2^m invertible mod q");
+        let d = ((a - a_prime)? * inv_2m)?;
+
+        // ---- phase 3: commit + send (one-shot) ----
+        let sender = {
+            let mut s = store_mutex.lock().await;
+
+            if s.state == TruncState::Finished {
+                return Ok(true);
+            }
+
+            s.state = TruncState::Finished;
+            s.share_d = Some(d.clone());
+            s.open_buf.clear();
+
+            s.output_sender
+                .take()
+                .ok_or(TruncPrError::SendError(session_id))?
+        };
+
+        sender
+            .send(d)
+            .map_err(|_| TruncPrError::SendError(session_id))?;
+
+        Ok(true)
+    }
+
     /// Start TruncPr:
     /// - builds [r'] and [r] from preseeded randomness,
     /// - forms share of (b + r) where b = 2^{k-1} + [a],
@@ -122,6 +183,8 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         s.r_dash = Some(r_dash.clone());
         s.state = TruncState::Initialized;
         drop(s);
+        self.try_finalize(session, store.clone()).await?;
+
         // [r] = 2^m [r''] + [r']
         let r = ((r_int * pow2_f::<F>(m))? + r_dash)?;
 
@@ -176,39 +239,8 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         }
         s.open_buf.insert(msg.sender_id, share_i);
 
-        // reconstruct when we have t+1
-        if s.open_buf.len() >= 2 * self.t + 1 {
-            let shares: Vec<RobustShare<F>> = s.open_buf.values().cloned().collect();
-            let (_, c) = RobustShare::recover_secret(&shares, self.n)?;
-
-            // c' = c mod 2^m  (public integer)
-            let m = s.m;
-            let c_mod = mod_pow2_from_field::<F>(c, m);
-
-            // [a'] = c' - [r']  (work in the field; lift c' into F)
-            let r_dash = s
-                .r_dash
-                .clone()
-                .ok_or(TruncPrError::NotSet("r_dash".to_string()))?;
-            let a_prime = RobustShare::from_scalar_sub(c_mod, &r_dash);
-
-            // [d] = ([a] - [a']) * (2^{-m} mod q)
-            let a = s
-                .share_a
-                .clone()
-                .ok_or(TruncPrError::NotSet("share_a".to_string()))?;
-            let inv_2m = pow2_f::<F>(m).inverse().expect("2^m invertible mod q");
-            let d = ((a - a_prime)? * inv_2m)?;
-
-            s.share_d = Some(d.clone());
-            s.open_buf.clear();
-            s.state = TruncState::Finished;
-            let taken_output_sender = s.output_sender.take().unwrap();
-
-            taken_output_sender
-                .send(d)
-                .map_err(|_| TruncPrError::SendError(msg.session_id))?;
-        }
+        drop(s);
+        self.try_finalize(msg.session_id, store.clone()).await?;
 
         Ok(())
     }

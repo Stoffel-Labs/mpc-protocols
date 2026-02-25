@@ -167,7 +167,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         }
 
         if storage.openings.is_none() {
-            return Err(MulError::WaitForOk);
+            return Ok(());
         }
         let shares_mult = finalize_mul(&storage)?;
 

@@ -228,6 +228,7 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     pub output_int_sender: Option<Sender<Vec<RobustShare<G>>>>,
     pub output_bit_receiver: Option<Receiver<Vec<(RobustShare<G>, F2_8)>>>,
     pub output_int_receiver: Option<Receiver<Vec<RobustShare<G>>>>,
+    pub open_started: bool,
 }
 
 impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
@@ -251,6 +252,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
             output_int_sender: Some(output_int_sender),
             output_bit_receiver: Some(output_bit_receiver),
             output_int_receiver: Some(output_int_receiver),
+            open_started: false,
         }
     }
 }
@@ -295,8 +297,6 @@ pub enum TruncPrError {
     Abort,
     #[error("Duplicate input: {0}")]
     Duplicate(usize),
-    #[error("Not set:{0}")]
-    NotSet(String),
     #[error("Rbc error: {0}")]
     RbcError(#[from] RbcError),
     #[error("ShareError: {0}")]

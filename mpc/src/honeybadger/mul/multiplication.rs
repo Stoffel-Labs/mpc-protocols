@@ -509,8 +509,7 @@ pub mod tests {
     use crate::{
         common::{rbc::rbc::Avid, SecretSharingScheme},
         honeybadger::{
-            robust_interpolate::robust_interpolate::RobustShare, ProtocolType, RbcError,
-            WrappedMessage,
+            robust_interpolate::robust_interpolate::RobustShare, ProtocolType, WrappedMessage,
         },
     };
     use ark_bls12_381::Fr;
@@ -710,7 +709,6 @@ pub mod tests {
                         WrappedMessage::Rbc(rbc_msg) => {
                             match node.rbc.process(rbc_msg, network.clone()).await {
                                 Ok(()) => {}
-                                Err(RbcError::SessionEnded(_)) => {}
                                 Err(e) => {
                                     panic!("unexpected error during RBC: {e}");
                                 }

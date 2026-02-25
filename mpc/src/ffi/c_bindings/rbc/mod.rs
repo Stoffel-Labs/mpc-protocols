@@ -23,8 +23,6 @@ pub enum RbcErrorCode {
     RbcSuccess,
     // Invalid threshold t for n must satisfy t < ceil(n / 3)
     RbcInvalidThreshold,
-    // Session already ended
-    RbcSessionEnded,
     // Unknown Bracha message type
     RbcUnknownMsgType,
     // Message send failed
@@ -153,7 +151,6 @@ impl From<RbcError> for RbcErrorCode {
     fn from(value: RbcError) -> Self {
         match value {
             RbcError::InvalidThreshold(_, _) => RbcErrorCode::RbcInvalidThreshold,
-            RbcError::SessionEnded(_) => RbcErrorCode::RbcSessionEnded,
             RbcError::UnknownMsgType(_) => RbcErrorCode::RbcUnknownMsgType,
             RbcError::SendFailed => RbcErrorCode::RbcSendFailed,
             RbcError::Internal(_) => RbcErrorCode::RbcInternal,
