@@ -106,7 +106,7 @@ pub fn test_setup(
     Vec<Arc<FakeNetwork>>,
     Vec<Vec<Receiver<Vec<u8>>>>,
     HashMap<usize, Arc<FakeNetwork>>,
-    HashMap<usize, Receiver<Vec<u8>>>,
+    HashMap<usize, Vec<Receiver<Vec<u8>>>>,
 ) {
     let config = FakeNetworkConfig::new(500);
     let (inner, receivers, client_recv) = FakeInnerNetwork::new(n, Some(clientid.clone()), config);
@@ -138,7 +138,7 @@ pub fn test_setup_bad(
     Vec<Vec<Sender<Vec<u8>>>>,
     Vec<Vec<Receiver<Vec<u8>>>>,
     HashMap<ClientId, Arc<BadFakeNetwork>>,
-    HashMap<ClientId, Receiver<Vec<u8>>>,
+    HashMap<ClientId, Vec<Receiver<Vec<u8>>>>,
 ) {
     let config = BadFakeNetworkConfig::new(500);
     let (inner, net_rx, node_channels, receivers, client_recv) =
@@ -710,7 +710,7 @@ pub fn create_clients<F: FftField, R: RBC + 'static>(
 }
 
 pub fn receive_client<F, R, N>(
-    mut receivers: HashMap<ClientId, Receiver<Vec<u8>>>,
+    mut receivers: HashMap<ClientId, Vec<Receiver<Vec<u8>>>>,
     clients: HashMap<ClientId, HoneyBadgerMPCClient<F, R>>,
     mut net: HashMap<usize, Arc<N>>,
 ) where
@@ -724,14 +724,32 @@ pub fn receive_client<F, R, N>(
         "Each node must have a receiver"
     );
 
-    for (clientid, mut recv) in receivers.drain() {
+    for (clientid, inbox_vec) in receivers.drain() {
         let mut client = clients[&clientid].clone();
         let net_clone = net.remove(&clientid).unwrap();
 
+        // tag each receiver with the sender node id
+        let inbox: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)> = inbox_vec
+            .into_iter()
+            .enumerate()
+            .map(|(from, r)| (SenderId::Node(from), r))
+            .collect();
+
+        // fan-in so we preserve (sender, msg)
+        let merged_rx = fan_in_inboxes(inbox);
+
         tokio::spawn(async move {
-            while let Some(received) = recv.recv().await {
-                if let Err(e) = client.process(received, net_clone.clone()).await {
-                    tracing::error!("Client {clientid} failed to process message: {e:?}");
+            let mut merged_rx = merged_rx;
+            while let Some((sender, received)) = merged_rx.recv().await {
+                if let SenderId::Node(s) = sender {
+                    if let Err(e) = client.process(s, received, net_clone.clone()).await {
+                        tracing::error!(
+                            "Client {} failed processing from {:?}: {:?}",
+                            clientid,
+                            sender,
+                            e
+                        );
+                    }
                 }
             }
             tracing::info!("Receiver task for client {clientid} ended");

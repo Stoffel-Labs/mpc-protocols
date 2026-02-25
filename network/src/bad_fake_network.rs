@@ -168,7 +168,7 @@ pub struct BadFakeInnerNetwork {
     /// Fake nodes connected to the network
     nodes: Vec<FakeBadNode>,
     /// Channels to send messages to clients.
-    to_client_channels: HashMap<ClientId, Sender<Vec<u8>>>,
+    to_client_channels: HashMap<ClientId, Vec<Sender<Vec<u8>>>>,
     client_channels: HashMap<ClientId, Vec<Sender<Vec<u8>>>>, // [client][to_node]
 }
 
@@ -191,7 +191,7 @@ impl BadFakeInnerNetwork {
         Receiver<(PartyId, PartyId, Vec<u8>)>,
         Vec<Vec<Sender<Vec<u8>>>>,
         Vec<Vec<Receiver<Vec<u8>>>>,
-        HashMap<ClientId, Receiver<Vec<u8>>>,
+        HashMap<ClientId, Vec<Receiver<Vec<u8>>>>,
     ) {
         let (net_channel, net_rx) = mpsc::channel(config.channel_buff_size);
         let mut net_channels = Vec::new();
@@ -238,11 +238,19 @@ impl BadFakeInnerNetwork {
         let mut to_client_channels = HashMap::new();
         let mut client_receivers = HashMap::new();
 
-        if let Some(clients) = n_clients {
-            for id in clients {
-                let (client_tx, client_rx) = mpsc::channel(config.channel_buff_size);
-                to_client_channels.insert(id, client_tx);
-                client_receivers.insert(id, client_rx);
+        if let Some(client_ids) = n_clients {
+            for client_id in client_ids {
+                let mut senders = Vec::with_capacity(n_nodes);
+                let mut receivers = Vec::with_capacity(n_nodes);
+
+                for _from in 0..n_nodes {
+                    let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
+                    senders.push(tx);
+                    receivers.push(rx);
+                }
+
+                to_client_channels.insert(client_id, senders);
+                client_receivers.insert(client_id, receivers);
             }
         }
 
@@ -469,15 +477,26 @@ impl Network for BadFakeNetwork {
         client: ClientId,
         message: &[u8],
     ) -> Result<usize, NetworkError> {
-        if let Some(sender) = self.inner.to_client_channels.get(&client) {
-            sender
-                .send(message.to_vec())
-                .await
-                .map_err(|_| NetworkError::SendError)?;
-            Ok(message.len())
-        } else {
-            Err(NetworkError::ClientNotFound(client))
-        }
+        let from = match self.sender {
+            BadSenderId::Node(id) => id,
+            BadSenderId::Client(_) => {
+                return Err(NetworkError::SendError);
+            }
+        };
+
+        let row = self
+            .inner
+            .to_client_channels
+            .get(&client)
+            .ok_or(NetworkError::ClientNotFound(client))?;
+
+        let tx = row.get(from).ok_or(NetworkError::PartyNotFound(from))?;
+
+        tx.send(message.to_vec())
+            .await
+            .map_err(|_| NetworkError::SendError)?;
+
+        Ok(message.len())
     }
 
     fn clients(&self) -> Vec<ClientId> {

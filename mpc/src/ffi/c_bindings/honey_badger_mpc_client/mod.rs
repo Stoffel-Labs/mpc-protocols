@@ -120,6 +120,7 @@ pub extern "C" fn new_honey_badger_mpc_client(
 pub extern "C" fn hb_client_process(
     client_ptr: *mut HoneyBadgerMPCClientOpaque,
     net_ptr: *mut network::NetworkOpaque,
+    sender_id: usize,
     raw_msg: ByteSlice,
 ) -> HoneyBadgerErrorCode {
     let client = unsafe { &mut *(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha>) };
@@ -129,10 +130,10 @@ pub extern "C" fn hb_client_process(
     let result = match network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(client.process(msg, Arc::clone(n))),
+            .block_on(client.process(sender_id, msg, Arc::clone(n))),
         GenericNetwork::QuicNetworkManager(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(client.process(msg, Arc::clone(n))),
+            .block_on(client.process(sender_id, msg, Arc::clone(n))),
     };
     match result {
         Ok(_) => HoneyBadgerErrorCode::HoneyBadgerSuccess,

@@ -511,7 +511,15 @@ pub mod tests {
         let config = FakeNetworkConfig::new(500);
         let (net, mut receivers, mut client_recv_map) =
             FakeInnerNetwork::new(n, Some(vec![clientid]), config);
-        let mut client_recv = client_recv_map.remove(&clientid).unwrap();
+        let client_inboxes = client_recv_map.remove(&clientid).unwrap();
+
+        let inbox: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)> = client_inboxes
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+
+        let mut client_recv = fan_in_inboxes(inbox);
         let network: Vec<_> = (0..n)
             .map(|id| Arc::new(FakeNetwork::new(id, net.clone())))
             .collect();
@@ -554,11 +562,14 @@ pub mod tests {
 
         // receive random shares to send masked input
         for _ in 0..3 {
-            let received = client_recv.recv().await.unwrap();
-            if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received) {
-                assert!(client.process(msg, client_network.clone()).await.is_ok());
-            } else {
-                panic!();
+            let (_, raw) = client_recv.recv().await.unwrap();
+            let wrapped: WrappedMessage =
+                bincode::deserialize(&raw).expect("deserialization error");
+            match wrapped {
+                WrappedMessage::Input(msg) => {
+                    assert!(client.process(msg, client_network.clone()).await.is_ok());
+                }
+                _ => panic!("Unexpected message"),
             }
         }
 

@@ -10,7 +10,7 @@ use tokio::sync::mpsc::Receiver;
 // struct that includes receivers of the FakeNetwork
 pub struct FakeNetworkReceivers {
     pub node_receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    pub client_receivers: HashMap<ClientId, Receiver<Vec<u8>>>,
+    pub client_receivers: HashMap<ClientId, Vec<Receiver<Vec<u8>>>>,
 }
 
 // opaque pointer for FakeNetworkReceivers

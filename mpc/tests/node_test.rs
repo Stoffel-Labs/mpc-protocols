@@ -1,7 +1,8 @@
 use crate::utils::test_utils::{
     construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
-    generate_independent_shares, initialize_global_nodes_randousha, initialize_global_nodes_ransha,
-    receive, receive_client, setup_tracing, test_setup, test_setup_bad,
+    fan_in_inboxes, generate_independent_shares, initialize_global_nodes_randousha,
+    initialize_global_nodes_ransha, receive, receive_client, setup_tracing, test_setup,
+    test_setup_bad,
 };
 use ark_bls12_381::Fr;
 use ark_ff::{AdditiveGroup, Field, UniformRand};
@@ -35,7 +36,10 @@ use stoffelmpc_mpc::{
         ProtocolType, SessionId, WrappedMessage,
     },
 };
-use stoffelmpc_network::{bad_fake_network::BadFakeNetwork, fake_network::FakeNetwork};
+use stoffelmpc_network::{
+    bad_fake_network::BadFakeNetwork,
+    fake_network::{FakeNetwork, SenderId},
+};
 use stoffelnet::network_utils::ClientId;
 use tokio::{
     sync::{mpsc, Mutex},
@@ -229,10 +233,20 @@ async fn test_input_protocol_e2e() {
     );
     //Receive at client
     let net_clone2 = client_net.remove(&clientid[0]).unwrap();
-    let mut recv = client_recv.remove(&clientid[0]).unwrap();
+    let client_inboxes = client_recv.remove(&clientid[0]).unwrap();
+
+    // tag each receiver with the sender node id
+    let inbox: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)> = client_inboxes
+        .into_iter()
+        .enumerate()
+        .map(|(from, r)| (SenderId::Node(from), r))
+        .collect();
+
+    // fan-in so we preserve (sender, msg)
+    let mut merged_rx = fan_in_inboxes(inbox);
     tokio::spawn(async move {
-        while let Some(received) = recv.recv().await {
-            let wrapped: WrappedMessage = match bincode::deserialize(&received) {
+        while let Some(received) = merged_rx.recv().await {
+            let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
                 Ok(w) => w,
                 Err(_) => continue,
             };
@@ -324,10 +338,20 @@ async fn gen_masks_for_input_e2e() {
     );
     //At client
     let net_clone2 = client_net.remove(&clientid[0]).unwrap();
-    let mut recv = client_recv.remove(&clientid[0]).unwrap();
+    let client_inboxes = client_recv.remove(&clientid[0]).unwrap();
+
+    // tag each receiver with the sender node id
+    let inbox: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)> = client_inboxes
+        .into_iter()
+        .enumerate()
+        .map(|(from, r)| (SenderId::Node(from), r))
+        .collect();
+
+    // fan-in so we preserve (sender, msg)
+    let mut merged_rx = fan_in_inboxes(inbox);
     tokio::spawn(async move {
-        while let Some(received) = recv.recv().await {
-            let wrapped: WrappedMessage = match bincode::deserialize(&received) {
+        while let Some(received) = merged_rx.recv().await {
+            let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
                 Ok(w) => w,
                 Err(_) => continue,
             };
@@ -1326,12 +1350,22 @@ async fn test_output_protocol_e2e() {
     let servers: Vec<OutputServer> = (0..n).map(|i| OutputServer::new(i, n).unwrap()).collect();
 
     // Spawn receiver task for client
-    let mut recv = client_recv.remove(&clientid).unwrap();
+    let client_inboxes = client_recv.remove(&clientid).unwrap();
+
+    // tag each receiver with the sender node id
+    let inbox: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)> = client_inboxes
+        .into_iter()
+        .enumerate()
+        .map(|(from, r)| (SenderId::Node(from), r))
+        .collect();
+
+    // fan-in so we preserve (sender, msg)
+    let mut merged_rx = fan_in_inboxes(inbox);
     tokio::spawn({
         let mut client = client.clone();
         async move {
-            while let Some(received) = recv.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&received) {
+            while let Some(received) = merged_rx.recv().await {
+                let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
                     Ok(w) => w,
                     Err(_) => continue,
                 };

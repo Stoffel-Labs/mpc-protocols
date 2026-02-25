@@ -1,5 +1,6 @@
 use crate::utils::test_utils::{
-    create_global_nodes, generate_independent_shares, receive, setup_tracing, test_setup,
+    create_global_nodes, fan_in_inboxes, generate_independent_shares, receive, setup_tracing,
+    test_setup,
 };
 use ark_bls12_381::Fr;
 use futures::future::join_all;
@@ -12,7 +13,7 @@ use stoffelmpc_mpc::{
         HoneyBadgerMPCNode, WrappedMessage,
     },
 };
-use stoffelmpc_network::fake_network::FakeNetwork;
+use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use tokio::time::{timeout, Duration};
 
 pub mod utils;
@@ -61,11 +62,21 @@ async fn test_multiple_clients_parallel_input() {
     for (i, &cid) in client_ids.iter().enumerate() {
         let input = inputs[i].clone();
         let mut client = InputClient::<Fr, Avid>::new(cid, n, t, 111, input.clone()).unwrap();
-        let mut recv = client_recv.remove(&cid).unwrap();
+        let client_inboxes = client_recv.remove(&cid).unwrap();
+
+        // tag each receiver with the sender node id
+        let inbox: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)> = client_inboxes
+            .into_iter()
+            .enumerate()
+            .map(|(from, r)| (SenderId::Node(from), r))
+            .collect();
+
+        // fan-in so we preserve (sender, msg)
+        let mut merged_rx = fan_in_inboxes(inbox);
         let net_clone = client_net.remove(&cid).unwrap();
         tokio::spawn(async move {
-            while let Some(received) = recv.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&received).ok().unwrap();
+            while let Some((_, raw)) = merged_rx.recv().await {
+                let wrapped: WrappedMessage = bincode::deserialize(&raw).ok().unwrap();
                 if let WrappedMessage::Input(msg) = wrapped {
                     client.process(msg, net_clone.clone()).await.ok();
                 }
@@ -137,11 +148,21 @@ async fn test_input_recovery_with_missing_server() {
         net.clone(),
         Some(vec![clientid]),
     );
-    let mut recv = client_recv.remove(&clientid).unwrap();
+    let client_inboxes = client_recv.remove(&clientid).unwrap();
+
+    // tag each receiver with the sender node id
+    let inbox: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)> = client_inboxes
+        .into_iter()
+        .enumerate()
+        .map(|(from, r)| (SenderId::Node(from), r))
+        .collect();
+
+    // fan-in so we preserve (sender, msg)
+    let mut merged_rx = fan_in_inboxes(inbox);
     let net_clone = client_net.remove(&clientid).unwrap();
     tokio::spawn(async move {
-        while let Some(received) = recv.recv().await {
-            if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received) {
+        while let Some(received) = merged_rx.recv().await {
+            if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received.1) {
                 client.process(msg, net_clone.clone()).await.ok();
             }
         }
@@ -213,11 +234,21 @@ async fn test_input_with_too_many_faulty_shares() {
     );
 
     // Start client receiver loop
-    let mut recv = client_recv.remove(&client_id).unwrap();
+    let client_inboxes = client_recv.remove(&client_id).unwrap();
+
+    // tag each receiver with the sender node id
+    let inbox: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)> = client_inboxes
+        .into_iter()
+        .enumerate()
+        .map(|(from, r)| (SenderId::Node(from), r))
+        .collect();
+
+    // fan-in so we preserve (sender, msg)
+    let mut merged_rx = fan_in_inboxes(inbox);
     let net_clone = client_net.remove(&client_id).unwrap();
     tokio::spawn(async move {
-        while let Some(received) = recv.recv().await {
-            if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received) {
+        while let Some(received) = merged_rx.recv().await {
+            if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received.1) {
                 // Client will fail internally when trying to decode faulty shares
                 let _ = client.process(msg, net_clone.clone()).await;
             }

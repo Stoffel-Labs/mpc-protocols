@@ -172,6 +172,7 @@ impl<F: FftField, R: RBC> HoneyBadgerMPCClient<F, R> {
     }
     pub async fn process<N: Network + Send + Sync>(
         &mut self,
+        sender_id: ClientId,
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), HoneyBadgerError> {
@@ -179,9 +180,17 @@ impl<F: FftField, R: RBC> HoneyBadgerMPCClient<F, R> {
 
         match wrapped {
             WrappedMessage::Input(input_msg) => {
+                if sender_id != input_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
                 self.input.process(input_msg, net).await?;
             }
-            WrappedMessage::Output(output_msg) => self.output.process(output_msg).await?,
+            WrappedMessage::Output(output_msg) => {
+                if sender_id != output_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                self.output.process(output_msg).await?
+            }
             _ => warn!("Incorrect message type recieved at input"),
         }
         Ok(())
