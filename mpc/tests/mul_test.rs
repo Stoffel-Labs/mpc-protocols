@@ -141,9 +141,6 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
 
                         match result {
                             Ok(()) => {}
-                            Err(MulError::WaitForOk) => {
-                                info!("{} waiting", mul_node.id);
-                            }
                             Err(MulError::ResultAlreadyReceived(_)) => {
                                 info!("{} already received result", mul_node.id);
                             }

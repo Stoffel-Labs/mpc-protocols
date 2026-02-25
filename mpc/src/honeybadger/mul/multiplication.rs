@@ -435,7 +435,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             || storage.output_open_mult2.len() != no_of_batch
             || storage.openings.is_none()
         {
-            return Err(MulError::WaitForOk);
+            return Ok(());
         }
 
         // 6.
@@ -995,9 +995,6 @@ pub mod tests {
             let result = mul_node.process(msg).await;
             match result {
                 Ok(()) => {}
-                Err(MulError::WaitForOk) => {
-                    info!("waiting");
-                }
                 Err(MulError::Duplicate(e)) => {
                     panic!("duplicate detected: {e}")
                 }

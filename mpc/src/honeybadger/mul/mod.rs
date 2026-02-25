@@ -99,8 +99,6 @@ pub enum MulError {
     NoSuchSessionId(SessionId),
     #[error("result already received: {0:?}")]
     ResultAlreadyReceived(SessionId),
-    #[error("waiting for more openings")]
-    WaitForOk,
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(SessionId),
 }
