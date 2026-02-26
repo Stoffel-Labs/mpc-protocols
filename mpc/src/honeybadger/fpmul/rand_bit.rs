@@ -256,10 +256,6 @@ where
             )
             .await?;
 
-        let a_square_share = self
-            .mult_node
-            .wait_for_result(session_id, Duration::from_millis(500))
-            .await?;
         info!(id = self.id, "Multiplication at RandBit initialized");
 
         let a_square_share = self
@@ -267,7 +263,7 @@ where
             .wait_for_result(session_id, Duration::from_millis(10000))
             .await?;
 
-        tracing::info!("Multiplication at RandBit done: {0:?}", self.id);
+        info!("Multiplication at RandBit done: {0:?}", self.id);
 
         for (i, chunk) in a_square_share.chunks(self.threshold + 1).enumerate() {
             let session_id_batch_recon = SessionId::new(

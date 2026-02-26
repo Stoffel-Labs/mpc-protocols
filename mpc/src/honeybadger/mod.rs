@@ -1131,7 +1131,7 @@ where
         G: Rng + Send,
     {
         // Get how many triples and random shares are already available
-        let (no_of_triples_avail, no_of_random_shares_avail, _, _, _) = {
+        let (no_of_triples_avail, no_of_random_shares_avail, _, _, no_of_random_shares_small_avail) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
@@ -1274,6 +1274,18 @@ where
         self.ensure_prandint_shares(network.clone()).await?;
         info!("PRandInt share generation done");
 
+        // ---------------------------------------------------
+        // Step 7. Generate Random shares in the small field.
+        // ---------------------------------------------------
+        let mut random_shares_small_field_gen = 0;
+        if no_of_random_shares_small_avail < self.params.n_small_field {
+            random_shares_small_field_gen =
+                self.params.n_small_field - no_of_random_shares_small_avail;
+        }
+        self.ensure_random_shares_small_field(network.clone(), rng, random_shares_small_field_gen)
+            .await?;
+        info!("PRandInt share generation in small field done");
+
         Ok(())
     }
 }
@@ -1296,17 +1308,20 @@ where
         // Outputs in batches of (n-2t)
         let batch = self.params.n_parties - 2 * self.params.threshold;
         let run = (needed + batch - 1) / batch; // ceil(missing / batch)
+        let mut round_id = 0u8;
+        let mut ran_sha_small_field_counter =
+            self.counters.ran_sha_small_field_counter.get_next().await?;
+
+        if (256 - ran_sha_small_field_counter as usize) * 255 < run {
+            return Err(HoneyBadgerError::LimitError);
+        }
 
         for i in 0..run {
             info!("Random share generation run {}", i);
 
             let sessionid = SessionId::new(
                 ProtocolType::RanShaSmallField,
-                SessionId::pack_slot24(
-                    self.counters.ran_sha_small_field_counter.get_next().await?,
-                    0,
-                    0,
-                ),
+                SessionId::pack_slot24(ran_sha_small_field_counter, 0, round_id),
                 self.params.instance_id,
             );
 
@@ -1335,6 +1350,14 @@ where
                         None,
                     );
                 }
+            }
+
+            if round_id == 255 {
+                ran_sha_small_field_counter =
+                    self.counters.ran_sha_small_field_counter.get_next().await?;
+                round_id = 0;
+            } else {
+                round_id += 1;
             }
         }
 
@@ -1405,7 +1428,7 @@ where
             }
 
             if round_id == 255 {
-                ran_sha_counter = self.counters.ran_sha_counter.get_next().await.unwrap();
+                ran_sha_counter = self.counters.ran_sha_counter.get_next().await?;
                 round_id = 0;
             } else {
                 round_id += 1;

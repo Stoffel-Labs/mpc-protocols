@@ -1223,7 +1223,7 @@ async fn preprocessing_e2e() {
         assert_eq!(n_shares, 2); //>no_of_randomshares
         assert_eq!(n_prandbit, 4);
         assert_eq!(n_prandint, 4);
-        assert_eq!(n_small_field, 2);
+        assert!(n_small_field > 2 && n_small_field % (n_parties - 2 * t) == 0);
     }
 }
 

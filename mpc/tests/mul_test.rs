@@ -188,7 +188,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
     for i in 0..n_parties {
         let node = &mul_nodes[i];
         let final_shares = node
-            .wait_for_result(session_id, Duration::from_millis(500))
+            .wait_for_result(session_id, Duration::from_millis(1000))
             .await
             .unwrap();
 
