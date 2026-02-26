@@ -217,17 +217,14 @@ impl<F: FftField> BatchReconNode<F> {
                     // Lock the session store to update the session state.
                     let session_store = self.get_or_create_store(msg.session_id).await;
                     // Lock the session-specific store to access or update the session state.
-                    let store = session_store.lock().await;
-                    (store.reveals_received.clone(), store.secrets.clone())
-                };
-                if !reveals_received.iter().any(|s| s.id == sender_id) {
-                    let session_store = self.get_or_create_store(msg.session_id).await;
-                    // Lock the session-specific store to access or update the session state.
                     let mut store = session_store.lock().await;
+                    (store.reveals_received.clone(), store.secrets.clone());
                     store
                         .reveals_received
                         .push(RobustShare::new(y_j, sender_id, self.t));
-                }
+                    (store.reveals_received.clone(), store.secrets.clone())
+                };
+
                 // Check if we have enough revealed `y_j` values and haven't already reconstructed the secrets.
                 if reveals_received.len() >= 2 * self.t + 1 && secrets.is_none() {
                     info!(
@@ -332,6 +329,13 @@ impl<F: FftField> BatchReconNode<F> {
                             return Err(BatchReconError::InterpolateError(e));
                         }
                     }
+                } else if reveals_received.len() < 2 * self.t + 1 {
+                    info!(
+                        self_id = self.id,
+                        reveals_received = reveals_received.len(),
+                        reveals_needed = 2 * self.t + 1,
+                        "Not enough Reveals collected yet. Waiting for more reveals"
+                    );
                 }
                 Ok(())
             }

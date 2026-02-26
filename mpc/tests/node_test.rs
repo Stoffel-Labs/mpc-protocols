@@ -2098,7 +2098,7 @@ async fn mul_int_e2e_with_preprocessing() {
     let n_parties = 5;
     let t = 1;
     let instance_id = 777;
-    let bitlen = 8; // int8 example
+    let bit_len = 8; // int8 example
     let mut rng = test_rng();
 
     // we will compute:  7 * 6 = 42
@@ -2131,8 +2131,8 @@ async fn mul_int_e2e_with_preprocessing() {
     let mut secret_y = Vec::new();
 
     for i in 0..n_parties {
-        secret_x.push(SecretInt::new(x_shares[i].clone(), bitlen));
-        secret_y.push(SecretInt::new(y_shares[i].clone(), bitlen));
+        secret_x.push(SecretInt::new(x_shares[i].clone(), bit_len));
+        secret_y.push(SecretInt::new(y_shares[i].clone(), bit_len));
     }
 
     //----------------------------------------RECEIVE LOOP----------------------------------------

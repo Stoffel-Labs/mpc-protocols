@@ -379,7 +379,7 @@ pub fn receive<F, R, S, N>(
     net: Arc<N>,
 ) where
     F: PrimeField,
-    R: RBC<Id = SessionId> + 'static,
+    R: RBC + 'static,
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
     HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N>,
@@ -421,7 +421,7 @@ pub fn create_global_nodes<F, R, S, N>(
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
     F: PrimeField,
-    R: RBC<Id = SessionId> + 'static,
+    R: RBC + 'static,
     N: Network + Send + Sync + 'static,
     S: SecretSharingScheme<F>,
     HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts>,

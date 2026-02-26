@@ -109,10 +109,6 @@ pub enum HoneyBadgerError {
     NetworkError(#[from] NetworkError),
     #[error("error in share generation: {0:?}")]
     RanShaError(#[from] RanShaError),
-    #[error("error in share generation using AVSS: {0:?}")]
-    RanShaAvssError(#[from] RanShaAvssError),
-    #[error("error in avss generation: {0:?}")]
-    AvssError(#[from] AvssError),
     #[error("error in Input share generation: {0:?}")]
     InputError(#[from] InputError),
     #[error("error in faulty double share generation: {0:?}")]
@@ -212,7 +208,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
 
 /// Information pertaining a HoneyBadgerMPCNode protocol participant.
 #[derive(Clone, Debug)]
-pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC<Id = SessionId>> {
+pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     /// ID of the current execution node.
     pub id: PartyId,
     /// Preprocessing material used in the protocol execution.
@@ -239,7 +235,7 @@ pub struct TypeOperations<F: PrimeField, R: RBC> {
 }
 
 #[derive(Clone, Debug)]
-pub struct PreprocessNodes<F: PrimeField, R: RBC<Id = SessionId>> {
+pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     // Nodes for subprotocols.
     pub input: InputServer<F, R>,
     pub share_gen: RanShaNode<F, R>,
@@ -1270,7 +1266,7 @@ where
         // Step 5. Generate Random bits
         // ------------------------
         self.ensure_prandbit_shares(network.clone()).await?;
-        info!("PrandBit share generation done");
+        info!("PRandBit share generation done");
 
         // ------------------------
         // Step 6. Generate Random Int
