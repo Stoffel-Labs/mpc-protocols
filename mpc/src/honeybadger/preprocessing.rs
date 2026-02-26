@@ -1,10 +1,7 @@
 use crate::common::math::goldilocks::GoldilocksField;
-use crate::{
-    common::share::avss::FeldmanShamirShare,
-    honeybadger::{
-        fpmul::gf_256::GF256, robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::ShamirBeaverTriple, HoneyBadgerError,
-    },
+use crate::honeybadger::{
+    fpmul::gf_256::GF256, robust_interpolate::robust_interpolate::RobustShare,
+    triple_gen::ShamirBeaverTriple, HoneyBadgerError,
 };
 use ark_ff::FftField;
 use async_trait::async_trait;

@@ -27,25 +27,18 @@ pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
 
-use crate::avss_mpc::share_gen::share_gen_avss::RanShaAvssNode;
-use crate::avss_mpc::share_gen::RanShaAvssError;
-use crate::avss_mpc::{self, AvssSessionId};
 use crate::common::math::goldilocks::GoldilocksField;
 use crate::common::{ProtocolSessionId, ProtocolTag};
 use crate::honeybadger::fpmul::rand_bit::{RandBitError, RandBitMessage};
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
-        share::{
-            avss::{AvssError, AvssMessage, FeldmanShamirShare},
-            shamir::Shamirshare,
-        },
         types::{
             fixed::{ClearFixedPoint, SecretFixedPoint},
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, SecretKey, ShamirShare, ADKG, RBC,
+        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ShamirShare, RBC,
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
@@ -74,7 +67,6 @@ use crate::{
         triple_gen::{TripleGenError, TripleGenMessage},
     },
 };
-use ark_ec::CurveGroup;
 use ark_ff::{FftField, PrimeField};
 use ark_std::rand::rngs::{OsRng, StdRng};
 use ark_std::rand::{Rng, SeedableRng};
@@ -84,13 +76,7 @@ use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
-use std::{
-    fmt,
-    sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc,
-    },
-};
+use std::{fmt, sync::Arc};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use thiserror::Error;
 use tokio::{

@@ -19,7 +19,7 @@ use futures::lock::Mutex;
 use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
 use stoffelnet::network_utils::Network;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// --------------------------BatchRecPub--------------------------
 ///
@@ -97,9 +97,8 @@ impl<F: FftField> BatchReconNode<F> {
             let encoded_msg =
                 bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
 
-            net.send(j, &encoded_msg).await.map_err(|e| {
+            net.send(j, &encoded_msg).await.inspect_err(|_| {
                 error!("Error sending y_j shares to the other party");
-                e
             })?;
         }
         Ok(())
@@ -218,7 +217,6 @@ impl<F: FftField> BatchReconNode<F> {
                     let session_store = self.get_or_create_store(msg.session_id).await;
                     // Lock the session-specific store to access or update the session state.
                     let mut store = session_store.lock().await;
-                    (store.reveals_received.clone(), store.secrets.clone());
                     store
                         .reveals_received
                         .push(RobustShare::new(y_j, sender_id, self.t));

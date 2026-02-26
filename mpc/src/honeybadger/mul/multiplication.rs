@@ -1,4 +1,3 @@
-use crate::honeybadger::ProtocolType;
 use crate::{
     common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC},
     honeybadger::{

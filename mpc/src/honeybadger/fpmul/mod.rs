@@ -8,7 +8,7 @@ use crate::{
         SessionId,
     },
 };
-use ark_ff::{BigInteger, FftField, PrimeField};
+use ark_ff::{BigInteger, PrimeField};
 use ark_poly::{univariate::DensePolynomial, EvaluationDomain, GeneralEvaluationDomain};
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;

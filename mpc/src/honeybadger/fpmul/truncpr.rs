@@ -1,5 +1,4 @@
 use crate::honeybadger::fpmul::ProtocolState;
-use crate::honeybadger::mul::concat_sorted;
 use crate::{
     common::{ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
@@ -10,7 +9,6 @@ use crate::{
 };
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use itertools::sorted;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use tokio::sync::{mpsc::Sender, Mutex};

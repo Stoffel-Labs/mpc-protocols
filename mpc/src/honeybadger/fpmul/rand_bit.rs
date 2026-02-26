@@ -24,7 +24,7 @@ use crate::honeybadger::mul::multiplication::Multiply;
 use crate::honeybadger::mul::{concat_sorted, MulError};
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::triple_gen::ShamirBeaverTriple;
-use crate::honeybadger::{ProtocolType, SessionId};
+use crate::honeybadger::SessionId;
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, SerializationError};
 use itertools::izip;

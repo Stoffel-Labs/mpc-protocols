@@ -1,14 +1,12 @@
 use crate::avss_mpc::AvssSessionId;
 pub(crate) use crate::common::share::feldman::FeldmanShamirShare;
 use crate::common::share::ShareError;
-use crate::common::{ProtocolSessionId, RbcWrapFn};
-use crate::{
-    common::{rbc::RbcError, share::shamir::Shamirshare, SecretKey, SecretSharingScheme, RBC},
-    honeybadger::{SessionId, WrappedMessage},
+use crate::common::{
+    rbc::RbcError, share::shamir::Shamirshare, SecretKey, SecretSharingScheme, RBC,
 };
+use crate::common::{ProtocolSessionId, RbcWrapFn};
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
-use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use bincode::ErrorKind;
@@ -20,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::info;
 
@@ -45,7 +42,7 @@ pub enum AvssError {
     #[error("network error")]
     Network(#[from] stoffelnet::network_utils::NetworkError),
     #[error("share error")]
-    ShareError(#[from] crate::common::share::ShareError),
+    ShareError(#[from] ShareError),
     #[error("send error")]
     SendError,
 }
