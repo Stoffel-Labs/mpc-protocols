@@ -15,7 +15,6 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
-
 ///--------------------------Bracha RBC--------------------------
 ///
 /// Protocol works as follows(m is the message to broadcast) :
