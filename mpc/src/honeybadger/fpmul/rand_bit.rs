@@ -213,8 +213,9 @@ where
             storage.protocol_state = ProtocolState::Initialized;
             storage.a_share = Some(a.clone());
         }
-        let _ = self.try_finalize(session_id).await?;
-
+        if self.try_finalize(session_id).await? {
+            return Ok(());
+        }
         // Step 2: Execute the multiplication to obtain a^2 mod p.
         let a_copy = a.clone();
         self.mult_node

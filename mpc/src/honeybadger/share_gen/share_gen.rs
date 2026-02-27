@@ -278,7 +278,9 @@ where
         let mut store = bind_store.lock().await;
         store.computed_r_shares = r_deg_t.clone();
         drop(store);
-        let _ = self.try_finalize(session_id).await?;
+        if self.try_finalize(session_id).await? {
+            return Ok(());
+        }
 
         for i in 0..2 * self.threshold {
             let share_deg_t = r_deg_t[i].clone();

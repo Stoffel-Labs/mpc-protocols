@@ -183,8 +183,9 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         s.r_dash = Some(r_dash.clone());
         s.state = TruncState::Initialized;
         drop(s);
-        self.try_finalize(session, store.clone()).await?;
-
+        if self.try_finalize(session, store.clone()).await? {
+            return Ok(());
+        }
         // [r] = 2^m [r''] + [r']
         let r = ((r_int * pow2_f::<F>(m))? + r_dash)?;
 

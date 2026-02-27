@@ -304,8 +304,9 @@ where
         store.computed_r_shares_degree_2t = r_deg_2t.clone();
         drop(store);
         // Check if pending OK messages are sufficient to finalize immediately
-        self.try_finalize(session_id, bind_store.clone()).await?;
-
+        if self.try_finalize(session_id, bind_store.clone()).await? {
+            return Ok(());
+        }
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
         for i in 0..self.n_parties {

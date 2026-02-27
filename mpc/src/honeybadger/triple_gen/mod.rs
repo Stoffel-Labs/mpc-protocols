@@ -98,6 +98,7 @@ where
 {
     /// Current state of the protocol execution.
     pub protocol_state: ProtocolState,
+    pub batch_recon_result: Option<Vec<F>>,
     pub randousha_pairs: Vec<DoubleShamirShare<F>>,
     pub random_shares_a_input: Vec<RobustShare<F>>,
     pub random_shares_b_input: Vec<RobustShare<F>>,
@@ -116,6 +117,7 @@ where
 
         Self {
             protocol_state: ProtocolState::NotInitialized,
+            batch_recon_result: None,
             randousha_pairs: Vec::new(),
             random_shares_a_input: Vec::new(),
             random_shares_b_input: Vec::new(),

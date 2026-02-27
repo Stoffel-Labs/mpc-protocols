@@ -113,6 +113,75 @@ where
         }
     }
 
+    async fn try_finalize_triple_gen(
+        &self,
+        session_id: SessionId,
+        storage_bind: Arc<Mutex<TripleGenStorage<F>>>,
+    ) -> Result<bool, TripleGenError> {
+        // ---------- Phase 1: Check readiness ----------
+        let (batch_recon_result, randousha_pairs, random_a, random_b) = {
+            let storage = storage_bind.lock().await;
+
+            if storage.protocol_state == ProtocolState::Finished {
+                return Ok(true);
+            }
+
+            if storage.protocol_state != ProtocolState::Initialized {
+                return Ok(false);
+            }
+
+            let Some(result) = storage.batch_recon_result.clone() else {
+                return Ok(false);
+            };
+
+            (
+                result,
+                storage.randousha_pairs.clone(),
+                storage.random_shares_a_input.clone(),
+                storage.random_shares_b_input.clone(),
+            )
+        };
+
+        // ---------- Phase 2: Compute outside lock ----------
+        let mut result_triples = Vec::new();
+
+        for (sub_value, pair, share_a, share_b) in izip!(
+            batch_recon_result.into_iter(),
+            &randousha_pairs,
+            &random_a,
+            &random_b,
+        ) {
+            let result_share = (pair.degree_t.clone() + &sub_value)?;
+            result_triples.push(ShamirBeaverTriple::new(
+                share_a.clone(),
+                share_b.clone(),
+                result_share.into(),
+            ));
+        }
+
+        // ---------- Phase 3: Commit + send ----------
+        let sender = {
+            let mut storage = storage_bind.lock().await;
+
+            if storage.protocol_state == ProtocolState::Finished {
+                return Ok(true);
+            }
+
+            storage.protocol_state = ProtocolState::Finished;
+            storage.protocol_output = result_triples.clone();
+
+            storage
+                .output_sender
+                .take()
+                .ok_or(TripleGenError::SendError(session_id))?
+        };
+
+        sender
+            .send(result_triples)
+            .map_err(|_| TripleGenError::SendError(session_id))?;
+
+        Ok(true)
+    }
     /// Initializes the protocol to generate random triples based on previously generated shares
     /// and random double shares.
     pub async fn init<N: Network>(
@@ -162,6 +231,14 @@ where
             storage.random_shares_b_input = random_shares_b;
         }
 
+        let storage_bind = self.get_or_create_store(session_id).await?;
+
+        if self
+            .try_finalize_triple_gen(session_id, storage_bind.clone())
+            .await?
+        {
+            return Ok(());
+        }
         info!(
             ?session_id,
             "Starting batch reconstruction for degree-2t shares"
@@ -188,36 +265,19 @@ where
 
         // SHOULD ALSO NEVER FAIL, since comes from batch reconstruction
         let storage_bind = self.get_or_create_store(message.session_id).await?;
-        let mut storage = storage_bind.lock().await;
+        {
+            let mut storage = storage_bind.lock().await;
 
-        if storage.protocol_state == ProtocolState::Finished {
-            return Ok(());
-        }
-        let mut result_triples = Vec::new();
-        for (sub_value, pair, share_a, share_b) in izip!(
-            batch_recon_result.into_iter(),
-            &storage.randousha_pairs,
-            &storage.random_shares_a_input,
-            &storage.random_shares_b_input,
-        ) {
-            let result_share = (pair.degree_t.clone() + &sub_value)?;
-            result_triples.push(ShamirBeaverTriple::new(
-                share_a.clone(),
-                share_b.clone(),
-                result_share.into(),
-            ));
+            if storage.protocol_state == ProtocolState::Finished {
+                return Ok(());
+            }
+
+            // STORE result instead of immediately computing
+            storage.batch_recon_result = Some(batch_recon_result);
         }
 
-        // First, we mark the protocol as initialized.
-        storage.protocol_state = ProtocolState::Finished;
-        // Store the result in the inner memory of the node.
-        storage.protocol_output = result_triples.clone();
-        info!(?message.session_id, id = message.sender_id, "TripleGen protocol finished");
-
-        let taken_output_sender = storage.output_sender.take().unwrap();
-        taken_output_sender
-            .send(result_triples)
-            .map_err(|_| TripleGenError::SendError(message.session_id))?;
+        self.try_finalize_triple_gen(message.session_id, storage_bind)
+            .await?;
 
         Ok(())
     }
