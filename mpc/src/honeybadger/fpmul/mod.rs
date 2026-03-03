@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
-use tokio::sync::mpsc::error::SendError;
+use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 pub mod f256;
 pub mod fpmul;
@@ -50,13 +50,25 @@ pub enum RandBitError {
     SerializationError(#[from] SerializationError),
     #[error("error operating with the shares: {0:?}")]
     ShareError(#[from] ShareError),
-    #[error("error sending the finished session ID to the caller: {0:?}")]
-    SenderError(#[from] SendError<SessionId>),
+    #[error("error sending the result: {0:?}")]
+    SendError(SessionId),
+    #[error("error receiving the result: {0:?}")]
+    ReceiveError(SessionId),
+    #[error("storage limit exceeded: {0}")]
+    LimitError(String),
+    #[error("no such session ID exists: {0:?}")]
+    NoSuchSessionId(SessionId),
     #[error("unknown calling protocol in session ID {0:?}")]
     SessionIdError(SessionId),
+    #[error("cannot create {0:?} random bits at once")]
+    ShareLimitError(usize),
+    #[error("result already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("multiplication {0:?} did not complete in time")]
+    Timeout(SessionId),
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum ProtocolState {
     Initialized,
     NotInitialized,
@@ -80,7 +92,7 @@ impl RandBitMessage {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RandBitStorage<F>
 where
     F: FftField,
@@ -93,6 +105,8 @@ where
     /// Share of `a`
     pub a_share: Option<Vec<RobustShare<F>>>,
     pub output_open: HashMap<u8, Vec<F>>,
+    pub output_sender: Option<Sender<Vec<RobustShare<F>>>>,
+    pub output_receiver: Option<Receiver<Vec<RobustShare<F>>>>,
 }
 
 impl<F> RandBitStorage<F>
@@ -100,11 +114,14 @@ where
     F: FftField,
 {
     pub fn empty() -> Self {
+        let (output_sender, output_receiver) = channel();
         Self {
             protocol_state: ProtocolState::NotInitialized,
             protocol_output: None,
             a_share: None,
             output_open: HashMap::new(),
+            output_sender: Some(output_sender),
+            output_receiver: Some(output_receiver),
         }
     }
 }
@@ -134,14 +151,22 @@ pub enum PRandError {
     ShareError(#[from] ShareError),
     #[error("unknown calling protocol in session ID {0:?}")]
     SessionIdError(SessionId),
-    #[error("error sending the finished session ID to the caller: {0:?}")]
-    SenderError(#[from] SendError<SessionId>),
+    #[error("error sending the result: {0:?}")]
+    SendError(SessionId),
+    #[error("error receiving the result: {0:?}")]
+    ReceiveError(SessionId),
     #[error("F2_8 Error: {0}")]
     F2_8Error(#[from] F2_8Error),
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
     #[error("error in batch reconstruction: {0:?}")]
     BatchRecError(#[from] BatchReconError),
+    #[error("no such session ID exists: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("result already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("multiplication {0:?} did not complete in time")]
+    Timeout(SessionId),
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -183,7 +208,13 @@ impl PRandBitDMessage {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrandState {
+    Initialized,
+    BitFinished,
+    IntFinished,
+}
+#[derive(Debug)]
 pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     /// For every maximal unqualified set T that excludes this player,
     /// we store the full mask r_T = sum_i r_T^i
@@ -198,10 +229,17 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     pub share_r_2: Option<Vec<F2_8>>,
     pub share_b_2: Vec<F2_8>,           //PrandBitD output
     pub share_b_p: Vec<RobustShare<G>>, //PrandBitD/PrandBitL output
+    pub state: PrandState,
+    pub output_bit_sender: Option<Sender<Vec<(RobustShare<G>, F2_8)>>>,
+    pub output_int_sender: Option<Sender<Vec<RobustShare<G>>>>,
+    pub output_bit_receiver: Option<Receiver<Vec<(RobustShare<G>, F2_8)>>>,
+    pub output_int_receiver: Option<Receiver<Vec<RobustShare<G>>>>,
 }
 
 impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
     pub fn empty() -> Self {
+        let (output_bit_sender, output_bit_receiver) = channel();
+        let (output_int_sender, output_int_receiver) = channel();
         Self {
             batch_size: None,
             output_open: HashMap::new(),
@@ -214,6 +252,11 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
             share_r_2: None,
             share_b_2: Vec::new(),
             share_b_p: Vec::new(),
+            state: PrandState::Initialized,
+            output_bit_sender: Some(output_bit_sender),
+            output_int_sender: Some(output_int_sender),
+            output_bit_receiver: Some(output_bit_receiver),
+            output_int_receiver: Some(output_int_receiver),
         }
     }
 }
@@ -264,12 +307,20 @@ pub enum TruncPrError {
     RbcError(#[from] RbcError),
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
-    #[error("error sending the thread asynchronously")]
-    SendError(#[from] SendError<SessionId>),
+    #[error("error sending the result: {0:?}")]
+    SendError(SessionId),
+    #[error("error receiving the result: {0:?}")]
+    ReceiveError(SessionId),
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
-    #[error("unknown calling protocol in session ID {0:?}")]
-    SessionIdError(SessionId)
+    #[error("malformed session ID {0:?}")]
+    SessionIdError(SessionId),
+    #[error("no such session ID exists: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("result already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("multiplication {0:?} did not complete in time")]
+    Timeout(SessionId),
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -289,7 +340,12 @@ impl TruncPrMessage {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TruncState {
+    Initialized,
+    Finished,
+}
+#[derive(Debug)]
 pub struct TruncPrStore<F: PrimeField> {
     pub m: usize,
     pub k: usize,
@@ -297,10 +353,14 @@ pub struct TruncPrStore<F: PrimeField> {
     pub share_a: Option<RobustShare<F>>,
     pub open_buf: HashMap<usize, RobustShare<F>>, // sender_id -> share of (b + r)
     pub share_d: Option<RobustShare<F>>,          // [d]
+    pub state: TruncState,
+    pub output_sender: Option<Sender<RobustShare<F>>>,
+    pub output_receiver: Option<Receiver<RobustShare<F>>>,
 }
 
 impl<F: PrimeField> TruncPrStore<F> {
     pub fn empty() -> Self {
+        let (output_sender, output_receiver) = channel();
         Self {
             m: 0,
             k: 0,
@@ -308,6 +368,9 @@ impl<F: PrimeField> TruncPrStore<F> {
             share_a: None,
             open_buf: HashMap::new(),
             share_d: None,
+            state: TruncState::Initialized,
+            output_sender: Some(output_sender),
+            output_receiver: Some(output_receiver),
         }
     }
 }

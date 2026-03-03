@@ -5,7 +5,7 @@ use crate::{
         fpmul::{
             build_all_f_polys,
             f256::{build_all_f_polys_2_8, F2_8Domain, F2_8},
-            PRandBitDMessage, PRandBitDStore, PRandError, PRandMessageType,
+            PRandBitDMessage, PRandBitDStore, PRandError, PRandMessageType, PrandState,
         },
         mul::concat_sorted,
         robust_interpolate::robust_interpolate::RobustShare,
@@ -18,7 +18,10 @@ use itertools::Itertools;
 use rand::Rng;
 use std::{collections::HashMap, sync::Arc, vec};
 use stoffelnet::network_utils::Network;
-use tokio::sync::{mpsc::Sender, Mutex};
+use tokio::{
+    sync::Mutex,
+    time::{timeout, Duration},
+};
 use tracing::{debug, info};
 
 /// Represents the shares stored by a player
@@ -30,21 +33,13 @@ pub struct PRandBitNode<F: PrimeField, G: PrimeField> {
     pub l: usize,
     pub k: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PRandBitDStore<F, G>>>>>>,
-    pub output_bit_channel: Sender<SessionId>,
-    pub output_int_channel: Sender<SessionId>,
     pub batch_recon: BatchReconNode<F>,
 }
 
 impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
     /// Creates a new PRandBitDNode with empty shares.
-    pub fn new(
-        id: usize,
-        n: usize,
-        t: usize,
-        output_bit_channel: Sender<SessionId>,
-        output_int_channel: Sender<SessionId>,
-    ) -> Result<Self, PRandError> {
-        let batch_recon = BatchReconNode::new(id, n, t)?;
+    pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PRandError> {
+        let batch_recon = BatchReconNode::new(id, n, t, t)?;
         Ok(Self {
             id,
             n,
@@ -52,8 +47,6 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             l: 0,
             k: 0,
             store: Arc::new(Mutex::new(HashMap::new())),
-            output_bit_channel,
-            output_int_channel,
             batch_recon,
         })
     }
@@ -62,6 +55,57 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         let mut store = self.store.lock().await;
         self.batch_recon.clear_entire_store().await;
         store.clear();
+    }
+    pub async fn wait_for_bit_result(
+        &self,
+        session_id: SessionId,
+        duration: Duration,
+    ) -> Result<Vec<(RobustShare<G>, F2_8)>, PRandError> {
+        let output_receiver = {
+            let storage = self.store.lock().await;
+            let storage_bind = match storage.get(&session_id) {
+                Some(value) => value,
+                None => return Err(PRandError::NoSuchSessionId(session_id)),
+            };
+            let mut storage = storage_bind.lock().await;
+
+            storage
+                .output_bit_receiver
+                .take()
+                .ok_or(PRandError::ResultAlreadyReceived(session_id))?
+        };
+
+        match timeout(duration, output_receiver).await {
+            Err(_) => Err(PRandError::Timeout(session_id)),
+            Ok(Err(_)) => Err(PRandError::ReceiveError(session_id)),
+            Ok(Ok(shares)) => Ok(shares),
+        }
+    }
+
+    pub async fn wait_for_int_result(
+        &self,
+        session_id: SessionId,
+        duration: Duration,
+    ) -> Result<Vec<RobustShare<G>>, PRandError> {
+        let output_receiver = {
+            let storage = self.store.lock().await;
+            let storage_bind = match storage.get(&session_id) {
+                Some(value) => value,
+                None => return Err(PRandError::NoSuchSessionId(session_id)),
+            };
+            let mut storage = storage_bind.lock().await;
+
+            storage
+                .output_int_receiver
+                .take()
+                .ok_or(PRandError::ResultAlreadyReceived(session_id))?
+        };
+
+        match timeout(duration, output_receiver).await {
+            Err(_) => Err(PRandError::Timeout(session_id)),
+            Ok(Err(_)) => Err(PRandError::ReceiveError(session_id)),
+            Ok(Ok(shares)) => Ok(shares),
+        }
     }
 
     /// Distributed RISS generation
@@ -76,6 +120,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         network: Arc<N>,
     ) -> Result<(), PRandError> {
         info!(node_id = self.id, "RISS started");
+
+        assert_eq!(session_id.sub_id(), 0);
+        assert_eq!(session_id.round_id(), 0);
+
         if batch_size % (self.t + 1) != 0
             && session_id.calling_protocol() == Some(ProtocolType::PRandBit)
         {
@@ -103,6 +151,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         }
         store.share_b_q = Some(smallfield_bits);
         store.batch_size = Some(batch_size);
+        store.state = PrandState::Initialized;
         drop(store);
         // Step 2: P_i samples randomness and sends
         // Random integer range: [0, 2^(l+k)]
@@ -188,10 +237,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             .batch_size
             .ok_or_else(|| PRandError::NotSet("Batch size not set at RISS handler".to_string()))?;
         let total_tsets = store.no_of_tsets.ok_or_else(|| {
-            PRandError::NotSet(format!(
-                "No of tsets not set {:?}",
-                calling_proto
-            ))
+            PRandError::NotSet(format!("No of tsets not set {:?}", calling_proto))
         })?;
         if store.r_t.len() == total_tsets {
             info!(node_id = self.id, "Constructing Polynomials");
@@ -246,11 +292,23 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
             store.share_r_2 = Some(share_2);
 
             if msg.session_id.calling_protocol() == Some(ProtocolType::PRandInt) {
-                //output the shared random integer,r_t that is converted to r_p
-                //stored in share_r_p
-                info!(node_id = self.id, "Output for PRandInt");
-                self.output_int_channel.send(msg.session_id).await?;
-                return Ok(());
+                if store.state != PrandState::IntFinished {
+                    //output the shared random integer,r_t that is converted to r_p
+                    //stored in share_r_p
+                    info!(node_id = self.id, "Output for PRandInt");
+                    store.state = PrandState::IntFinished;
+
+                    let output = store.share_r_p.clone().unwrap();
+                    let taken_output_sender = store.output_int_sender.take().unwrap();
+                    drop(store);
+                    taken_output_sender
+                        .send(output)
+                        .map_err(|_| PRandError::SendError(msg.session_id))?;
+
+                    return Ok(());
+                } else if store.state == PrandState::IntFinished {
+                    return Ok(());
+                }
             }
 
             //Compute
@@ -259,7 +317,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 .clone()
                 .ok_or_else(|| PRandError::NotSet("Small field bits not set".to_string()))?;
             drop(store);
-            
+
             // share of r + b
             let share_rplusb: Vec<RobustShare<F>> = share_q
                 .iter()
@@ -311,6 +369,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
 
         let binding = self.get_or_create_store(session_id).await;
         let mut store = binding.lock().await;
+        if store.state == PrandState::BitFinished {
+            return Ok(());
+        }
         let batch_size = store
             .batch_size
             .ok_or_else(|| PRandError::NotSet("Batch size not set at RISS handler".to_string()))?;
@@ -333,7 +394,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         }
 
         let share_r_plus_b: Vec<F> = concat_sorted(&store.output_open);
-
+        let mut output = Vec::new();
         // Check if we have enough shares to reconstruct
         if store.share_b_2.len() != batch_size {
             for (i, v) in share_r_plus_b.iter().enumerate() {
@@ -369,10 +430,16 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
 
                 info!(node_id = self.id, "Generated [b] shares");
                 store.share_b_2.push(my_b2_share);
-                store.share_b_p.push(my_b_p_share);
+                store.share_b_p.push(my_b_p_share.clone());
+                output.push((my_b_p_share, my_b2_share));
             }
             info!(id = self.id, "Prandbit finished");
-            self.output_bit_channel.send(session_id).await?;
+            store.state = PrandState::BitFinished;
+            let taken_output_sender = store.output_bit_sender.take().unwrap();
+            drop(store);
+            taken_output_sender
+                .send(output)
+                .map_err(|_| PRandError::SendError(session_id))?;
             return Ok(());
         }
 
@@ -395,6 +462,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
         session_id: SessionId,
     ) -> Arc<Mutex<PRandBitDStore<F, G>>> {
         let mut storage = self.store.lock().await;
+
+        // should never happen, since only exec ID changes for different runs
+        assert!(storage.len() <= 256);
         storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(PRandBitDStore::empty())))

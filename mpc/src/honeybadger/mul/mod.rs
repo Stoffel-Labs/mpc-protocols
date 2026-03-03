@@ -102,7 +102,9 @@ pub enum MulError {
     #[error("waiting for more openings")]
     WaitForOk,
     #[error("multiplication {0:?} did not complete in time")]
-    Timeout(SessionId)
+    Timeout(SessionId),
+    #[error("Channel closed")]
+    Abort,
 }
 
 /// Generic message for the multiplication protocol.

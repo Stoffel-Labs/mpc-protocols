@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
-use tokio::sync::mpsc::error::SendError;
+use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 pub mod double_share_generation;
 
@@ -39,10 +39,20 @@ pub enum DouShaError {
     /// Error during a network operation.
     #[error("error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
-    #[error("error sending the output of the protocol execution: {0:?}")]
-    SendError(#[from] SendError<SessionId>),
+    #[error("error sending the result: {0:?}")]
+    SendError(SessionId),
+    #[error("error receiving the result: {0:?}")]
+    ReceiveError(SessionId),
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
+    #[error("Party Id is out of bounds")]
+    InvalidPartyId,
+    #[error("no such session ID exists: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("result already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("multiplication {0:?} did not complete in time")]
+    Timeout(SessionId),
 }
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
@@ -67,7 +77,7 @@ impl<F: FftField> DoubleShamirShare<F> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DouShaMessage {
     /// ID of the sender.
-    sender_id: PartyId,
+    pub sender_id: PartyId,
     /// ID of the session.
     pub session_id: SessionId,
     /// Payload of the message.
@@ -86,7 +96,7 @@ impl DouShaMessage {
 }
 
 /// Storage for the faulty double share protocol.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 
 pub struct DouShaStorage<F>
 where
@@ -104,6 +114,8 @@ where
     /// Each time tha a party receives a share, the boolean vector in its position is set to
     /// `true`. The protocol is finished once all the flags of the vector are `true`.
     reception_tracker: Vec<bool>,
+    pub output_sender: Option<Sender<Vec<DoubleShamirShare<F>>>>,
+    pub output_receiver: Option<Receiver<Vec<DoubleShamirShare<F>>>>,
 }
 
 impl<F> DouShaStorage<F>
@@ -112,11 +124,14 @@ where
 {
     /// Creates an empty storage. The
     pub fn empty(n_parties: usize) -> Self {
+        let (output_sender, output_receiver) = channel();
         Self {
             protocol_output: Vec::new(),
             share: BTreeMap::new(),
             reception_tracker: vec![false; n_parties],
             state: ProtocolState::NotInitialized,
+            output_sender: Some(output_sender),
+            output_receiver: Some(output_receiver),
         }
     }
 }

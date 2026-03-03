@@ -1,6 +1,5 @@
 use ark_bls12_381::Fr;
 use std::sync::Arc;
-use stoffelmpc_mpc::honeybadger::SessionId;
 use stoffelmpc_mpc::honeybadger::{
     double_share::{
         double_share_generation::{DoubleShareNode, ProtocolState},
@@ -8,23 +7,17 @@ use stoffelmpc_mpc::honeybadger::{
     },
     WrappedMessage,
 };
+use stoffelmpc_network::fake_network::SenderId;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::{error, warn};
 
+use crate::utils::test_utils::fan_in_inboxes;
+
 /// Initializes all RanDouSha nodes and returns them wrapped in `Arc<Mutex<_>>`.
-pub fn create_nodes(
-    n_parties: usize,
-    threshold: usize,
-    senders: Vec<Sender<SessionId>>,
-) -> Vec<Arc<Mutex<DoubleShareNode<Fr>>>> {
+pub fn create_nodes(n_parties: usize, threshold: usize) -> Vec<Arc<Mutex<DoubleShareNode<Fr>>>> {
     (0..n_parties)
-        .zip(senders.into_iter())
-        .map(|(id, sender)| {
-            Arc::new(Mutex::new(DoubleShareNode::new(
-                id, n_parties, threshold, sender,
-            )))
-        })
+        .map(|id| Arc::new(Mutex::new(DoubleShareNode::new(id, n_parties, threshold))))
         .collect()
 }
 
@@ -35,23 +28,30 @@ pub fn create_nodes(
 /// For the rest of the errors, we panic
 pub fn spawn_receiver_tasks(
     nodes: &[Arc<Mutex<DoubleShareNode<Fr>>>],
-    mut receivers: Vec<Receiver<Vec<u8>>>,
+    mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
     final_result_data_chan: Sender<(usize, Vec<DoubleShamirShare<Fr>>)>,
 ) {
     for node in nodes {
         let dousha_node = Arc::clone(&node);
-        let mut receiver = receivers.remove(0);
+        let inboxes = receivers.remove(0);
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = inboxes
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+
+        let mut merged_rx = fan_in_inboxes(inbox);
 
         let final_result_data_chan = final_result_data_chan.clone();
 
         // spawn tasks to process received messages
         tokio::spawn(async move {
             loop {
-                let msg = match receiver.recv().await {
+                let msg = match merged_rx.recv().await {
                     Some(msg) => msg,
                     None => break,
                 };
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg) {
+                let wrapped: WrappedMessage = match bincode::deserialize(&msg.1) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("Malformed or unrecognized message format.");

@@ -306,7 +306,7 @@ pub extern "C" fn shamir_share_recover_secret(
                 .iter()
                 .map(|f| f.clone().into())
                 .collect::<Vec<Shamirshare<Fr>>>();
-            let recover_result = Shamirshare::recover_secret(&shares, 0);
+            let recover_result = Shamirshare::recover_secret(&shares, 0, 0);
             match recover_result {
                 Ok((coeffs, secret)) => {
                     let bls12fr_coeffs =
@@ -409,6 +409,7 @@ pub extern "C" fn robust_share_compute_shares(
 pub extern "C" fn robust_share_recover_secret(
     shares: RobustShareSlice,
     n: usize,
+    t: usize,
     output_secret: *mut U256,
     output_coeffs: *mut U256Slice,
     field_kind: FieldKind,
@@ -423,7 +424,7 @@ pub extern "C" fn robust_share_recover_secret(
                 .iter()
                 .map(|f| f.clone().into())
                 .collect::<Vec<robust_interpolate::RobustShare<Fr>>>();
-            let recover_result = robust_interpolate::RobustShare::recover_secret(&shares, n);
+            let recover_result = robust_interpolate::RobustShare::recover_secret(&shares, n, t);
             match recover_result {
                 Ok((coeffs, secret)) => {
                     let bls12fr_coeffs =
@@ -520,7 +521,7 @@ pub extern "C" fn non_robust_share_recover_secret(
                 .iter()
                 .map(|f| f.clone().into())
                 .collect::<Vec<shamir::NonRobustShare<Fr>>>();
-            let recover_result = shamir::NonRobustShare::recover_secret(&shares, n);
+            let recover_result = shamir::NonRobustShare::recover_secret(&shares, n, 0);
             match recover_result {
                 Ok((coeffs, secret)) => {
                     let bls12fr_coeffs =

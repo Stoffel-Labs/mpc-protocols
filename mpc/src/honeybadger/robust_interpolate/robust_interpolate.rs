@@ -94,19 +94,36 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShare<F> {
     fn recover_secret(
         shares: &[Self],
         n: usize,
+        t: usize,
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), InterpolateError> {
-        let t = shares[0].degree;
-        if !shares.iter().all(|share| share.degree == t) {
+        let degree = shares[0].degree;
+        if !shares.iter().all(|share| share.degree == degree) {
             return Err(InterpolateError::ShareError(ShareError::DegreeMismatch));
         };
 
+        let mut seen = HashSet::new();
+        if !shares.iter().all(|s| seen.insert(s.id)) {
+            return Err(InterpolateError::InvalidInput(
+                "Duplicate share Ids".to_string(),
+            ));
+        }
+
+        for s in shares {
+            if s.id >= n {
+                return Err(InterpolateError::InvalidInput(format!(
+                    "Share id {} is out of range: expected 0 <= id < n (n = {})",
+                    s.id, n
+                )));
+            }
+        }
+
         let share_len = shares.len();
-        if share_len < 2 * t + 1 {
+        if share_len < degree + t + 1 {
             return Err(InterpolateError::InvalidInput(format!(
             "Not enough shares provided ({}) to attempt decoding for t={}. At least {} shares are required.",
             share_len,
             t,
-            2 * t + 1
+            degree + t + 1
         )));
         }
 
@@ -114,7 +131,7 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShare<F> {
         sorted_shares.sort_by_key(|i| i.id);
 
         // === Step 1: Optimistic decoding attempt ===
-        if let Ok(poly) = robust_interpolate_fnt(t, n, &sorted_shares[..2 * t + 1]) {
+        if let Ok(poly) = robust_interpolate_fnt(t, n, &sorted_shares[..degree + t + 1]) {
             return Ok((poly.coeffs.clone(), poly.evaluate(&F::zero())));
         }
         // === Step 2: Fall back to online error correction ===
@@ -177,9 +194,10 @@ fn robust_interpolate_fnt<F: FftField>(
     n: usize,
     shares: &[RobustShare<F>],
 ) -> Result<DensePolynomial<F>, InterpolateError> {
+    let degree = shares[0].degree;
     let domain =
         GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
-    let subset = &shares[..=t];
+    let subset = &shares[..=degree];
     let xs: Vec<F> = subset.iter().map(|s| domain.element(s.id)).collect();
     let ys: Vec<F> = subset.iter().map(|s| s.share[0]).collect();
 
@@ -224,7 +242,7 @@ fn robust_interpolate_fnt<F: FftField>(
         .filter(|(x, y)| interpolated.evaluate(x) == y[0])
         .count();
 
-    if valid_count >= 2 * t + 1 {
+    if valid_count >= degree + t + 1 {
         Ok(interpolated)
     } else {
         Err(InterpolateError::DecodingError(
@@ -366,10 +384,11 @@ fn oec_decode<F: FftField>(
 ) -> Result<(DensePolynomial<F>, F), InterpolateError> {
     let domain =
         GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
+    let degree = shares[0].degree;
 
     // Iterate, increasing the number of shares considered (r) to handle more erasures/errors
     for r in 1..=t {
-        let required = 2 * t + 1 + r;
+        let required = degree + t + 1 + r;
         if shares.len() < required {
             break;
         }
@@ -389,7 +408,7 @@ fn oec_decode<F: FftField>(
 
         // Attempt Reed-Solomon decoding (Gao's algorithm is used for this)
         // t+1 is the expected number of coefficients (degree t polynomial)
-        if let Ok(coeffs) = gao_rs_decode(&received, t + 1, n, &erasures) {
+        if let Ok(coeffs) = gao_rs_decode(&received, degree + 1, n, &erasures) {
             let poly = DensePolynomial::from_coefficients_vec(coeffs);
 
             // Verify if the interpolated polynomial matches a sufficient number of original shares
@@ -399,7 +418,7 @@ fn oec_decode<F: FftField>(
                 .count();
 
             // If enough shares match, the decoding is considered successful
-            if matched >= 2 * t + 1 {
+            if matched >= degree + t + 1 {
                 return Ok((poly.clone(), poly.evaluate(&F::zero())));
             }
         }
@@ -595,7 +614,7 @@ mod tests {
             .unwrap();
         }
         // Attempt robust interpolation
-        let result = RobustShare::recover_secret(&shares, n);
+        let result = RobustShare::recover_secret(&shares, n, t);
         assert!(
             result.is_ok(),
             "robust_interpolate failed despite valid parameters"
@@ -631,7 +650,7 @@ mod tests {
                 }
 
                 // Run recovery
-                let result = RobustShare::recover_secret(&shares, n);
+                let result = RobustShare::recover_secret(&shares, n, t);
 
                 // Debug: show the corrupted indices
                 if result.is_err() {

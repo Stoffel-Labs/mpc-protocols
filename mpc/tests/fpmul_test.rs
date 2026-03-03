@@ -1,12 +1,13 @@
 pub mod utils;
-use crate::utils::test_utils::{setup_tracing, test_setup};
+use crate::utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 use ark_bls12_381::Fr as G;
 use ark_bn254::Fr as F;
 use ark_ff::Field;
 use ark_std::test_rng;
+use futures::future::join_all;
 use itertools::Itertools;
 use std::collections::HashMap;
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::{SecretSharingScheme, ShamirShare, RBC};
 use stoffelmpc_mpc::honeybadger::fpmul::f256::{
@@ -16,7 +17,8 @@ use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitNode;
 use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::{Robust, RobustShare};
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
-use tokio::sync::mpsc::{self, Sender};
+use stoffelmpc_network::fake_network::SenderId;
+use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
 
 #[tokio::test]
@@ -30,27 +32,11 @@ async fn test_prandbitd_end_to_end() {
     let session_id = SessionId::new(ProtocolType::PRandBit, 123, 0, 0, 111);
     let mut rng = test_rng();
     // Build fake network
-    let (network, mut recv, _) = test_setup(n, vec![]);
-
-    let sender_channels: Vec<Sender<_>> = (0..n)
-        .map(|_| {
-            let (sender, _) = mpsc::channel(128);
-            sender
-        })
-        .collect();
+    let (network, mut recv, _, _) = test_setup(n, vec![]);
 
     // Initialize nodes
     let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
-        .map(|i| {
-            PRandBitNode::new(
-                i,
-                n,
-                t,
-                sender_channels[i].clone(),
-                sender_channels[i].clone(),
-            )
-            .unwrap()
-        })
+        .map(|i| PRandBitNode::new(i, n, t).unwrap())
         .collect();
 
     // Run distributed RISS generation
@@ -70,7 +56,7 @@ async fn test_prandbitd_end_to_end() {
             l,
             k,
             batch_size,
-            network.clone(),
+            network[i].clone(),
         )
         .await
         .unwrap();
@@ -79,13 +65,19 @@ async fn test_prandbitd_end_to_end() {
     // Process all messages
     let mut set = JoinSet::new();
     for i in 0..n {
-        let mut receiver = recv.remove(0);
+        let receiver = recv.remove(0);
         let mut node = nodes[i].clone();
-        let net = Arc::clone(&network);
+        let net = network[i].clone();
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+        let mut merged_rx = fan_in_inboxes(inbox);
 
         set.spawn(async move {
-            while let Some(received) = receiver.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&received).unwrap();
+            while let Some(received) = merged_rx.recv().await {
+                let wrapped: WrappedMessage = bincode::deserialize(&received.1).unwrap();
                 match wrapped {
                     WrappedMessage::PRandBit(msg) => {
                         let _ = node.process(msg, net.clone()).await;
@@ -149,7 +141,7 @@ async fn test_prandbitd_end_to_end() {
 
     for y in shares {
         let owned: Vec<ShamirShare<_, 1, Robust>> = y.iter().map(|s| (*s).clone()).collect();
-        let (_, v) = RobustShare::recover_secret(&owned, n).unwrap();
+        let (_, v) = RobustShare::recover_secret(&owned, n, t).unwrap();
         let recovered_b_p = v;
 
         println!("Recovered b (prime field G) = {:?}", recovered_b_p);
@@ -168,27 +160,11 @@ async fn test_prandbitd_r_reconstruction() {
     let session_id = SessionId::new(ProtocolType::PRandBit, 123, 0, 0, 222);
     let mut rng = test_rng();
     // Build fake network
-    let (network, mut recv, _) = test_setup(n, vec![]);
-
-    let sender_channels: Vec<Sender<_>> = (0..n)
-        .map(|_| {
-            let (sender, _) = mpsc::channel(128);
-            sender
-        })
-        .collect();
+    let (network, mut recv, _, _) = test_setup(n, vec![]);
 
     // Initialize nodes
     let mut nodes: Vec<PRandBitNode<F, G>> = (0..n)
-        .map(|i| {
-            PRandBitNode::new(
-                i,
-                n,
-                t,
-                sender_channels[i].clone(),
-                sender_channels[i].clone(),
-            )
-            .unwrap()
-        })
+        .map(|i| PRandBitNode::new(i, n, t).unwrap())
         .collect();
 
     // Run distributed RISS generation
@@ -207,7 +183,7 @@ async fn test_prandbitd_r_reconstruction() {
             l,
             k,
             batch_size,
-            network.clone(),
+            network[node.id].clone(),
         )
         .await
         .unwrap();
@@ -216,13 +192,19 @@ async fn test_prandbitd_r_reconstruction() {
     // Spawn receivers for each node
     let mut set = JoinSet::new();
     for i in 0..n {
-        let mut receiver = recv.remove(0);
+        let receiver = recv.remove(0);
         let mut node = nodes[i].clone();
-        let net = Arc::clone(&network);
+        let net = network[i].clone();
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+        let mut merged_rx = fan_in_inboxes(inbox);
 
         set.spawn(async move {
-            while let Some(received) = receiver.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&received).unwrap();
+            while let Some(received) = merged_rx.recv().await {
+                let wrapped: WrappedMessage = bincode::deserialize(&received.1).unwrap();
                 match wrapped {
                     WrappedMessage::PRandBit(msg) => {
                         let _ = node.process(msg, net.clone()).await;
@@ -290,7 +272,7 @@ async fn test_prandbitd_r_reconstruction() {
         }
 
         for i in 0..batch_size {
-            let (_, rec_r) = RobustShare::recover_secret(&shares[i], n).unwrap();
+            let (_, rec_r) = RobustShare::recover_secret(&shares[i], n, t).unwrap();
             assert_eq!(
                 rec_r,
                 F::from(r_int[i]),
@@ -365,13 +347,11 @@ async fn test_truncpr_end_to_end() {
     let session_id = SessionId::new(ProtocolType::Trunc, 123, 0, 0, 999);
 
     // === Build fake network ===
-    let (network, mut recv, _) = test_setup(n, vec![]);
+    let (network, mut recv, _, _) = test_setup(n, vec![]);
 
     // === Initialize nodes ===
-    let (trunc_sender, _) = mpsc::channel(128);
-    let mut nodes: Vec<TruncPrNode<F, Avid>> = (0..n)
-        .map(|i| TruncPrNode::new(i, n, t, trunc_sender.clone()).unwrap())
-        .collect();
+    let mut nodes: Vec<TruncPrNode<F, Avid>> =
+        (0..n).map(|i| TruncPrNode::new(i, n, t).unwrap()).collect();
 
     // === Input secret [a] (same across parties for test) ===
     let mut rng = test_rng();
@@ -384,8 +364,36 @@ async fn test_truncpr_end_to_end() {
             r_bits[i].push(share.clone());
         }
     }
+
+    // === Spawn receivers to process messages ===
+    let mut set = JoinSet::new();
+    for i in 0..n {
+        let receiver = recv.remove(0);
+        let mut node = nodes[i].clone();
+        let net = network[i].clone();
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+        let mut merged_rx = fan_in_inboxes(inbox);
+
+        set.spawn(async move {
+            while let Some(received) = merged_rx.recv().await {
+                let wrapped: WrappedMessage = bincode::deserialize(&received.1).unwrap();
+                match wrapped {
+                    WrappedMessage::Rbc(msg) => {
+                        let _ = node.rbc.process(msg, net.clone()).await;
+                        let _ = node.drain_rbc_output().await;
+                    }
+                    _ => continue,
+                }
+            }
+        });
+    }
+
     // === Run init() for each node ===
-    for node in &mut nodes {
+    let futures = nodes.iter_mut().map(|node| {
         node.init(
             a_val[node.id].clone(),
             k,
@@ -393,34 +401,13 @@ async fn test_truncpr_end_to_end() {
             r_bits[node.id].clone(),
             r_int[node.id].clone(),
             session_id,
-            network.clone(),
+            network[node.id].clone(),
         )
-        .await
-        .unwrap();
-    }
+    });
 
-    // === Spawn receivers to process messages ===
-    let mut set = JoinSet::new();
-    for i in 0..n {
-        let mut receiver = recv.remove(0);
-        let mut node = nodes[i].clone();
-        let net = Arc::clone(&network);
-
-        set.spawn(async move {
-            while let Some(received) = receiver.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&received).unwrap();
-                match wrapped {
-                    WrappedMessage::Trunc(msg) => {
-                        let _ = node.process(msg, net.clone()).await;
-                    }
-                    WrappedMessage::Rbc(msg) => {
-                        let _ = node.rbc.process(msg, net.clone()).await;
-                    }
-                    _ => continue,
-                }
-            }
-        });
-    }
+    join_all(futures).await.into_iter().for_each(|res| {
+        res.unwrap();
+    });
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -435,7 +422,7 @@ async fn test_truncpr_end_to_end() {
         shares.push(s.share_d.clone().unwrap());
     }
 
-    let (_, d_reconstructed) = RobustShare::recover_secret(&shares, n).unwrap();
+    let (_, d_reconstructed) = RobustShare::recover_secret(&shares, n, t).unwrap();
     println!("Reconstructed [d] = {:?}", d_reconstructed);
 
     // === Verify correctness: expected floor(a / 2^m) ===

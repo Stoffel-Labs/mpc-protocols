@@ -3,12 +3,12 @@ use crate::{
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         mul::{
-            concat_sorted, MulError, InterpolateError, MultMessage, MultProtocolState, MultStorage,
+            concat_sorted, InterpolateError, MulError, MultMessage, MultProtocolState, MultStorage,
             ReconstructionMessage,
         },
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         triple_gen::ShamirBeaverTriple,
-        SessionId, WrappedMessage,
+        SessionId,
     },
 };
 use ark_ff::FftField;
@@ -20,14 +20,17 @@ use std::{
     sync::Arc,
 };
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::Mutex;
+use tokio::sync::{
+    mpsc::{self, Receiver},
+    Mutex,
+};
 use tokio::time::{timeout, Duration};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// Secret multiplication is explained in Section 2.2 of the paper.
 /// Assume that we want to multiply two t-shares x and y. We take a Beaver triple
-/// (a, b, a*b) and 
-/// 
+/// (a, b, a*b) and
+///
 /// 1. calculate a - x and b - y and open these values
 /// 2. calculate x*y = a*b - (a - x)(b - y) - (a - x)y - (b - y)x; a - x and b - y have been
 ///    opened, a*b is part of the Beaver triple and x and y are known shares
@@ -48,7 +51,7 @@ use tracing::{info, warn, error};
 // requires that Multiply::init has been called before and all chunks and shares via RBC have been
 // received
 fn finalize_mul<F: FftField>(storage: &MultStorage<F>) -> Result<Vec<RobustShare<F>>, MulError> {
-    assert!(storage.openings.is_some());    // always ensured by the caller
+    assert!(storage.openings.is_some()); // always ensured by the caller
 
     let openings = storage.openings.as_ref().unwrap();
 
@@ -58,6 +61,16 @@ fn finalize_mul<F: FftField>(storage: &MultStorage<F>) -> Result<Vec<RobustShare
     let mut concatenated_mult2: Vec<F> = concat_sorted(&storage.output_open_mult2);
     concatenated_mult2.extend(openings.1.clone());
 
+    let expected_len = storage.share_mult_from_triple.len();
+    if concatenated_mult1.len() != expected_len
+        || concatenated_mult2.len() != expected_len
+        || storage.inputs.0.len() != expected_len
+        || storage.inputs.1.len() != expected_len
+    {
+        return Err(MulError::InvalidInput(
+            "Inconsistent lengths in finalize_mul".to_string(),
+        ));
+    }
     let mut shares_mult = Vec::with_capacity(storage.share_mult_from_triple.len());
     for (triple_mult, input_a, input_b, subtraction_a, subtraction_b) in izip!(
         &storage.share_mult_from_triple,
@@ -82,7 +95,12 @@ fn finalize_mul<F: FftField>(storage: &MultStorage<F>) -> Result<Vec<RobustShare
     Ok(shares_mult)
 }
 
-fn reconstruct_rbc<F: FftField>(received_shares: &HashMap<PartyId, (Vec<RobustShare<F>>, Vec<RobustShare<F>>)>, share_len: usize, n: usize) -> Result<(Vec<F>, Vec<F>), InterpolateError> {
+fn reconstruct_rbc<F: FftField>(
+    received_shares: &HashMap<PartyId, (Vec<RobustShare<F>>, Vec<RobustShare<F>>)>,
+    share_len: usize,
+    n: usize,
+    t: usize,
+) -> Result<(Vec<F>, Vec<F>), InterpolateError> {
     let mut a_sub_x: Vec<F> = Vec::new();
     let mut b_sub_y: Vec<F> = Vec::new();
     let mut a_shares = vec![vec![]; share_len];
@@ -91,17 +109,18 @@ fn reconstruct_rbc<F: FftField>(received_shares: &HashMap<PartyId, (Vec<RobustSh
     for (id, (a, b)) in received_shares.iter() {
         if a.len() != share_len || b.len() != share_len {
             warn!("Node {} did not send right number of shares to reconstruct using RBC (sent {} for a-x and {} for b-y)", id, a.len(), b.len());
+            continue;
         }
-    
+
         for i in 0..share_len {
             a_shares[i].push(a[i].clone());
             b_shares[i].push(b[i].clone());
         }
     }
     for i in 0..share_len {
-        let a = RobustShare::recover_secret(&a_shares[i], n)?;
-        let b = RobustShare::recover_secret(&b_shares[i], n)?;
-    
+        let a = RobustShare::recover_secret(&a_shares[i], n, t)?;
+        let b = RobustShare::recover_secret(&b_shares[i], n, t)?;
+
         a_sub_x.push(a.1);
         b_sub_y.push(b.1);
     }
@@ -117,16 +136,14 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub mult_storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<MultStorage<F>>>>>>,
     pub batch_recon: BatchReconNode<F>,
     pub rbc: R,
+    pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 impl<F: FftField, R: RBC> Multiply<F, R> {
-    pub fn new(
-        id: PartyId,
-        n: usize,
-        threshold: usize,
-    ) -> Result<Self, MulError> {
-        let batch_recon = BatchReconNode::<F>::new(id, n, threshold)?;
-        let rbc = R::new(id, n, threshold, threshold + 1)?;
+    pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
+        let (rbc_sender, rbc_receiver) = mpsc::channel(200);
+        let batch_recon = BatchReconNode::<F>::new(id, n, threshold, threshold)?;
+        let rbc = R::new(id, n, threshold, threshold + 1, rbc_sender)?;
         Ok(Self {
             id,
             n,
@@ -134,6 +151,31 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             mult_storage: Arc::new(Mutex::new(HashMap::new())),
             batch_recon,
             rbc,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
+        })
+    }
+    pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {
+        Ok(loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(MulError::Abort);
+                    }
+                }
+            };
+
+            let output = self.rbc.get_store(id).await?;
+            let msg: MultMessage = bincode::deserialize(&output)?;
+
+            match self.open_mult_handler(msg).await {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
         })
     }
     pub async fn clear_store(&self) {
@@ -172,14 +214,18 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         x: Vec<RobustShare<F>>,
         y: Vec<RobustShare<F>>,
         beaver_triples: Vec<ShamirBeaverTriple<F>>,
-        network: Arc<N>
+        network: Arc<N>,
     ) -> Result<(), MulError> {
         info!(party = self.id, "Initializing multiplication");
         if x.len() != y.len() || x.len() != beaver_triples.len() {
-            return Err(MulError::InvalidInput("Length of x and y vectors and Beaver triples must match".to_string()));
+            return Err(MulError::InvalidInput(
+                "Length of x and y vectors and Beaver triples must match".to_string(),
+            ));
         }
 
         assert!(session_id.calling_protocol().is_some());
+        assert_eq!(session_id.sub_id(), 0);
+        assert_eq!(session_id.round_id(), 0);
 
         let no_of_mul = x.len();
         let no_of_batch = no_of_mul / (self.t + 1);
@@ -213,23 +259,28 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             // `share_len != 0`, since some honest nodes have sent us their shares
             info!("Received enough messages with shares to try reconstruction using RBC");
 
-            match reconstruct_rbc(&storage.received_shares, share_len, self.n) {
+            match reconstruct_rbc(&storage.received_shares, share_len, self.n, self.t) {
                 Ok(openings) => {
                     info!("Reconstruction succeeded");
                     storage.openings = Some(openings);
                 }
-                Err(e) => error!("Reconstruction in init failed: {e}")  // could fail if shares corrupt
+                Err(e) => error!("Reconstruction in init failed: {e}"), // could fail if shares corrupt
             };
         }
 
         // 5.
-        if have_batch_recon1.iter().all(|b| *b) && have_batch_recon2.iter().all(|b| *b) && storage.openings.is_some() {
+        if have_batch_recon1.iter().all(|b| *b)
+            && have_batch_recon2.iter().all(|b| *b)
+            && storage.openings.is_some()
+        {
             let shares_mult = finalize_mul(&storage)?;
-    
+
             // never None because checked at the beginning
             let taken_output_sender = storage.output_sender.take().unwrap();
-    
-            taken_output_sender.send(shares_mult).map_err(|_| MulError::SendError(session_id))?;
+
+            taken_output_sender
+                .send(shares_mult)
+                .map_err(|_| MulError::SendError(session_id))?;
             storage.protocol_state = MultProtocolState::Finished;
 
             info!("Multiplication completed at node {}", self.id);
@@ -260,7 +311,11 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
 
         // 8.
         // initiate batch reconstruction for those chunks that need it
-        for (i, (chunk_a, chunk_b)) in a_full.chunks(self.t + 1).zip(b_full.chunks(self.t + 1)).enumerate() {
+        for (i, (chunk_a, chunk_b)) in a_full
+            .chunks(self.t + 1)
+            .zip(b_full.chunks(self.t + 1))
+            .enumerate()
+        {
             if !have_batch_recon1[i] {
                 let session_id1 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
@@ -306,8 +361,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
                 session_id.instance_id(),
             );
 
-            let wrapped =
-                WrappedMessage::Mul(MultMessage::new(self.id, sessionid, bytes_rec_message));
+            let wrapped = MultMessage::new(self.id, sessionid, bytes_rec_message);
             let bytes_wrapped = bincode::serialize(&wrapped)?;
 
             self.rbc
@@ -329,16 +383,14 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
     // `open_mult_handler` mainly serves to receive opened values from batch reconstruction
     // or shares from RBC, from which openings will be manually reconstructed.
     // If `init` has been called, then it can also try to perform the multiplication.
-    pub async fn open_mult_handler(
-        &self,
-        msg: MultMessage,
-    ) -> Result<(), MulError> {
+    pub async fn open_mult_handler(&self, msg: MultMessage) -> Result<(), MulError> {
         let calling_proto = match msg.session_id.calling_protocol() {
             Some(proto) => proto,
             None => {
-                return Err(MulError::InvalidInput(
-                    format!("Unknown calling protocol in session ID {:?}", msg.session_id)
-                ));
+                return Err(MulError::InvalidInput(format!(
+                    "Unknown calling protocol in session ID {:?}",
+                    msg.session_id
+                )));
             }
         };
 
@@ -417,7 +469,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         if storage.received_shares.len() >= 2 * self.t + 1 && storage.openings.is_none() {
             // `share_len != 0`, since some honest nodes have sent us their shares
             info!("Received enough messages with shares to try reconstruction using RBC");
-            let openings = reconstruct_rbc(&storage.received_shares, share_len, self.n)?;
+            let openings = reconstruct_rbc(&storage.received_shares, share_len, self.n, self.t)?;
 
             info!("Reconstruction succeeded");
             storage.openings = Some(openings);
@@ -437,7 +489,9 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         // never None because checked at the beginning
         let taken_output_sender = storage.output_sender.take().unwrap();
 
-        taken_output_sender.send(shares_mult).map_err(|_| MulError::SendError(session_id))?;
+        taken_output_sender
+            .send(shares_mult)
+            .map_err(|_| MulError::SendError(session_id))?;
         storage.protocol_state = MultProtocolState::Finished;
 
         info!("Multiplication completed at node {}", self.id);
@@ -455,38 +509,41 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         session_id: SessionId,
     ) -> Arc<Mutex<MultStorage<F>>> {
         let mut storage = self.mult_storage.lock().await;
+
+        // should never occur, since only exec ID changes for different runs
+        assert!(storage.len() <= 256);
+
         storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(MultStorage::empty())))
             .clone()
     }
 
-    pub async fn wait_for_result(&self, session_id: SessionId, duration: Duration) -> Result<Vec<RobustShare<F>>, MulError> {
+    pub async fn wait_for_result(
+        &self,
+        session_id: SessionId,
+        duration: Duration,
+    ) -> Result<Vec<RobustShare<F>>, MulError> {
         // scoped because self.mult_storage and storage locks must not be held anymore
         // when receiving afterwards
         let output_receiver = {
             let mult_storage = self.mult_storage.lock().await;
             let storage_bind = match mult_storage.get(&session_id) {
                 Some(value) => value,
-                None => return Err(MulError::NoSuchSessionId(session_id))
+                None => return Err(MulError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
 
-            storage.output_receiver
-                   .take()
-                   .ok_or(MulError::ResultAlreadyReceived(session_id))?
+            storage
+                .output_receiver
+                .take()
+                .ok_or(MulError::ResultAlreadyReceived(session_id))?
         };
 
         match timeout(duration, output_receiver).await {
-            Err(_) => {
-                Err(MulError::Timeout(session_id))
-            }
-            Ok(Err(_)) => {
-                Err(MulError::ReceiveError(session_id))
-            }
-            Ok(Ok(mul_shares)) => {
-                Ok(mul_shares)
-            }
+            Err(_) => Err(MulError::Timeout(session_id)),
+            Ok(Err(_)) => Err(MulError::ReceiveError(session_id)),
+            Ok(Ok(mul_shares)) => Ok(mul_shares),
         }
     }
 }
@@ -494,52 +551,59 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use ark_std::test_rng;
-    use ark_bls12_381::Fr;
-    use ark_ff::UniformRand;
     use crate::{
         common::{rbc::rbc::Avid, SecretSharingScheme},
         honeybadger::{
-            ProtocolType,
-            RbcError,
-            robust_interpolate::robust_interpolate::RobustShare,
+            robust_interpolate::robust_interpolate::RobustShare, ProtocolType, RbcError,
             WrappedMessage,
-        }
+        },
     };
-    use tokio::time::{sleep, Duration};
-    use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-    use rand::{thread_rng, prelude::SliceRandom};
+    use ark_bls12_381::Fr;
+    use ark_ff::UniformRand;
+    use ark_std::test_rng;
+    use rand::{prelude::SliceRandom, thread_rng};
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+    use tokio::{
+        sync::mpsc::{self, Receiver},
+        time::{sleep, Duration},
+    };
 
     async fn construct_input_mul(
         n_parties: usize,
         n_triples: usize,
         threshold: usize,
-    ) -> ((Vec<Fr>, Vec<Fr>, Vec<Fr>), Vec<Vec<ShamirBeaverTriple<Fr>>>) {
+    ) -> (
+        (Vec<Fr>, Vec<Fr>, Vec<Fr>),
+        Vec<Vec<ShamirBeaverTriple<Fr>>>,
+    ) {
         let mut rng = test_rng();
         let mut secrets_a = Vec::new();
         let mut secrets_b = Vec::new();
         let mut secrets_c = Vec::new();
         let mut per_party_triples: Vec<Vec<ShamirBeaverTriple<Fr>>> = vec![Vec::new(); n_parties];
-    
+
         for _i in 0..n_triples {
             // sample secrets a,b
             let a_secret = Fr::rand(&mut rng);
             let b_secret = Fr::rand(&mut rng);
             let c_secret = a_secret * b_secret;
-    
+
             // make robust shares for each secret (length == n_parties)
-            let shares_a = RobustShare::compute_shares(a_secret, n_parties, threshold, None, &mut rng)
-                .expect("share a creation failed");
-            let shares_b = RobustShare::compute_shares(b_secret, n_parties, threshold, None, &mut rng)
-                .expect("share b creation failed");
-            let shares_c = RobustShare::compute_shares(c_secret, n_parties, threshold, None, &mut rng)
-                .expect("share c creation failed");
-    
+            let shares_a =
+                RobustShare::compute_shares(a_secret, n_parties, threshold, None, &mut rng)
+                    .expect("share a creation failed");
+            let shares_b =
+                RobustShare::compute_shares(b_secret, n_parties, threshold, None, &mut rng)
+                    .expect("share b creation failed");
+            let shares_c =
+                RobustShare::compute_shares(c_secret, n_parties, threshold, None, &mut rng)
+                    .expect("share c creation failed");
+
             // push the secrets to the vectors
             secrets_a.push(a_secret);
             secrets_b.push(b_secret);
             secrets_c.push(c_secret);
-    
+
             // For each party, create their per-party ShamirBeaverTriple and push it
             for pid in 0..n_parties {
                 let triple = ShamirBeaverTriple {
@@ -552,7 +616,21 @@ pub mod tests {
         }
         ((secrets_a, secrets_b, secrets_c), per_party_triples)
     }
+    fn fan_in_inboxes(inboxes: Vec<Receiver<Vec<u8>>>) -> Receiver<(usize, Vec<u8>)> {
+        let (tx, rx) = mpsc::channel(300);
 
+        for (from, mut rx_i) in inboxes.into_iter().enumerate() {
+            let tx_i = tx.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = rx_i.recv().await {
+                    // ignore send errors (receiver dropped)
+                    let _ = tx_i.send((from, msg)).await;
+                }
+            });
+        }
+
+        rx
+    }
     /// `2t+1` nodes send random shares to the client, which reconstructs the random value and
     /// broadcasts the masked input. Some node, which is not one of the `2t+1` has not sent its
     /// random share and receives the masked input before even having called `InputServer::init`.
@@ -564,39 +642,50 @@ pub mod tests {
         let no_of_mul = 10;
         let session_id = SessionId::new(ProtocolType::Mul, 123, 0, 0, 111);
         let mut rng = test_rng();
-    
+
         // 1. Generate Beaver triples
-        let ((secrets_a, secrets_b, _), beaver_triples) = construct_input_mul(n, no_of_mul, t).await;
+        let ((secrets_a, secrets_b, _), beaver_triples) =
+            construct_input_mul(n, no_of_mul, t).await;
         let mult_from_triple: Vec<_> = beaver_triples[node_id]
             .iter()
             .map(|triple| triple.mult.clone())
             .collect();
-    
+
         // 2. Prepare inputs for multiplication
         let mut x_values = Vec::new();
         let mut y_values = Vec::new();
         let mut x_inputs_per_node = vec![Vec::new(); n];
         let mut y_inputs_per_node = vec![Vec::new(); n];
-    
+
         for _i in 0..no_of_mul {
             let x_value = Fr::rand(&mut rng);
             x_values.push(x_value);
             let y_value = Fr::rand(&mut rng);
             y_values.push(y_value);
-    
+
             let shares_x = RobustShare::compute_shares(x_value, n, t, None, &mut rng).unwrap();
             let shares_y = RobustShare::compute_shares(y_value, n, t, None, &mut rng).unwrap();
-    
+
             for p in 0..n {
                 x_inputs_per_node[p].push(shares_x[p].clone());
                 y_inputs_per_node[p].push(shares_y[p].clone());
             }
         }
-    
+
         // 3. Generate correct openings and shares
-        let correct_a_sub_x = secrets_a.clone().iter().zip(x_values.clone()).map(|(a, x)| *a - x).collect::<Vec<_>>();
-        let correct_b_sub_y = secrets_b.clone().iter().zip(y_values.clone()).map(|(b, y)| *b - y).collect::<Vec<_>>();
-    
+        let correct_a_sub_x = secrets_a
+            .clone()
+            .iter()
+            .zip(x_values.clone())
+            .map(|(a, x)| *a - x)
+            .collect::<Vec<_>>();
+        let correct_b_sub_y = secrets_b
+            .clone()
+            .iter()
+            .zip(y_values.clone())
+            .map(|(b, y)| *b - y)
+            .collect::<Vec<_>>();
+
         let mut correct_shares = Vec::with_capacity(mult_from_triple.len());
         for (triple_mult, input_a, input_b, subtraction_a, subtraction_b) in izip!(
             &mult_from_triple,
@@ -608,21 +697,35 @@ pub mod tests {
             //(a−x)(b−y)
             let mult_subs = subtraction_a * subtraction_b;
             //(a−x)[y]_t
-            let mult_sub_a_y = input_b.clone().mul(*subtraction_a).expect("multiplication failed");
+            let mult_sub_a_y = input_b
+                .clone()
+                .mul(*subtraction_a)
+                .expect("multiplication failed");
             //(b−y)[x]_t
-            let mult_sub_b_x = input_a.clone().mul(*subtraction_b).expect("multiplication failed");
+            let mult_sub_b_x = input_a
+                .clone()
+                .mul(*subtraction_b)
+                .expect("multiplication failed");
             //[xy]_t
-            let share = triple_mult.clone().sub(mult_subs).expect("subtraction failed");
-            let share2: ShamirShare<Fr, 1, Robust> = (share - mult_sub_a_y).expect("subtraction failed");
+            let share = triple_mult
+                .clone()
+                .sub(mult_subs)
+                .expect("subtraction failed");
+            let share2: ShamirShare<Fr, 1, Robust> =
+                (share - mult_sub_a_y).expect("subtraction failed");
             let share3 = (share2 - mult_sub_b_x).expect("subtraction failed");
             correct_shares.push(share3);
         }
 
         let config = FakeNetworkConfig::new(500);
-        let (network, mut receivers, _) = FakeNetwork::new(n, None, config);
-        let network = Arc::new(network);
+        let (inner, mut receivers, _) = FakeInnerNetwork::new(n, None, config);
+        let network: Vec<_> = (0..n)
+            .map(|id| Arc::new(FakeNetwork::new(id, inner.clone())))
+            .collect();
 
-        let mut nodes: Vec<_> = (0..n).map(|i| { Multiply::<Fr, Avid>::new(i, n, t).unwrap() }).collect();
+        let mut nodes: Vec<_> = (0..n)
+            .map(|i| Multiply::<Fr, Avid>::new(i, n, t).unwrap())
+            .collect();
 
         // all but one node call init
         for i in 0..nodes.len() {
@@ -638,37 +741,52 @@ pub mod tests {
 
             tokio::spawn(async move {
                 assert!(node
-                    .init(session_id, x_inputs_per_node, y_inputs_per_node, beaver_triples, network)
+                    .init(
+                        session_id,
+                        x_inputs_per_node,
+                        y_inputs_per_node,
+                        beaver_triples,
+                        network[i].clone()
+                    )
                     .await
                     .is_ok());
             });
         }
 
         // run RBC for masked input and eventually process it
-        for node in nodes.iter_mut() {
+        for (i, node) in nodes.iter_mut().enumerate() {
             let network = network.clone();
             let mut node = node.clone();
-            let mut receiver = receivers.remove(0);
-
+            let receiver = receivers.remove(0);
+            let mut merged_rx = fan_in_inboxes(receiver);
             tokio::spawn(async move {
-                while let Some(raw_msg) = receiver.recv().await {
-                    let wrapped: WrappedMessage = bincode::deserialize(&raw_msg).expect("deserialization error");
+                while let Some(raw_msg) = merged_rx.recv().await {
+                    let wrapped: WrappedMessage =
+                        bincode::deserialize(&raw_msg.1).expect("deserialization error");
 
                     match wrapped {
                         WrappedMessage::BatchRecon(batchrecon_msg) => {
-                            node.batch_recon.process(batchrecon_msg, network.clone()).await.unwrap();
+                            node.batch_recon
+                                .process(batchrecon_msg, network[i].clone())
+                                .await
+                                .unwrap();
                         }
                         WrappedMessage::Rbc(rbc_msg) => {
-                            match node.rbc.process(rbc_msg, network.clone()).await {
-                                Ok(()) => { },
-                                Err(RbcError::SessionEnded(_)) => { },
-                                Err(e) => { panic!("unexpected error during RBC: {e}"); }
+                            match node.rbc.process(rbc_msg, network[i].clone()).await {
+                                Ok(()) => {}
+                                Err(RbcError::SessionEnded(_)) => {}
+                                Err(e) => {
+                                    panic!("unexpected error during RBC: {e}");
+                                }
                             }
+                            let _ = node.drain_rbc_output().await;
                         }
                         WrappedMessage::Mul(input_msg) => {
                             let _ = node.process(input_msg).await;
                         }
-                        _ => { panic!(); }
+                        _ => {
+                            panic!();
+                        }
                     };
                 }
             });
@@ -676,7 +794,7 @@ pub mod tests {
 
         // wait for left out node to receive messages and calculate result
         sleep(Duration::from_millis(500)).await;
-        
+
         let storage_bind = nodes[node_id].get_or_create_mult_storage(session_id).await;
         let storage = storage_bind.lock().await;
 
@@ -685,7 +803,9 @@ pub mod tests {
         // all openings except for the RBC ones should be there, but enough shares
         // for reconstruction should be there
         assert!((0..no_of_batch).all(|i| storage.output_open_mult1.contains_key(&((2 * i) as u8))));
-        assert!((0..no_of_batch).all(|i| storage.output_open_mult2.contains_key(&((2 * i + 1) as u8))));
+        assert!(
+            (0..no_of_batch).all(|i| storage.output_open_mult2.contains_key(&((2 * i + 1) as u8)))
+        );
         assert!(storage.openings.is_none());
         assert!(storage.received_shares.len() >= 2 * t + 1);
 
@@ -693,10 +813,15 @@ pub mod tests {
 
         // so now we call init...
         assert!(nodes[node_id]
-            .init(session_id, x_inputs_per_node[node_id].clone(), y_inputs_per_node[node_id].clone(), beaver_triples[node_id].clone(), network)
+            .init(
+                session_id,
+                x_inputs_per_node[node_id].clone(),
+                y_inputs_per_node[node_id].clone(),
+                beaver_triples[node_id].clone(),
+                network[node_id].clone()
+            )
             .await
-            .is_ok()
-        );
+            .is_ok());
 
         let storage_bind = nodes[node_id].get_or_create_mult_storage(session_id).await;
         let storage = storage_bind.lock().await;
@@ -708,10 +833,19 @@ pub mod tests {
 
         // ...and obtain the result
         let mut real_shares = None;
-        match nodes[node_id].wait_for_result(session_id, Duration::from_millis(5)).await {
-            Err(MulError::ResultAlreadyReceived(_)) => { info!("already received result"); }
-            Err(e) => { panic!("unexpected error during waiting: {e}"); }
-            Ok(shares) => { real_shares = Some(shares); }
+        match nodes[node_id]
+            .wait_for_result(session_id, Duration::from_millis(5))
+            .await
+        {
+            Err(MulError::ResultAlreadyReceived(_)) => {
+                info!("already received result");
+            }
+            Err(e) => {
+                panic!("unexpected error during waiting: {e}");
+            }
+            Ok(shares) => {
+                real_shares = Some(shares);
+            }
         }
 
         // 8. Check that shares are correct
@@ -742,7 +876,8 @@ pub mod tests {
         let mut rng = test_rng();
 
         // 1. Generate Beaver triples
-        let ((secrets_a, secrets_b, _), beaver_triples) = construct_input_mul(n_parties, no_of_mul, t).await;
+        let ((secrets_a, secrets_b, _), beaver_triples) =
+            construct_input_mul(n_parties, no_of_mul, t).await;
         let mult_from_triple: Vec<_> = beaver_triples[node_id]
             .iter()
             .map(|triple| triple.mult.clone())
@@ -760,8 +895,10 @@ pub mod tests {
             let y_value = Fr::rand(&mut rng);
             y_values.push(y_value);
 
-            let shares_x = RobustShare::compute_shares(x_value, n_parties, t, None, &mut rng).unwrap();
-            let shares_y = RobustShare::compute_shares(y_value, n_parties, t, None, &mut rng).unwrap();
+            let shares_x =
+                RobustShare::compute_shares(x_value, n_parties, t, None, &mut rng).unwrap();
+            let shares_y =
+                RobustShare::compute_shares(y_value, n_parties, t, None, &mut rng).unwrap();
 
             for p in 0..n_parties {
                 x_inputs_per_node[p].push(shares_x[p].clone());
@@ -770,8 +907,18 @@ pub mod tests {
         }
 
         // 3. Generate correct openings and shares
-        let correct_a_sub_x = secrets_a.clone().iter().zip(x_values.clone()).map(|(a, x)| *a - x).collect::<Vec<_>>();
-        let correct_b_sub_y = secrets_b.clone().iter().zip(y_values.clone()).map(|(b, y)| *b - y).collect::<Vec<_>>();
+        let correct_a_sub_x = secrets_a
+            .clone()
+            .iter()
+            .zip(x_values.clone())
+            .map(|(a, x)| *a - x)
+            .collect::<Vec<_>>();
+        let correct_b_sub_y = secrets_b
+            .clone()
+            .iter()
+            .zip(y_values.clone())
+            .map(|(b, y)| *b - y)
+            .collect::<Vec<_>>();
 
         let mut correct_shares = Vec::with_capacity(mult_from_triple.len());
         for (triple_mult, input_a, input_b, subtraction_a, subtraction_b) in izip!(
@@ -784,12 +931,22 @@ pub mod tests {
             //(a−x)(b−y)
             let mult_subs = subtraction_a * subtraction_b;
             //(a−x)[y]_t
-            let mult_sub_a_y = input_b.clone().mul(*subtraction_a).expect("multiplication failed");
+            let mult_sub_a_y = input_b
+                .clone()
+                .mul(*subtraction_a)
+                .expect("multiplication failed");
             //(b−y)[x]_t
-            let mult_sub_b_x = input_a.clone().mul(*subtraction_b).expect("multiplication failed");
+            let mult_sub_b_x = input_a
+                .clone()
+                .mul(*subtraction_b)
+                .expect("multiplication failed");
             //[xy]_t
-            let share = triple_mult.clone().sub(mult_subs).expect("subtraction failed");
-            let share2: ShamirShare<Fr, 1, Robust> = (share - mult_sub_a_y).expect("subtraction failed");
+            let share = triple_mult
+                .clone()
+                .sub(mult_subs)
+                .expect("subtraction failed");
+            let share2: ShamirShare<Fr, 1, Robust> =
+                (share - mult_sub_a_y).expect("subtraction failed");
             let share3 = (share2 - mult_sub_b_x).expect("subtraction failed");
             correct_shares.push(share3);
         }
@@ -799,7 +956,10 @@ pub mod tests {
 
         let storage_bind = mul_node.get_or_create_mult_storage(session_id).await;
         let mut storage = storage_bind.lock().await;
-        storage.inputs = (x_inputs_per_node[node_id].clone(), y_inputs_per_node[node_id].clone());
+        storage.inputs = (
+            x_inputs_per_node[node_id].clone(),
+            y_inputs_per_node[node_id].clone(),
+        );
         storage.share_mult_from_triple = beaver_triples[node_id]
             .iter()
             .map(|triple| triple.mult.clone())
@@ -814,7 +974,11 @@ pub mod tests {
         let open_b_sub_y = correct_b_sub_y.clone()[0..split_at].to_vec();
 
         // using batch reconstruction
-        for (i, (chunk_a, chunk_b)) in open_a_sub_x.chunks(t + 1).zip(open_b_sub_y.chunks(t + 1)).enumerate() {
+        for (i, (chunk_a, chunk_b)) in open_a_sub_x
+            .chunks(t + 1)
+            .zip(open_b_sub_y.chunks(t + 1))
+            .enumerate()
+        {
             let session_id_a = SessionId::new(
                 ProtocolType::Mul,
                 session_id.exec_id(),
@@ -834,21 +998,13 @@ pub mod tests {
             chunk_a
                 .serialize_compressed(&mut chunk_a_bytes)
                 .expect("serialization failed");
-            let chunk_a_msg = MultMessage::new(
-                node_id,
-                session_id_a,
-                chunk_a_bytes,
-            );
+            let chunk_a_msg = MultMessage::new(node_id, session_id_a, chunk_a_bytes);
 
             let mut chunk_b_bytes = Vec::new();
             chunk_b
                 .serialize_compressed(&mut chunk_b_bytes)
                 .expect("serialization failed");
-            let chunk_b_msg = MultMessage::new(
-                node_id,
-                session_id_b,
-                chunk_b_bytes,
-            );
+            let chunk_b_msg = MultMessage::new(node_id, session_id_b, chunk_b_bytes);
 
             mul_msgs.push(chunk_a_msg);
             mul_msgs.push(chunk_b_msg);
@@ -864,27 +1020,31 @@ pub mod tests {
                 .iter()
                 .zip(beaver_triples[i][split_at..].iter())
                 .map(|(x, triple)| triple.a.clone() - x.clone())
-                .collect::<Result<Vec<RobustShare<Fr>>, ShareError>>().expect("share subtraction failed");
+                .collect::<Result<Vec<RobustShare<Fr>>, ShareError>>()
+                .expect("share subtraction failed");
             let shared_b_sub_y = y_inputs_per_node[i][split_at..]
                 .iter()
                 .zip(beaver_triples[i][split_at..].iter())
                 .map(|(y, triple)| triple.b.clone() - y.clone())
-                .collect::<Result<Vec<RobustShare<Fr>>, ShareError>>().expect("share subtraction failed");
+                .collect::<Result<Vec<RobustShare<Fr>>, ShareError>>()
+                .expect("share subtraction failed");
 
             if shared_a_sub_x.len() > 0 && shared_b_sub_y.len() > 0 {
                 let rec_msg =
                     ReconstructionMessage::new(shared_a_sub_x.to_vec(), shared_b_sub_y.to_vec());
                 let mut bytes_rec_msg = Vec::new();
-                rec_msg.serialize_compressed(&mut bytes_rec_msg).expect("serialization failed");
-            
+                rec_msg
+                    .serialize_compressed(&mut bytes_rec_msg)
+                    .expect("serialization failed");
+
                 let shared_session_id = SessionId::new(
                     ProtocolType::Mul,
                     session_id.exec_id(),
                     2,
                     mul_node.id as u8,
-                    session_id.instance_id()
+                    session_id.instance_id(),
                 );
-            
+
                 mul_msgs.push(MultMessage::new(i, shared_session_id, bytes_rec_msg));
             }
         }
@@ -896,17 +1056,30 @@ pub mod tests {
         for msg in mul_msgs {
             let result = mul_node.process(msg).await;
             match result {
-                Ok(()) => { }
-                Err(MulError::WaitForOk) => { info!("waiting"); }
-                Err(MulError::Duplicate(e)) => { panic!("duplicate detected: {e}") }
-                Err(e) => { panic!("unexpected error during processing: {e}"); }
+                Ok(()) => {}
+                Err(MulError::WaitForOk) => {
+                    info!("waiting");
+                }
+                Err(MulError::Duplicate(e)) => {
+                    panic!("duplicate detected: {e}")
+                }
+                Err(e) => {
+                    panic!("unexpected error during processing: {e}");
+                }
             }
         }
 
-        let real_shares = match mul_node.wait_for_result(session_id, Duration::from_millis(1)).await {
-            Err(MulError::ResultAlreadyReceived(_)) => { panic!("already received result"); }
-            Err(e) => { panic!("unexpected error during waiting: {e}"); }
-            Ok(shares) => { Some(shares) }
+        let real_shares = match mul_node
+            .wait_for_result(session_id, Duration::from_millis(1))
+            .await
+        {
+            Err(MulError::ResultAlreadyReceived(_)) => {
+                panic!("already received result");
+            }
+            Err(e) => {
+                panic!("unexpected error during waiting: {e}");
+            }
+            Ok(shares) => Some(shares),
         };
 
         // 8. Check that shares are correct

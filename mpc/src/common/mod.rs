@@ -23,12 +23,14 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use async_trait::async_trait;
 use std::{
+    collections::HashSet,
     marker::PhantomData,
     ops::{Add, Mul, Sub},
     sync::Arc,
     usize,
 };
-use stoffelnet::network_utils::{Network, ClientId, PartyId};
+use stoffelnet::network_utils::{ClientId, Network, PartyId};
+use tokio::sync::mpsc::Sender;
 
 #[derive(Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
@@ -64,6 +66,7 @@ pub trait SecretSharingScheme<F: FftField>:
     fn recover_secret(
         shares: &[Self],
         n: usize,
+        t: usize,
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), Self::Error>;
 }
 
@@ -76,6 +79,10 @@ pub fn lagrange_interpolate<F: FftField>(
     y_vals: &[F],
 ) -> Result<DensePolynomial<F>, ShareError> {
     if x_vals.len() != y_vals.len() {
+        return Err(ShareError::InvalidInput);
+    }
+    let mut seen = HashSet::new();
+    if !x_vals.iter().all(|s| seen.insert(s)) {
         return Err(ShareError::InvalidInput);
     }
     let n = x_vals.len();
@@ -242,12 +249,19 @@ where
 #[async_trait]
 pub trait RBC: Send + Sync {
     /// Creates a new instance
-    fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, RbcError>
+    fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        k: usize,
+        output_sender: Sender<SessionId>,
+    ) -> Result<Self, RbcError>
     where
         Self: Sized;
     /// Returns the unique identifier of the current party.
     fn id(&self) -> usize;
     async fn clear_store(&self);
+    async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, RbcError>;
     /// Required for initiating the broadcast
     async fn init<N: Network + Send + Sync>(
         &self,
@@ -289,11 +303,20 @@ where
     type MPCOpts;
     type Error: std::fmt::Debug;
 
-    fn setup(id: PartyId, params: Self::MPCOpts, input_ids: Vec<ClientId>) -> Result<Self, Self::Error>
+    fn setup(
+        id: PartyId,
+        params: Self::MPCOpts,
+        input_ids: Vec<ClientId>,
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized;
 
-    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error>;
+    async fn process(
+        &mut self,
+        sender_id: PartyId,
+        raw_msg: Vec<u8>,
+        net: Arc<N>,
+    ) -> Result<(), Self::Error>;
 
     async fn mul(&mut self, a: Vec<S>, b: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
     where
