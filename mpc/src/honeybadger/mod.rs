@@ -460,7 +460,7 @@ where
 
         self.operations
             .mul
-            .wait_for_result(session_id, Duration::MAX)
+            .wait_for_result(session_id, self.params.timeout)
             .await
             .map_err(HoneyBadgerError::from)
     }

@@ -49,9 +49,6 @@ pub enum RanDouShaError {
     /// The protocol received an abort signal.
     #[error("received abort signal")]
     Abort,
-    /// The party is waiting for confirmations.
-    #[error("waiting for more confirmations")]
-    WaitForOk,
     #[error("error sending the result: {0:?}")]
     SendError(SessionId),
     #[error("error receiving the result: {0:?}")]
@@ -176,27 +173,6 @@ where
         let mut store = self.store.lock().await;
         store.remove(&session_id).is_some()
     }
-    pub async fn pop_finished_protocol_result(&self) -> Option<Vec<DoubleShamirShare<F>>> {
-        let mut storage = self.store.lock().await;
-        let mut finished_sid = None;
-        let mut output = Vec::new();
-        for (sid, storage_mutex) in storage.iter() {
-            let storage_bind = storage_mutex.lock().await;
-            if storage_bind.state == RanDouShaState::Finished {
-                finished_sid = Some(*sid);
-                output = storage_bind.protocol_output.clone();
-                break;
-            }
-        }
-        match finished_sid {
-            Some(sid) => {
-                // Remove the entry from the storage
-                storage.remove(&sid);
-                Some(output)
-            }
-            None => None,
-        }
-    }
 
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
@@ -234,7 +210,6 @@ where
 
             match self.output_handler(msg).await {
                 Ok(()) => {}
-                Err(RanDouShaError::WaitForOk) => {}
                 Err(e) => {
                     return Err(e);
                 }
@@ -267,6 +242,52 @@ where
             Ok(Err(_)) => Err(RanDouShaError::ReceiveError(session_id)),
             Ok(Ok(shares)) => Ok(shares),
         }
+    }
+
+    async fn try_finalize(
+        &self,
+        session_id: SessionId,
+        store_mutex: Arc<Mutex<RanDouShaStore<F>>>,
+    ) -> Result<bool, RanDouShaError> {
+        let mut store = store_mutex.lock().await;
+
+        // Already finished
+        if store.state == RanDouShaState::Finished {
+            return Ok(true);
+        }
+
+        // Must be initialized
+        if store.computed_r_shares_degree_t.len() < self.threshold + 1
+            || store.computed_r_shares_degree_2t.len() < self.threshold + 1
+        {
+            return Ok(false);
+        }
+
+        // Need enough OK messages
+        if store.received_ok_msg.len() < self.n_parties - (self.threshold + 1) {
+            return Ok(false);
+        }
+
+        // Construct output
+        let output_r_t = store.computed_r_shares_degree_t[0..self.threshold + 1].to_vec();
+
+        let output_r_2t = store.computed_r_shares_degree_2t[0..self.threshold + 1].to_vec();
+
+        let output_double_share: Vec<DoubleShamirShare<F>> = output_r_t
+            .into_iter()
+            .zip(output_r_2t)
+            .map(|(a, b)| DoubleShamirShare::new(a, b))
+            .collect();
+
+        store.state = RanDouShaState::Finished;
+        store.protocol_output = output_double_share.clone();
+
+        let sender = store.output_sender.take().unwrap();
+        sender
+            .send(output_double_share)
+            .map_err(|_| RanDouShaError::SendError(session_id))?;
+
+        Ok(true)
     }
 
     /// Implements the initialization phase of the Random double share protocol. In particular,
@@ -314,6 +335,10 @@ where
         store.computed_r_shares_degree_t = r_deg_t.clone();
         store.computed_r_shares_degree_2t = r_deg_2t.clone();
         drop(store);
+        // Check if pending OK messages are sufficient to finalize immediately
+        if self.try_finalize(session_id, bind_store.clone()).await? {
+            return Ok(());
+        }
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
         for i in 0..self.n_parties {
@@ -484,39 +509,9 @@ where
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
         }
-        // wait for (n-(t+1)) Ok messages
-        if store.received_ok_msg.len() < self.n_parties - (self.threshold + 1) {
-            return Err(RanDouShaError::WaitForOk);
-        }
 
-        if store.computed_r_shares_degree_t.len() < self.threshold + 1
-            && store.computed_r_shares_degree_2t.len() < self.threshold + 1
-        {
-            // waiting for self.init
-            return Err(RanDouShaError::WaitForOk);
-        }
-
-        // create vector for share [r_1]_t ... [r_t+1]_t
-        let output_r_t = store.computed_r_shares_degree_t[0..self.threshold + 1].to_vec();
-        // create vector for share [r_1]_2t ... [r_t+1]_2t
-        let output_r_2t = store.computed_r_shares_degree_2t[0..self.threshold + 1].to_vec();
-
-        let output_double_share: Vec<DoubleShamirShare<F>> = output_r_t
-            .into_iter()
-            .zip(output_r_2t)
-            .map(|(share_deg_t, share_deg_2t)| DoubleShamirShare::new(share_deg_t, share_deg_2t))
-            .collect();
-
-        // Computation is done so set state to Finished
-        store.state = RanDouShaState::Finished;
-        store.protocol_output = output_double_share.clone();
-
-        let taken_output_sender = store.output_sender.take().unwrap();
         drop(store);
-        taken_output_sender
-            .send(output_double_share)
-            .map_err(|_| RanDouShaError::SendError(msg.session_id))?;
-
+        self.try_finalize(msg.session_id, binding.clone()).await?;
         Ok(())
     }
 

@@ -29,9 +29,6 @@ pub enum RbcError {
     #[error("Invalid threshold t={0} for n={1}, must satisfy t < ceil(n / 3)")]
     InvalidThreshold(usize, usize),
 
-    #[error("Session {0} already ended")]
-    SessionEnded(u64),
-
     #[error("Unknown Bracha message type: {0}")]
     UnknownMsgType(String),
 

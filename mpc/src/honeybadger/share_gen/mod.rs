@@ -41,8 +41,6 @@ pub enum RanShaError {
     ReceiveError(SessionId),
     #[error("received abort signal")]
     Abort,
-    #[error("waiting for more confirmations")]
-    WaitForOk,
     #[error("Party Id is out of bounds")]
     InvalidPartyId,
     #[error("session ID {0:?} malformed")]
@@ -75,7 +73,6 @@ pub enum RanShaState {
     Initialized,
     FinishedInitialSharing,
     Reconstruction,
-    Output,
     Finished,
 }
 

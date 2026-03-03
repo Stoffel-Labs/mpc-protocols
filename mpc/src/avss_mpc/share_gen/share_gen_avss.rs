@@ -13,9 +13,12 @@ use ark_ff::FftField;
 use ark_std::rand::Rng;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::{
-    mpsc::{self, Receiver, Sender},
-    Mutex,
+use tokio::{
+    sync::{
+        mpsc::{self, Receiver},
+        Mutex,
+    },
+    time::{timeout, Duration},
 };
 use tracing::info;
 
@@ -26,7 +29,6 @@ pub struct RanShaAvssNode<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub threshold: usize,
     pub store: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<RanShaAvssStore<F, G>>>>>>,
     pub avss: AvssNode<F, R, G, AvssSessionId>,
-    pub output_sender: Sender<AvssSessionId>,
     pub avss_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
 
@@ -42,7 +44,6 @@ where
         threshold: usize,
         sk_i: F,
         pk_map: Arc<Vec<C>>,
-        output_sender: Sender<AvssSessionId>,
     ) -> Result<Self, RanShaAvssError> {
         let (avss_sender, avss_receiver) = mpsc::channel(128);
         let avss = AvssNode::new(
@@ -61,7 +62,6 @@ where
             threshold,
             store: Arc::new(Mutex::new(HashMap::new())),
             avss,
-            output_sender,
             avss_output: Arc::new(Mutex::new(avss_receiver)),
         })
     }
@@ -77,11 +77,30 @@ where
             .clone()
     }
 
-    pub async fn output(&mut self, session_id: AvssSessionId) -> Vec<FeldmanShamirShare<F, C>> {
-        let mut share_store = self.store.lock().await;
-        let store_lock = share_store.remove(&session_id).unwrap();
-        let store = store_lock.lock().await;
-        store.protocol_output.clone()
+    pub async fn wait_for_result(
+        &self,
+        session_id: AvssSessionId,
+        duration: Duration,
+    ) -> Result<Vec<FeldmanShamirShare<F, C>>, RanShaAvssError> {
+        let output_receiver = {
+            let storage = self.store.lock().await;
+            let storage_bind = match storage.get(&session_id) {
+                Some(value) => value,
+                None => return Err(RanShaAvssError::NoSuchSessionId(session_id)),
+            };
+            let mut storage = storage_bind.lock().await;
+
+            storage
+                .output_receiver
+                .take()
+                .ok_or(RanShaAvssError::ResultAlreadyReceived(session_id))?
+        };
+
+        match timeout(duration, output_receiver).await {
+            Err(_) => Err(RanShaAvssError::Timeout(session_id)),
+            Ok(Err(_)) => Err(RanShaAvssError::ReceiveError(session_id)),
+            Ok(Ok(shares)) => Ok(shares),
+        }
     }
 
     pub async fn init<N, G>(
@@ -201,8 +220,12 @@ where
             .collect();
 
         let output = store.computed_r_shares[2 * t..].to_vec();
-        store.protocol_output = output;
-        self.output_sender.send(session_id).await?;
+        store.protocol_output = output.clone();
+
+        let taken_output_sender = store.output_sender.take().unwrap();
+        taken_output_sender
+            .send(output)
+            .map_err(|_| RanShaAvssError::SendError(session_id))?;
 
         Ok(())
     }

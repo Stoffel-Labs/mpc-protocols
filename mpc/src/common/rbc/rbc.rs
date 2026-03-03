@@ -235,7 +235,7 @@ where
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring ECHO"
             );
-            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
+            return Ok(());
         }
 
         // If this sender has not already sent an ECHO, process it.
@@ -323,7 +323,7 @@ where
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring READY"
             );
-            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
+            return Ok(());
         }
 
         // If this sender hasn't sent READY yet, process it.
@@ -739,7 +739,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring ECHO"
             );
-            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
+            return Ok(());
         }
         // If this sender has not already sent an ECHO, process it.
         if !store.has_echo(msg.sender_id) {
@@ -830,7 +830,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring READY"
             );
-            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
+            return Ok(());
         }
         // If this sender has not already sent an READY, process it.
         if !store.has_ready(msg.sender_id) {
@@ -1252,7 +1252,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring est"
             );
-            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
+            return Ok(());
         }
 
         //Get est value
@@ -1353,7 +1353,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                 session_id = msg.session_id.as_u64(),
                 "Session already ended, ignoring aux"
             );
-            return Err(RbcError::SessionEnded(msg.session_id.as_u64()));
+            return Ok(());
         }
         let bin_val = store.get_bin_values(msg.round_id);
 

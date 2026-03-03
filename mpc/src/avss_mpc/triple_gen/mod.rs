@@ -9,7 +9,7 @@ use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use std::collections::HashMap;
 use thiserror::Error;
-use tokio::sync::mpsc::error::SendError;
+use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 pub mod triple_gen;
 
@@ -35,26 +35,39 @@ pub enum TripleGenError {
     RbcError(#[from] RbcError),
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
-    #[error("error sending the finished session ID to the caller: {0:?}")]
-    SenderError(#[from] SendError<AvssSessionId>),
     #[error("invalid share length")]
     InvalidShareLength,
+    #[error("error sending the result: {0:?}")]
+    SendError(AvssSessionId),
+    #[error("error receiving the result: {0:?}")]
+    ReceiveError(AvssSessionId),
+    #[error("no such session ID exists: {0:?}")]
+    NoSuchSessionId(AvssSessionId),
+    #[error("result already received: {0:?}")]
+    ResultAlreadyReceived(AvssSessionId),
+    #[error("multiplication {0:?} did not complete in time")]
+    Timeout(AvssSessionId),
 }
 
 /// Store for one triple session
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct TripleGenStore<F: FftField, C: CurveGroup<ScalarField = F>> {
     pub received: HashMap<usize, Vec<FeldmanShamirShare<F, C>>>,
     pub reception_tracker: Vec<bool>,
     pub output: Option<Vec<BeaverTriple<F, C>>>,
+    pub output_sender: Option<Sender<Vec<BeaverTriple<F, C>>>>,
+    pub output_receiver: Option<Receiver<Vec<BeaverTriple<F, C>>>>,
 }
 
 impl<F: FftField, C: CurveGroup<ScalarField = F>> TripleGenStore<F, C> {
     pub fn empty(num_dealers: usize) -> Self {
+        let (output_sender, output_receiver) = channel();
         Self {
             received: HashMap::new(),
             reception_tracker: vec![false; num_dealers],
             output: None,
+            output_sender: Some(output_sender),
+            output_receiver: Some(output_receiver),
         }
     }
 }

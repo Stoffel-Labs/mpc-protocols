@@ -457,10 +457,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         // 3.
-        let no_of_mul = storage.no_of_mul.ok_or(MulError::InvalidInput(format!(
-            "No. of multiplications not set for node (init not called yet) {}",
-            self.id
-        )))?;
+        let Some(no_of_mul) = storage.no_of_mul else {
+            // init not called yet: buffer-only mode
+            return Ok(());
+        };
         let no_of_batch = no_of_mul / (self.t + 1);
         let share_len = no_of_mul % (self.t + 1);
 
@@ -479,7 +479,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             || storage.output_open_mult2.len() != no_of_batch
             || storage.openings.is_none()
         {
-            return Err(MulError::WaitForOk);
+            return Ok(());
         }
 
         // 6.
@@ -553,8 +553,7 @@ pub mod tests {
     use crate::{
         common::{rbc::rbc::Avid, SecretSharingScheme},
         honeybadger::{
-            robust_interpolate::robust_interpolate::RobustShare, ProtocolType, RbcError,
-            WrappedMessage,
+            robust_interpolate::robust_interpolate::RobustShare, ProtocolType, WrappedMessage,
         },
     };
     use ark_bls12_381::Fr;
@@ -773,7 +772,6 @@ pub mod tests {
                         WrappedMessage::Rbc(rbc_msg) => {
                             match node.rbc.process(rbc_msg, network[i].clone()).await {
                                 Ok(()) => {}
-                                Err(RbcError::SessionEnded(_)) => {}
                                 Err(e) => {
                                     panic!("unexpected error during RBC: {e}");
                                 }
@@ -1061,9 +1059,6 @@ pub mod tests {
             let result = mul_node.process(msg).await;
             match result {
                 Ok(()) => {}
-                Err(MulError::WaitForOk) => {
-                    info!("waiting");
-                }
                 Err(MulError::Duplicate(e)) => {
                     panic!("duplicate detected: {e}")
                 }
