@@ -211,12 +211,6 @@ where
         Ok(())
     }
 
-    pub async fn output(&mut self, session_id: SessionId) -> Vec<RobustShare<F>> {
-        let mut share_store = self.store.lock().await;
-        let store_lock = share_store.remove(&session_id).unwrap();
-        let store = store_lock.lock().await;
-        store.protocol_output.clone()
-    }
     pub async fn receive_shares_handler<N>(
         &mut self,
         msg: RanShaMessage,
