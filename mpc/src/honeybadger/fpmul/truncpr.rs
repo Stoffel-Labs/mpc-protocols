@@ -13,7 +13,10 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use tokio::{
-    sync::{mpsc::{self, Receiver}, Mutex},
+    sync::{
+        mpsc::{self, Receiver},
+        Mutex,
+    },
     time::{timeout, Duration},
 };
 use tracing::info;
