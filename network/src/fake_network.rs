@@ -3,7 +3,7 @@ use futures::future::join_all;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
-use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
+use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId, VerifiedOrdering};
 
 /// Simulates a network for testing purposes. The channels for the network are simulated as `tokio`
 /// channels.
@@ -258,19 +258,19 @@ impl Network for FakeNetwork {
         self.inner.client_channels.contains_key(&client)
     }
 
-    // fn local_party_id(&self) -> PartyId {
-    //     match self.sender {
-    //         SenderId::Node(i) => i,
-    //         SenderId::Client(i) => i,
-    //     }
-    // }
+    fn local_party_id(&self) -> PartyId {
+        match self.sender {
+            SenderId::Node(i) => i,
+            SenderId::Client(i) => i,
+        }
+    }
 
-    // fn party_count(&self) -> usize {
-    //     self.inner.nodes.len()
-    // }
-    // fn verified_ordering(&self) -> Option<VerifiedOrdering> {
-    //     None
-    // }
+    fn party_count(&self) -> usize {
+        self.inner.nodes.len()
+    }
+    fn verified_ordering(&self) -> Option<VerifiedOrdering> {
+        None
+    }
 }
 
 /// Represents a node in the FakeNetwork.
