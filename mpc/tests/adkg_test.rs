@@ -117,6 +117,7 @@ where
                 instance_id,
                 duration,
             )
+            .unwrap()
         })
         .collect();
 

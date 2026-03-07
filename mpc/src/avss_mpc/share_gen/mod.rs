@@ -34,6 +34,8 @@ pub enum RanShaAvssError {
     Timeout(AvssSessionId),
     #[error("Channel closed")]
     Abort,
+    #[error("Party Id is out of bounds")]
+    InvalidPartyId,
 }
 
 #[derive(Debug)]

@@ -65,6 +65,10 @@ pub enum AdkgError {
     InstanceIdError(u32),
     #[error("Party Id is out of bounds")]
     InvalidPartyId,
+    #[error("Invalid threshold t={0} for n={1}, must satisfy t < ceil(n / 3)")]
+    InvalidThreshold(usize, usize),
+    #[error("Party size is too large")]
+    InvalidPartySize,
 }
 
 #[derive(Clone, Debug)]
@@ -103,8 +107,16 @@ where
         pk_map: Arc<Vec<G>>,
         instance_id: u32,
         timeout: Duration,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, AdkgError> {
+        //No of parties should not exceed 255
+        if n_parties > 255 {
+            return Err(AdkgError::InvalidPartySize);
+        }
+        if !(threshold < (n_parties + 2) / 3) {
+            // ceil(n / 3)
+            return Err(AdkgError::InvalidThreshold(threshold, n_parties));
+        }
+        Ok(Self {
             n_parties,
             threshold,
             n_v_random_shares,
@@ -113,7 +125,7 @@ where
             pk_map,
             instance_id,
             timeout,
-        }
+        })
     }
     pub fn set_timeout(&mut self, secs: u64) {
         self.timeout = Duration::from_secs(secs)
@@ -252,6 +264,9 @@ where
         params: Self::MPCOpts,
         _input_ids: Vec<ClientId>,
     ) -> Result<Self, AdkgError> {
+        if id >= params.n_parties {
+            return Err(AdkgError::InvalidPartyId);
+        }
         let share_gen_avss = RanShaAvssNode::new(
             id,
             params.n_parties,

@@ -294,6 +294,7 @@ fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
         for (_, (a, b)) in storage.received_shares.iter() {
             if a.len() != no_of_mul || b.len() != no_of_mul {
                 warn!("Did not recieve the right number of shares to reconstruct using RBC (sent for a-x and for b-y)");
+                continue;
             }
             for i in 0..no_of_mul {
                 a_shares[i].push(a[i].clone());
@@ -319,8 +320,13 @@ fn finalize_mul<F: FftField, G: CurveGroup<ScalarField = F>>(
     assert!(storage.openings.is_some()); // always ensured by the caller
 
     let openings = storage.openings.as_ref().unwrap();
-
-    let mut shares_mult = Vec::with_capacity(storage.share_mult_from_triple.len());
+    let expected_len = storage.share_mult_from_triple.len();
+    if storage.inputs.0.len() != expected_len || storage.inputs.1.len() != expected_len {
+        return Err(MulError::InvalidInput(
+            "Inconsistent lengths in finalize_mul".to_string(),
+        ));
+    }
+    let mut shares_mult = Vec::with_capacity(expected_len);
     for (triple_mult, input_a, input_b, subtraction_a, subtraction_b) in izip!(
         &storage.share_mult_from_triple,
         &storage.inputs.0,

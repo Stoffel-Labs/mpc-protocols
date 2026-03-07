@@ -140,6 +140,9 @@ where
                 let binding = self.get_or_create_store(session_id).await;
                 let mut ransha_storage = binding.lock().await;
                 let sender_id = id.sub_id();
+                if usize::from(sender_id) >= self.n_parties {
+                    return Err(RanShaAvssError::InvalidPartyId);
+                }
                 ransha_storage
                     .initial_shares
                     .insert(sender_id.into(), avss_share[0].clone());
