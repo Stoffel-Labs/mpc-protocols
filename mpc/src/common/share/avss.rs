@@ -207,7 +207,7 @@ where
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), AvssError> {
-        Ok(loop {
+        loop {
             let id = {
                 let mut rx = self.rbc_output.lock().await;
                 match rx.try_recv() {
@@ -228,7 +228,8 @@ where
                     return Err(e);
                 }
             }
-        })
+        }
+        Ok(())
     }
     pub async fn init<Rnd, N>(
         &mut self,

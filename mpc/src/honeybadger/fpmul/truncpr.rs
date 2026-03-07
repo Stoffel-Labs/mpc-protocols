@@ -54,7 +54,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), TruncPrError> {
-        Ok(loop {
+        loop {
             let id = {
                 let mut rx = self.rbc_output.lock().await;
                 match rx.try_recv() {
@@ -75,7 +75,8 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
                     return Err(e);
                 }
             }
-        })
+        }
+        Ok(())
     }
     pub async fn get_or_create_store(&mut self, session: SessionId) -> Arc<Mutex<TruncPrStore<F>>> {
         let mut map = self.store.lock().await;

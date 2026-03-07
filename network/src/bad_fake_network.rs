@@ -69,7 +69,7 @@ use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
 ///    messages.
 async fn send_next_msgs(
     net_msgs: &mut BinaryHeap<KeyedMessage>,
-    node_channels: &mut Vec<Vec<Sender<Vec<u8>>>>,
+    node_channels: &mut [Vec<Sender<Vec<u8>>>],
     recvd_msg: Option<KeyedMessage>,
     elapsed_time: Duration,
 ) -> Duration {
@@ -99,8 +99,8 @@ async fn send_next_msgs(
             // 3.
             let (from, to, payload) = &msg.1;
             let result = node_channels[*from][*to].send(payload.to_vec()).await;
-            if result.is_err() {
-                panic!("network thread encountered error {}", result.unwrap_err());
+            if let Err(e) = result {
+                panic!("network thread encountered error {}", e);
             }
         } else {
             #[cfg(debug_assertions)]
@@ -125,10 +125,10 @@ async fn send_next_msgs(
 
     // 7.
     let next_msg = net_msgs.peek();
-    if next_msg.is_none() {
-        Duration::MAX
+    if let Some(m) = next_msg {
+        m.0
     } else {
-        next_msg.unwrap().0
+        Duration::MAX
     }
 }
 
@@ -210,11 +210,11 @@ impl BadFakeInnerNetwork {
         // ---- node → node channels ----
         let mut node_channels = vec![Vec::with_capacity(n_nodes); n_nodes];
 
-        for from in 0..n_nodes {
-            for to in 0..n_nodes {
+        for from in node_channels.iter_mut().take(n_nodes) {
+            for to in inboxes.iter_mut().take(n_nodes) {
                 let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
-                node_channels[from].push(tx);
-                inboxes[to].push(rx);
+                from.push(tx);
+                to.push(rx);
             }
         }
 
@@ -225,10 +225,10 @@ impl BadFakeInnerNetwork {
             for client_id in client_ids {
                 let mut row = Vec::with_capacity(n_nodes);
 
-                for to in 0..n_nodes {
+                for to in inboxes.iter_mut().take(n_nodes) {
                     let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
                     row.push(tx);
-                    inboxes[to].push(rx);
+                    to.push(rx);
                 }
 
                 client_channels.insert(client_id, row);
@@ -505,16 +505,16 @@ impl Network for BadFakeNetwork {
     fn is_client_connected(&self, client: ClientId) -> bool {
         self.inner.client_channels.contains_key(&client)
     }
-    // fn local_party_id(&self) -> PartyId {
-    //     match self.sender {
-    //         BadSenderId::Node(i) => i,
-    //         BadSenderId::Client(i) => i,
-    //     }
-    // }
+    fn local_party_id(&self) -> PartyId {
+        match self.sender {
+            BadSenderId::Node(i) => i,
+            BadSenderId::Client(i) => i,
+        }
+    }
 
-    // fn party_count(&self) -> usize {
-    //     self.inner.nodes.len()
-    // }
+    fn party_count(&self) -> usize {
+        self.inner.nodes.len()
+    }
 }
 
 /// Represents a node in the BadFakeNetwork.

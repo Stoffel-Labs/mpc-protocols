@@ -162,7 +162,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         })
     }
     pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {
-        Ok(loop {
+        loop {
             let id = {
                 let mut rx = self.rbc_output.lock().await;
                 match rx.try_recv() {
@@ -183,7 +183,8 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                     return Err(e);
                 }
             }
-        })
+        }
+        Ok(())
     }
     pub async fn clear_store(&self) {
         let mut store = self.mult_storage.lock().await;

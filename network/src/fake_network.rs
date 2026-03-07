@@ -44,11 +44,11 @@ impl FakeInnerNetwork {
         // ---- node → node channels ----
         let mut node_channels = vec![Vec::with_capacity(n_nodes); n_nodes];
 
-        for from in 0..n_nodes {
-            for to in 0..n_nodes {
+        for from in node_channels.iter_mut().take(n_nodes) {
+            for to in inboxes.iter_mut().take(n_nodes) {
                 let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
-                node_channels[from].push(tx);
-                inboxes[to].push(rx);
+                from.push(tx);
+                to.push(rx);
             }
         }
 
@@ -59,10 +59,10 @@ impl FakeInnerNetwork {
             for client_id in client_ids {
                 let mut row = Vec::with_capacity(n_nodes);
 
-                for to in 0..n_nodes {
+                for to in inboxes.iter_mut().take(n_nodes) {
                     let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
                     row.push(tx);
-                    inboxes[to].push(rx);
+                    to.push(rx);
                 }
 
                 client_channels.insert(client_id, row);
@@ -258,16 +258,16 @@ impl Network for FakeNetwork {
         self.inner.client_channels.contains_key(&client)
     }
 
-    // fn local_party_id(&self) -> PartyId {
-    //     match self.sender {
-    //         SenderId::Node(i) => i,
-    //         SenderId::Client(i) => i,
-    //     }
-    // }
+    fn local_party_id(&self) -> PartyId {
+        match self.sender {
+            SenderId::Node(i) => i,
+            SenderId::Client(i) => i,
+        }
+    }
 
-    // fn party_count(&self) -> usize {
-    //     self.inner.nodes.len()
-    // }
+    fn party_count(&self) -> usize {
+        self.inner.nodes.len()
+    }
 }
 
 /// Represents a node in the FakeNetwork.

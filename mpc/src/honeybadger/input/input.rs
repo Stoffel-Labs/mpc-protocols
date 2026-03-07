@@ -131,7 +131,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), InputError> {
-        Ok(loop {
+        loop {
             let id = {
                 let mut rx = self.rbc_output.lock().await;
                 match rx.try_recv() {
@@ -150,7 +150,8 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
                     return Err(e);
                 }
             }
-        })
+        }
+        Ok(())
     }
     /// Called by each server to send its share of `r_i` to the client.
     pub async fn init<N: Network>(

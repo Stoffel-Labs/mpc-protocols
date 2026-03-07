@@ -54,7 +54,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {
-        Ok(loop {
+        loop {
             let id = {
                 let mut rx = self.rbc_output.lock().await;
                 match rx.try_recv() {
@@ -75,7 +75,8 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
                     return Err(e);
                 }
             }
-        })
+        }
+        Ok(())
     }
     pub async fn init<N: Network + Send + Sync>(
         &mut self,

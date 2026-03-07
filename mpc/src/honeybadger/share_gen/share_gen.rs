@@ -65,7 +65,7 @@ where
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), RanShaError> {
-        Ok(loop {
+        loop {
             let id = {
                 let mut rx = self.rbc_output.lock().await;
                 match rx.try_recv() {
@@ -86,7 +86,8 @@ where
                     return Err(e);
                 }
             }
-        })
+        }
+        Ok(())
     }
     pub async fn get_or_create_store(
         &mut self,
