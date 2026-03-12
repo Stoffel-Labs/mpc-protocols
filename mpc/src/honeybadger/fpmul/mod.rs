@@ -2,7 +2,7 @@ use crate::{
     common::{lagrange_interpolate, rbc::RbcError, share::ShareError},
     honeybadger::{
         batch_recon::BatchReconError,
-        fpmul::f256::{F2_8Error, F2_8},
+        fpmul::f256::{Gf256, Gf256Error},
         mul::MulError,
         robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId,
@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
+use tokio::sync::oneshot::{Receiver, Sender};
 
 pub mod f256;
 pub mod fpmul;
@@ -139,7 +140,7 @@ pub enum PRandError {
     #[error("error sending the finished session ID to the caller: {0:?}")]
     SenderError(#[from] SendError<SessionId>),
     #[error("F2_8 Error: {0}")]
-    F2_8Error(#[from] F2_8Error),
+    F2_8Error(#[from] Gf256Error),
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
     #[error("error in batch reconstruction: {0:?}")]
@@ -197,8 +198,8 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     pub share_r_q: Option<Vec<RobustShare<F>>>, //smaller field
     pub share_r_p: Option<Vec<RobustShare<G>>>, // PrandInt output
     pub share_b_q: Option<Vec<RobustShare<F>>>, //smaller field
-    pub share_r_2: Option<Vec<F2_8>>,
-    pub share_b_2: Vec<F2_8>,           //PrandBitD output
+    pub share_r_2: Option<Vec<Gf256>>,
+    pub share_b_2: Vec<Gf256>,          //PrandBitD output
     pub share_b_p: Vec<RobustShare<G>>, //PrandBitD/PrandBitL output
 }
 
@@ -267,11 +268,17 @@ pub enum TruncPrError {
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
     #[error("error sending the thread asynchronously")]
-    SendError(#[from] SendError<SessionId>),
+    SendError(SessionId),
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
     #[error("unknown calling protocol in session ID {0:?}")]
     SessionIdError(SessionId),
+    #[error("result already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("multiplication {0:?} did not complete in time")]
+    Timeout(SessionId),
+    #[error("error receiving the result: {0:?}")]
+    ReceiveError(SessionId),
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -291,7 +298,13 @@ impl TruncPrMessage {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TruncState {
+    Initialized,
+    Finished,
+}
+
+#[derive(Debug)]
 pub struct TruncPrStore<F: PrimeField> {
     pub m: usize,
     pub k: usize,
@@ -299,10 +312,14 @@ pub struct TruncPrStore<F: PrimeField> {
     pub share_a: Option<RobustShare<F>>,
     pub open_buf: HashMap<usize, RobustShare<F>>, // sender_id -> share of (b + r)
     pub share_d: Option<RobustShare<F>>,          // [d]
+    pub state: TruncState,
+    pub output_sender: Option<Sender<RobustShare<F>>>,
+    pub output_receiver: Option<Receiver<RobustShare<F>>>,
 }
 
 impl<F: PrimeField> TruncPrStore<F> {
     pub fn empty() -> Self {
+        let (output_sender, output_receiver) = tokio::sync::oneshot::channel();
         Self {
             m: 0,
             k: 0,
@@ -310,6 +327,9 @@ impl<F: PrimeField> TruncPrStore<F> {
             share_a: None,
             open_buf: HashMap::new(),
             share_d: None,
+            output_sender: Some(output_sender),
+            output_receiver: Some(output_receiver),
+            state: TruncState::Initialized,
         }
     }
 }
@@ -320,17 +340,22 @@ pub fn pow2_f<F: PrimeField>(e: usize) -> F {
     F::from(2u64).pow(&[e as u64])
 }
 
-pub fn mod_pow2_from_field<F: PrimeField>(x: F, m: usize) -> F {
+pub fn mod_pow_2_from_field<F: PrimeField>(x: F, m: usize) -> F {
     let bigint = x.into_bigint();
     let mut bytes = bigint.to_bytes_le();
 
-    // Zero out any bits above m
     let full_bytes = m / 8;
     let extra_bits = m % 8;
 
+    let usable_bytes = if extra_bits == 0 {
+        full_bytes
+    } else {
+        full_bytes + 1
+    };
+
     // Truncate extra bytes
-    if bytes.len() > full_bytes {
-        bytes.truncate(full_bytes + 1);
+    if bytes.len() > usable_bytes {
+        bytes.truncate(usable_bytes);
     }
 
     if extra_bits > 0 && !bytes.is_empty() {
@@ -338,6 +363,6 @@ pub fn mod_pow2_from_field<F: PrimeField>(x: F, m: usize) -> F {
         bytes[full_bytes] &= mask;
     }
 
-    // Interpret as an integer modulo q, return as field element
+    // Interpret as an integer modulo q and return it as a field element.
     F::from_le_bytes_mod_order(&bytes)
 }

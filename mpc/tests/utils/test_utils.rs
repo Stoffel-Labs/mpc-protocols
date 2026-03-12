@@ -6,6 +6,7 @@ use ark_std::test_rng;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::time::Duration;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::rbc::RbcError;
@@ -26,6 +27,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::warn;
+use tracing_subscriber::fmt::time;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::FmtSubscriber;
 
@@ -416,6 +418,7 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     l: usize,
     k: usize,
     input_ids: Vec<ClientId>,
+    timeout: Duration,
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
     N: Network + Send + Sync + 'static,
@@ -432,6 +435,7 @@ where
         n_prandint,
         l,
         k,
+        timeout,
     );
     (0..n_parties)
         .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), input_ids.clone()).unwrap())

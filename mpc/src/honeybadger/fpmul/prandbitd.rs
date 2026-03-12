@@ -4,7 +4,7 @@ use crate::{
         batch_recon::batch_recon::BatchReconNode,
         fpmul::{
             build_all_f_polys,
-            f256::{build_all_f_polys_2_8, F2_8Domain, F2_8},
+            f256::{build_all_f_polys_2_8, Gf256, Gf256Domain},
             PRandBitDMessage, PRandBitDStore, PRandError, PRandMessageType,
         },
         mul::concat_sorted,
@@ -23,7 +23,7 @@ use tracing::{debug, info};
 
 /// Represents the shares stored by a player
 #[derive(Debug, Clone)]
-pub struct PRandBitNode<F: PrimeField, G: PrimeField> {
+pub struct PRandBitDNode<F: PrimeField, G: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
@@ -35,7 +35,7 @@ pub struct PRandBitNode<F: PrimeField, G: PrimeField> {
     pub batch_recon: BatchReconNode<F>,
 }
 
-impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
+impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     /// Creates a new PRandBitDNode with empty shares.
     pub fn new(
         id: usize,
@@ -209,14 +209,14 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 .ok_or_else(|| ShareError::NoSuitableDomain(self.n))?;
             let domain_g = GeneralEvaluationDomain::<G>::new(self.n)
                 .ok_or_else(|| ShareError::NoSuitableDomain(self.n))?;
-            let domain_2 = F2_8Domain::new(self.n)?;
+            let domain_2 = Gf256Domain::new(self.n)?;
             let xi_q = domain_f.element(self.id);
             let xi_p = domain_g.element(self.id);
             let xi_2 = domain_2.element(self.id);
 
             let mut share_q = vec![RobustShare::new(F::zero(), self.id, self.t); batch_size];
             let mut share_p = vec![RobustShare::new(G::zero(), self.id, self.t); batch_size];
-            let mut share_2 = vec![F2_8::zero(); batch_size];
+            let mut share_2 = vec![Gf256::zero(); batch_size];
 
             for (tset, r_t) in store.r_t.clone() {
                 let poly_q = &poly_fq[&tset];
@@ -232,7 +232,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                     // Reduce r_T into each field
                     let r_q = F::from(r_t[i]);
                     let r_p = G::from(r_t[i]);
-                    let r_2 = F2_8::from((r_t[i] & 1) as u8); // parity
+                    let r_2 = Gf256::from((r_t[i] & 1) as u8); // parity
 
                     // Accumulate
                     share_q[i].share[0] += r_q * coeff_q;
@@ -338,7 +338,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitNode<F, G> {
                 // BigInteger has is_odd() method.
                 let repr = v.into_bigint();
                 let lsb = repr.is_odd(); // boolean
-                let lsb_elem_2 = F2_8::from(lsb as u8);
+                let lsb_elem_2 = Gf256::from(lsb as u8);
 
                 let bytes = repr.to_bytes_le();
                 let v_g = G::from_le_bytes_mod_order(&bytes); // reduction into G

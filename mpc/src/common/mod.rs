@@ -11,6 +11,7 @@ pub mod share;
 /// Implementation of the hbACSS protocol from https://eprint.iacr.org/2021/159.
 pub mod acss;
 
+pub mod math;
 pub mod types;
 
 use crate::common::{

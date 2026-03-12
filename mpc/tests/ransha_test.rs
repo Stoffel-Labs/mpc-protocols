@@ -5,6 +5,7 @@ use ark_bls12_381::Fr;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use std::sync::Arc;
+use std::time::Duration;
 use stoffelmpc_mpc::{
     common::{rbc::rbc::Avid, ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
@@ -63,6 +64,7 @@ async fn test_reconstruct_handler_incorrect_share() {
         0,
         0,
         vec![],
+        Duration::from_secs(10),
     );
 
     // receiver randousha node

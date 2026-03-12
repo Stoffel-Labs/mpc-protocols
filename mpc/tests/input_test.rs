@@ -22,6 +22,7 @@ async fn test_multiple_clients_parallel_input() {
     let n = 4;
     let t = 1;
     let client_ids = vec![100, 101];
+    let duration = Duration::from_millis(1000);
     let inputs = vec![
         vec![Fr::from(10), Fr::from(20)],
         vec![Fr::from(30), Fr::from(40)],
@@ -49,6 +50,7 @@ async fn test_multiple_clients_parallel_input() {
             0,
             0,
             client_ids.clone(),
+            duration,
         );
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         server_recv,
@@ -112,6 +114,7 @@ async fn test_input_recovery_with_missing_server() {
     let clientid = 100;
     let input_values = vec![Fr::from(10)];
     let mask_values = vec![Fr::from(11)];
+    let duration = Duration::from_millis(1000);
 
     let (net, server_recv, mut client_recv) = test_setup(n, vec![clientid]);
     let local_shares = generate_independent_shares(&mask_values, t, n);
@@ -128,6 +131,7 @@ async fn test_input_recovery_with_missing_server() {
         0,
         0,
         vec![clientid],
+        duration,
     );
 
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -181,6 +185,7 @@ async fn test_input_with_too_many_faulty_shares() {
     let client_id = 103;
     let input_value = Fr::from(33);
     let mask_value = Fr::from(88);
+    let duration = Duration::from_millis(1000);
 
     let (net, server_recv, mut client_recv) = test_setup(n, vec![client_id]);
 
@@ -198,6 +203,7 @@ async fn test_input_with_too_many_faulty_shares() {
         0,
         0,
         vec![client_id],
+        duration,
     );
 
     // Start server receiver loop

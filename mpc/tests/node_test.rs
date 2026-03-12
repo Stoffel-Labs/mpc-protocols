@@ -26,7 +26,7 @@ use stoffelmpc_mpc::{
         ShamirShare,
     },
     honeybadger::{
-        fpmul::f256::F2_8,
+        fpmul::f256::Gf256,
         input::input::InputClient,
         output::output::{OutputClient, OutputServer},
         ran_dou_sha::RanDouShaState,
@@ -56,6 +56,7 @@ async fn randousha_e2e() {
         111,
     );
     let degree_t = 1;
+    let duration = Duration::from_secs(1);
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
@@ -72,6 +73,7 @@ async fn randousha_e2e() {
         0,
         0,
         vec![],
+        duration,
     );
     // spawn tasks to process received messages
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -137,6 +139,7 @@ async fn ransha_e2e() {
         SessionId::pack_slot24(123, 0, 0),
         111,
     );
+    let duration = Duration::from_secs(1);
 
     //Setup
     let (network, receivers, _) = test_setup(n_parties, vec![]);
@@ -152,6 +155,7 @@ async fn ransha_e2e() {
         0,
         0,
         vec![],
+        duration,
     );
     // spawn tasks to process received messages
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -201,6 +205,7 @@ async fn test_input_protocol_e2e() {
     let clientid: Vec<ClientId> = vec![100];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     let mask_values: Vec<Fr> = vec![Fr::from(11), Fr::from(21)];
+    let duration = Duration::from_secs(1);
 
     //Setup network
     let (net, server_recv, mut client_recv) = test_setup(n, clientid.clone());
@@ -222,6 +227,7 @@ async fn test_input_protocol_e2e() {
         0,
         0,
         clientid.clone(),
+        duration,
     );
 
     //Receive at server
@@ -310,6 +316,7 @@ async fn gen_masks_for_input_e2e() {
         0,
         0,
         clientid.clone(),
+        Duration::from_secs(10),
     );
     //Create nodes for InputClient
     let mut client = InputClient::<Fr, Avid<SessionId>>::new(
@@ -476,6 +483,7 @@ async fn mul_e2e_bad_net() {
         0,
         0,
         vec![],
+        Duration::from_secs(10),
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -607,6 +615,7 @@ async fn mul_e2e() {
         0,
         0,
         vec![],
+        Duration::from_secs(10),
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -723,6 +732,7 @@ async fn mul_e2e_with_preprocessing_bad_net() {
         0,
         0,
         vec![clientid[0]],
+        Duration::from_secs(10),
     );
 
     //Create Clients
@@ -872,11 +882,10 @@ async fn mul_e2e_with_preprocessing_bad_net() {
     };
 
     let output_values = vec![Fr::from(100), Fr::from(400)];
-    assert!(
-        output_values == recovered,
+    assert_eq!(
+        output_values, recovered,
         "Recovered output {:?} not equal to expected values {:?}",
-        recovered,
-        output_values
+        recovered, output_values
     );
 }
 
@@ -907,6 +916,7 @@ async fn mul_e2e_with_preprocessing() {
         0,
         0,
         vec![clientid[0]],
+        Duration::from_secs(10),
     );
 
     //Create Clients
@@ -1093,6 +1103,7 @@ async fn preprocessing_e2e() {
         l,
         k,
         vec![],
+        Duration::from_secs(10),
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1170,6 +1181,7 @@ async fn preprocessing_e2e_big() {
         l,
         k,
         vec![],
+        Duration::from_secs(10),
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1249,6 +1261,7 @@ async fn preprocessing_e2e_bad_net() {
         0,
         0,
         vec![],
+        Duration::from_secs(10),
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1407,6 +1420,7 @@ async fn test_rand_bit() {
         0,
         0,
         vec![],
+        Duration::from_secs(10),
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1534,7 +1548,7 @@ async fn fpmul_e2e() {
         let x = RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
             .unwrap();
         for (i, share) in x.iter().enumerate() {
-            r_bits[i].push((share.clone(), F2_8::one()));
+            r_bits[i].push((share.clone(), Gf256::one()));
         }
     }
     //----------------------------------------SETUP NODES----------------------------------------
@@ -1550,6 +1564,7 @@ async fn fpmul_e2e() {
         0,
         0,
         vec![],
+        Duration::from_secs(10),
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1663,6 +1678,7 @@ async fn fpmul_e2e_with_preprocessing() {
         bound_l,
         security_k,
         vec![],
+        Duration::from_secs(10),
     );
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1756,6 +1772,7 @@ async fn add_fixed_e2e() {
         8,
         4,
         vec![],
+        Duration::from_secs(10),
     );
 
     // Receiver loop
@@ -1829,6 +1846,7 @@ async fn sub_fixed_e2e() {
         8,
         4,
         vec![],
+        Duration::from_secs(10),
     );
 
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -1891,6 +1909,7 @@ async fn add_int_e2e() {
         8,
         4,
         vec![],
+        Duration::from_secs(10),
     );
 
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -1953,6 +1972,7 @@ async fn sub_int_e2e() {
         8,
         4,
         vec![],
+        Duration::from_secs(10),
     );
 
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -2013,6 +2033,7 @@ async fn mul_int_e2e_with_preprocessing() {
         0,
         0,
         vec![],
+        Duration::from_secs(10),
     );
 
     //----------------------------------------SECRET-SHARE INPUTS----------------------------------------
@@ -2121,7 +2142,7 @@ async fn fpdiv_const_e2e() {
             RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
                 .unwrap();
         for (i, share) in bit_shares.iter().enumerate() {
-            r_bits[i].push((share.clone(), F2_8::one()));
+            r_bits[i].push((share.clone(), Gf256::one()));
         }
     }
 
@@ -2137,6 +2158,7 @@ async fn fpdiv_const_e2e() {
         0,
         0,
         vec![],
+        Duration::from_secs(10),
     );
 
     //----------------------------------------RECEIVE LOOP----------------------------------------

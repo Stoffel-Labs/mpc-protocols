@@ -43,9 +43,9 @@ use crate::{
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
-            f256::F2_8,
+            f256::Gf256,
             fpmul::{FPError, FPMulNode},
-            prandbitd::PRandBitNode,
+            prandbitd::PRandBitDNode,
             rand_bit::RandBit,
             PRandBitDMessage, PRandError, RandBitError, RandBitMessage, TruncPrError,
             TruncPrMessage,
@@ -227,7 +227,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
     pub rand_bit: RandBit<F, R>,
-    pub prand_bit: PRandBitNode<F, F>,
+    pub prand_bit: PRandBitDNode<F, F>,
 }
 
 #[derive(Clone, Debug)]
@@ -327,6 +327,7 @@ pub struct HoneyBadgerMPCNodeOpts {
     pub k: usize,
     ///Bit size for fixed point
     pub l: usize,
+    pub timeout: Duration,
 }
 
 impl HoneyBadgerMPCNodeOpts {
@@ -341,6 +342,7 @@ impl HoneyBadgerMPCNodeOpts {
         n_prandint: usize,
         l: usize,
         k: usize,
+        timeout: Duration,
     ) -> Self {
         Self {
             n_parties,
@@ -352,6 +354,7 @@ impl HoneyBadgerMPCNodeOpts {
             n_prandint,
             k,
             l,
+            timeout,
         }
     }
 }
@@ -386,7 +389,7 @@ where
         let dousha_node =
             DoubleShareNode::new(id, params.n_parties, params.threshold, dou_sha_sender);
         let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold, rand_bit_sender)?;
-        let prand_bit_node = PRandBitNode::new(
+        let prand_bit_node = PRandBitDNode::new(
             id,
             params.n_parties,
             params.threshold,
@@ -411,7 +414,7 @@ where
             params.threshold + 1,
             share_gen_sender,
         )?;
-        let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold, fpmul_sender)?;
+        let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold)?;
         let fpdiv_const_node =
             FPDivConstNode::new(id, params.n_parties, params.threshold, fpdiv_const_sender)?;
         let input = InputServer::new(id, params.n_parties, params.threshold, input_ids)?;
@@ -850,7 +853,8 @@ where
         let r_bits = r_bits_vec.iter().map(|(a, _)| a.clone()).collect();
 
         // Call the fpmul function
-        self.type_ops
+        let result = self
+            .type_ops
             .fpmul
             .init(
                 x,
@@ -858,25 +862,13 @@ where
                 beaver_triples[0].clone(),
                 r_bits,
                 r_int[0].clone(),
+                self.params.timeout,
                 session_id,
                 net,
             )
             .await?;
 
-        let mut rx = self.outputchannels.fpmul_channel.lock().await;
-        while let Some(id) = rx.recv().await {
-            if id == session_id {
-                let output = self
-                    .type_ops
-                    .fpmul
-                    .protocol_output
-                    .clone()
-                    .ok_or(FPError::Failed)?;
-
-                return Ok(output);
-            }
-        }
-        Err(HoneyBadgerError::ChannelClosed)
+        Ok(result)
     }
 
     async fn div_with_const_fixed(
@@ -1507,7 +1499,7 @@ where
                 let store = store_lock.lock().await;
                 let bigbit = store.share_b_p.clone();
                 let smallbit = store.share_b_2.clone();
-                let output: Vec<(ShamirShare<F, 1, Robust>, F2_8)> = bigbit
+                let output: Vec<(ShamirShare<F, 1, Robust>, Gf256)> = bigbit
                     .iter()
                     .zip(smallbit)
                     .map(|(a, b)| (a.clone(), b))

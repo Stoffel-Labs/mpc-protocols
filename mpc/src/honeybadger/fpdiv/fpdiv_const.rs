@@ -66,7 +66,7 @@ where
             id,
             n_parties,
             threshold,
-            trunc_node: TruncPrNode::new(id, n_parties, threshold, trunc_sender)?,
+            trunc_node: TruncPrNode::new(id, n_parties, threshold)?,
             trunc_output: Arc::new(Mutex::new(trunc_receiver)),
             protocol_output: None,
             output_channel,
