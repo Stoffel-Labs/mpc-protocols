@@ -15,16 +15,17 @@ use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalSerialize, SerializationError};
 use bincode::ErrorKind;
-use messages::{RanDouShaMessage, RanDouShaMessageType, ReconstructionMessage};
+use messages::{RanDouShaMessage, ReconstructionMessage};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
 };
 use thiserror::Error;
 use tokio::sync::{
-    mpsc::{error::SendError, Sender},
+    oneshot::{channel, Receiver, Sender},
     Mutex,
 };
+use tokio::time::{timeout, Duration};
 
 use stoffelnet::network_utils::{Network, NetworkError, PartyId};
 use tracing::info;
@@ -48,21 +49,28 @@ pub enum RanDouShaError {
     /// The protocol received an abort signal.
     #[error("received abort signal")]
     Abort,
-    /// The party is waiting for confirmations.
-    #[error("waiting for more confirmations")]
-    WaitForOk,
-    #[error("error sending information to other async tasks: {0:?}")]
-    SendError(#[from] SendError<SessionId>),
+    #[error("error sending the result: {0:?}")]
+    SendError(SessionId),
+    #[error("error receiving the result: {0:?}")]
+    ReceiveError(SessionId),
+    #[error("Share ID and Sender ID doesn't match")]
+    IncorrectID,
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
     #[error("session ID {0:?} malformed")]
     SessionIdError(SessionId),
     #[error("limit reached")]
     LimitError,
+    #[error("no such session ID exists: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("result already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("multiplication {0:?} did not complete in time")]
+    Timeout(SessionId),
 }
 
 /// Storage for the Random Double Sharing protocol.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RanDouShaStore<F: FftField> {
     /// Vector that stores the received degree t shares of r.
     pub received_r_shares_degree_t: HashMap<PartyId, NonRobustShare<F>>,
@@ -79,6 +87,8 @@ pub struct RanDouShaStore<F: FftField> {
     /// Current state of the protocol.
     pub state: RanDouShaState,
     pub protocol_output: Vec<DoubleShamirShare<F>>,
+    pub output_sender: Option<Sender<Vec<DoubleShamirShare<F>>>>,
+    pub output_receiver: Option<Receiver<Vec<DoubleShamirShare<F>>>>,
 }
 
 /// State of the Random Double Sharing protocol.
@@ -96,6 +106,8 @@ where
 {
     /// Creates a new empty store for the random double sharing node.
     pub fn empty() -> Self {
+        let (output_sender, output_receiver) = channel();
+
         Self {
             received_r_shares_degree_t: HashMap::new(),
             received_r_shares_degree_2t: HashMap::new(),
@@ -104,6 +116,8 @@ where
             received_ok_msg: Vec::new(),
             state: RanDouShaState::Initialized,
             protocol_output: Vec::new(),
+            output_sender: Some(output_sender),
+            output_receiver: Some(output_receiver),
         }
     }
 }
@@ -119,9 +133,9 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     pub threshold: usize,
     /// Storage of the node.
     pub store: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
-    pub output_sender: Sender<SessionId>,
     ///Avid instance for RBC
     pub rbc: R,
+    pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
 }
 
 pub static MAX_RAN_DOU_SHA_SESSIONS: usize = 1024;
@@ -133,16 +147,17 @@ where
 {
     pub fn new(
         id: PartyId,
-        output_sender: Sender<SessionId>,
         n_parties: usize,
         threshold: usize,
         k: usize, // for RBC init
     ) -> Result<Self, RanDouShaError> {
+        let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
         let rbc = R::new(
             id,
             n_parties,
             threshold,
             k,
+            rbc_sender,
             Arc::new(WrappedMessage::rbc_wrap),
         )?;
         Ok(Self {
@@ -150,31 +165,13 @@ where
             n_parties,
             threshold,
             store: Arc::new(Mutex::new(BTreeMap::new())),
-            output_sender,
             rbc,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
-
-    pub async fn pop_finished_protocol_result(&self) -> Option<Vec<DoubleShamirShare<F>>> {
-        let mut storage = self.store.lock().await;
-        let mut finished_sid = None;
-        let mut output = Vec::new();
-        for (sid, storage_mutex) in storage.iter() {
-            let storage_bind = storage_mutex.lock().await;
-            if storage_bind.state == RanDouShaState::Finished {
-                finished_sid = Some(*sid);
-                output = storage_bind.protocol_output.clone();
-                break;
-            }
-        }
-        match finished_sid {
-            Some(sid) => {
-                // Remove the entry from the storage
-                storage.remove(&sid);
-                Some(output)
-            }
-            None => None,
-        }
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        let mut store = self.store.lock().await;
+        store.remove(&session_id).is_some()
     }
 
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
@@ -193,6 +190,104 @@ where
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(RanDouShaStore::empty())))
             .clone())
+    }
+
+    pub async fn drain_rbc_output(&mut self) -> Result<(), RanDouShaError> {
+        loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(RanDouShaError::Abort);
+                    }
+                }
+            };
+
+            let output = self.rbc.get_store(id).await?;
+            let msg: RanDouShaMessage = bincode::deserialize(&output)?;
+
+            match self.output_handler(msg).await {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+    pub async fn wait_for_result(
+        &self,
+        session_id: SessionId,
+        duration: Duration,
+    ) -> Result<Vec<DoubleShamirShare<F>>, RanDouShaError> {
+        let output_receiver = {
+            let storage = self.store.lock().await;
+            let storage_bind = match storage.get(&session_id) {
+                Some(value) => value,
+                None => return Err(RanDouShaError::NoSuchSessionId(session_id)),
+            };
+            let mut storage = storage_bind.lock().await;
+
+            storage
+                .output_receiver
+                .take()
+                .ok_or(RanDouShaError::ResultAlreadyReceived(session_id))?
+        };
+
+        match timeout(duration, output_receiver).await {
+            Err(_) => Err(RanDouShaError::Timeout(session_id)),
+            Ok(Err(_)) => Err(RanDouShaError::ReceiveError(session_id)),
+            Ok(Ok(shares)) => Ok(shares),
+        }
+    }
+
+    async fn try_finalize(
+        &self,
+        session_id: SessionId,
+        store_mutex: Arc<Mutex<RanDouShaStore<F>>>,
+    ) -> Result<bool, RanDouShaError> {
+        let mut store = store_mutex.lock().await;
+
+        // Already finished
+        if store.state == RanDouShaState::Finished {
+            return Ok(true);
+        }
+
+        // Must be initialized
+        if store.computed_r_shares_degree_t.len() < self.threshold + 1
+            || store.computed_r_shares_degree_2t.len() < self.threshold + 1
+        {
+            return Ok(false);
+        }
+
+        // Need enough OK messages
+        if store.received_ok_msg.len() < self.n_parties - (self.threshold + 1) {
+            return Ok(false);
+        }
+
+        // Construct output
+        let output_r_t = store.computed_r_shares_degree_t[0..self.threshold + 1].to_vec();
+
+        let output_r_2t = store.computed_r_shares_degree_2t[0..self.threshold + 1].to_vec();
+
+        let output_double_share: Vec<DoubleShamirShare<F>> = output_r_t
+            .into_iter()
+            .zip(output_r_2t)
+            .map(|(a, b)| DoubleShamirShare::new(a, b))
+            .collect();
+
+        store.state = RanDouShaState::Finished;
+        store.protocol_output = output_double_share.clone();
+
+        let sender = store.output_sender.take().unwrap();
+        sender
+            .send(output_double_share)
+            .map_err(|_| RanDouShaError::SendError(session_id))?;
+
+        Ok(true)
     }
 
     /// Implements the initialization phase of the Random double share protocol. In particular,
@@ -240,6 +335,10 @@ where
         store.computed_r_shares_degree_t = r_deg_t.clone();
         store.computed_r_shares_degree_2t = r_deg_2t.clone();
         drop(store);
+        // Check if pending OK messages are sufficient to finalize immediately
+        if self.try_finalize(session_id, bind_store.clone()).await? {
+            return Ok(());
+        }
         // The current party with index i sends the share [r_j] to the party P_j so that P_j can
         // reconstruct the value r_j.
         for i in 0..self.n_parties {
@@ -253,7 +352,6 @@ where
                 reconst_message.serialize_compressed(&mut bytes_rec_message)?;
                 let rds_message = RanDouShaMessage::new(
                     self.id,
-                    RanDouShaMessageType::ReconstructMessage,
                     session_id,
                     RanDouShaPayload::Reconstruct(bytes_rec_message),
                 );
@@ -307,6 +405,10 @@ where
         // one for degree t and one for degree 2t.
         // These shares originate from the *sender* of the message, but they are components of the 'r_j'
 
+        let sender_id = msg.sender_id;
+        if rec_msg.r_share_deg_t.id != sender_id || rec_msg.r_share_deg_2t.id != sender_id {
+            return Err(RanDouShaError::IncorrectID);
+        }
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
@@ -340,10 +442,16 @@ where
                 drop(store);
                 // (5) Perform reconstruction for both degrees.
                 // ShamirSecretSharing::reconstruct expects a vector of shares.
-                let reconstructed_r_t =
-                    NonRobustShare::recover_secret(&shares_t_for_recon, self.n_parties)?;
-                let reconstructed_r_2t =
-                    NonRobustShare::recover_secret(&shares_2t_for_recon, self.n_parties)?;
+                let reconstructed_r_t = NonRobustShare::recover_secret(
+                    &shares_t_for_recon,
+                    self.n_parties,
+                    self.threshold,
+                )?;
+                let reconstructed_r_2t = NonRobustShare::recover_secret(
+                    &shares_2t_for_recon,
+                    self.n_parties,
+                    self.threshold,
+                )?;
                 let poly1 = DensePolynomial::from_coefficients_slice(&reconstructed_r_t.0);
                 let poly2 = DensePolynomial::from_coefficients_slice(&reconstructed_r_2t.0);
 
@@ -351,14 +459,10 @@ where
                     && (2 * self.threshold == poly2.degree())
                     && (reconstructed_r_t.1 == reconstructed_r_2t.1);
 
-                let wrapped = WrappedMessage::RanDouSha(RanDouShaMessage::new(
-                    self.id,
-                    RanDouShaMessageType::OutputMessage,
-                    msg.session_id,
-                    RanDouShaPayload::Output(ok),
-                ));
+                let msg =
+                    RanDouShaMessage::new(self.id, msg.session_id, RanDouShaPayload::Output(ok));
 
-                let bytes_wrapped = bincode::serialize(&wrapped)?;
+                let bytes_msg = bincode::serialize(&msg)?;
 
                 // if the verification succeeds, broadcast true (aka. OK)
                 let sessionid = SessionId::new(
@@ -372,7 +476,7 @@ where
                 );
                 self.rbc
                     .init(
-                        bytes_wrapped,
+                        bytes_msg,
                         sessionid, // A unique session id per node
                         Arc::clone(&network),
                     )
@@ -405,34 +509,9 @@ where
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
         }
-        // wait for (n-(t+1)) Ok messages
-        if store.received_ok_msg.len() < self.n_parties - (self.threshold + 1) {
-            return Err(RanDouShaError::WaitForOk);
-        }
 
-        if store.computed_r_shares_degree_t.len() < self.threshold + 1
-            && store.computed_r_shares_degree_2t.len() < self.threshold + 1
-        {
-            // waiting for self.init
-            return Err(RanDouShaError::WaitForOk);
-        }
-
-        // create vector for share [r_1]_t ... [r_t+1]_t
-        let output_r_t = store.computed_r_shares_degree_t[0..self.threshold + 1].to_vec();
-        // create vector for share [r_1]_2t ... [r_t+1]_2t
-        let output_r_2t = store.computed_r_shares_degree_2t[0..self.threshold + 1].to_vec();
-
-        let output_double_share = output_r_t
-            .into_iter()
-            .zip(output_r_2t)
-            .map(|(share_deg_t, share_deg_2t)| DoubleShamirShare::new(share_deg_t, share_deg_2t))
-            .collect();
-
-        // Computation is done so set state to Finished
-        store.state = RanDouShaState::Finished;
-        store.protocol_output = output_double_share;
-        self.output_sender.send(msg.session_id).await?;
-
+        drop(store);
+        self.try_finalize(msg.session_id, binding.clone()).await?;
         Ok(())
     }
 
@@ -444,16 +523,7 @@ where
     where
         N: Network + Send + Sync,
     {
-        match msg.msg_type {
-            messages::RanDouShaMessageType::OutputMessage => {
-                self.output_handler(msg).await?;
-                return Ok(());
-            }
-            messages::RanDouShaMessageType::ReconstructMessage => {
-                self.reconstruction_handler(msg, network).await?;
-                return Ok(());
-            }
-        }
+        self.reconstruction_handler(msg, network).await
     }
 }
 
@@ -462,21 +532,19 @@ mod tests {
     use super::*;
     use crate::common::rbc::rbc::Avid;
     use crate::honeybadger::ran_dou_sha::messages::{
-        RanDouShaMessage, RanDouShaMessageType, RanDouShaPayload, ReconstructionMessage,
+        RanDouShaMessage, RanDouShaPayload, ReconstructionMessage,
     };
     use crate::honeybadger::SessionId;
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
     use std::sync::Arc;
-    use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-    use tokio::sync::mpsc;
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
 
     #[tokio::test]
     async fn test_randousha_storage_limit_in_reconstruction_handler() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, tx, 5, 1, 2).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
-
+        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
         // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
         let mut exec = 0u8;
         let mut round = 0u8;
@@ -489,12 +557,7 @@ mod tests {
             let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
             let mut payload = Vec::new();
             rec_msg.serialize_compressed(&mut payload).unwrap();
-            let msg = RanDouShaMessage::new(
-                0,
-                RanDouShaMessageType::ReconstructMessage,
-                sid,
-                RanDouShaPayload::Reconstruct(payload),
-            );
+            let msg = RanDouShaMessage::new(0, sid, RanDouShaPayload::Reconstruct(payload));
             // Ignore the result, just fill up storage
             let _ = node.reconstruction_handler(msg, net.clone()).await;
 
@@ -516,12 +579,7 @@ mod tests {
         let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
         let mut payload = Vec::new();
         rec_msg.serialize_compressed(&mut payload).unwrap();
-        let msg = RanDouShaMessage::new(
-            0,
-            RanDouShaMessageType::ReconstructMessage,
-            over_sid,
-            RanDouShaPayload::Reconstruct(payload),
-        );
+        let msg = RanDouShaMessage::new(0, over_sid, RanDouShaPayload::Reconstruct(payload));
 
         let result = node.reconstruction_handler(msg, net).await;
         assert!(
@@ -532,9 +590,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_randousha_handle_invalid_sub_id() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, tx, 5, 1, 2).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
 
         // Create a session id with sub_id != 0
         let session_id =
@@ -544,12 +602,7 @@ mod tests {
         let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
         let mut payload = Vec::new();
         rec_msg.serialize_compressed(&mut payload).unwrap();
-        let msg = RanDouShaMessage::new(
-            0,
-            RanDouShaMessageType::ReconstructMessage,
-            session_id,
-            RanDouShaPayload::Reconstruct(payload),
-        );
+        let msg = RanDouShaMessage::new(0, session_id, RanDouShaPayload::Reconstruct(payload));
 
         // Should return a SessionIdError due to sub_id != 0
         let result = node.reconstruction_handler(msg, net).await;

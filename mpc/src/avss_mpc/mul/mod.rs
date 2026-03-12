@@ -43,10 +43,10 @@ pub enum MulError {
     NoSuchSessionId(AvssSessionId),
     #[error("result already received: {0:?}")]
     ResultAlreadyReceived(AvssSessionId),
-    #[error("waiting for more openings")]
-    WaitForOk,
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(AvssSessionId),
+    #[error("Channel closed")]
+    Abort,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -6,26 +6,30 @@ use ark_std::test_rng;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::time::Duration;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::rbc::RbcError;
 use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
 use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme, RBC};
-use stoffelmpc_mpc::honeybadger::double_share::DoubleShamirShare;
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
+use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::share_gen::RanShaError;
 use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{
     HoneyBadgerMPCClient, HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
-use stoffelmpc_network::bad_fake_network::{BadFakeNetwork, BadFakeNetworkConfig};
-use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+use stoffelmpc_network::bad_fake_network::{
+    BadFakeInnerNetwork, BadFakeNetwork, BadFakeNetworkConfig,
+};
+use stoffelmpc_network::fake_network::{
+    FakeInnerNetwork, FakeNetwork, FakeNetworkConfig, SenderId,
+};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::warn;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::FmtSubscriber;
 
@@ -37,14 +41,17 @@ pub async fn setup_network_and_parties<T: RBC<Id = SessionId>, N: Network>(
     t: usize,
     k: usize,
     buffer_size: usize,
-) -> Result<(Vec<T>, Arc<FakeNetwork>, Vec<mpsc::Receiver<Vec<u8>>>), RbcError> {
+) -> Result<(Vec<T>, Vec<Arc<FakeNetwork>>, Vec<Vec<Receiver<Vec<u8>>>>), RbcError> {
     let config = FakeNetworkConfig::new(buffer_size);
-    let (network, receivers, _) = FakeNetwork::new(n as usize, None, config);
-    let net = Arc::new(network);
+    let (inner, receivers, _) = FakeInnerNetwork::new(n as usize, None, config);
+    let net: Vec<_> = (0..n)
+        .map(|id| Arc::new(FakeNetwork::new(id, inner.clone())))
+        .collect();
 
     let mut parties = Vec::with_capacity(n as usize);
     for i in 0..n {
-        let rbc = T::new(i, n, t, k, Arc::new(WrappedMessage::rbc_wrap))?; // Create a new RBC instance for each party
+        let (rbc_sender, _) = mpsc::channel(200);
+        let rbc = T::new(i, n, t, k, rbc_sender, Arc::new(WrappedMessage::rbc_wrap))?; // Create a new RBC instance for each party
         parties.push(rbc);
     }
     Ok((parties, net, receivers))
@@ -53,18 +60,25 @@ pub async fn setup_network_and_parties<T: RBC<Id = SessionId>, N: Network>(
 ///Spawn parties for rbc
 pub async fn spawn_parties<T, N>(
     parties: &[T],
-    receivers: Vec<mpsc::Receiver<Vec<u8>>>,
-    net: Arc<N>,
+    receivers: Vec<Vec<mpsc::Receiver<Vec<u8>>>>,
+    net: Vec<Arc<N>>,
 ) where
     T: RBC<Id = SessionId> + Clone + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
-    for (rbc, mut rx) in parties.iter().cloned().zip(receivers.into_iter()) {
-        let net_clone = Arc::clone(&net);
+    for (rbc, rx) in parties.iter().cloned().zip(receivers.into_iter()) {
+        let id = rbc.id();
+        let net_clone = net[id].clone();
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = rx
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
 
+        let mut merge_rx = fan_in_inboxes(inbox);
         tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg) {
+            while let Some(msg) = merge_rx.recv().await {
+                let wrapped: WrappedMessage = match bincode::deserialize(&msg.1) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("Malformed or unrecognized message format.");
@@ -91,31 +105,71 @@ pub fn test_setup(
     n: usize,
     clientid: Vec<ClientId>,
 ) -> (
-    Arc<FakeNetwork>,
-    Vec<Receiver<Vec<u8>>>,
-    HashMap<usize, Receiver<Vec<u8>>>,
+    Vec<Arc<FakeNetwork>>,
+    Vec<Vec<Receiver<Vec<u8>>>>,
+    HashMap<usize, Arc<FakeNetwork>>,
+    HashMap<usize, Vec<Receiver<Vec<u8>>>>,
 ) {
     let config = FakeNetworkConfig::new(500);
-    let (network, receivers, client_recv) = FakeNetwork::new(n, Some(clientid), config);
-    let network = Arc::new(network);
-    (network, receivers, client_recv)
+    let (inner, receivers, client_recv) = FakeInnerNetwork::new(n, Some(clientid.clone()), config);
+    // ---- node networks ----
+    let network: Vec<_> = (0..n)
+        .map(|id| Arc::new(FakeNetwork::new(id, inner.clone())))
+        .collect();
+
+    // ---- client networks ----
+    let client_networks: HashMap<ClientId, Arc<FakeNetwork>> = clientid
+        .into_iter()
+        .map(|client_id| {
+            (
+                client_id,
+                Arc::new(FakeNetwork::new_client(client_id, inner.clone())),
+            )
+        })
+        .collect();
+
+    (network, receivers, client_networks, client_recv)
 }
 
 pub fn test_setup_bad(
     n: usize,
     clientid: Vec<ClientId>,
 ) -> (
-    Arc<BadFakeNetwork>,
-    Receiver<(PartyId, Vec<u8>)>,
-    Vec<Sender<Vec<u8>>>,
-    Vec<Receiver<Vec<u8>>>,
-    HashMap<ClientId, Receiver<Vec<u8>>>,
+    Vec<Arc<BadFakeNetwork>>,
+    Receiver<(PartyId, PartyId, Vec<u8>)>,
+    Vec<Vec<Sender<Vec<u8>>>>,
+    Vec<Vec<Receiver<Vec<u8>>>>,
+    HashMap<ClientId, Arc<BadFakeNetwork>>,
+    HashMap<ClientId, Vec<Receiver<Vec<u8>>>>,
 ) {
     let config = BadFakeNetworkConfig::new(500);
-    let (network, net_rx, node_channels, receivers, client_recv) =
-        BadFakeNetwork::new(n, Some(clientid), config);
-    let network = Arc::new(network);
-    (network, net_rx, node_channels, receivers, client_recv)
+    let (inner, net_rx, node_channels, receivers, client_recv) =
+        BadFakeInnerNetwork::new(n, Some(clientid.clone()), config);
+
+    // ---- node networks ----
+    let network: Vec<_> = (0..n)
+        .map(|id| Arc::new(BadFakeNetwork::new(id, inner.clone())))
+        .collect();
+
+    // ---- client networks ----
+    let client_networks: HashMap<ClientId, Arc<BadFakeNetwork>> = clientid
+        .into_iter()
+        .map(|client_id| {
+            (
+                client_id,
+                Arc::new(BadFakeNetwork::new_client(client_id, inner.clone())),
+            )
+        })
+        .collect();
+
+    (
+        network,
+        net_rx,
+        node_channels,
+        receivers,
+        client_networks,
+        client_recv,
+    )
 }
 
 pub fn get_reconstruct_input(
@@ -165,21 +219,18 @@ pub fn initialize_node(
     n: usize,
     t: usize,
     k: usize,
-    output_sender: Sender<SessionId>,
 ) -> RanDouShaNode<Fr, Avid<SessionId>> {
-    RanDouShaNode::new(node_id, output_sender, n, t, k).unwrap()
+    RanDouShaNode::new(node_id, n, t, k).unwrap()
 }
 
 /// Initializes all RanDouSha nodes and returns them wrapped in `Arc<Mutex<_>>`.
 pub fn create_nodes(
     n_parties: usize,
-    senders: Vec<Sender<SessionId>>,
     t: usize,
     k: usize,
 ) -> Vec<Arc<Mutex<RanDouShaNode<Fr, Avid<SessionId>>>>> {
     (0..n_parties)
-        .zip(senders)
-        .map(|(id, sender)| Arc::new(Mutex::new(initialize_node(id, n_parties, t, k, sender))))
+        .map(|id| Arc::new(Mutex::new(initialize_node(id, n_parties, t, k))))
         .collect()
 }
 
@@ -189,7 +240,7 @@ pub async fn initialize_all_nodes(
     n_shares_t: &[Vec<NonRobustShare<Fr>>],
     n_shares_2t: &[Vec<NonRobustShare<Fr>>],
     session_id: SessionId,
-    network: Arc<FakeNetwork>,
+    network: Vec<Arc<FakeNetwork>>,
 ) {
     assert!(nodes.len() == n_shares_t.len());
     assert!(nodes.len() == n_shares_2t.len());
@@ -202,7 +253,7 @@ pub async fn initialize_all_nodes(
                 n_shares_t[node_id].clone(),
                 n_shares_2t[node_id].clone(),
                 session_id,
-                Arc::clone(&network),
+                network[node_id].clone(),
             )
             .await
         {
@@ -231,23 +282,26 @@ pub async fn initialize_all_nodes(
 /// For the rest of the errors, we panic
 pub fn spawn_receiver_tasks(
     nodes: Vec<Arc<Mutex<RanDouShaNode<Fr, Avid<SessionId>>>>>,
-    mut receivers: Vec<Receiver<Vec<u8>>>,
-    network: Arc<FakeNetwork>,
-    fin_send: mpsc::Sender<(usize, Vec<DoubleShamirShare<Fr>>)>,
+    mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
+    network: Vec<Arc<FakeNetwork>>,
     abort_counter: Option<Arc<AtomicUsize>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
-    for node in nodes {
+    for (i, node) in nodes.iter().enumerate() {
         let randousha_node = Arc::clone(&node);
-        let mut receiver = receivers.remove(0);
-        let net_clone = Arc::clone(&network);
-        let fin_send = fin_send.clone();
+        let receiver = receivers.remove(0);
+        let net_clone = network[i].clone();
         let abort_count = abort_counter.clone();
-
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+        let mut merge_rx = fan_in_inboxes(inbox);
         set.spawn(async move {
-            while let Some(msg_bytes) = receiver.recv().await {
+            while let Some(msg_bytes) = merge_rx.recv().await {
                 // Attempt to deserialize into WrappedMessage
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg_bytes) {
+                let wrapped: WrappedMessage = match bincode::deserialize(&msg_bytes.1) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("Malformed or unrecognized message format.");
@@ -264,15 +318,7 @@ pub fn spawn_receiver_tasks(
                             .await;
 
                         match result {
-                            Ok(()) => {
-                                let node = randousha_node.lock().await;
-                                let storage_db = node.store.lock().await;
-                                let storage = storage_db.get(&rds.session_id).unwrap().lock().await;
-                                if storage.state == RanDouShaState::Finished {
-                                    let final_shares = storage.protocol_output.clone();
-                                    fin_send.send((node.id, final_shares)).await.unwrap();
-                                }
-                            }
+                            Ok(()) => {}
                             Err(RanDouShaError::Abort) => {
                                 let id = randousha_node.lock().await.id;
                                 println!("RanDouSha aborted by node {id}");
@@ -281,7 +327,6 @@ pub fn spawn_receiver_tasks(
                                 }
                                 break;
                             }
-                            Err(RanDouShaError::WaitForOk) => {}
                             Err(RanDouShaError::NetworkError(NetworkError::SendError)) => {
                                 eprintln!(
                                     "Party {} encountered SendError (ignored)",
@@ -306,6 +351,20 @@ pub fn spawn_receiver_tasks(
                             .await
                         {
                             warn!("Rbc processing error: {e}");
+                        }
+                        match randousha_node.lock().await.drain_rbc_output().await {
+                            Ok(()) => {}
+                            Err(RanDouShaError::Abort) => {
+                                info!("RanDouSha aborted");
+                                if let Some(c) = abort_count.clone() {
+                                    c.fetch_add(1, Ordering::SeqCst);
+                                }
+                                break;
+                            }
+                            Err(e) => {
+                                warn!("RBC output handling error: {e}");
+                                // Depending on how strict you want tests, you can `break` here too.
+                            }
                         }
                     }
                     _ => todo!(),
@@ -372,10 +431,28 @@ pub fn generate_independent_shares<F: FftField>(
 
 //--------------------------NODE--------------------------
 
+pub fn fan_in_inboxes(
+    inboxes: Vec<(SenderId, Receiver<Vec<u8>>)>,
+) -> Receiver<(SenderId, Vec<u8>)> {
+    let (tx, rx) = mpsc::channel(300);
+
+    for (sender, mut rx_i) in inboxes {
+        let tx_i = tx.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = rx_i.recv().await {
+                let _ = tx_i.send((sender, msg)).await;
+            }
+        });
+    }
+
+    rx
+}
+
 pub fn receive<F, R, S, N>(
-    mut receivers: Vec<Receiver<Vec<u8>>>,
+    mut receivers: Vec<Vec<Receiver<Vec<u8>>>>, // inboxes[to][*]
     mut nodes: Vec<HoneyBadgerMPCNode<F, R>>,
-    net: Arc<N>,
+    net: Vec<Arc<N>>,
+    client_ids: Option<Vec<ClientId>>,
 ) where
     F: PrimeField,
     R: RBC + 'static,
@@ -388,19 +465,44 @@ pub fn receive<F, R, S, N>(
         nodes.len(),
         "Each node must have a receiver"
     );
-
-    for i in 0..receivers.len() {
-        let mut rx = receivers.remove(0);
+    let n_len = nodes.len();
+    for i in 0..n_len {
+        let inbox_row = receivers.remove(0);
         let mut node = nodes.remove(0);
-        let net_clone = net.clone();
+        let net_clone = net[i].clone();
+
+        // ---- label inboxes ----
+        let mut labeled_inboxes = Vec::with_capacity(inbox_row.len());
+
+        for (idx, rx) in inbox_row.into_iter().enumerate() {
+            if idx < n_len {
+                // node → node
+                labeled_inboxes.push((SenderId::Node(idx), rx));
+            } else if let Some(ref clients) = client_ids {
+                // client → node
+                let client_idx = idx - n_len;
+                labeled_inboxes.push((SenderId::Client(clients[client_idx]), rx));
+            }
+        }
+
+        let mut merged_rx = fan_in_inboxes(labeled_inboxes);
 
         tokio::spawn(async move {
-            while let Some(raw_msg) = rx.recv().await {
-                if let Err(e) = node.process(raw_msg, net_clone.clone()).await {
-                    tracing::error!("Node {i} failed to process message: {e:?}");
+            while let Some((sender, raw_msg)) = merged_rx.recv().await {
+                let id = match sender {
+                    SenderId::Node(i) => i,
+                    SenderId::Client(i) => i,
+                };
+                if let Err(e) = node.process(id, raw_msg, net_clone.clone()).await {
+                    tracing::error!(
+                        "Node {:?} failed to process message from {:?}: {:?}",
+                        i,
+                        sender,
+                        e
+                    );
                 }
             }
-            tracing::info!("Receiver task for node {i} ended");
+            tracing::info!("Receiver task for node {:?} ended", i);
         });
     }
 }
@@ -415,6 +517,7 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     n_prandint: usize,
     l: usize,
     k: usize,
+    timeout: Duration,
     input_ids: Vec<ClientId>,
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
@@ -432,7 +535,9 @@ where
         n_prandint,
         l,
         k,
-    );
+        timeout,
+    )
+    .unwrap();
     (0..n_parties)
         .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), input_ids.clone()).unwrap())
         .collect()
@@ -444,7 +549,7 @@ pub async fn initialize_global_nodes_randousha<F, R, N>(
     n_shares_t: &[Vec<NonRobustShare<F>>],
     n_shares_2t: &[Vec<NonRobustShare<F>>],
     session_id: SessionId,
-    network: Arc<N>,
+    network: Vec<Arc<N>>,
 ) where
     F: PrimeField,
     R: RBC<Id = SessionId> + 'static,
@@ -461,7 +566,7 @@ pub async fn initialize_global_nodes_randousha<F, R, N>(
                 n_shares_t[node_id].clone(),
                 n_shares_2t[node_id].clone(),
                 session_id,
-                Arc::clone(&network),
+                network[node.id].clone(),
             )
             .await
         {
@@ -508,7 +613,7 @@ pub fn construct_e2e_input_ransha(
 pub async fn initialize_global_nodes_ransha<F, R, N>(
     nodes: Vec<HoneyBadgerMPCNode<F, R>>,
     session_id: SessionId,
-    network: Arc<N>,
+    network: Vec<Arc<N>>,
 ) where
     F: PrimeField,
     R: RBC<Id = SessionId> + 'static,
@@ -520,7 +625,7 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
         let mut node_rds = node.preprocess.share_gen;
         let node_id = node_rds.id;
         match node_rds
-            .init(session_id, &mut rng, Arc::clone(&network))
+            .init(session_id, &mut rng, network[node_id].clone())
             .await
         {
             Ok(()) => (),
@@ -611,9 +716,9 @@ pub fn create_clients<F: FftField, R: RBC<Id = SessionId> + 'static>(
 }
 
 pub fn receive_client<F, R, N>(
-    mut receivers: HashMap<ClientId, Receiver<Vec<u8>>>,
+    mut receivers: HashMap<ClientId, Vec<Receiver<Vec<u8>>>>,
     clients: HashMap<ClientId, HoneyBadgerMPCClient<F, R>>,
-    net: Arc<N>,
+    mut net: HashMap<usize, Arc<N>>,
 ) where
     F: FftField + 'static,
     R: RBC<Id = SessionId> + 'static,
@@ -625,14 +730,32 @@ pub fn receive_client<F, R, N>(
         "Each node must have a receiver"
     );
 
-    for (clientid, mut recv) in receivers.drain() {
+    for (clientid, inbox_vec) in receivers.drain() {
         let mut client = clients[&clientid].clone();
-        let net_clone = net.clone();
+        let net_clone = net.remove(&clientid).unwrap();
+
+        // tag each receiver with the sender node id
+        let inbox: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)> = inbox_vec
+            .into_iter()
+            .enumerate()
+            .map(|(from, r)| (SenderId::Node(from), r))
+            .collect();
+
+        // fan-in so we preserve (sender, msg)
+        let merged_rx = fan_in_inboxes(inbox);
 
         tokio::spawn(async move {
-            while let Some(received) = recv.recv().await {
-                if let Err(e) = client.process(received, net_clone.clone()).await {
-                    tracing::error!("Client {clientid} failed to process message: {e:?}");
+            let mut merged_rx = merged_rx;
+            while let Some((sender, received)) = merged_rx.recv().await {
+                if let SenderId::Node(s) = sender {
+                    if let Err(e) = client.process(s, received, net_clone.clone()).await {
+                        tracing::error!(
+                            "Client {} failed processing from {:?}: {:?}",
+                            clientid,
+                            sender,
+                            e
+                        );
+                    }
                 }
             }
             tracing::info!("Receiver task for client {clientid} ended");

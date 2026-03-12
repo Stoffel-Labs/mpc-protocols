@@ -1,4 +1,4 @@
-use crate::utils::test_utils::{setup_tracing, test_setup};
+use crate::utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 use ark_bls12_381::{Fr, G1Projective as G};
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{PrimeField, UniformRand};
@@ -9,7 +9,7 @@ use ark_std::{
     },
     test_rng,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use stoffelmpc_mpc::{
     avss_mpc::{triple_gen::BeaverTriple, AdkgNode, AdkgNodeOpts, AvssSessionId},
     common::{
@@ -17,16 +17,16 @@ use stoffelmpc_mpc::{
         SecretSharingScheme, RBC,
     },
 };
-use stoffelmpc_network::fake_network::FakeNetwork;
+use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use stoffelnet::network_utils::Network;
 use tokio::sync::mpsc::{self, Receiver};
 
 pub mod utils;
 
 pub fn adkg_receive<F, R, S, N, G>(
-    mut receivers: Vec<Receiver<Vec<u8>>>,
+    mut receivers: Vec<Vec<Receiver<Vec<u8>>>>, // inboxes[to][*]
     mut nodes: Vec<AdkgNode<F, R, G>>,
-    net: Arc<N>,
+    net: Vec<Arc<N>>,
 ) where
     F: PrimeField,
     R: RBC + 'static,
@@ -40,19 +40,41 @@ pub fn adkg_receive<F, R, S, N, G>(
         nodes.len(),
         "Each node must have a receiver"
     );
-
-    for i in 0..receivers.len() {
-        let mut rx = receivers.remove(0);
+    let n_len = nodes.len();
+    for i in 0..n_len {
+        let inbox_row = receivers.remove(0);
         let mut node = nodes.remove(0);
-        let net_clone = net.clone();
+        let net_clone = net[i].clone();
+
+        // ---- label inboxes ----
+        let mut labeled_inboxes = Vec::with_capacity(inbox_row.len());
+
+        for (idx, rx) in inbox_row.into_iter().enumerate() {
+            assert!(idx < n_len);
+            {
+                // node → node
+                labeled_inboxes.push((SenderId::Node(idx), rx));
+            }
+        }
+
+        let mut merged_rx = fan_in_inboxes(labeled_inboxes);
 
         tokio::spawn(async move {
-            while let Some(raw_msg) = rx.recv().await {
-                if let Err(e) = node.process(raw_msg, net_clone.clone()).await {
-                    tracing::error!("Node {i} failed to process message: {e:?}");
+            while let Some((sender, raw_msg)) = merged_rx.recv().await {
+                let id = match sender {
+                    SenderId::Node(i) => i,
+                    SenderId::Client(i) => i,
+                };
+                if let Err(e) = node.process(id, raw_msg, net_clone.clone()).await {
+                    tracing::error!(
+                        "Node {:?} failed to process message from {:?}: {:?}",
+                        i,
+                        sender,
+                        e
+                    );
                 }
             }
-            tracing::info!("Receiver task for node {i} ended");
+            tracing::info!("Receiver task for node {:?} ended", i);
         });
     }
 }
@@ -63,6 +85,7 @@ pub fn create_adkg_nodes<F: PrimeField, R: RBC + 'static, S, N, G>(
     n_v_random_shares: usize,
     n_triples: usize,
     instance_id: u32,
+    duration: Duration,
 ) -> Vec<AdkgNode<F, R, G>>
 where
     N: Network + Send + Sync + 'static,
@@ -92,7 +115,9 @@ where
                 sks[i],
                 pk_map.clone(),
                 instance_id,
+                duration,
             )
+            .unwrap()
         })
         .collect();
 
@@ -170,14 +195,17 @@ async fn adkg_e2e() {
     let n_parties = 5;
     let t = 1;
     //Setup
-    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes =
-        create_adkg_nodes::<Fr, Avid<AvssSessionId>, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
-            n_parties, t, 1, 0, 111,
-        );
+    let nodes = create_adkg_nodes::<
+        Fr,
+        Avid<AvssSessionId>,
+        FeldmanShamirShare<Fr, G>,
+        FakeNetwork,
+        G,
+    >(n_parties, t, 1, 0, 111, Duration::from_secs(30));
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
@@ -193,7 +221,7 @@ async fn adkg_e2e() {
     let mut handles = Vec::new();
     for pid in 0..n_parties {
         let mut node = nodes[pid].clone();
-        let net = network.clone();
+        let net = network[pid].clone();
         let fin_send = fin_send.clone();
         let handle = tokio::spawn(async move {
             {
@@ -226,7 +254,7 @@ async fn adkg_e2e() {
     // Reconstruct secret from t+1 shares
     let subset = feldman_shares[0..(t + 1)].to_vec();
     let (_, secret_rec) =
-        FeldmanShamirShare::recover_secret(&subset, n_parties).expect("recover_secret failed");
+        FeldmanShamirShare::recover_secret(&subset, n_parties, t).expect("recover_secret failed");
 
     //-------------------------------- PK checks --------------------------------
     let pk_expected = G::generator() * secret_rec;
@@ -264,17 +292,19 @@ async fn preprocessing_e2e() {
     let instance_id = 111;
 
     //Setup
-    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_adkg_nodes::<
-        Fr,
-        Avid<AvssSessionId>,
-        FeldmanShamirShare<Fr, G>,
-        FakeNetwork,
-        G,
-    >(n_parties, t, no_of_randomshares, no_of_triples, instance_id);
+    let nodes =
+        create_adkg_nodes::<Fr, Avid<AvssSessionId>, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
+            n_parties,
+            t,
+            no_of_randomshares,
+            no_of_triples,
+            instance_id,
+            Duration::from_secs(30),
+        );
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
@@ -290,7 +320,7 @@ async fn preprocessing_e2e() {
     let mut handles = Vec::new();
     for pid in 0..n_parties {
         let mut node = nodes[pid].clone();
-        let net = network.clone();
+        let net = network[pid].clone();
         let mut rng = StdRng::from_rng(OsRng).unwrap();
 
         let handle = tokio::spawn(async move {
@@ -329,7 +359,7 @@ async fn mul_e2e() {
     let ids: Vec<_> = (1..=n_parties).collect();
 
     //Setup
-    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
     //Generate triples
     let (_, triple) = construct_e2e_input_mul(n_parties, no_of_multiplication, t).await;
 
@@ -361,13 +391,15 @@ async fn mul_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_adkg_nodes::<
-        Fr,
-        Avid<AvssSessionId>,
-        FeldmanShamirShare<Fr, G>,
-        FakeNetwork,
-        G,
-    >(n_parties, t, 0, no_of_multiplication, 111);
+    let nodes =
+        create_adkg_nodes::<Fr, Avid<AvssSessionId>, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
+            n_parties,
+            t,
+            0,
+            no_of_multiplication,
+            111,
+            Duration::from_secs(30),
+        );
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
@@ -392,7 +424,7 @@ async fn mul_e2e() {
     let mut handles = Vec::new();
     for pid in 0..n_parties {
         let mut node = nodes[pid].clone();
-        let net = network.clone();
+        let net = network[pid].clone();
         let fin_send = fin_send.clone();
         let x_shares = x_inputs_per_node[pid].clone();
         let y_shares = y_inputs_per_node[pid].clone();
@@ -441,7 +473,7 @@ async fn mul_e2e() {
 
     for i in 0..no_of_multiplication {
         let shares_for_i = per_multiplication_shares[i][0..=t].to_vec();
-        let (_, z_rec) = FeldmanShamirShare::recover_secret(&shares_for_i, n_parties)
+        let (_, z_rec) = FeldmanShamirShare::recover_secret(&shares_for_i, n_parties, t)
             .expect("interpolate failed");
         let expected = x_values[i] * y_values[i];
 

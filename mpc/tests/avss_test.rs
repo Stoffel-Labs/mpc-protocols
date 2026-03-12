@@ -1,6 +1,6 @@
 pub mod utils;
 
-use crate::utils::test_utils::{setup_tracing, test_setup};
+use crate::utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 use ark_bls12_381::{Fr, G1Projective as G};
 use ark_ec::PrimeGroup;
 use ark_ff::UniformRand;
@@ -11,7 +11,8 @@ use stoffelmpc_mpc::common::ProtocolSessionId;
 use stoffelmpc_mpc::common::{rbc::rbc::Avid, ShamirShare};
 use stoffelmpc_mpc::common::{share::avss::verify_feldman, SecretSharingScheme};
 use stoffelmpc_mpc::common::{share::avss::AvssNode, RBC};
-use tokio::sync::mpsc::{self, Sender};
+use stoffelmpc_network::fake_network::SenderId;
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinSet;
 use tokio::time::Duration;
 use tracing::info;
@@ -27,7 +28,7 @@ async fn test_avss_end_to_end() {
     let mut rng = test_rng();
 
     // --- Fake network ---
-    let (network, mut recv, _) = test_setup(n, vec![]);
+    let (network, mut recv, _, _) = test_setup(n, vec![]);
 
     // --- PKI setup (one-time) ---
     let mut sks = Vec::new();
@@ -68,26 +69,30 @@ async fn test_avss_end_to_end() {
     // --- Dealer starts AVSS ---
     let secrets = vec![Fr::from(50), Fr::from(60), Fr::from(70)];
     nodes[0]
-        .init(secrets.clone(), session_id, &mut rng, network.clone())
+        .init(secrets.clone(), session_id, &mut rng, network[0].clone())
         .await
         .unwrap();
 
     // --- Spawn receiver loops ---
     let mut set = JoinSet::new();
     for i in 0..n {
-        let mut receiver = recv.remove(0);
+        let receiver = recv.remove(0);
         let mut node = nodes[i].clone();
-        let net = Arc::clone(&network);
+        let net = network[i].clone();
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+        let mut merged_rx = fan_in_inboxes(inbox);
 
         set.spawn(async move {
-            while let Some(received) = receiver.recv().await {
-                let wrapped: AvssWrappedMessage = bincode::deserialize(&received).unwrap();
+            while let Some(received) = merged_rx.recv().await {
+                let wrapped: AvssWrappedMessage = bincode::deserialize(&received.1).unwrap();
                 match wrapped {
-                    AvssWrappedMessage::Avss(msg) => {
-                        let _ = node.process(msg).await;
-                    }
                     AvssWrappedMessage::Rbc(msg) => {
-                        let _ = node.rbc.process(msg, net.clone()).await;
+                        node.rbc.process(msg, net.clone()).await.unwrap();
+                        let _ = node.drain_rbc_output().await;
                     }
                     _ => {}
                 }
@@ -117,7 +122,7 @@ async fn test_avss_end_to_end() {
 
     // --- Reconstruct secret ---
     for (i, s) in shares.iter().enumerate() {
-        let recovered = ShamirShare::recover_secret(&s, n).unwrap();
+        let recovered = ShamirShare::recover_secret(&s, n, t).unwrap();
         assert_eq!(secrets[i], recovered.1);
         info!("Recovered AVSS secret = {:?}", recovered.1);
     }

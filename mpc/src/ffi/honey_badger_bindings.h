@@ -583,6 +583,7 @@ enum ShareErrorCode robust_share_compute_shares(struct U256 secret,
  */
 enum ShareErrorCode robust_share_recover_secret(struct RobustShareSlice shares,
                                                 uintptr_t n,
+                                                uintptr_t t,
                                                 struct U256 *output_secret,
                                                 struct U256Slice *output_coeffs,
                                                 enum FieldKind field_kind);

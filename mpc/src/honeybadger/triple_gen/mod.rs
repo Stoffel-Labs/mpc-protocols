@@ -4,7 +4,10 @@ use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
-use tokio::{sync::mpsc::error::SendError, task::JoinError};
+use tokio::{
+    sync::oneshot::{channel, Receiver, Sender},
+    task::JoinError,
+};
 
 use crate::{
     common::share::ShareError,
@@ -49,12 +52,20 @@ pub enum TripleGenError {
     /// The session ID of the parameters and the received message does not match.
     #[error("the session IDs do not match")]
     SessionIdMismatch,
-    #[error("error sending the thread asynchronously")]
-    SendError(#[from] SendError<SessionId>),
+    #[error("error sending the result: {0:?}")]
+    SendError(SessionId),
+    #[error("error receiving the result: {0:?}")]
+    ReceiveError(SessionId),
     #[error("session ID {0:?} malformed")]
     SessionIdError(SessionId),
     #[error("limit reached")]
     LimitError,
+    #[error("no such session ID exists: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("result already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("multiplication {0:?} did not complete in time")]
+    Timeout(SessionId),
 }
 
 /// Represents a Beaver triple of non-robust Shamir shares.
@@ -80,17 +91,20 @@ where
 }
 
 /// Storage necessary for the triple generation protocol.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct TripleGenStorage<F>
 where
     F: FftField,
 {
     /// Current state of the protocol execution.
     pub protocol_state: ProtocolState,
+    pub batch_recon_result: Option<Vec<F>>,
     pub randousha_pairs: Vec<DoubleShamirShare<F>>,
     pub random_shares_a_input: Vec<RobustShare<F>>,
     pub random_shares_b_input: Vec<RobustShare<F>>,
     pub protocol_output: Vec<ShamirBeaverTriple<F>>,
+    pub output_sender: Option<Sender<Vec<ShamirBeaverTriple<F>>>>,
+    pub output_receiver: Option<Receiver<Vec<ShamirBeaverTriple<F>>>>,
 }
 
 impl<F> TripleGenStorage<F>
@@ -99,12 +113,17 @@ where
 {
     /// Creates an empty state for the protocol.
     pub fn empty() -> Self {
+        let (output_sender, output_receiver) = channel();
+
         Self {
             protocol_state: ProtocolState::NotInitialized,
+            batch_recon_result: None,
             randousha_pairs: Vec::new(),
             random_shares_a_input: Vec::new(),
             random_shares_b_input: Vec::new(),
             protocol_output: Vec::new(),
+            output_sender: Some(output_sender),
+            output_receiver: Some(output_receiver),
         }
     }
 }

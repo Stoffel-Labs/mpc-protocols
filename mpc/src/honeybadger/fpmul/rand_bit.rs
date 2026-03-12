@@ -13,9 +13,8 @@ use std::collections::HashMap;
 use std::ops::{Add, Mul};
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
-use tokio::time::Duration;
+use tokio::time::{timeout, Duration};
 
 /// Represents the random bit generation protocol.
 ///
@@ -47,8 +46,6 @@ where
     pub threshold: usize,
     /// Storage for the protocol.
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RandBitStorage<F>>>>>>,
-    /// Channel to send session ID of the current session once the protocol finishes its execution.
-    pub output_channel: Sender<SessionId>,
     /// Node to execute a secure multiplication.
     pub mult_node: Multiply<F, R>,
     /// Batch reconstruction node to reconstruct `a^2 mod p`.
@@ -60,20 +57,14 @@ where
     F: FftField,
     R: RBC<Id = SessionId>,
 {
-    pub fn new(
-        id: PartyId,
-        n_parties: usize,
-        threshold: usize,
-        protocol_output: Sender<SessionId>,
-    ) -> Result<Self, RandBitError> {
-        let batch_recon_node = BatchReconNode::new(id, n_parties, threshold)?;
+    pub fn new(id: PartyId, n_parties: usize, threshold: usize) -> Result<Self, RandBitError> {
+        let batch_recon_node = BatchReconNode::new(id, n_parties, threshold, threshold)?;
         let mult_node = Multiply::new(id, n_parties, threshold)?;
         Ok(Self {
             id,
             n_parties,
             threshold,
             storage: Arc::new(Mutex::new(HashMap::new())),
-            output_channel: protocol_output,
             mult_node,
             batch_recon: batch_recon_node,
         })
@@ -104,11 +95,106 @@ where
             .clone())
     }
 
+    pub async fn wait_for_result(
+        &self,
+        session_id: SessionId,
+        duration: Duration,
+    ) -> Result<Vec<RobustShare<F>>, RandBitError> {
+        let output_receiver = {
+            let storage = self.storage.lock().await;
+            let storage_bind = match storage.get(&session_id) {
+                Some(value) => value,
+                None => return Err(RandBitError::NoSuchSessionId(session_id)),
+            };
+            let mut storage = storage_bind.lock().await;
+
+            storage
+                .output_receiver
+                .take()
+                .ok_or(RandBitError::ResultAlreadyReceived(session_id))?
+        };
+
+        match timeout(duration, output_receiver).await {
+            Err(_) => Err(RandBitError::Timeout(session_id)),
+            Ok(Err(_)) => Err(RandBitError::ReceiveError(session_id)),
+            Ok(Ok(shares)) => Ok(shares),
+        }
+    }
+    async fn try_finalize(&self, session_id: SessionId) -> Result<bool, RandBitError> {
+        // ---- phase 1: decide + extract under lock ----
+        let (a_share_array, a_square_array) = {
+            let storage_bind = self.get_or_create_storage(session_id).await?;
+            let storage = storage_bind.lock().await;
+
+            if storage.protocol_state == ProtocolState::Finished {
+                return Ok(true);
+            }
+
+            let Some(a_share_array) = storage.a_share.clone() else {
+                // init not called yet
+                return Ok(false);
+            };
+
+            let batch_size = a_share_array.len() / (self.threshold + 1);
+            if storage.output_open.len() != batch_size {
+                return Ok(false);
+            }
+
+            let a_square_array: Vec<F> = concat_sorted(&storage.output_open);
+            (a_share_array, a_square_array)
+        };
+
+        // ---- phase 2: compute outside lock ----
+        for a_square in &a_square_array {
+            if *a_square == F::zero() {
+                return Err(RandBitError::ZeroSquare);
+            }
+        }
+
+        let mut b_inv_array = Vec::with_capacity(a_square_array.len());
+        for a_square in &a_square_array {
+            let b = a_square.sqrt().ok_or(RandBitError::SquareRoot)?;
+            let b_inv = b.inverse().ok_or(RandBitError::Inverse)?;
+            b_inv_array.push(b_inv);
+        }
+
+        let mut c_share_array = Vec::with_capacity(a_share_array.len());
+        for (a_share, b_inv) in izip!(&a_share_array, &b_inv_array) {
+            c_share_array.push(a_share.clone().mul(*b_inv)?);
+        }
+
+        let two_inv = (F::one() + F::one()).inverse().unwrap();
+        let mut d_share_array = Vec::with_capacity(c_share_array.len());
+        for c_share in &c_share_array {
+            d_share_array.push(c_share.clone().add(F::one())?.mul(two_inv)?);
+        }
+
+        // ---- phase 3: commit + send under lock (once) ----
+        let storage_bind = self.get_or_create_storage(session_id).await?;
+        let mut storage = storage_bind.lock().await;
+
+        if storage.protocol_state == ProtocolState::Finished {
+            return Ok(true);
+        }
+
+        storage.protocol_state = ProtocolState::Finished;
+        storage.protocol_output = Some(d_share_array.clone());
+
+        let sender = storage.output_sender.take().unwrap();
+
+        sender
+            .send(d_share_array)
+            .map_err(|_| RandBitError::SendError(session_id))?;
+
+        Ok(true)
+    }
+
     pub async fn init<N>(
         &mut self,
         a: Vec<RobustShare<F>>,
         mult_triple: Vec<ShamirBeaverTriple<F>>,
         session_id: SessionId,
+        duration: Duration,
         network: Arc<N>,
     ) -> Result<(), RandBitError>
     where
@@ -118,7 +204,13 @@ where
             return Err(RandBitError::Incompatible);
         }
 
+        if a.len() / (self.threshold + 1) > 256 {
+            return Err(RandBitError::ShareLimitError(a.len()));
+        }
+
         assert!(session_id.calling_protocol().is_some());
+        assert_eq!(session_id.sub_id(), 0);
+        assert_eq!(session_id.round_id(), 0);
 
         // Mark the protocol as initialized.
         {
@@ -127,17 +219,16 @@ where
             storage.protocol_state = ProtocolState::Initialized;
             storage.a_share = Some(a.clone());
         }
-
+        if self.try_finalize(session_id).await? {
+            return Ok(());
+        }
         // Step 2: Execute the multiplication to obtain a^2 mod p.
         let a_copy = a.clone();
         self.mult_node
             .init(session_id, a, a_copy, mult_triple, network.clone())
             .await?;
 
-        let a_square_share = self
-            .mult_node
-            .wait_for_result(session_id, Duration::from_millis(500))
-            .await?;
+        let a_square_share = self.mult_node.wait_for_result(session_id, duration).await?;
 
         tracing::info!("Multiplication at Rand_bit done: {0:?}", self.id);
 
@@ -158,7 +249,7 @@ where
     async fn square_reconstruction_handler(
         &self,
         message: RandBitMessage,
-    ) -> Result<Vec<RobustShare<F>>, RandBitError> {
+    ) -> Result<(), RandBitError> {
         tracing::info!(
             "Rand_bit reconstruction msg received from node: {0:?}",
             message.sender
@@ -167,7 +258,7 @@ where
         let calling_proto = match message.session_id.calling_protocol() {
             Some(proto) => proto,
             None => {
-                return Err(RandBitError::SessionIdError(message.session_id));
+                return Err(RandBitError::NoSuchSessionId(message.session_id));
             }
         };
 
@@ -178,11 +269,9 @@ where
         );
         let storage_bind = self.get_or_create_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
-        let a = storage
-            .a_share
-            .clone()
-            .ok_or(RandBitError::NotInitialized)?;
-        let batch_size = a.len() / (self.threshold + 1);
+        if storage.protocol_state == ProtocolState::Finished {
+            return Ok(());
+        }
 
         let open: Vec<F> =
             CanonicalDeserialize::deserialize_compressed(message.payload.as_slice())?;
@@ -194,69 +283,14 @@ where
             )));
         }
         storage.output_open.insert(round_id, open);
-        if storage.output_open.len() != batch_size {
-            return Err(RandBitError::WaitForOk);
+        // If not initialized, data is stored but can't finalize yet.
+        // init() will check for stored data and finalize if ready.
+        if storage.a_share.is_none() {
+            return Ok(());
         }
-
-        let a_square_array: Vec<F> = concat_sorted(&storage.output_open);
         drop(storage);
-        // Step 4.
-        for a_square in &a_square_array {
-            if *a_square == F::zero() {
-                return Err(RandBitError::ZeroSquare);
-            }
-        }
-
-        // Step 5.
-        let mut b_array = Vec::new();
-        for a_square in &a_square_array {
-            let b = a_square.sqrt().ok_or(RandBitError::SquareRoot)?;
-            b_array.push(b);
-        }
-
-        // Step 6.
-        let mut b_inv_array = Vec::new();
-        for b in &b_array {
-            let b_inv = b.inverse().ok_or(RandBitError::Inverse)?;
-            b_inv_array.push(b_inv);
-        }
-
-        let a_share_array = self
-            .get_or_create_storage(session_id)
-            .await?
-            .lock()
-            .await
-            .a_share
-            .clone()
-            .ok_or(RandBitError::NotInitialized)?;
-
-        let mut c_share_array = Vec::new();
-        for (a_share, b_inv) in izip!(&a_share_array, &b_inv_array) {
-            let c_share = a_share.clone().mul(b_inv.clone())?;
-            c_share_array.push(c_share);
-        }
-
-        // Step 7.
-        // SAFETY: we can unwrap as the field cannot have characteristic 2.
-        let two_inv = (F::one() + F::one()).inverse().unwrap();
-        let mut d_share_array = Vec::new();
-        for c_share in &c_share_array {
-            let d = c_share.clone().add(F::one())?.mul(two_inv)?;
-            d_share_array.push(d);
-        }
-
-        // Mark the protocol as finished.
-        {
-            let storage_bind = self.get_or_create_storage(session_id).await?;
-            let mut storage = storage_bind.lock().await;
-            storage.protocol_state = ProtocolState::Finished;
-            storage.protocol_output = Some(d_share_array.clone());
-        }
-
-        // You send the current session ID as finished to the sender channel.
-        self.output_channel.send(session_id).await?;
-
-        Ok(d_share_array)
+        let _done = self.try_finalize(session_id).await?;
+        return Ok(());
     }
 
     pub async fn process(&mut self, message: RandBitMessage) -> Result<(), RandBitError> {
@@ -270,12 +304,10 @@ mod tests {
     use super::*;
     use crate::common::rbc::rbc::Avid;
     use ark_bls12_381::Fr;
-    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_randbit_storage_limit() {
-        let (tx, _rx) = mpsc::channel(1);
-        let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1, tx).unwrap();
+        let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
 
         // Fill up storage to the limit (256 sessions)
         for i in 0u8..=255 {

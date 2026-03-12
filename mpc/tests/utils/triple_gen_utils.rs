@@ -6,29 +6,24 @@ use stoffelmpc_mpc::{
     common::{share::shamir::NonRobustShare, SecretSharingScheme},
     honeybadger::{
         double_share::DoubleShamirShare, robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::triple_generation::TripleGenNode, SessionId, WrappedMessage,
+        triple_gen::triple_generation::TripleGenNode, WrappedMessage,
     },
 };
-use stoffelmpc_network::fake_network::FakeNetwork;
-use tokio::sync::mpsc::{self, Receiver};
+use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
-pub fn create_nodes(
-    n_parties: usize,
-    threshold: usize,
-) -> (Vec<Arc<Mutex<TripleGenNode<Fr>>>>, Vec<Receiver<SessionId>>) {
-    let mut receivers = vec![];
+use crate::utils::test_utils::fan_in_inboxes;
+
+pub fn create_nodes(n_parties: usize, threshold: usize) -> Vec<Arc<Mutex<TripleGenNode<Fr>>>> {
     let triple_gen_nodes = (0..n_parties)
         .map(|id| {
-            let (triple_sender, triple_receiver) = mpsc::channel(128);
-            let triple_gen_node =
-                TripleGenNode::new(id, n_parties, threshold, triple_sender).unwrap();
-            receivers.push(triple_receiver);
+            let triple_gen_node = TripleGenNode::new(id, n_parties, threshold).unwrap();
             Arc::new(Mutex::new(triple_gen_node))
         })
         .collect();
-    (triple_gen_nodes, receivers)
+    triple_gen_nodes
 }
 
 // Return vectors that contain vectors of inputs of init_handler for each node
@@ -65,11 +60,9 @@ pub fn get_triple_init_test_shares(
         let r = Fr::rand(&mut rng);
         pairs_values.push(r);
 
-        let ids: Vec<usize> = (1..=n_parties).collect();
-        let shares_r_t =
-            NonRobustShare::compute_shares(r, n_parties, t, Some(&ids), &mut rng).unwrap();
+        let shares_r_t = NonRobustShare::compute_shares(r, n_parties, t, None, &mut rng).unwrap();
         let shares_r_2t =
-            NonRobustShare::compute_shares(r, n_parties, 2 * t, Some(&ids), &mut rng).unwrap();
+            NonRobustShare::compute_shares(r, n_parties, 2 * t, None, &mut rng).unwrap();
 
         for p in 0..n_parties {
             random_shares_a[p].push(shares_a[p].clone());
@@ -80,6 +73,7 @@ pub fn get_triple_init_test_shares(
             ));
         }
     }
+    info!("{:?}", a_values);
     (
         random_shares_a,
         random_shares_b,
@@ -97,22 +91,28 @@ pub fn get_triple_init_test_shares(
 /// For the rest of the errors, we panic
 pub fn spawn_receiver_tasks(
     nodes: &[Arc<Mutex<TripleGenNode<Fr>>>],
-    mut receivers: Vec<Receiver<Vec<u8>>>,
-    network: Arc<FakeNetwork>,
+    mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
+    network: Vec<Arc<FakeNetwork>>,
 ) {
-    for node in nodes {
+    for (i, node) in nodes.iter().enumerate() {
         let triple_gen_node = Arc::clone(&node);
-        let mut receiver = receivers.remove(0);
+        let receiver = receivers.remove(0);
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+        let mut merged_rx = fan_in_inboxes(inbox);
 
-        let net_clone = Arc::clone(&network);
+        let net_clone = network[i].clone();
         // spawn tasks to process received messages
         tokio::spawn(async move {
             loop {
-                let msg = match receiver.recv().await {
+                let msg = match merged_rx.recv().await {
                     Some(msg) => msg,
                     None => break,
                 };
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg) {
+                let wrapped: WrappedMessage = match bincode::deserialize(&msg.1) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("Malformed or unrecognized message format.");

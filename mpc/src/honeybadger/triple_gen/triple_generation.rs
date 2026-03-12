@@ -4,7 +4,8 @@ use ark_ff::FftField;
 use ark_serialize::CanonicalDeserialize;
 use itertools::izip;
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::{mpsc::Sender, Mutex};
+use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 use tracing::info;
 
 use crate::honeybadger::triple_gen::{TripleGenError, TripleGenMessage, TripleGenStorage};
@@ -17,7 +18,7 @@ use crate::honeybadger::{
 };
 
 /// Current state of the Shamir Beaver triple generation protocol.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum ProtocolState {
     /// The protocol has not been initialized.
     NotInitialized,
@@ -41,9 +42,7 @@ where
     pub threshold: usize,
     /// Internal storage of the node.
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStorage<F>>>>>>,
-    pub output_sender: Sender<SessionId>,
     /// Batch reconstruction node used in the triple generation
-    // TODO - should we put batch_recon_node here or in honeybadger node
     pub batch_recon_node: BatchReconNode<F>,
 }
 
@@ -53,20 +52,14 @@ impl<F> TripleGenNode<F>
 where
     F: FftField,
 {
-    pub fn new(
-        id: PartyId,
-        n_parties: usize,
-        threshold: usize,
-        output_sender: Sender<SessionId>,
-    ) -> Result<Self, TripleGenError> {
+    pub fn new(id: PartyId, n_parties: usize, threshold: usize) -> Result<Self, TripleGenError> {
         // batch_recon_node is for opening degree 2t shares
-        let batch_recon_node = BatchReconNode::<F>::new(id, n_parties, threshold * 2)?;
+        let batch_recon_node = BatchReconNode::<F>::new(id, n_parties, threshold, threshold * 2)?;
         Ok(Self {
             id,
             n_parties,
             threshold,
             storage: Arc::new(Mutex::new(HashMap::new())),
-            output_sender,
             batch_recon_node,
         })
     }
@@ -88,7 +81,106 @@ where
             .or_insert(Arc::new(Mutex::new(TripleGenStorage::empty())))
             .clone())
     }
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        let mut store = self.storage.lock().await;
+        store.remove(&session_id).is_some()
+    }
 
+    pub async fn wait_for_result(
+        &self,
+        session_id: SessionId,
+        duration: Duration,
+    ) -> Result<Vec<ShamirBeaverTriple<F>>, TripleGenError> {
+        let output_receiver = {
+            let storage = self.storage.lock().await;
+            let storage_bind = match storage.get(&session_id) {
+                Some(value) => value,
+                None => return Err(TripleGenError::NoSuchSessionId(session_id)),
+            };
+            let mut storage = storage_bind.lock().await;
+
+            storage
+                .output_receiver
+                .take()
+                .ok_or(TripleGenError::ResultAlreadyReceived(session_id))?
+        };
+
+        match timeout(duration, output_receiver).await {
+            Err(_) => Err(TripleGenError::Timeout(session_id)),
+            Ok(Err(_)) => Err(TripleGenError::ReceiveError(session_id)),
+            Ok(Ok(shares)) => Ok(shares),
+        }
+    }
+
+    async fn try_finalize_triple_gen(
+        &self,
+        session_id: SessionId,
+        storage_bind: Arc<Mutex<TripleGenStorage<F>>>,
+    ) -> Result<bool, TripleGenError> {
+        // ---------- Phase 1: Check readiness ----------
+        let (batch_recon_result, randousha_pairs, random_a, random_b) = {
+            let storage = storage_bind.lock().await;
+
+            if storage.protocol_state == ProtocolState::Finished {
+                return Ok(true);
+            }
+
+            if storage.protocol_state != ProtocolState::Initialized {
+                return Ok(false);
+            }
+
+            let Some(result) = storage.batch_recon_result.clone() else {
+                return Ok(false);
+            };
+
+            (
+                result,
+                storage.randousha_pairs.clone(),
+                storage.random_shares_a_input.clone(),
+                storage.random_shares_b_input.clone(),
+            )
+        };
+
+        // ---------- Phase 2: Compute outside lock ----------
+        let mut result_triples = Vec::new();
+
+        for (sub_value, pair, share_a, share_b) in izip!(
+            batch_recon_result.into_iter(),
+            &randousha_pairs,
+            &random_a,
+            &random_b,
+        ) {
+            let result_share = (pair.degree_t.clone() + &sub_value)?;
+            result_triples.push(ShamirBeaverTriple::new(
+                share_a.clone(),
+                share_b.clone(),
+                result_share.into(),
+            ));
+        }
+
+        // ---------- Phase 3: Commit + send ----------
+        let sender = {
+            let mut storage = storage_bind.lock().await;
+
+            if storage.protocol_state == ProtocolState::Finished {
+                return Ok(true);
+            }
+
+            storage.protocol_state = ProtocolState::Finished;
+            storage.protocol_output = result_triples.clone();
+
+            storage
+                .output_sender
+                .take()
+                .ok_or(TripleGenError::SendError(session_id))?
+        };
+
+        sender
+            .send(result_triples)
+            .map_err(|_| TripleGenError::SendError(session_id))?;
+
+        Ok(true)
+    }
     /// Initializes the protocol to generate random triples based on previously generated shares
     /// and random double shares.
     pub async fn init<N: Network>(
@@ -138,6 +230,14 @@ where
             storage.random_shares_b_input = random_shares_b;
         }
 
+        let storage_bind = self.get_or_create_store(session_id).await?;
+
+        if self
+            .try_finalize_triple_gen(session_id, storage_bind.clone())
+            .await?
+        {
+            return Ok(());
+        }
         info!(
             ?session_id,
             "Starting batch reconstruction for degree-2t shares"
@@ -164,30 +264,20 @@ where
 
         // SHOULD ALSO NEVER FAIL, since comes from batch reconstruction
         let storage_bind = self.get_or_create_store(message.session_id).await?;
-        let mut storage = storage_bind.lock().await;
+        {
+            let mut storage = storage_bind.lock().await;
 
-        let mut result_triples = Vec::new();
-        for (sub_value, pair, share_a, share_b) in izip!(
-            batch_recon_result.into_iter(),
-            &storage.randousha_pairs,
-            &storage.random_shares_a_input,
-            &storage.random_shares_b_input,
-        ) {
-            let result_share = (pair.degree_t.clone() + &sub_value)?;
-            result_triples.push(ShamirBeaverTriple::new(
-                share_a.clone(),
-                share_b.clone(),
-                result_share.into(),
-            ));
+            if storage.protocol_state == ProtocolState::Finished {
+                return Ok(());
+            }
+
+            // STORE result instead of immediately computing
+            storage.batch_recon_result = Some(batch_recon_result);
         }
 
-        // First, we mark the protocol as initialized.
-        storage.protocol_state = ProtocolState::Finished;
-        self.output_sender.send(message.session_id).await?;
-        info!(?message.session_id, id = message.sender_id, "TripleGen protocol finished");
+        self.try_finalize_triple_gen(message.session_id, storage_bind)
+            .await?;
 
-        // Store the result in the inner memory of the node.
-        storage.protocol_output = result_triples;
         Ok(())
     }
 

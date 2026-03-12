@@ -69,7 +69,7 @@ use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
 ///    messages.
 async fn send_next_msgs(
     net_msgs: &mut BinaryHeap<KeyedMessage>,
-    node_channels: &mut [Sender<Vec<u8>>],
+    node_channels: &mut [Vec<Sender<Vec<u8>>>],
     recvd_msg: Option<KeyedMessage>,
     elapsed_time: Duration,
 ) -> Duration {
@@ -92,12 +92,13 @@ async fn send_next_msgs(
                 }
                 debug!(
                     "TIME: sent to {} with elapsed_time={:?} >= delay={:?}",
-                    msg.1 .0, elapsed_time, msg.0
+                    msg.1 .1, elapsed_time, msg.0
                 );
             }
 
             // 3.
-            let result = node_channels[msg.1 .0].send(msg.1 .1.to_vec()).await;
+            let (from, to, payload) = &msg.1;
+            let result = node_channels[*from][*to].send(payload.to_vec()).await;
             if let Err(e) = result {
                 panic!("network thread encountered error {}", e);
             }
@@ -105,7 +106,7 @@ async fn send_next_msgs(
             #[cfg(debug_assertions)]
             debug!(
                 "TIME: msg for {} not ready yet: elapsed_time={:?} < delay={:?}",
-                msg.1 .0, elapsed_time, msg.0
+                msg.1 .1, elapsed_time, msg.0
             );
 
             // 4.
@@ -123,11 +124,17 @@ async fn send_next_msgs(
     *net_msgs = new_net_msgs;
 
     // 7.
-    net_msgs.peek().map_or(Duration::MAX, |msg| msg.0)
+    let next_msg = net_msgs.peek();
+    if let Some(m) = next_msg {
+        m.0
+    } else {
+        Duration::MAX
+    }
 }
 
 #[derive(Debug)]
-struct KeyedMessage(Duration, (PartyId, Vec<u8>));
+struct KeyedMessage(Duration, (PartyId, PartyId, Vec<u8>));
+// (from, to, msg)
 
 impl PartialEq for KeyedMessage {
     fn eq(&self, other: &Self) -> bool {
@@ -150,18 +157,20 @@ impl Ord for KeyedMessage {
 
 /// Simulates a network for testing purposes. The channels for the network are simulated as `tokio`
 /// channels.
-pub struct BadFakeNetwork {
+#[derive(Clone)]
+pub struct BadFakeInnerNetwork {
     /// Fake nodes channels to send information to the network
-    net_channels: Vec<Sender<(PartyId, Vec<u8>)>>,
+    net_channels: Vec<Sender<(PartyId, PartyId, Vec<u8>)>>,
     /// Configuration of the network.
     config: BadFakeNetworkConfig,
     /// Fake nodes connected to the network
     nodes: Vec<FakeBadNode>,
     /// Channels to send messages to clients.
-    client_channels: HashMap<ClientId, Sender<Vec<u8>>>,
+    to_client_channels: HashMap<ClientId, Vec<Sender<Vec<u8>>>>,
+    client_channels: HashMap<ClientId, Vec<Sender<Vec<u8>>>>, // [client][to_node]
 }
 
-impl BadFakeNetwork {
+impl BadFakeInnerNetwork {
     /// Creates a new bad fake network for testing using the given number of nodes and configuration.
     /// Returns
     ///   1. a receiving endpoint to receive messages sent by nodes at the delaying thread
@@ -178,34 +187,69 @@ impl BadFakeNetwork {
         config: BadFakeNetworkConfig,
     ) -> (
         Self,
-        Receiver<(PartyId, Vec<u8>)>,
-        Vec<Sender<Vec<u8>>>,
-        Vec<Receiver<Vec<u8>>>,
-        HashMap<ClientId, Receiver<Vec<u8>>>,
+        Receiver<(PartyId, PartyId, Vec<u8>)>,
+        Vec<Vec<Sender<Vec<u8>>>>,
+        Vec<Vec<Receiver<Vec<u8>>>>,
+        HashMap<ClientId, Vec<Receiver<Vec<u8>>>>,
     ) {
         let (net_channel, net_rx) = mpsc::channel(config.channel_buff_size);
-        let mut net_channels = vec![net_channel];
-        for _ in 1..n_nodes {
-            net_channels.push(net_channels[0].clone());
+        let mut net_channels = Vec::new();
+        for _ in 0..n_nodes {
+            net_channels.push(net_channel.clone());
         }
 
-        let mut node_channels = Vec::new();
-        let mut nodes = Vec::new();
-        let mut receivers = Vec::new();
+        // ---- nodes ----
+        let mut nodes = Vec::with_capacity(n_nodes);
         for id in 0..n_nodes {
-            let (sender, receiver) = mpsc::channel(config.channel_buff_size);
-            node_channels.push(sender);
             nodes.push(FakeBadNode::new(id));
-            receivers.push(receiver);
         }
-        let mut client_channels = HashMap::new();
+
+        // ---- inboxes: one Vec per node ----
+        let mut inboxes: Vec<Vec<Receiver<Vec<u8>>>> = (0..n_nodes).map(|_| Vec::new()).collect();
+
+        // ---- node → node channels ----
+        let mut node_channels = vec![Vec::with_capacity(n_nodes); n_nodes];
+
+        for from in node_channels.iter_mut().take(n_nodes) {
+            for to in inboxes.iter_mut().take(n_nodes) {
+                let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
+                from.push(tx);
+                to.push(rx);
+            }
+        }
+
+        // ---- client → node channels ----
+        let mut client_channels: HashMap<ClientId, Vec<Sender<Vec<u8>>>> = HashMap::new();
+
+        if let Some(client_ids) = n_clients.clone() {
+            for client_id in client_ids {
+                let mut row = Vec::with_capacity(n_nodes);
+
+                for to in inboxes.iter_mut().take(n_nodes) {
+                    let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
+                    row.push(tx);
+                    to.push(rx);
+                }
+
+                client_channels.insert(client_id, row);
+            }
+        }
+        let mut to_client_channels = HashMap::new();
         let mut client_receivers = HashMap::new();
 
-        if let Some(clients) = n_clients {
-            for id in clients {
-                let (client_tx, client_rx) = mpsc::channel(config.channel_buff_size);
-                client_channels.insert(id, client_tx);
-                client_receivers.insert(id, client_rx);
+        if let Some(client_ids) = n_clients {
+            for client_id in client_ids {
+                let mut senders = Vec::with_capacity(n_nodes);
+                let mut receivers = Vec::with_capacity(n_nodes);
+
+                for _from in 0..n_nodes {
+                    let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
+                    senders.push(tx);
+                    receivers.push(rx);
+                }
+
+                to_client_channels.insert(client_id, senders);
+                client_receivers.insert(client_id, receivers);
             }
         }
 
@@ -214,13 +258,41 @@ impl BadFakeNetwork {
                 net_channels,
                 config,
                 nodes,
-                client_channels: client_channels.clone(),
+                to_client_channels,
+                client_channels,
             },
             net_rx,
             node_channels,
-            receivers,
+            inboxes,
             client_receivers,
         )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum BadSenderId {
+    Node(PartyId),
+    Client(ClientId),
+}
+
+#[derive(Clone)]
+pub struct BadFakeNetwork {
+    sender: BadSenderId,
+    inner: BadFakeInnerNetwork,
+}
+impl BadFakeNetwork {
+    pub fn new(id: PartyId, inner: BadFakeInnerNetwork) -> Self {
+        Self {
+            sender: BadSenderId::Node(id),
+            inner,
+        }
+    }
+
+    pub fn new_client(id: ClientId, inner: BadFakeInnerNetwork) -> Self {
+        Self {
+            sender: BadSenderId::Client(id),
+            inner,
+        }
     }
 
     /// Starts the thread, which delays messages and then sends them to the receivers.
@@ -238,8 +310,8 @@ impl BadFakeNetwork {
     ///    a. `send_next_msgs` is called to send any messages whose delay has expired
     ///    b. The timer's expiration time is updated for the next iteration.
     pub fn start(
-        mut net_rx: Receiver<(PartyId, Vec<u8>)>,
-        mut node_channels: Vec<Sender<Vec<u8>>>,
+        mut net_rx: Receiver<(PartyId, PartyId, Vec<u8>)>,
+        mut node_channels: Vec<Vec<Sender<Vec<u8>>>>,
         mut rng: StdRng,
         delay_dist: impl Distribution<u64> + 'static + Send,
     ) -> JoinHandle<()> {
@@ -266,18 +338,19 @@ impl BadFakeNetwork {
 
                         let now = Instant::now();
 
-                        let (id, msg) = id_msg.unwrap();
+                        let (from, to, msg) = id_msg.unwrap();
+
                         // a.
                         let delay = Duration::from_millis(delay_dist.sample(&mut rng));
 
                         #[cfg(debug_assertions)]
-                        debug!("TIME: recvd msg for {} with delay {:?}", id, delay);
+                        debug!("TIME: recvd msg for {} with delay {:?}", to, delay);
 
                         // b.
                         duration = send_next_msgs(
                             &mut net_msgs,
                             &mut node_channels,
-                            Some(KeyedMessage(delay, (id, msg))),
+                            Some(KeyedMessage(delay, (from, to, msg))),
                             now - timer_start
                         ).await;
 
@@ -301,7 +374,6 @@ impl BadFakeNetwork {
         })
     }
 }
-
 #[async_trait]
 impl Network for BadFakeNetwork {
     type NodeType = FakeBadNode;
@@ -310,53 +382,89 @@ impl Network for BadFakeNetwork {
     // Sends a message from a node to the delaying thread, which later forwards it to the right
     // node.
     async fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
-        if self.net_channels.get(recipient).is_some() {
-            self.net_channels[recipient]
-                .send((recipient, message.to_vec()))
-                .await
-                .map_err(|_| NetworkError::SendError)?;
-            Ok(message.len())
-        } else {
-            Err(NetworkError::PartyNotFound(recipient))
+        match self.sender {
+            BadSenderId::Node(from) => {
+                self.inner.net_channels[from]
+                    .send((from, recipient, message.to_vec()))
+                    .await
+                    .map_err(|_| NetworkError::SendError)?;
+            }
+
+            BadSenderId::Client(client_id) => {
+                let row = self
+                    .inner
+                    .client_channels
+                    .get(&client_id)
+                    .ok_or(NetworkError::ClientNotFound(client_id))?;
+
+                let tx = row
+                    .get(recipient)
+                    .ok_or(NetworkError::PartyNotFound(recipient))?;
+
+                tx.send(message.to_vec())
+                    .await
+                    .map_err(|_| NetworkError::SendError)?;
+            }
         }
+        Ok(message.len())
     }
 
     fn node(&self, id: PartyId) -> Option<&Self::NodeType> {
-        self.nodes.iter().find(|node| node.id() == id)
+        self.inner.nodes.iter().find(|node| node.id() == id)
     }
 
     fn node_mut(&mut self, id: PartyId) -> Option<&mut Self::NodeType> {
-        self.nodes.iter_mut().find(|node| node.id == id)
+        self.inner.nodes.iter_mut().find(|node| node.id == id)
     }
 
     async fn broadcast(&self, message: &[u8]) -> Result<usize, NetworkError> {
         let msg = message.to_vec();
 
-        let futures = self
-            .net_channels
-            .iter()
-            .enumerate()
-            .map(|(i, sender)| sender.send((i, msg.clone())));
+        match self.sender {
+            BadSenderId::Node(from) => {
+                if from >= self.inner.net_channels.len() {
+                    return Err(NetworkError::PartyNotFound(from));
+                }
 
-        let results = join_all(futures).await;
+                let futures = (0..self.inner.nodes.len())
+                    .map(|to| self.inner.net_channels[from].send((from, to, msg.clone())));
 
-        if results.iter().any(|r| r.is_err()) {
-            return Err(NetworkError::SendError);
-        }
+                let results = join_all(futures).await;
+
+                if results.iter().any(|r| r.is_err()) {
+                    return Err(NetworkError::SendError);
+                }
+            }
+            BadSenderId::Client(client_id) => {
+                let row = self
+                    .inner
+                    .client_channels
+                    .get(&client_id)
+                    .ok_or(NetworkError::ClientNotFound(client_id))?;
+
+                let futures = row.iter().map(|tx| tx.send(msg.clone()));
+
+                let results = join_all(futures).await;
+
+                if results.iter().any(|r| r.is_err()) {
+                    return Err(NetworkError::SendError);
+                }
+            }
+        };
 
         Ok(message.len())
     }
 
     fn parties(&self) -> Vec<&Self::NodeType> {
-        self.nodes.iter().collect()
+        self.inner.nodes.iter().collect()
     }
 
     fn parties_mut(&mut self) -> Vec<&mut Self::NodeType> {
-        self.nodes.iter_mut().collect()
+        self.inner.nodes.iter_mut().collect()
     }
 
     fn config(&self) -> &Self::NetworkConfig {
-        &self.config
+        &self.inner.config
     }
 
     // --- New client communication methods ---
@@ -368,27 +476,49 @@ impl Network for BadFakeNetwork {
         client: ClientId,
         message: &[u8],
     ) -> Result<usize, NetworkError> {
-        if let Some(sender) = self.client_channels.get(&client) {
-            sender
-                .send(message.to_vec())
-                .await
-                .map_err(|_| NetworkError::SendError)?;
-            Ok(message.len())
-        } else {
-            Err(NetworkError::ClientNotFound(client))
-        }
+        let from = match self.sender {
+            BadSenderId::Node(id) => id,
+            BadSenderId::Client(_) => {
+                return Err(NetworkError::SendError);
+            }
+        };
+
+        let row = self
+            .inner
+            .to_client_channels
+            .get(&client)
+            .ok_or(NetworkError::ClientNotFound(client))?;
+
+        let tx = row.get(from).ok_or(NetworkError::PartyNotFound(from))?;
+
+        tx.send(message.to_vec())
+            .await
+            .map_err(|_| NetworkError::SendError)?;
+
+        Ok(message.len())
     }
 
     fn clients(&self) -> Vec<ClientId> {
-        self.client_channels.keys().copied().collect()
+        self.inner.client_channels.keys().copied().collect()
     }
 
     fn is_client_connected(&self, client: ClientId) -> bool {
-        self.client_channels.contains_key(&client)
+        self.inner.client_channels.contains_key(&client)
+    }
+    fn local_party_id(&self) -> PartyId {
+        match self.sender {
+            BadSenderId::Node(i) => i,
+            BadSenderId::Client(i) => i,
+        }
+    }
+
+    fn party_count(&self) -> usize {
+        self.inner.nodes.len()
     }
 }
 
 /// Represents a node in the BadFakeNetwork.
+#[derive(Clone)]
 pub struct FakeBadNode {
     /// The id of the node.
     pub id: PartyId,
@@ -417,6 +547,7 @@ impl Node for FakeBadNode {
 }
 
 /// Configuration for the fake network.
+#[derive(Clone)]
 pub struct BadFakeNetworkConfig {
     /// Size of the buffer for the channels in the fake network.
     pub channel_buff_size: usize,
@@ -435,8 +566,26 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
     use tokio::sync::Mutex;
+    use tokio::time::timeout;
 
     use super::*;
+
+    pub fn fan_in_inboxes(
+        inboxes: Vec<(BadSenderId, Receiver<Vec<u8>>)>,
+    ) -> Receiver<(BadSenderId, Vec<u8>)> {
+        let (tx, rx) = mpsc::channel(300);
+
+        for (sender, mut rx_i) in inboxes {
+            let tx_i = tx.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = rx_i.recv().await {
+                    let _ = tx_i.send((sender, msg)).await;
+                }
+            });
+        }
+
+        rx
+    }
 
     #[tokio::test]
     async fn test_fake_network_new() {
@@ -444,11 +593,11 @@ mod tests {
 
         let n_nodes = 5;
         let config = BadFakeNetworkConfig::new(100);
-        let (network, _, _, _, _) = BadFakeNetwork::new(n_nodes, None, config);
+        let (inner, _, _, _, _) = BadFakeInnerNetwork::new(n_nodes, None, config);
+        let network = BadFakeNetwork::new(0, inner);
+        let channels = network.inner.net_channels.clone();
 
-        let channels = network.net_channels.clone();
-
-        assert_eq!(network.nodes.len(), n_nodes);
+        assert_eq!(network.inner.nodes.len(), n_nodes);
         assert_eq!(channels.len(), n_nodes);
 
         for i in 0..n_nodes {
@@ -464,8 +613,9 @@ mod tests {
 
         let n_nodes = 3;
         let config = BadFakeNetworkConfig::new(100);
-        let (network, net_rx, node_channels, mut receivers, _) =
-            BadFakeNetwork::new(n_nodes, None, config);
+        let (inner, net_rx, node_channels, mut receivers, _) =
+            BadFakeInnerNetwork::new(n_nodes, None, config);
+        let network = BadFakeNetwork::new(0, inner);
 
         BadFakeNetwork::start(
             net_rx,
@@ -474,7 +624,6 @@ mod tests {
             Uniform::new_inclusive(1, 1),
         );
 
-        let sender_id = 1;
         let recipient_id = 2;
         let message = b"hello";
 
@@ -486,20 +635,32 @@ mod tests {
         assert_eq!(send_result.unwrap(), message.len());
 
         // Get the recipient node and try to receive the message
-        let recipient_node = &mut receivers[recipient_id];
-        let received_message_result = recipient_node.try_recv();
+        let recipient_node = receivers.remove(recipient_id);
+        let inbox: Vec<(BadSenderId, Receiver<Vec<u8>>)> = recipient_node
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (BadSenderId::Node(i), r))
+            .collect();
+        let mut merge_rx = fan_in_inboxes(inbox);
+        let received_message_result = timeout(Duration::from_millis(50), merge_rx.recv())
+            .await
+            .expect("timed out waiting for merged message");
 
-        assert!(received_message_result.is_ok());
-        assert_eq!(received_message_result.unwrap(), message.to_vec());
+        assert!(received_message_result.is_some());
+        assert_eq!(received_message_result.unwrap().1, message.to_vec());
 
         // Ensure the other node didn't receive the message
-        let other_node1 = &mut receivers[sender_id];
-        let other_received_message_result = other_node1.try_recv();
-        assert!(other_received_message_result.is_err()); // Should be empty
-
-        let other_node2 = &mut receivers[2];
-        let other_received_message_result = other_node2.try_recv();
-        assert!(other_received_message_result.is_err()); // Should be empty
+        for _ in 0..2 {
+            let other_node1 = receivers.remove(0);
+            let inbox: Vec<(BadSenderId, Receiver<Vec<u8>>)> = other_node1
+                .into_iter() // MOVE the receivers
+                .enumerate()
+                .map(|(i, r)| (BadSenderId::Node(i), r))
+                .collect();
+            let mut merge_rx = fan_in_inboxes(inbox);
+            let other_received_message_result = merge_rx.try_recv();
+            assert!(other_received_message_result.is_err()); // Should be empty
+        }
     }
 
     #[tokio::test]
@@ -508,9 +669,9 @@ mod tests {
 
         let n_nodes = 3;
         let config = BadFakeNetworkConfig::new(100);
-        let (network, net_rx, node_channels, mut receivers, _) =
-            BadFakeNetwork::new(n_nodes, None, config);
-        let network = Arc::new(Mutex::new(network));
+        let (inner, net_rx, node_channels, mut receivers, _) =
+            BadFakeInnerNetwork::new(n_nodes, None, config);
+        let network = Arc::new(Mutex::new(BadFakeNetwork::new(0, inner)));
 
         BadFakeNetwork::start(
             net_rx,
@@ -529,10 +690,19 @@ mod tests {
         sleep(Duration::from_millis(10)).await; // wait for broadcast to make it through the network
 
         // Verify all nodes received the message
-        for node_recv in receivers.iter_mut().take(n_nodes) {
-            let received_message_result = node_recv.try_recv();
-            assert!(received_message_result.is_ok());
-            assert_eq!(received_message_result.unwrap(), message.to_vec());
+        for _ in 0..n_nodes {
+            let node_recv = receivers.remove(0);
+            let inbox: Vec<(BadSenderId, Receiver<Vec<u8>>)> = node_recv
+                .into_iter() // MOVE the receivers
+                .enumerate()
+                .map(|(i, r)| (BadSenderId::Node(i), r))
+                .collect();
+            let mut merge_rx = fan_in_inboxes(inbox);
+            let received_message_result = timeout(Duration::from_millis(50), merge_rx.recv())
+                .await
+                .expect("timed out waiting for merged message");
+            assert!(received_message_result.is_some());
+            assert_eq!(received_message_result.unwrap().1, message.to_vec());
         }
     }
 
@@ -558,7 +728,8 @@ mod tests {
 
         let n_nodes = 2;
         let config = BadFakeNetworkConfig::new(100);
-        let (mut network, net_rx, node_channels, _, _) = BadFakeNetwork::new(n_nodes, None, config);
+        let (inner, net_rx, node_channels, _, _) = BadFakeInnerNetwork::new(n_nodes, None, config);
+        let mut network = BadFakeNetwork::new(0, inner);
 
         BadFakeNetwork::start(
             net_rx,
@@ -572,15 +743,14 @@ mod tests {
 
         // Simulate send failure by removing the recipient's sender
         assert!(
-            recipient_id < network.net_channels.len(),
+            recipient_id < network.inner.net_channels.len(),
             "Recipient must exist"
         );
 
-        network.net_channels[recipient_id] = {
-            // Drop the sender by replacing it with a closed channel
-            let (closed_sender, _): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(1);
-            drop(closed_sender); // explicitly drop so that send fails
-            mpsc::channel(1).0 // use a channel with no receiver
+        network.inner.net_channels[0] = {
+            let (tx, rx) = mpsc::channel::<(PartyId, PartyId, Vec<u8>)>(1);
+            drop(rx); // no receiver alive
+            tx
         };
 
         // Now, sending should fail
@@ -600,8 +770,9 @@ mod tests {
 
         let n_nodes = 2;
         let config = BadFakeNetworkConfig::new(500);
-        let (network, net_rx, node_channels, mut receivers, _) =
-            BadFakeNetwork::new(n_nodes, None, config);
+        let (inner, net_rx, node_channels, mut receivers, _) =
+            BadFakeInnerNetwork::new(n_nodes, None, config);
+        let network = BadFakeNetwork::new(0, inner);
 
         BadFakeNetwork::start(
             net_rx,
@@ -624,17 +795,24 @@ mod tests {
         }
 
         let mut out_of_order = false;
-        let recipient_node = &mut receivers[recipient_id];
+        let recipient_node = receivers.remove(recipient_id);
+        let inbox: Vec<(BadSenderId, Receiver<Vec<u8>>)> = recipient_node
+            .into_iter() // MOVE the receivers
+            .enumerate()
+            .map(|(i, r)| (BadSenderId::Node(i), r))
+            .collect();
+        let mut merge_rx = fan_in_inboxes(inbox);
         let mut i_recvd = HashSet::new();
 
         for i in 0..n_msgs {
-            let received_message_result = recipient_node.recv().await;
+            let received_message_result = merge_rx.recv().await;
 
             assert!(received_message_result.is_some());
 
             let i_msg = u32::from_be_bytes(
                 received_message_result
                     .unwrap()
+                    .1
                     .try_into()
                     .expect("received unexpected message"),
             );

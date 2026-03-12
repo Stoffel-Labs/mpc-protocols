@@ -25,10 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Duration};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use thiserror::Error;
-use tokio::sync::{
-    mpsc::{self, Receiver},
-    Mutex,
-};
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 pub mod mul;
@@ -64,6 +61,14 @@ pub enum AdkgError {
     TripleGenError(#[from] TripleGenError),
     #[error("the protocol cannot be executed any more")]
     LimitError,
+    #[error("instance ID {0:?} is incorrect")]
+    InstanceIdError(u32),
+    #[error("Party Id is out of bounds")]
+    InvalidPartyId,
+    #[error("Invalid threshold t={0} for n={1}, must satisfy t < ceil(n / 3)")]
+    InvalidThreshold(usize, usize),
+    #[error("Party size is too large")]
+    InvalidPartySize,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +89,7 @@ where
     pub n_triples: usize,
     /// Instance ID
     pub instance_id: u32,
+    pub timeout: Duration,
 }
 
 impl<F, G> AdkgNodeOpts<F, G>
@@ -100,8 +106,17 @@ where
         sk_i: F,
         pk_map: Arc<Vec<G>>,
         instance_id: u32,
-    ) -> Self {
-        Self {
+        timeout: Duration,
+    ) -> Result<Self, AdkgError> {
+        //No of parties should not exceed 255
+        if n_parties > 255 {
+            return Err(AdkgError::InvalidPartySize);
+        }
+        if !(threshold < (n_parties + 2) / 3) {
+            // ceil(n / 3)
+            return Err(AdkgError::InvalidThreshold(threshold, n_parties));
+        }
+        Ok(Self {
             n_parties,
             threshold,
             n_v_random_shares,
@@ -109,7 +124,11 @@ where
             sk_i,
             pk_map,
             instance_id,
-        }
+            timeout,
+        })
+    }
+    pub fn set_timeout(&mut self, secs: u64) {
+        self.timeout = Duration::from_secs(secs)
     }
 }
 
@@ -180,8 +199,6 @@ pub struct AdkgNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub share_gen_avss: RanShaAvssNode<F, R, G>,
     pub triple_gen: TripleGenNode<F, R, G>,
     pub mul_node: Multiply<F, R, G>,
-    pub share_gen_avss_channel: Arc<Mutex<Receiver<AvssSessionId>>>,
-    pub triple_channel: Arc<Mutex<Receiver<AvssSessionId>>>,
     pub counters: SubProtocolCounters,
 }
 
@@ -247,17 +264,15 @@ where
         params: Self::MPCOpts,
         _input_ids: Vec<ClientId>,
     ) -> Result<Self, AdkgError> {
-        let (share_gen_avss_sender, share_gen_avss_reciever) = mpsc::channel(128);
-        let (triple_sender, triple_reciever) = mpsc::channel(128);
-
+        if id >= params.n_parties {
+            return Err(AdkgError::InvalidPartyId);
+        }
         let share_gen_avss = RanShaAvssNode::new(
             id,
             params.n_parties,
             params.threshold,
-            params.threshold + 1,
             params.sk_i,
             params.pk_map.clone(),
-            share_gen_avss_sender,
         )?;
 
         let triple_gen = TripleGenNode::new(
@@ -266,7 +281,6 @@ where
             params.threshold,
             params.sk_i,
             params.pk_map.clone(),
-            triple_sender,
         )?;
         let mul_node = Multiply::new(id, params.n_parties, params.threshold)?;
         Ok(Self {
@@ -276,46 +290,60 @@ where
             share_gen_avss,
             triple_gen,
             mul_node,
-            share_gen_avss_channel: Arc::new(Mutex::new(share_gen_avss_reciever)),
-            triple_channel: Arc::new(Mutex::new(triple_reciever)),
             counters: SubProtocolCounters::new(),
         })
     }
-    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
+    async fn process(
+        &mut self,
+        sender_id: PartyId,
+        raw_msg: Vec<u8>,
+        net: Arc<N>,
+    ) -> Result<(), Self::Error> {
         let wrapped: AvssWrappedMessage = bincode::deserialize(&raw_msg)?;
         match wrapped {
-            AvssWrappedMessage::Rbc(rbc_msg) => match rbc_msg.session_id.calling_protocol() {
-                Some(ProtocolType::Avss) => {
-                    self.share_gen_avss.avss.rbc.process(rbc_msg, net).await?
+            AvssWrappedMessage::Rbc(rbc_msg) => {
+                if sender_id != rbc_msg.sender_id {
+                    return Err(AdkgError::InvalidPartyId);
                 }
-                Some(ProtocolType::Triple) => {
-                    self.triple_gen.avss.rbc.process(rbc_msg, net).await?
+                if rbc_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(AdkgError::InstanceIdError(rbc_msg.session_id.instance_id()));
                 }
-                Some(ProtocolType::Mul) => self.mul_node.rbc.process(rbc_msg, net).await?,
-                _ => {
-                    warn!(
-                        "Unknown protocol ID in session ID: {:?} in RBC",
-                        rbc_msg.session_id
-                    );
-                }
-            },
-            AvssWrappedMessage::Avss(avss_message) => {
-                match avss_message.session_id.calling_protocol() {
+                match rbc_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Avss) => {
-                        self.share_gen_avss.avss.process(avss_message).await?;
+                        self.share_gen_avss.avss.rbc.process(rbc_msg, net).await?;
+                        self.share_gen_avss.avss.drain_rbc_output().await?;
                     }
                     Some(ProtocolType::Triple) => {
-                        self.triple_gen.avss.process(avss_message).await?
+                        self.triple_gen.avss.rbc.process(rbc_msg, net).await?;
+                        self.triple_gen.avss.drain_rbc_output().await?;
+                    }
+                    Some(ProtocolType::Mul) => {
+                        self.mul_node.rbc.process(rbc_msg, net).await?;
+                        self.mul_node.drain_rbc_output().await?;
                     }
                     _ => {
                         warn!(
-                            "Unknown protocol ID in session ID: {:?}",
-                            avss_message.session_id
+                            "Unknown protocol ID in session ID: {:?} in RBC",
+                            rbc_msg.session_id
                         );
                     }
                 }
             }
-            AvssWrappedMessage::Mul(mul_message) => self.mul_node.process(mul_message).await?,
+            AvssWrappedMessage::Mul(mul_message) => {
+                if sender_id != mul_message.sender {
+                    return Err(AdkgError::InvalidPartyId);
+                }
+                if mul_message.session_id.instance_id() != self.params.instance_id {
+                    return Err(AdkgError::InstanceIdError(
+                        mul_message.session_id.instance_id(),
+                    ));
+                }
+                self.mul_node.process(mul_message).await?
+            }
+
+            _ => {
+                warn!("Unknown session ID in ADKG",);
+            }
         }
 
         Ok(())
@@ -361,7 +389,7 @@ where
             .await?;
 
         self.mul_node
-            .wait_for_result(session_id, Duration::MAX)
+            .wait_for_result(session_id, self.params.timeout)
             .await
             .map_err(AdkgError::from)
     }
@@ -478,24 +506,20 @@ where
                     AvssSessionId::pack_slot24(triple_counter, 0, round_id),
                     self.params.instance_id,
                 );
-                self.triple_gen
+                let triples = self
+                    .triple_gen
                     .gen_triple(sessionid, a.to_vec(), b.to_vec(), rng, network.clone())
                     .await?;
 
                 // ------------------------
                 // Step 4. Collect triples
                 // ------------------------
-                if let Some(sid) = self.triple_channel.lock().await.recv().await {
-                    if sid == sessionid {
-                        let mut triple_gen_db = self.triple_gen.store.lock().await;
-                        let triple_storage_mutex = triple_gen_db.remove(&sid).unwrap();
-                        let triple_storage = triple_storage_mutex.lock().await;
-                        let triples = triple_storage.output.clone();
-
-                        self.preprocessing_material.lock().await.add(triples, None);
-                    }
+                {
+                    self.preprocessing_material
+                        .lock()
+                        .await
+                        .add(Some(triples), None);
                 }
-
                 if round_id == 255 {
                     triple_counter = self.counters.triple_counter.get_next().await.unwrap();
                     round_id = 0;
@@ -548,16 +572,16 @@ where
                 .await?;
 
             // Collect its output
-            if let Some(id) = self.share_gen_avss_channel.lock().await.recv().await {
-                if id == sessionid {
-                    let output = self.share_gen_avss.output(id).await;
-                    self.preprocessing_material
-                        .lock()
-                        .await
-                        .add(None, Some(output));
-                }
+            let output = self
+                .share_gen_avss
+                .wait_for_result(sessionid, self.params.timeout)
+                .await?;
+            {
+                self.preprocessing_material
+                    .lock()
+                    .await
+                    .add(None, Some(output));
             }
-
             if round_id == 255 {
                 v_ran_sha_counter = self.counters.ran_sha_avss_counter.get_next().await?;
                 round_id = 0;
@@ -565,9 +589,6 @@ where
                 round_id += 1;
             }
         }
-
-        // Clear RBC store
-        self.share_gen_avss.rbc.clear_store().await;
         Ok(())
     }
 }

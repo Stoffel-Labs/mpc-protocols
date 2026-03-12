@@ -4,7 +4,8 @@ use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::{mpsc::Sender, Mutex};
+use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 use tracing::info;
 
 use crate::{
@@ -28,7 +29,7 @@ pub struct RanShaNode<F: FftField, R: RBC> {
     pub threshold: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanShaStore<F>>>>>>,
     pub rbc: R,
-    pub output_sender: Sender<SessionId>,
+    pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
 }
 
 pub static MAX_SHARE_GEN_SESSIONS: usize = 1024;
@@ -43,13 +44,14 @@ where
         n_parties: usize,
         threshold: usize,
         k: usize,
-        output_sender: Sender<SessionId>,
     ) -> Result<Self, RanShaError> {
+        let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
         let rbc = R::new(
             id,
             n_parties,
             threshold,
             k,
+            rbc_sender,
             Arc::new(WrappedMessage::rbc_wrap),
         )?;
         Ok(Self {
@@ -58,10 +60,35 @@ where
             threshold,
             store: Arc::new(Mutex::new(HashMap::new())),
             rbc,
-            output_sender,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
 
+    pub async fn drain_rbc_output(&mut self) -> Result<(), RanShaError> {
+        loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(RanShaError::Abort);
+                    }
+                }
+            };
+
+            let output = self.rbc.get_store(id).await?;
+            let msg: RanShaMessage = bincode::deserialize(&output)?;
+
+            match self.output_handler(msg).await {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
@@ -78,6 +105,68 @@ where
             .clone())
     }
 
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        let mut store = self.store.lock().await;
+        store.remove(&session_id).is_some()
+    }
+    pub async fn wait_for_result(
+        &self,
+        session_id: SessionId,
+        duration: Duration,
+    ) -> Result<Vec<RobustShare<F>>, RanShaError> {
+        let output_receiver = {
+            let storage = self.store.lock().await;
+            let storage_bind = match storage.get(&session_id) {
+                Some(value) => value,
+                None => return Err(RanShaError::NoSuchSessionId(session_id)),
+            };
+            let mut storage = storage_bind.lock().await;
+
+            storage
+                .output_receiver
+                .take()
+                .ok_or(RanShaError::ResultAlreadyReceived(session_id))?
+        };
+
+        match timeout(duration, output_receiver).await {
+            Err(_) => Err(RanShaError::Timeout(session_id)),
+            Ok(Err(_)) => Err(RanShaError::ReceiveError(session_id)),
+            Ok(Ok(shares)) => Ok(shares),
+        }
+    }
+    async fn try_finalize(&mut self, session_id: SessionId) -> Result<bool, RanShaError> {
+        // phase 1: decide + extract under lock
+        let output = {
+            let store_bind = self.get_or_create_store(session_id).await?;
+            let mut store = store_bind.lock().await;
+
+            if store.state == RanShaState::Finished {
+                return Ok(true);
+            }
+
+            if store.received_ok_msg.len() < 2 * self.threshold {
+                return Ok(false);
+            }
+            if store.computed_r_shares.len() < self.n_parties {
+                return Ok(false);
+            }
+
+            let output = store.computed_r_shares[2 * self.threshold..].to_vec();
+            store.state = RanShaState::Finished;
+            store.protocol_output = output.clone();
+
+            let sender = store.output_sender.take().unwrap();
+            (sender, output)
+        };
+
+        // phase 2: send outside lock (send is sync, but it’s still a good pattern)
+        let (sender, output) = output;
+        sender
+            .send(output)
+            .map_err(|_| RanShaError::SendError(session_id))?;
+        Ok(true)
+    }
+
     pub async fn init<N, G>(
         &mut self,
         session_id: SessionId,
@@ -92,7 +181,6 @@ where
 
         assert_eq!(session_id.sub_id(), 0);
 
-        let storage_access = self.get_or_create_store(session_id).await?;
         let secret = F::rand(rng);
 
         let shares_deg_t =
@@ -117,37 +205,12 @@ where
         }
 
         // Update the state of the protocol to Initialized.
+        let storage_access = self.get_or_create_store(session_id).await?;
         let mut storage = storage_access.lock().await;
         storage.state = RanShaState::Initialized;
         Ok(())
     }
 
-    pub async fn process<N>(
-        &mut self,
-        msg: RanShaMessage,
-        network: Arc<N>,
-    ) -> Result<(), RanShaError>
-    where
-        N: Network + Send + Sync,
-    {
-        match msg.msg_type {
-            RanShaMessageType::ShareMessage => {
-                self.receive_shares_handler(msg, network).await?;
-                Ok(())
-            }
-            RanShaMessageType::OutputMessage => Ok(self.output_handler(msg).await?),
-            RanShaMessageType::ReconstructMessage => {
-                self.reconstruction_handler(msg, network).await?;
-                Ok(())
-            }
-        }
-    }
-    pub async fn output(&mut self, session_id: SessionId) -> Vec<RobustShare<F>> {
-        let mut share_store = self.store.lock().await;
-        let store_lock = share_store.remove(&session_id).unwrap();
-        let store = store_lock.lock().await;
-        store.protocol_output.clone()
-    }
     pub async fn receive_shares_handler<N>(
         &mut self,
         msg: RanShaMessage,
@@ -175,6 +238,10 @@ where
             session_id = msg.session_id.as_u64(),
             "party {:?} received shares from {:?}", self.id, msg.sender_id,
         );
+
+        if msg.sender_id >= self.n_parties {
+            return Err(RanShaError::InvalidPartyId);
+        }
         ransha_storage.reception_tracker[msg.sender_id] = true;
 
         // Check if the protocol has reached an end
@@ -224,6 +291,9 @@ where
         let mut store = bind_store.lock().await;
         store.computed_r_shares = r_deg_t.clone();
         drop(store);
+        if self.try_finalize(session_id).await? {
+            return Ok(());
+        }
 
         for i in 0..2 * self.threshold {
             let share_deg_t = r_deg_t[i].clone();
@@ -267,6 +337,9 @@ where
         }
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
+        if store.state == RanShaState::Finished {
+            return Ok(());
+        }
         store.state = RanShaState::Reconstruction;
         store.received_r_shares.insert(msg.sender_id, share.clone());
 
@@ -277,7 +350,7 @@ where
             drop(store);
 
             let ok: bool;
-            match RobustShare::recover_secret(&shares, self.n_parties) {
+            match RobustShare::recover_secret(&shares, self.n_parties, self.threshold) {
                 Ok(r) => {
                     let poly = DensePolynomial::from_coefficients_slice(&r.0);
                     ok = poly.degree() == self.threshold;
@@ -285,12 +358,12 @@ where
                 Err(_) => ok = false,
             }
 
-            let result = WrappedMessage::RanSha(RanShaMessage::new(
+            let result = RanShaMessage::new(
                 self.id,
                 RanShaMessageType::OutputMessage,
                 msg.session_id,
                 RanShaPayload::Output(ok),
-            ));
+            );
             let bytes = bincode::serialize(&result)?;
             let sessionid = SessionId::new(
                 ProtocolType::Ransha,
@@ -325,25 +398,34 @@ where
 
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
-        store.state = RanShaState::Output;
 
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
         }
-
-        if store.received_ok_msg.len() < 2 * self.threshold {
-            return Err(RanShaError::WaitForOk);
-        }
-
-        if store.computed_r_shares.len() < self.n_parties {
-            return Err(RanShaError::WaitForOk);
-        }
-
-        let output = store.computed_r_shares[2 * self.threshold..].to_vec();
-        store.state = RanShaState::Finished;
-        store.protocol_output = output;
-        self.output_sender.send(msg.session_id).await?;
+        drop(store);
+        self.try_finalize(msg.session_id).await?;
         Ok(())
+    }
+
+    pub async fn process<N>(
+        &mut self,
+        msg: RanShaMessage,
+        network: Arc<N>,
+    ) -> Result<(), RanShaError>
+    where
+        N: Network + Send + Sync,
+    {
+        match msg.msg_type {
+            RanShaMessageType::ShareMessage => {
+                self.receive_shares_handler(msg, network).await?;
+                Ok(())
+            }
+            RanShaMessageType::OutputMessage => Ok(()),
+            RanShaMessageType::ReconstructMessage => {
+                self.reconstruction_handler(msg, network).await?;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -357,14 +439,13 @@ mod tests {
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
     use std::sync::Arc;
-    use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-    use tokio::sync::mpsc;
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
 
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_receive_shares_handler() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
 
         // Fill up the storage to the limit by calling receive_shares_handler with unique session IDs
         let mut exec = 0u8;
@@ -417,9 +498,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_reconstruction_handler() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
 
         // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
         let mut exec = 0u8;
@@ -472,8 +553,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sharegen_storage_limit_in_output_handler() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
 
         // Fill up the storage to the limit by calling output_handler with unique session IDs
         let mut exec = 0u8;
@@ -520,9 +600,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_sharegen_receive_shares_handler_invalid_sub_id() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(0, 1, 0), 0);
@@ -545,9 +625,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_sharegen_reconstruction_handler_invalid_sub_id() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
-        let net = Arc::new(FakeNetwork::new(5, None, FakeNetworkConfig::new(10)).0);
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(0, 1, 0), 0);
@@ -570,8 +650,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sharegen_output_handler_invalid_sub_id() {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2, tx).unwrap();
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(0, 1, 0), 0);

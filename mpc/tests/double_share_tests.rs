@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, thread, time::Duration};
+use std::{collections::HashMap, thread, time::Duration};
 
 use crate::utils::test_utils::test_setup;
 use ark_std::test_rng;
@@ -21,17 +21,9 @@ async fn generate_faulty_double_shares_e2e() {
     let threshold = 2;
     let session_id = SessionId::new(ProtocolType::Dousha, SessionId::pack_slot24(123, 0, 0), 111);
 
-    let (network, receivers, _) = test_setup(n_parties, vec![]);
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
-    let mut sender_channels = Vec::new();
-    let mut receiver_channels = Vec::new();
-    for _ in 0..n_parties {
-        let (sender, receiver) = mpsc::channel(128);
-        sender_channels.push(sender);
-        receiver_channels.push(receiver);
-    }
-
-    let dou_sha_nodes = create_nodes(n_parties, threshold, sender_channels);
+    let dou_sha_nodes = create_nodes(n_parties, threshold);
     let mut rng = test_rng();
 
     let (final_result_sender, mut final_result_receiver) = mpsc::channel(1024);
@@ -45,8 +37,9 @@ async fn generate_faulty_double_shares_e2e() {
     // Initialize nodes.
     for node in &dou_sha_nodes {
         let mut node_locked = node.lock().await;
+        let id = node_locked.id;
         node_locked
-            .init(session_id, &mut rng, Arc::clone(&network))
+            .init(session_id, &mut rng, network[id].clone())
             .await
             .unwrap();
     }
@@ -86,8 +79,8 @@ async fn generate_faulty_double_shares_e2e() {
             .map(|shares| shares[i].degree_2t.clone())
             .collect();
 
-        let secret_t = NonRobustShare::recover_secret(&shares_t, n_parties);
-        let secret_2t = NonRobustShare::recover_secret(&shares_2t, n_parties);
+        let secret_t = NonRobustShare::recover_secret(&shares_t, n_parties, threshold);
+        let secret_2t = NonRobustShare::recover_secret(&shares_2t, n_parties, threshold);
 
         assert_eq!(
             secret_t.unwrap().1,

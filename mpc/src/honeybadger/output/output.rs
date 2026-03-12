@@ -142,7 +142,7 @@ impl<F: FftField> OutputClient<F> {
                 let mut output = Vec::new();
 
                 for output_elem in r_shares {
-                    let secret = match RobustShare::recover_secret(&output_elem, self.n) {
+                    let secret = match RobustShare::recover_secret(&output_elem, self.n, self.t) {
                         Ok(secret) => secret,
                         Err(e) => {
                             recovery_err = Some(e);

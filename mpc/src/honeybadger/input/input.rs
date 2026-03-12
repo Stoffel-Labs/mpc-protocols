@@ -1,13 +1,13 @@
 use crate::common::{ProtocolSessionId, SecretSharingScheme, RBC};
+use crate::honeybadger::input::InputError;
 use crate::honeybadger::input::InputMessage;
-use crate::honeybadger::input::{InputError, InputMessageType};
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use stoffelnet::network_utils::{ClientId, Network};
+use stoffelnet::network_utils::{ClientId, Network, PartyId};
 use tokio::{
     sync::{
         watch::{channel, Receiver, Sender},
@@ -74,6 +74,7 @@ pub struct InputServer<F: FftField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub rbc: R,
+    pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
     status_sender: Sender<HashMap<ClientId, (InputType, Vec<RobustShare<F>>)>>,
     status_receiver: Receiver<HashMap<ClientId, (InputType, Vec<RobustShare<F>>)>>,
 }
@@ -103,7 +104,15 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         t: usize,
         input_ids: Vec<ClientId>,
     ) -> Result<Self, InputError> {
-        let rbc = R::new(id, n, t, t + 1, Arc::new(WrappedMessage::rbc_wrap))?;
+        let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
+        let rbc = R::new(
+            id,
+            n,
+            t,
+            t + 1,
+            rbc_sender,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?;
         let (status_sender, status_receiver) = channel(
             input_ids
                 .into_iter()
@@ -115,11 +124,35 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
             id,
             n,
             rbc,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             status_sender,
             status_receiver,
         })
     }
 
+    pub async fn drain_rbc_output(&mut self) -> Result<(), InputError> {
+        loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(InputError::Abort);
+                    }
+                }
+            };
+
+            let output = self.rbc.get_store(id).await?;
+            match self.input_handler(id.sub_id().into(), output).await {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
     /// Called by each server to send its share of `r_i` to the client.
     pub async fn init<N: Network>(
         &mut self,
@@ -181,7 +214,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         if send_over_network {
             let mut payload = Vec::new();
             shares.serialize_compressed(&mut payload)?;
-            let msg = InputMessage::new(self.id, InputMessageType::MaskShare, payload);
+            let msg = InputMessage::new(self.id, payload);
             let wrapped = WrappedMessage::Input(msg);
             let bytes = bincode::serialize(&wrapped)?;
             net.send_to_client(client_id, &bytes).await?;
@@ -192,20 +225,22 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
     }
 
     /// Called by each server: receives masked m_i, subtracts r_i to get share of m_i.
-    pub async fn input_handler(&mut self, msg: InputMessage) -> Result<(), InputError> {
+    pub async fn input_handler(
+        &mut self,
+        sender_id: PartyId,
+        payload: Vec<u8>,
+    ) -> Result<(), InputError> {
         //handler for server
         //accepts the m+r values and then subtracts the r' local share from it to get m' shares
         // and stores it
         info!(
             "Server {} received MaskedInput from client {}",
-            self.id, msg.sender_id
+            self.id, sender_id
         );
 
         let masked_inputs_as_shares: Vec<RobustShare<F>> = {
             let masked_inputs: Vec<F> =
-                ark_serialize::CanonicalDeserialize::deserialize_compressed(
-                    msg.payload.as_slice(),
-                )?;
+                ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
             masked_inputs
                 .iter()
                 .map(|m| RobustShare::new(*m, 0, 0))
@@ -216,7 +251,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         let mut already_masked_inputs = false;
 
         self.status_sender
-            .send_if_modified(|status| match status.get(&msg.sender_id) {
+            .send_if_modified(|status| match status.get(&sender_id) {
                 Some((InputType::MaskedInputs | InputType::InputShares, _)) => {
                     already_masked_inputs = true;
                     false
@@ -225,22 +260,22 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
                     let input_shares =
                         calculate_input_shares(&masked_inputs_as_shares, random_shares);
 
-                    status.insert(msg.sender_id, (InputType::InputShares, input_shares));
+                    status.insert(sender_id, (InputType::InputShares, input_shares));
                     info!(
                         "Server {} stored input shares from client {}",
-                        self.id, msg.sender_id
+                        self.id, sender_id
                     );
 
                     true
                 }
                 Some((InputType::Empty, _)) => {
                     status.insert(
-                        msg.sender_id,
+                        sender_id,
                         (InputType::MaskedInputs, masked_inputs_as_shares),
                     );
                     info!(
                         "Server {} stored masked inputs from client {}",
-                        self.id, msg.sender_id
+                        self.id, sender_id
                     );
 
                     true
@@ -254,7 +289,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         if already_masked_inputs {
             return Err(InputError::Duplicate(format!(
                 "Server {} already received masked inputs from {}",
-                self.id, msg.sender_id
+                self.id, sender_id
             )));
         }
         if unknown_client {
@@ -264,16 +299,6 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         }
 
         Ok(())
-    }
-
-    /// Process any message (used for both client and server roles).
-    pub async fn process(&mut self, msg: InputMessage) -> Result<(), InputError> {
-        match msg.msg_type {
-            InputMessageType::MaskShare => Err(InputError::InvalidInput(
-                "Incorrect message type".to_string(),
-            )),
-            InputMessageType::MaskedInput => self.input_handler(msg).await,
-        }
     }
 
     pub async fn wait_for_all_inputs(
@@ -339,7 +364,15 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
         instance_id: u32,
         inputs: Vec<F>,
     ) -> Result<Self, InputError> {
-        let rbc = R::new(id, n, t, t + 1, Arc::new(WrappedMessage::rbc_wrap))?;
+        let (rbc_sender, _) = tokio::sync::mpsc::channel(200);
+        let rbc = R::new(
+            id,
+            n,
+            t,
+            t + 1,
+            rbc_sender,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?;
         Ok(Self {
             client_id: id,
             n,
@@ -406,7 +439,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
                 }
             }
             for recon in r_shares {
-                let secret = RobustShare::recover_secret(&recon, self.n)?;
+                let secret = RobustShare::recover_secret(&recon, self.n, self.t)?;
                 masks.push(secret.1);
             }
 
@@ -416,10 +449,6 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
 
             let mut payload = Vec::new();
             output.serialize_compressed(&mut payload)?;
-            let msg = InputMessage::new(self.client_id, InputMessageType::MaskedInput, payload);
-            //wrap it in protocol wide enum
-            let wrapped = WrappedMessage::Input(msg);
-            let bytes = bincode::serialize(&wrapped)?;
             //Broadcast to servers
             let sessionid = SessionId::new(
                 ProtocolType::Input,
@@ -431,7 +460,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
                 self.instance_id,
             );
 
-            d.rbc.init(bytes, sessionid, net).await?;
+            d.rbc.init(payload, sessionid, net).await?;
             d.rbc_done = true;
             info!(
                 "Client {} initialized broadcasting of masked input to all servers",
@@ -448,12 +477,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
         msg: InputMessage,
         net: Arc<N>,
     ) -> Result<(), InputError> {
-        match msg.msg_type {
-            InputMessageType::MaskedInput => Err(InputError::InvalidInput(
-                "Incorrect message type".to_string(),
-            )),
-            InputMessageType::MaskShare => self.init_handler(msg, net).await,
-        }
+        self.init_handler(msg, net).await
     }
 }
 
@@ -466,9 +490,30 @@ pub mod tests {
     };
     use ark_bls12_381::Fr;
     use ark_std::test_rng;
-    use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
-    use tokio::time::{sleep, Duration};
+    use stoffelmpc_network::fake_network::{
+        FakeInnerNetwork, FakeNetwork, FakeNetworkConfig, SenderId,
+    };
+    use tokio::{
+        sync::mpsc,
+        time::{sleep, Duration},
+    };
 
+    pub fn fan_in_inboxes(
+        inboxes: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)>,
+    ) -> tokio::sync::mpsc::Receiver<(SenderId, Vec<u8>)> {
+        let (tx, rx) = mpsc::channel(300);
+
+        for (sender, mut rx_i) in inboxes {
+            let tx_i = tx.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = rx_i.recv().await {
+                    let _ = tx_i.send((sender, msg)).await;
+                }
+            });
+        }
+
+        rx
+    }
     /// `2t+1` nodes send random shares to the client, which reconstructs the random value and
     /// broadcasts the masked input. Some node, which is not one of the `2t+1` has not sent its
     /// random share and receives the masked input before even having called `InputServer::init`.
@@ -481,10 +526,22 @@ pub mod tests {
         let input = Fr::from(10);
 
         let config = FakeNetworkConfig::new(500);
-        let (network, mut receivers, mut client_recv_map) =
-            FakeNetwork::new(n, Some(vec![clientid]), config);
-        let mut client_recv = client_recv_map.remove(&clientid).unwrap();
-        let network = Arc::new(network);
+        let (net, mut receivers, mut client_recv_map) =
+            FakeInnerNetwork::new(n, Some(vec![clientid]), config);
+        let client_inboxes = client_recv_map.remove(&clientid).unwrap();
+
+        let inbox: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)> = client_inboxes
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+
+        let mut client_recv = fan_in_inboxes(inbox);
+        let network: Vec<_> = (0..n)
+            .map(|id| Arc::new(FakeNetwork::new(id, net.clone())))
+            .collect();
+        let client_network: Arc<FakeNetwork> =
+            Arc::new(FakeNetwork::new_client(clientid, net.clone()));
 
         let mut rng = test_rng();
         let rand_shares = RobustShare::compute_shares(rand_secret, n, t, None, &mut rng).unwrap();
@@ -499,7 +556,12 @@ pub mod tests {
         // all but one node call init
         for i in 0..nodes.len() - 1 {
             assert!(nodes[i]
-                .init(clientid, vec![rand_shares[i].clone()], 1, network.clone())
+                .init(
+                    clientid,
+                    vec![rand_shares[i].clone()],
+                    1,
+                    network[i].clone()
+                )
                 .await
                 .is_ok());
 
@@ -518,32 +580,37 @@ pub mod tests {
 
         // receive random shares to send masked input
         for _ in 0..3 {
-            let received = client_recv.recv().await.unwrap();
-            if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received) {
-                assert!(client.process(msg, network.clone()).await.is_ok());
-            } else {
-                panic!();
+            let (_, raw) = client_recv.recv().await.unwrap();
+            let wrapped: WrappedMessage =
+                bincode::deserialize(&raw).expect("deserialization error");
+            match wrapped {
+                WrappedMessage::Input(msg) => {
+                    assert!(client.process(msg, client_network.clone()).await.is_ok());
+                }
+                _ => panic!("Unexpected message"),
             }
         }
 
         // run RBC for masked input and eventually process it
-        for node in nodes.iter_mut() {
+        for (i, node) in nodes.iter_mut().enumerate() {
             let network = network.clone();
             let mut node = node.clone();
-            let mut receiver = receivers.remove(0);
-
+            let receiver = receivers.remove(0);
+            let inbox: Vec<(SenderId, tokio::sync::mpsc::Receiver<Vec<u8>>)> = receiver
+                .into_iter() // MOVE the receivers
+                .enumerate()
+                .map(|(i, r)| (SenderId::Node(i), r))
+                .collect();
+            let mut merged_rx = fan_in_inboxes(inbox);
             tokio::spawn(async move {
-                while let Some(raw_msg) = receiver.recv().await {
+                while let Some(raw_msg) = merged_rx.recv().await {
                     let wrapped: WrappedMessage =
-                        bincode::deserialize(&raw_msg).expect("deserialization error");
+                        bincode::deserialize(&raw_msg.1).expect("deserialization error");
 
                     let _ = match wrapped {
                         WrappedMessage::Rbc(rbc_msg) => {
-                            node.rbc.process(rbc_msg, network.clone()).await
-                        }
-                        WrappedMessage::Input(input_msg) => {
-                            let _ = node.process(input_msg).await;
-                            return;
+                            let _ = node.rbc.process(rbc_msg, network[i].clone()).await;
+                            let _ = node.drain_rbc_output().await;
                         }
                         _ => {
                             panic!();
@@ -563,7 +630,12 @@ pub mod tests {
             assert!(client_status.is_some() && client_status.unwrap().0 == InputType::MaskedInputs);
         }
         nodes[3]
-            .init(clientid, vec![rand_shares[3].clone()], 1, network.clone())
+            .init(
+                clientid,
+                vec![rand_shares[3].clone()],
+                1,
+                network[3].clone(),
+            )
             .await
             .unwrap();
         // check that node that called init last now also has input share
@@ -583,7 +655,7 @@ pub mod tests {
             recovered_shares.push(client_shares[0].clone());
         }
 
-        let (_, r) = RobustShare::recover_secret(&recovered_shares, n).unwrap();
+        let (_, r) = RobustShare::recover_secret(&recovered_shares, n, t).unwrap();
         assert_eq!(r, input);
     }
 }

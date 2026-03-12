@@ -14,7 +14,7 @@ use ark_std::rand::Rng;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
-    mpsc::{self, Sender},
+    mpsc::{self},
     Mutex,
 };
 use tracing::info;
@@ -27,7 +27,6 @@ pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
     pub avss: AvssNode<F, R, C, AvssSessionId>,
     pub avss_output: Arc<Mutex<mpsc::Receiver<AvssSessionId>>>,
     pub store: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<TripleGenStore<F, C>>>>>>,
-    pub output_channel: Sender<AvssSessionId>,
 }
 
 impl<F, R, C> TripleGenNode<F, R, C>
@@ -42,7 +41,6 @@ where
         threshold: usize,
         sk_i: F,
         pk_map: Arc<Vec<C>>,
-        output_channel: Sender<AvssSessionId>,
     ) -> Result<Self, TripleGenError> {
         let (tx, rx) = mpsc::channel(256);
         let avss = AvssNode::new(
@@ -63,7 +61,6 @@ where
             avss,
             avss_output: Arc::new(Mutex::new(rx)),
             store: Arc::new(Mutex::new(HashMap::new())),
-            output_channel,
         })
     }
 
@@ -204,7 +201,6 @@ where
                     })
                     .collect();
                 st.output = Some(triples.clone());
-                self.output_channel.send(session_id).await?;
                 return Ok(triples);
             }
         }

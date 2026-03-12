@@ -12,7 +12,8 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use itertools::izip;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::Mutex;
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 
@@ -23,15 +24,18 @@ pub struct Multiply<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub t: usize,
     pub mult_storage: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<MultStorage<F, G>>>>>>,
     pub rbc: R,
+    pub rbc_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
 
 impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Multiply<F, R, G> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
+        let (rbc_sender, rbc_receiver) = mpsc::channel(200);
         let rbc = R::new(
             id,
             n,
             threshold,
             threshold + 1,
+            rbc_sender,
             Arc::new(AvssWrappedMessage::rbc_wrap),
         )?;
         Ok(Self {
@@ -40,6 +44,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             t: threshold,
             mult_storage: Arc::new(Mutex::new(HashMap::new())),
             rbc,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
     pub async fn clear_store(&self) {
@@ -48,6 +53,31 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         self.rbc.clear_store().await;
     }
 
+    pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {
+        loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(MulError::Abort);
+                    }
+                }
+            };
+
+            let output = self.rbc.get_store(id).await?;
+            let msg: MultMessage = bincode::deserialize(&output)?;
+
+            match self.open_mult_handler(msg).await {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
     pub async fn init<N: Network + Send + Sync>(
         &mut self,
         session_id: AvssSessionId,
@@ -78,7 +108,12 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             .map(|triple| triple.c.clone())
             .collect();
         drop(storage);
-
+        if self
+            .try_finalize_mul(session_id, storage_bind.clone())
+            .await?
+        {
+            return Ok(());
+        }
         let a_sub_x = x
             .iter()
             .zip(beaver_triples.iter())
@@ -100,8 +135,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             session_id.instance_id(),
         );
 
-        let wrapped =
-            AvssWrappedMessage::Mul(MultMessage::new(self.id, session_id, bytes_rec_message));
+        let wrapped = MultMessage::new(self.id, session_id, bytes_rec_message);
         let bytes_wrapped = bincode::serialize(&wrapped)?;
 
         self.rbc
@@ -134,51 +168,8 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         storage
             .received_shares
             .insert(msg.sender, (open_message.a_sub_x, open_message.b_sub_y));
-
-        let no_of_mul = storage.no_of_mul.ok_or(MulError::InvalidInput(format!(
-            "No. of multiplications not set for node (init not called yet) {}",
-            self.id
-        )))?;
-
-        if storage.received_shares.len() >= 2 * self.t + 1 && storage.openings.is_none() {
-            info!("Received enough messages with shares to try reconstruction using RBC");
-            let mut a_sub_x: Vec<F> = Vec::new();
-            let mut b_sub_y: Vec<F> = Vec::new();
-            let mut a_shares = vec![vec![]; no_of_mul];
-            let mut b_shares = vec![vec![]; no_of_mul];
-
-            for (id, (a, b)) in storage.received_shares.iter() {
-                if a.len() != no_of_mul || b.len() != no_of_mul {
-                    warn!("Node {} did not send right number of shares to reconstruct using RBC (sent {} for a-x and {} for b-y)", id, a.len(), b.len());
-                }
-                for i in 0..no_of_mul {
-                    a_shares[i].push(a[i].clone());
-                    b_shares[i].push(b[i].clone());
-                }
-            }
-            for i in 0..no_of_mul {
-                let a = FeldmanShamirShare::recover_secret(&a_shares[i], self.n)?;
-                let b = FeldmanShamirShare::recover_secret(&b_shares[i], self.n)?;
-                a_sub_x.push(a.1);
-                b_sub_y.push(b.1);
-            }
-            info!("Reconstruction succeeded");
-            storage.openings = Some((a_sub_x, b_sub_y));
-        }
-
-        if storage.openings.is_none() {
-            return Err(MulError::WaitForOk);
-        }
-        let shares_mult = finalize_mul(&storage)?;
-
-        // never None because checked at the beginning
-        let taken_output_sender = storage.output_sender.take().unwrap();
-
-        taken_output_sender
-            .send(shares_mult)
-            .map_err(|_| MulError::SendError(msg.session_id))?;
-        storage.protocol_state = MultProtocolState::Finished;
-
+        drop(storage);
+        let _ = self.try_finalize_mul(msg.session_id, storage_bind).await?;
         info!("Multiplication completed at node {}", self.id);
 
         Ok(())
@@ -231,16 +222,111 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             Ok(Ok(mul_shares)) => Ok(mul_shares),
         }
     }
+    async fn try_finalize_mul(
+        &self,
+        session_id: AvssSessionId,
+        storage_bind: Arc<Mutex<MultStorage<F, G>>>,
+    ) -> Result<bool, MulError> {
+        // -------- Phase 1: Check readiness --------
+        let should_finalize = {
+            let mut storage = storage_bind.lock().await;
+
+            if storage.protocol_state == MultProtocolState::Finished {
+                return Ok(true);
+            }
+
+            if storage.no_of_mul.is_none() {
+                return Ok(false);
+            }
+
+            reconstruct_if_ready(&mut storage, self.t, self.n)?;
+
+            storage.openings.is_some()
+        };
+
+        if !should_finalize {
+            return Ok(false);
+        }
+
+        // -------- Phase 2: Compute outside lock --------
+        let shares_mult = {
+            let storage = storage_bind.lock().await;
+            finalize_mul(&storage)?
+        };
+
+        // -------- Phase 3: Commit + send --------
+        let sender = {
+            let mut storage = storage_bind.lock().await;
+
+            if storage.protocol_state == MultProtocolState::Finished {
+                return Ok(true);
+            }
+
+            storage.protocol_state = MultProtocolState::Finished;
+
+            storage
+                .output_sender
+                .take()
+                .ok_or(MulError::SendError(session_id))?
+        };
+
+        sender
+            .send(shares_mult)
+            .map_err(|_| MulError::SendError(session_id))?;
+
+        Ok(true)
+    }
 }
 
+fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
+    storage: &mut MultStorage<F, G>,
+    t: usize,
+    n: usize,
+) -> Result<(), MulError> {
+    if storage.received_shares.len() >= 2 * t + 1 && storage.openings.is_none() {
+        let no_of_mul = storage.no_of_mul.unwrap();
+
+        let mut a_sub_x = Vec::new();
+        let mut b_sub_y = Vec::new();
+        let mut a_shares = vec![vec![]; no_of_mul];
+        let mut b_shares = vec![vec![]; no_of_mul];
+
+        for (_, (a, b)) in storage.received_shares.iter() {
+            if a.len() != no_of_mul || b.len() != no_of_mul {
+                warn!("Did not recieve the right number of shares to reconstruct using RBC (sent for a-x and for b-y)");
+                continue;
+            }
+            for i in 0..no_of_mul {
+                a_shares[i].push(a[i].clone());
+                b_shares[i].push(b[i].clone());
+            }
+        }
+
+        for i in 0..no_of_mul {
+            let a = FeldmanShamirShare::recover_secret(&a_shares[i], n, t)?;
+            let b = FeldmanShamirShare::recover_secret(&b_shares[i], n, t)?;
+            a_sub_x.push(a.1);
+            b_sub_y.push(b.1);
+        }
+        info!("Reconstruction succeeded");
+
+        storage.openings = Some((a_sub_x, b_sub_y));
+    }
+    Ok(())
+}
 fn finalize_mul<F: FftField, G: CurveGroup<ScalarField = F>>(
     storage: &MultStorage<F, G>,
 ) -> Result<Vec<FeldmanShamirShare<F, G>>, MulError> {
     assert!(storage.openings.is_some()); // always ensured by the caller
 
     let openings = storage.openings.as_ref().unwrap();
-
-    let mut shares_mult = Vec::with_capacity(storage.share_mult_from_triple.len());
+    let expected_len = storage.share_mult_from_triple.len();
+    if storage.inputs.0.len() != expected_len || storage.inputs.1.len() != expected_len {
+        return Err(MulError::InvalidInput(
+            "Inconsistent lengths in finalize_mul".to_string(),
+        ));
+    }
+    let mut shares_mult = Vec::with_capacity(expected_len);
     for (triple_mult, input_a, input_b, subtraction_a, subtraction_b) in izip!(
         &storage.share_mult_from_triple,
         &storage.inputs.0,

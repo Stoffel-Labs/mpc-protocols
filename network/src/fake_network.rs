@@ -7,18 +7,20 @@ use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
 
 /// Simulates a network for testing purposes. The channels for the network are simulated as `tokio`
 /// channels.
-pub struct FakeNetwork {
+#[derive(Clone)]
+pub struct FakeInnerNetwork {
     /// Fake nodes channels to send information to the network
-    node_channels: Vec<Sender<Vec<u8>>>,
+    node_channels: Vec<Vec<Sender<Vec<u8>>>>, // [sender][node] where sender = node | client.
     /// Configuration of the network.
     config: FakeNetworkConfig,
     /// Fake nodes connected to the network
     nodes: Vec<FakeNode>,
     /// Channels to send messages to clients.
-    client_channels: HashMap<ClientId, Sender<Vec<u8>>>,
+    to_client_channels: HashMap<ClientId, Vec<Sender<Vec<u8>>>>,
+    client_channels: HashMap<ClientId, Vec<Sender<Vec<u8>>>>, // [client][to_node]
 }
 
-impl FakeNetwork {
+impl FakeInnerNetwork {
     /// Creates a new fake network for testing using the given number of nodes and configuration.
     #[allow(clippy::type_complexity)]
     pub fn new(
@@ -27,26 +29,63 @@ impl FakeNetwork {
         config: FakeNetworkConfig,
     ) -> (
         Self,
-        Vec<Receiver<Vec<u8>>>,
-        HashMap<ClientId, Receiver<Vec<u8>>>,
+        Vec<Vec<Receiver<Vec<u8>>>>, // inboxes[to][sender_index]
+        HashMap<ClientId, Vec<Receiver<Vec<u8>>>>,
     ) {
-        let mut node_channels = Vec::new();
-        let mut nodes = Vec::new();
-        let mut receivers = Vec::new();
+        // ---- nodes ----
+        let mut nodes = Vec::with_capacity(n_nodes);
         for id in 0..n_nodes {
-            let (sender, receiver) = mpsc::channel(config.channel_buff_size);
-            node_channels.push(sender);
             nodes.push(FakeNode::new(id));
-            receivers.push(receiver);
         }
-        let mut client_channels = HashMap::new();
-        let mut client_receivers = HashMap::new();
 
-        if let Some(clients) = n_clients {
-            for id in clients {
-                let (client_tx, client_rx) = mpsc::channel(config.channel_buff_size);
-                client_channels.insert(id, client_tx);
-                client_receivers.insert(id, client_rx);
+        // ---- inboxes: one Vec per node ----
+        let mut inboxes: Vec<Vec<Receiver<Vec<u8>>>> = (0..n_nodes).map(|_| Vec::new()).collect();
+
+        // ---- node → node channels ----
+        let mut node_channels = vec![Vec::with_capacity(n_nodes); n_nodes];
+
+        for from in node_channels.iter_mut().take(n_nodes) {
+            for to in inboxes.iter_mut().take(n_nodes) {
+                let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
+                from.push(tx);
+                to.push(rx);
+            }
+        }
+
+        // ---- client → node channels ----
+        let mut client_channels: HashMap<ClientId, Vec<Sender<Vec<u8>>>> = HashMap::new();
+
+        if let Some(client_ids) = n_clients.clone() {
+            for client_id in client_ids {
+                let mut row = Vec::with_capacity(n_nodes);
+
+                for to in inboxes.iter_mut().take(n_nodes) {
+                    let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
+                    row.push(tx);
+                    to.push(rx);
+                }
+
+                client_channels.insert(client_id, row);
+            }
+        }
+
+        // ---- client receivers (node → client handled elsewhere) ----
+        let mut client_receivers = HashMap::new();
+        let mut to_client_channels = HashMap::new();
+
+        if let Some(client_ids) = n_clients {
+            for client_id in client_ids {
+                let mut senders = Vec::with_capacity(n_nodes);
+                let mut receivers = Vec::with_capacity(n_nodes);
+
+                for _from in 0..n_nodes {
+                    let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
+                    senders.push(tx);
+                    receivers.push(rx);
+                }
+
+                to_client_channels.insert(client_id, senders);
+                client_receivers.insert(client_id, receivers);
             }
         }
 
@@ -55,11 +94,39 @@ impl FakeNetwork {
                 node_channels,
                 config,
                 nodes,
-                client_channels: client_channels.clone(),
+                to_client_channels,
+                client_channels,
             },
-            receivers,
+            inboxes,
             client_receivers,
         )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum SenderId {
+    Node(PartyId),
+    Client(ClientId),
+}
+
+#[derive(Clone)]
+pub struct FakeNetwork {
+    sender: SenderId,
+    inner: FakeInnerNetwork,
+}
+impl FakeNetwork {
+    pub fn new(id: PartyId, inner: FakeInnerNetwork) -> Self {
+        Self {
+            sender: SenderId::Node(id),
+            inner,
+        }
+    }
+
+    pub fn new_client(id: ClientId, inner: FakeInnerNetwork) -> Self {
+        Self {
+            sender: SenderId::Client(id),
+            inner,
+        }
     }
 }
 
@@ -69,35 +136,72 @@ impl Network for FakeNetwork {
     type NetworkConfig = FakeNetworkConfig;
 
     async fn send(&self, recipient: PartyId, message: &[u8]) -> Result<usize, NetworkError> {
-        if let Some(sender) = self.node_channels.get(recipient) {
-            sender
-                .send(message.to_vec())
-                .await
-                .map_err(|_| NetworkError::SendError)?;
-            Ok(message.len())
-        } else {
-            Err(NetworkError::PartyNotFound(recipient))
+        match self.sender {
+            SenderId::Node(from) => {
+                let tx = self
+                    .inner
+                    .node_channels
+                    .get(from)
+                    .and_then(|row| row.get(recipient))
+                    .ok_or(NetworkError::PartyNotFound(recipient))?;
+
+                tx.send(message.to_vec())
+                    .await
+                    .map_err(|_| NetworkError::SendError)?;
+            }
+
+            SenderId::Client(client_id) => {
+                let row = self
+                    .inner
+                    .client_channels
+                    .get(&client_id)
+                    .ok_or(NetworkError::ClientNotFound(client_id))?;
+
+                let tx = row
+                    .get(recipient)
+                    .ok_or(NetworkError::PartyNotFound(recipient))?;
+
+                tx.send(message.to_vec())
+                    .await
+                    .map_err(|_| NetworkError::SendError)?;
+            }
         }
+
+        Ok(message.len())
     }
 
     fn node(&self, id: PartyId) -> Option<&Self::NodeType> {
-        self.nodes.iter().find(|node| node.id() == id)
+        self.inner.nodes.iter().find(|node| node.id() == id)
     }
 
     fn node_mut(&mut self, id: PartyId) -> Option<&mut Self::NodeType> {
-        self.nodes.iter_mut().find(|node| node.id == id)
+        self.inner.nodes.iter_mut().find(|node| node.id == id)
     }
 
     async fn broadcast(&self, message: &[u8]) -> Result<usize, NetworkError> {
         let msg = message.to_vec();
 
-        let futures = self
-            .node_channels
-            .iter()
-            .map(|sender| sender.send(msg.clone()));
+        let sends = match self.sender {
+            SenderId::Node(from) => self
+                .inner
+                .node_channels
+                .get(from)
+                .ok_or(NetworkError::PartyNotFound(from))?
+                .iter()
+                .map(|tx| tx.send(msg.clone()))
+                .collect::<Vec<_>>(),
 
-        let results = join_all(futures).await;
+            SenderId::Client(client_id) => self
+                .inner
+                .client_channels
+                .get(&client_id)
+                .ok_or(NetworkError::ClientNotFound(client_id))?
+                .iter()
+                .map(|tx| tx.send(msg.clone()))
+                .collect::<Vec<_>>(),
+        };
 
+        let results = join_all(sends).await;
         if results.iter().any(|r| r.is_err()) {
             return Err(NetworkError::SendError);
         }
@@ -106,15 +210,15 @@ impl Network for FakeNetwork {
     }
 
     fn parties(&self) -> Vec<&Self::NodeType> {
-        self.nodes.iter().collect()
+        self.inner.nodes.iter().collect()
     }
 
     fn parties_mut(&mut self) -> Vec<&mut Self::NodeType> {
-        self.nodes.iter_mut().collect()
+        self.inner.nodes.iter_mut().collect()
     }
 
     fn config(&self) -> &Self::NetworkConfig {
-        &self.config
+        &self.inner.config
     }
 
     // --- New client communication methods ---
@@ -124,27 +228,50 @@ impl Network for FakeNetwork {
         client: ClientId,
         message: &[u8],
     ) -> Result<usize, NetworkError> {
-        if let Some(sender) = self.client_channels.get(&client) {
-            sender
-                .send(message.to_vec())
-                .await
-                .map_err(|_| NetworkError::SendError)?;
-            Ok(message.len())
-        } else {
-            Err(NetworkError::ClientNotFound(client))
-        }
+        let from = match self.sender {
+            SenderId::Node(id) => id,
+            SenderId::Client(_) => {
+                return Err(NetworkError::SendError);
+            }
+        };
+
+        let row = self
+            .inner
+            .to_client_channels
+            .get(&client)
+            .ok_or(NetworkError::ClientNotFound(client))?;
+
+        let tx = row.get(from).ok_or(NetworkError::PartyNotFound(from))?;
+
+        tx.send(message.to_vec())
+            .await
+            .map_err(|_| NetworkError::SendError)?;
+
+        Ok(message.len())
     }
 
     fn clients(&self) -> Vec<ClientId> {
-        self.client_channels.keys().copied().collect()
+        self.inner.client_channels.keys().copied().collect()
     }
 
     fn is_client_connected(&self, client: ClientId) -> bool {
-        self.client_channels.contains_key(&client)
+        self.inner.client_channels.contains_key(&client)
+    }
+
+    fn local_party_id(&self) -> PartyId {
+        match self.sender {
+            SenderId::Node(i) => i,
+            SenderId::Client(i) => i,
+        }
+    }
+
+    fn party_count(&self) -> usize {
+        self.inner.nodes.len()
     }
 }
 
 /// Represents a node in the FakeNetwork.
+#[derive(Clone)]
 pub struct FakeNode {
     /// The id of the node.
     pub id: PartyId,
@@ -173,6 +300,7 @@ impl Node for FakeNode {
 }
 
 /// Configuration for the fake network.
+#[derive(Clone)]
 pub struct FakeNetworkConfig {
     /// Size of the buffer for the channels in the fake network.
     pub channel_buff_size: usize,
@@ -187,27 +315,32 @@ impl FakeNetworkConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use tokio::sync::Mutex;
-
     use super::*;
 
     #[tokio::test]
     async fn test_fake_network_new() {
         let n_nodes = 5;
         let config = FakeNetworkConfig::new(100);
-        let (network, _, _) = FakeNetwork::new(n_nodes, None, config);
 
-        let channels = network.node_channels.clone();
+        let (inner, inboxes, _) = FakeInnerNetwork::new(n_nodes, None, config);
 
-        assert_eq!(network.nodes.len(), n_nodes);
-        assert_eq!(channels.len(), n_nodes);
+        // One inbox matrix per node
+        assert_eq!(inboxes.len(), n_nodes);
+        for to in 0..n_nodes {
+            assert_eq!(inboxes[to].len(), n_nodes);
+        }
+
+        // Create per-node handles
+        let networks: Vec<_> = (0..n_nodes)
+            .map(|id| FakeNetwork::new(id, inner.clone()))
+            .collect();
+
+        assert_eq!(inner.nodes.len(), n_nodes);
 
         for i in 0..n_nodes {
-            assert!(channels.get(i).is_some());
-            assert!(network.node(i).is_some());
-            assert_eq!(network.node(i).unwrap().id(), i);
+            // assert_eq!(networks[i].local_party_id(), i);
+            assert!(networks[i].node(i).is_some());
+            assert_eq!(networks[i].node(i).unwrap().id(), i);
         }
     }
 
@@ -215,53 +348,62 @@ mod tests {
     async fn test_fake_network_send_and_receive() {
         let n_nodes = 3;
         let config = FakeNetworkConfig::new(100);
-        let (network, mut receivers, _) = FakeNetwork::new(n_nodes, None, config);
+
+        let (inner, mut inboxes, _) = FakeInnerNetwork::new(n_nodes, None, config);
+
+        let networks: Vec<_> = (0..n_nodes)
+            .map(|id| FakeNetwork::new(id, inner.clone()))
+            .collect();
 
         let sender_id = 1;
         let recipient_id = 2;
         let message = b"hello";
 
-        // Send a message from the perspective of the network
-        let send_result = network.send(recipient_id, message).await;
+        let send_result = networks[sender_id].send(recipient_id, message).await;
+
         assert!(send_result.is_ok());
         assert_eq!(send_result.unwrap(), message.len());
 
-        // Get the recipient node and try to receive the message
-        let recipient_node = &mut receivers[recipient_id];
-        let received_message_result = recipient_node.try_recv();
+        // Receiver reads specifically from sender_id
+        let received = inboxes[recipient_id][sender_id]
+            .try_recv()
+            .expect("message should exist");
 
-        assert!(received_message_result.is_ok());
-        assert_eq!(received_message_result.unwrap(), message.to_vec());
+        assert_eq!(received, message.to_vec());
 
-        // Ensure the other node didn't receive the message
-        let other_node1 = &mut receivers[sender_id];
-        let other_received_message_result = other_node1.try_recv();
-        assert!(other_received_message_result.is_err()); // Should be empty
-
-        let other_node2 = &mut receivers[2];
-        let other_received_message_result = other_node2.try_recv();
-        assert!(other_received_message_result.is_err()); // Should be empty
+        // Ensure no other sender channel fired
+        for from in 0..n_nodes {
+            if from != sender_id {
+                assert!(inboxes[recipient_id][from].try_recv().is_err());
+            }
+        }
     }
 
     #[tokio::test]
     async fn test_fake_network_broadcast() {
         let n_nodes = 3;
         let config = FakeNetworkConfig::new(100);
-        let (network, mut receivers, _) = FakeNetwork::new(n_nodes, None, config);
-        let network = Arc::new(Mutex::new(network));
 
+        let (inner, mut inboxes, _) = FakeInnerNetwork::new(n_nodes, None, config);
+        let networks: Vec<_> = (0..n_nodes)
+            .map(|id| FakeNetwork::new(id, inner.clone()))
+            .collect();
+
+        let sender_id = 0;
         let message = b"broadcast";
 
-        let network = network.lock().await;
-        let broadcast_result = network.broadcast(message).await;
+        let broadcast_result = networks[sender_id].broadcast(message).await;
+
         assert!(broadcast_result.is_ok());
         assert_eq!(broadcast_result.unwrap(), message.len());
 
-        // Verify all nodes received the message
-        for node_recv in receivers.iter_mut().take(n_nodes) {
-            let received_message_result = node_recv.try_recv();
-            assert!(received_message_result.is_ok());
-            assert_eq!(received_message_result.unwrap(), message.to_vec());
+        // Each node receives from sender_id
+        for to in 0..n_nodes {
+            let received = inboxes[to][sender_id]
+                .try_recv()
+                .expect("broadcast message missing");
+
+            assert_eq!(received, message.to_vec());
         }
     }
 
@@ -282,33 +424,27 @@ mod tests {
     #[tokio::test]
     async fn test_network_error_on_send_failure() {
         let n_nodes = 2;
-        let config = FakeNetworkConfig::new(100);
-        let (mut network, _, _) = FakeNetwork::new(n_nodes, None, config);
+        let config = FakeNetworkConfig::new(1);
 
-        let recipient_id = 1;
-        let message = b"test";
+        let (mut inner, _, _) = FakeInnerNetwork::new(n_nodes, None, config);
 
-        // Simulate send failure by removing the recipient's sender
-        assert!(
-            recipient_id < network.node_channels.len(),
-            "Recipient must exist"
-        );
+        let from = 0;
+        let to = 1;
 
-        network.node_channels[recipient_id] = {
-            // Drop the sender by replacing it with a closed channel
-            let (closed_sender, _): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel(1);
-            drop(closed_sender); // explicitly drop so that send fails
-            mpsc::channel(1).0 // use a channel with no receiver
+        // Close the (from -> to) channel
+        inner.node_channels[from][to] = {
+            let (tx, rx) = mpsc::channel(1);
+            drop(rx);
+            tx
         };
 
-        // Now, sending should fail
-        let send_result = network.send(recipient_id, message).await;
-        assert!(
-            send_result.is_err(),
-            "Send should fail after sender is closed."
-        );
+        let network = FakeNetwork::new(from, inner);
 
-        // Since the channel exists but is closed, expect a SendError (not PartyNotFound)
+        let message = b"test";
+
+        let send_result = network.send(to, message).await;
+
+        assert!(send_result.is_err());
         assert_eq!(send_result.unwrap_err(), NetworkError::SendError);
     }
 }

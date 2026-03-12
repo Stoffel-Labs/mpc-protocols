@@ -215,6 +215,7 @@ where
     fn recover_secret(
         shares: &[Self],
         _n: usize,
+        _t: usize,
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), Self::Error> {
         if shares.is_empty() {
             return Err(ShareError::InvalidInput);
@@ -317,7 +318,8 @@ mod tests {
         .unwrap();
 
         let (coeffs, recovered) =
-            FeldmanShamirShare::<F, G>::recover_secret(&shares[..degree + 1], ids.len()).unwrap();
+            FeldmanShamirShare::<F, G>::recover_secret(&shares[..degree + 1], ids.len(), 2)
+                .unwrap();
 
         assert_eq!(recovered, secret);
         assert_eq!(coeffs[0], secret);
@@ -350,7 +352,7 @@ mod tests {
         }
 
         let (_, recovered) =
-            FeldmanShamirShare::<F, G>::recover_secret(&sum[..degree + 1], ids.len()).unwrap();
+            FeldmanShamirShare::<F, G>::recover_secret(&sum[..degree + 1], ids.len(), 2).unwrap();
         assert_eq!(recovered, s1 + s2);
     }
 
@@ -381,7 +383,7 @@ mod tests {
         }
 
         let (_, recovered) =
-            FeldmanShamirShare::<F, G>::recover_secret(&diff[..degree + 1], ids.len()).unwrap();
+            FeldmanShamirShare::<F, G>::recover_secret(&diff[..degree + 1], ids.len(), 2).unwrap();
         assert_eq!(recovered, s1 - s2);
     }
 
@@ -410,7 +412,8 @@ mod tests {
         }
 
         let (_, recovered) =
-            FeldmanShamirShare::<F, G>::recover_secret(&scaled[..degree + 1], ids.len()).unwrap();
+            FeldmanShamirShare::<F, G>::recover_secret(&scaled[..degree + 1], ids.len(), 2)
+                .unwrap();
         assert_eq!(recovered, secret * scalar);
     }
 
@@ -442,7 +445,8 @@ mod tests {
         }
 
         let (_, recovered) =
-            FeldmanShamirShare::<F, G>::recover_secret(&shifted[..degree + 1], ids.len()).unwrap();
+            FeldmanShamirShare::<F, G>::recover_secret(&shifted[..degree + 1], ids.len(), 2)
+                .unwrap();
         assert_eq!(recovered, secret + constant);
     }
 }

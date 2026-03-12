@@ -93,7 +93,7 @@ ShareErrorCode test_create_and_recover_robust_shares()
     // recover the original secret with shares
     struct U256 recovered_secret;
     struct U256Slice recovered_coeff;
-    e = robust_share_recover_secret(output_shares, n, &recovered_secret, &recovered_coeff, Bls12_381Fr);
+    e = robust_share_recover_secret(output_shares, n, 1, &recovered_secret, &recovered_coeff, Bls12_381Fr);
     if (e != ShareSuccess)
     {
         return e;

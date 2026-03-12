@@ -23,8 +23,6 @@ pub enum RbcErrorCode {
     RbcSuccess,
     // Invalid threshold t for n must satisfy t < ceil(n / 3)
     RbcInvalidThreshold,
-    // Session already ended
-    RbcSessionEnded,
     // Unknown Bracha message type
     RbcUnknownMsgType,
     // Message send failed
@@ -45,6 +43,7 @@ pub enum RbcErrorCode {
     RbcShardError,
     // Session does not exits
     RbcSessionNotFound,
+    RbcSendError,
 }
 
 #[repr(C)]
@@ -72,10 +71,21 @@ pub struct BrachaOpaque {
     _data: (),
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
+#[repr(C)]
+pub struct BrachaOutputReceiverOpaque {
+    _data: (),
+    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
 
 // opaque pointer for Avid
 #[repr(C)]
 pub struct AvidOpaque {
+    _data: (),
+    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
+
+#[repr(C)]
+pub struct AvidOutputReceiverOpaque {
     _data: (),
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
@@ -85,6 +95,10 @@ pub struct AvidOpaque {
 pub struct AbaOpaque {
     _data: (),
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
+struct AbaInner {
+    pub _aba: ABA<SessionId>,
+    pub _output_rx: tokio::sync::mpsc::Receiver<SessionId>,
 }
 
 #[repr(transparent)]
@@ -106,6 +120,12 @@ pub struct RbcWrapCtx {
         out_ptr: *mut *mut u8,
         out_len: *mut usize,
     ) -> RbcErrorCode,
+}
+
+#[repr(C)]
+pub struct AbaOutputReceiverOpaque {
+    _data: (),
+    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
 
 #[repr(C)]
@@ -153,7 +173,6 @@ impl From<RbcError> for RbcErrorCode {
     fn from(value: RbcError) -> Self {
         match value {
             RbcError::InvalidThreshold(_, _) => RbcErrorCode::RbcInvalidThreshold,
-            RbcError::SessionEnded(_) => RbcErrorCode::RbcSessionEnded,
             RbcError::UnknownMsgType(_) => RbcErrorCode::RbcUnknownMsgType,
             RbcError::SendFailed => RbcErrorCode::RbcSendFailed,
             RbcError::Internal(_) => RbcErrorCode::RbcInternal,
@@ -171,6 +190,7 @@ impl From<RbcError> for RbcErrorCode {
             },
             RbcError::SerializationError(_) => RbcErrorCode::RbcSerializationError,
             RbcError::ShardError(_) => RbcErrorCode::RbcShardError,
+            RbcError::SendError => RbcErrorCode::RbcSendError,
         }
     }
 }
@@ -268,12 +288,10 @@ pub extern "C" fn bracha_new(
     bracha_pointer: *mut *mut BrachaOpaque,
     wrapper: RbcWrapCtx,
 ) -> RbcErrorCode {
-    // Capture only FFI-safe pieces
-    let ctx = wrapper.ctx; // FfiCtx (usize handle)
+    let ctx = wrapper.ctx;
     let call = wrapper.call;
 
     let rust_wrapper: RbcWrapFn<SessionId> = Arc::new(move |msg| {
-        // Match rbc_wrap semantics
         let wrapped = WrappedMessage::Rbc(msg);
         let encoded = bincode::serialize(&wrapped)?;
 
@@ -295,16 +313,14 @@ pub extern "C" fn bracha_new(
             )));
         }
 
-        // SAFETY:
-        // - out_ptr was allocated by Rust-compatible allocator
-        // - out_len bytes are valid
-        eprintln!("out_ptr = {:?}, out_len = {}", out_ptr, out_len);
-
         unsafe { Ok(Vec::from_raw_parts(out_ptr, out_len, out_len)) }
     });
 
-    // k is unused in Bracha, pass 0
-    let res = Bracha::new(id, n, t, 0, rust_wrapper);
+    // RBC output channel
+    let (output_sender, _output_receiver) = tokio::sync::mpsc::channel(200);
+
+    // k unused for Bracha
+    let res = Bracha::new(id, n, t, 0, output_sender, rust_wrapper);
 
     match res {
         Ok(b) => {
@@ -578,7 +594,7 @@ pub extern "C" fn avid_new(
         let mut out_len = 0;
 
         let code = (call)(
-            ctx.0 as *mut core::ffi::c_void, // conversion happens here
+            ctx.0 as *mut core::ffi::c_void,
             encoded.as_ptr(),
             encoded.len(),
             &mut out_ptr,
@@ -595,8 +611,9 @@ pub extern "C" fn avid_new(
         unsafe { Ok(Vec::from_raw_parts(out_ptr, out_len, out_len)) }
     });
 
-    let res = Avid::new(id, n, t, k, rust_wrapper);
+    let (output_sender, _output_receiver) = tokio::sync::mpsc::channel(200);
 
+    let res = Avid::new(id, n, t, k, output_sender, rust_wrapper);
     match res {
         Ok(a) => {
             unsafe {
@@ -844,7 +861,6 @@ pub extern "C" fn sync_avid_send(
     }
 }
 
-/// Creates a new Avid instance with the given parameters.
 #[no_mangle]
 pub extern "C" fn aba_new(
     id: usize,
@@ -854,12 +870,10 @@ pub extern "C" fn aba_new(
     aba_pointer: *mut *mut AbaOpaque,
     wrapper: RbcWrapCtx,
 ) -> RbcErrorCode {
-    // Extract FFI-safe pieces
-    let ctx = wrapper.ctx; // FfiCtx (usize handle)
+    let ctx = wrapper.ctx;
     let call = wrapper.call;
 
     let rust_wrapper: RbcWrapFn<SessionId> = Arc::new(move |msg| {
-        // Same semantics as rbc_wrap
         let wrapped = WrappedMessage::Rbc(msg);
         let encoded = bincode::serialize(&wrapped)?;
 
@@ -881,19 +895,25 @@ pub extern "C" fn aba_new(
             )));
         }
 
-        // SAFETY:
-        // - out_ptr allocated with Rust-compatible allocator
-        // - out_len bytes are valid
         unsafe { Ok(Vec::from_raw_parts(out_ptr, out_len, out_len)) }
     });
 
-    let res = ABA::new(id, n, t, k, rust_wrapper);
+    // ABA output channel
+    let (output_sender, output_rx) = tokio::sync::mpsc::channel(200);
+
+    let res = ABA::new(id, n, t, k, output_sender, rust_wrapper);
 
     match res {
-        Ok(a) => {
+        Ok(aba_instance) => {
+            let inner = AbaInner {
+                _aba: aba_instance,
+                _output_rx: output_rx,
+            };
+
             unsafe {
-                *aba_pointer = Box::into_raw(Box::new(a)) as *mut AbaOpaque;
+                *aba_pointer = Box::into_raw(Box::new(inner)) as *mut AbaOpaque;
             }
+
             RbcErrorCode::RbcSuccess
         }
         Err(e) => e.into(),

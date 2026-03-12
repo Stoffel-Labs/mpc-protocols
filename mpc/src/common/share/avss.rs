@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::{mpsc::Sender, Mutex};
+use tokio::sync::{
+    mpsc::{self, Receiver, Sender},
+    Mutex,
+};
 use tracing::info;
 
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +46,8 @@ pub enum AvssError {
     ShareError(#[from] crate::common::share::ShareError),
     #[error("send error")]
     SendError,
+    #[error("Channel closed")]
+    Abort,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -145,6 +150,7 @@ where
     pub pk_map: Arc<Vec<G>>,
     pub shares: Arc<Mutex<BTreeMap<Id, Option<Vec<FeldmanShamirShare<F, G>>>>>>,
     pub rbc: R,
+    pub rbc_output: Arc<Mutex<Receiver<Id>>>,
     pub output_sender: Sender<Id>,
     pub wrapper: AvssWrapFn<Id>,
 }
@@ -172,7 +178,7 @@ where
     F: FftField,
     R: RBC<Id = Id>,
     G: CurveGroup<ScalarField = F>,
-    Id: ProtocolSessionId,
+    Id: ProtocolSessionId + for<'a> Deserialize<'a> + Serialize,
 {
     pub fn new(
         id: PartyId,
@@ -184,7 +190,8 @@ where
         rbc_wrapper: RbcWrapFn<Id>,
         avss_wrapper: AvssWrapFn<Id>,
     ) -> Result<Self, AvssError> {
-        let rbc = R::new(id, n_parties, t, t + 1, rbc_wrapper)?;
+        let (rbc_sender, rbc_receiver) = mpsc::channel(200);
+        let rbc = R::new(id, n_parties, t, t + 1, rbc_sender, rbc_wrapper)?;
         Ok(Self {
             id,
             n_parties,
@@ -193,11 +200,37 @@ where
             pk_map,
             shares: Arc::new(Mutex::new(BTreeMap::new())),
             rbc,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             output_sender,
             wrapper: avss_wrapper,
         })
     }
 
+    pub async fn drain_rbc_output(&mut self) -> Result<(), AvssError> {
+        loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(AvssError::Abort);
+                    }
+                }
+            };
+
+            let output = self.rbc.get_store(id).await?;
+            let msg: AvssMessage<Id> = bincode::deserialize(&output)?;
+
+            match self.process(msg).await {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
     pub async fn init<Rnd, N>(
         &mut self,
         secrets: Vec<F>,
@@ -257,7 +290,7 @@ where
             encrypted_shares: encrypted,
         };
 
-        let bytes = (self.wrapper)(msg)?;
+        let bytes = bincode::serialize(&msg)?;
         self.rbc.init(bytes, session_id, net).await?;
 
         Ok(())

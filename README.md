@@ -66,13 +66,26 @@ A node capable of:
 - Handling RBC-based input and output
 - Routing messages using compact `SessionId` fields
 
+### ⏱️ Offline Phase, Abort Semantics, and Timeouts
+
+The **offline (preprocessing) phase** of HoneyBadgerMPC is intentionally designed to be **non-robust**. In line with the original HoneyBadgerMPC design, preprocessing protocols (e.g., random sharing, batch reconstruction, Beaver triple generation) are expected to **abort on failure** and be **restarted by the caller** until sufficient preprocessing material has been generated.
+
+Typical failure conditions include:
+- A node going offline
+- Network message loss or delays
+- RBC or subprotocols failing to terminate
+
+⚠️ **Important:**  
+The preprocessing protocols **do not internally enforce timeouts**.  If a required message or share never arrives, the protocol may wait indefinitely. As a result, **timeout handling is the responsibility of the caller**. Preprocessing should always be wrapped in **external timeout logic**, with retry or abort behavior defined by the application.
+
+
 ---
 
 ### 🏃 How to Run
 
 Running MPC requires:
 
-1. **Start `N` HoneyBadgerMPCNode instances(Minimum `5` to get the benefit of batch reconstruction)**
+1. **Start `N` HoneyBadgerMPCNode instances**
 2. **Connect them with a StoffelNet‐compatible network (`Network` trait)**
 3. **Spawn a processing loop for each node**
 4. **Send messages into the network**
@@ -80,17 +93,16 @@ Running MPC requires:
 
 ---
 
-### ▶ Minimal Example: Running a 5-Party Secure Multiplication
+### ▶ Minimal Example: Running a 4-Party Secure Multiplication
 
 Replace `FakeNetwork` with any `Network` implementation (FakeNetwork, StoffelNet, etc.):
 
 ```rust
 #[tokio::test]
 async fn test_mul() {
-    let n = 5;
+    let n = 4;
     let t = 1;
     let mut rng = test_rng();
-    let session_id = SessionId::new(ProtocolType::Mul, 0, 0, 0, 111);
 
     // ---------------- Network ----------------
     let config = FakeNetworkConfig::new(500);
@@ -122,34 +134,21 @@ async fn test_mul() {
             let y = vec![ys[pid].clone()];
 
             tokio::spawn(async move {
-                node.mul(x, y, net).await.expect("mul failed");
+                let shares = node.mul(x, y, net).await.expect("mul failed");
+                return shares[0].clone();
             })
         })
         .collect();
 
-    futures::future::join_all(handles).await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let shares: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|res| res.expect("task panicked"))
+        .collect();
 
     // ---------------- Collect & Check ----------------
-    let shares: Vec<_> = (0..n)
-        .map(|pid| {
-            let node = nodes[pid].clone();
-            async move {
-                let binding = node.operations.mul.mult_storage.lock().await;
-                let storage = binding
-                    .get(&session_id)
-                    .expect("missing session")
-                    .lock()
-                    .await;
 
-                storage.protocol_output[0].clone()
-            }
-        })
-        .collect::<futures::stream::FuturesOrdered<_>>()
-        .collect()
-        .await;
-
-    let (_, z) = RobustShare::recover_secret(&shares[..=2 * t], n).unwrap();
+    let (_, z) = RobustShare::recover_secret(&shares[..=2 * t], n, t).unwrap();
     assert_eq!(z, x * y);
 }
 
@@ -166,7 +165,7 @@ where
     HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts>,
 {
     let parameters =
-        HoneyBadgerMPCNodeOpts::new(n_parties, t, n_triples, 0, instance_id, 0, 0, 0, 0);
+        HoneyBadgerMPCNodeOpts::new(n_parties, t, n_triples, 0, instance_id, 0, 0, 0, 0).unwrap();
     (0..n_parties)
         .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), vec![]).unwrap())
         .collect()

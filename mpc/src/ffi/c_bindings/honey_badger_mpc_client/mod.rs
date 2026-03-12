@@ -44,6 +44,9 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerFPDivConstError,
     HoneyBadgerTypesError,
     HoneyBadgerAlreadyReservedError,
+    HoneyBadgerInvalidThesholdError,
+    HoneyBadgerInvalidPartySizeError,
+    HoneyBadgerInvalidPartyIdError,
     HoneyBadgerLimitError,
     HoneyBadgerInstanceIdError,
 }
@@ -76,6 +79,9 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::LimitError => Self::HoneyBadgerLimitError,
             HoneyBadgerError::InstanceIdError(_) => Self::HoneyBadgerInstanceIdError,
             HoneyBadgerError::AlreadyReserved => Self::HoneyBadgerAlreadyReservedError,
+            HoneyBadgerError::InvalidThreshold(_, _) => Self::HoneyBadgerInvalidThesholdError,
+            HoneyBadgerError::InvalidPartySize => Self::HoneyBadgerInvalidPartySizeError,
+            HoneyBadgerError::InvalidPartyId => Self::HoneyBadgerInvalidPartyIdError,
         }
     }
 }
@@ -114,6 +120,7 @@ pub extern "C" fn new_honey_badger_mpc_client(
 pub extern "C" fn hb_client_process(
     client_ptr: *mut HoneyBadgerMPCClientOpaque,
     net_ptr: *mut network::NetworkOpaque,
+    sender_id: usize,
     raw_msg: ByteSlice,
 ) -> HoneyBadgerErrorCode {
     let client = unsafe { &mut *(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha<SessionId>>) };
@@ -123,10 +130,10 @@ pub extern "C" fn hb_client_process(
     let result = match network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(client.process(msg, Arc::clone(n))),
+            .block_on(client.process(sender_id, msg, Arc::clone(n))),
         GenericNetwork::QuicNetworkManager(n) => tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(client.process(msg, Arc::clone(n))),
+            .block_on(client.process(sender_id, msg, Arc::clone(n))),
     };
     match result {
         Ok(_) => HoneyBadgerErrorCode::HoneyBadgerSuccess,

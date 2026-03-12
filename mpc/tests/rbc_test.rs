@@ -39,7 +39,9 @@ mod tests {
 
         // Party 0 initiates broadcast
         let bracha0 = &parties[0];
-        let _ = bracha0.init(payload.clone(), session_id, net).await;
+        let _ = bracha0
+            .init(payload.clone(), session_id, net[0].clone())
+            .await;
 
         // Give time for broadcast to propagate
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -92,7 +94,9 @@ mod tests {
         // Launch all sessions from party 0
         let bracha0 = &parties[0];
         for (i, sid) in session_ids.iter().enumerate() {
-            let _ = bracha0.init(payloads[i].clone(), *sid, net.clone()).await;
+            let _ = bracha0
+                .init(payloads[i].clone(), *sid, net[i].clone())
+                .await;
         }
 
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -146,7 +150,7 @@ mod tests {
         // Each party initiates one session
         for (i, bracha) in parties.iter().enumerate() {
             let _ = bracha
-                .init(payloads[i].clone(), session_ids[i], net.clone())
+                .init(payloads[i].clone(), session_ids[i], net[i].clone())
                 .await;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -211,19 +215,21 @@ mod tests {
 
         // Send READY first
         let _ = parties[sender_id as usize]
-            .send(ready_msg, net.clone(), 2)
+            .send(ready_msg, net[sender_id].clone(), 2)
             .await
             .expect("Sending ready failed");
 
         // Then ECHO
         let _ = parties[sender_id as usize]
-            .send(echo_msg, net.clone(), 3)
+            .send(echo_msg, net[sender_id].clone(), 3)
             .await
             .expect("Sending Echo failed");
 
         // Party 0 initiates broadcast
         let bracha0 = &parties[0];
-        let _ = bracha0.init(payload.clone(), session_id, net.clone()).await;
+        let _ = bracha0
+            .init(payload.clone(), session_id, net[0].clone())
+            .await;
 
         // Allow time for processing
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -262,10 +268,12 @@ mod tests {
 
         // Initiate broadcast from party 0
         let avid0 = &parties[0];
-        let _ = avid0.init(payload.clone(), session_id, net.clone()).await;
+        let _ = avid0
+            .init(payload.clone(), session_id, net[avid0.id].clone())
+            .await;
 
         // Allow time for propagation
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         for avid in &parties {
             let session_store = {
@@ -347,7 +355,7 @@ mod tests {
         // Each party initiates one session
         for (i, avid) in parties.iter().enumerate() {
             let _ = avid
-                .init(payloads[i].clone(), session_ids[i], net.clone())
+                .init(payloads[i].clone(), session_ids[i], net[0].clone())
                 .await;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -413,19 +421,21 @@ mod tests {
 
         // Send READY first
         let _ = parties[sender_id as usize]
-            .send(ready_msg, net.clone(), 2)
+            .send(ready_msg, net[sender_id].clone(), 2)
             .await
             .expect("Sending ready failed");
 
         // Then ECHO
         let _ = parties[sender_id as usize]
-            .send(echo_msg, net.clone(), 3)
+            .send(echo_msg, net[sender_id].clone(), 3)
             .await
             .expect("Sending ready failed");
 
         // Party 0 initiates broadcast
         let avid0 = &parties[0];
-        let _ = avid0.init(payload.clone(), session_id, net.clone()).await;
+        let _ = avid0
+            .init(payload.clone(), session_id, net[sender_id].clone())
+            .await;
 
         // Allow time for processing
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -468,11 +478,11 @@ mod tests {
         // One honest party initiates the broadcast
         let initiator_rbc = &honest_parties[0];
         let _ = initiator_rbc
-            .init(payload.clone(), session_id, net.clone())
+            .init(payload.clone(), session_id, net[initiator_rbc.id].clone())
             .await;
 
         // Give protocol time to complete
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
 
         // Check agreement and completion among honest nodes
         for rbc in honest_parties {
@@ -517,7 +527,7 @@ mod tests {
         // Initiate broadcast from one honest node
         let initiator = &honest_parties[0];
         let _ = initiator
-            .init(payload.clone(), session_id, net.clone())
+            .init(payload.clone(), session_id, net[0].clone())
             .await
             .unwrap_or_else(|e| warn!("Initiator {} failed : {:?}", initiator.id, e));
 
@@ -603,7 +613,11 @@ mod tests {
             0,
         );
         let _ = dealer
-            .distribute_keys(dealer_msg, net.clone(), Arc::new(WrappedMessage::rbc_wrap))
+            .distribute_keys(
+                dealer_msg,
+                net[0].clone(),
+                Arc::new(WrappedMessage::rbc_wrap),
+            )
             .await;
 
         // Wait for keys to propagate and be set
@@ -620,7 +634,7 @@ mod tests {
                 GenericMsgType::ABA(MsgTypeAba::Coin),
                 0,
             );
-            let _ = aba.init_coin(coin_msg, net.clone()).await;
+            let _ = aba.init_coin(coin_msg, net[aba.id].clone()).await;
         }
 
         // Wait for coin signatures and combination
@@ -687,7 +701,7 @@ mod tests {
         let _ = dealer
             .distribute_keys(
                 key_dist_msg,
-                net.clone(),
+                net[0].clone(),
                 Arc::new(WrappedMessage::rbc_wrap),
             )
             .await;
@@ -703,7 +717,7 @@ mod tests {
 
         let init_futures = parties.iter().zip(inputs).map(|(aba, input)| {
             let payload = set_value_round(input, round_id as u32);
-            aba.init(payload, session_id, net.clone())
+            aba.init(payload, session_id, net[aba.id].clone())
         });
 
         futures::future::join_all(init_futures).await;
@@ -802,7 +816,7 @@ mod tests {
         let _ = dealer
             .distribute_keys(
                 key_dist_msg,
-                net.clone(),
+                net[0].clone(),
                 Arc::new(WrappedMessage::rbc_wrap),
             )
             .await;
@@ -817,7 +831,7 @@ mod tests {
                 let input = rng.gen_bool(0.5); // Randomly true or false
                 tracing::info!("Party {} input: {}", i, input);
                 let payload = set_value_round(input, 0);
-                init_futures.push(aba.init(payload, *session_id, net.clone()));
+                init_futures.push(aba.init(payload, *session_id, net[i].clone()));
             }
             futures::future::join_all(init_futures).await;
             tokio::time::sleep(Duration::from_millis(50)).await;

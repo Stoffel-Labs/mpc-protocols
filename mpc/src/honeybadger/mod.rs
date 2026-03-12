@@ -43,12 +43,10 @@ use crate::{
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
-            f256::F2_8,
             fpmul::{FPError, FPMulNode},
             prandbitd::PRandBitNode,
             rand_bit::RandBit,
             PRandBitDMessage, PRandError, RandBitError, RandBitMessage, TruncPrError,
-            TruncPrMessage,
         },
         input::{
             input::{InputClient, InputServer},
@@ -78,13 +76,7 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use thiserror::Error;
-use tokio::{
-    sync::{
-        mpsc::{self, Receiver},
-        Mutex,
-    },
-    time::Duration,
-};
+use tokio::{sync::Mutex, time::Duration};
 use tracing::{info, warn};
 use triple_gen::triple_generation::TripleGenNode;
 
@@ -135,6 +127,12 @@ pub enum HoneyBadgerError {
     InstanceIdError(u32),
     #[error("output channel closed before result was received")]
     ChannelClosed,
+    #[error("Invalid threshold t={0} for n={1}, must satisfy t < ceil(n / 3)")]
+    InvalidThreshold(usize, usize),
+    #[error("Party size is too large")]
+    InvalidPartySize,
+    #[error("Party Id is out of bounds")]
+    InvalidPartyId,
     #[error("the protocol cannot be executed any more")]
     LimitError,
 }
@@ -175,6 +173,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
     }
     pub async fn process<N: Network + Send + Sync>(
         &mut self,
+        sender_id: ClientId,
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), HoneyBadgerError> {
@@ -182,9 +181,17 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
 
         match wrapped {
             WrappedMessage::Input(input_msg) => {
+                if sender_id != input_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
                 self.input.process(input_msg, net).await?;
             }
-            WrappedMessage::Output(output_msg) => self.output.process(output_msg).await?,
+            WrappedMessage::Output(output_msg) => {
+                if sender_id != output_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                self.output.process(output_msg).await?
+            }
             _ => warn!("Incorrect message type recieved at input"),
         }
         Ok(())
@@ -203,7 +210,6 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     pub operations: Operation<F, R>,
     pub type_ops: TypeOperations<F, R>,
     pub output: OutputServer,
-    pub outputchannels: OutputChannels,
     pub counters: SubProtocolCounters,
 }
 
@@ -228,19 +234,6 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub triple_gen: TripleGenNode<F>,
     pub rand_bit: RandBit<F, R>,
     pub prand_bit: PRandBitNode<F, F>,
-}
-
-#[derive(Clone, Debug)]
-pub struct OutputChannels {
-    pub share_gen_channel: Arc<Mutex<Receiver<SessionId>>>,
-    pub dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
-    pub ran_dou_sha_channel: Arc<Mutex<Receiver<SessionId>>>,
-    pub triple_channel: Arc<Mutex<Receiver<SessionId>>>,
-    pub rand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
-    pub prand_bit_channel: Arc<Mutex<Receiver<SessionId>>>,
-    pub prand_int_channel: Arc<Mutex<Receiver<SessionId>>>,
-    pub fpmul_channel: Arc<Mutex<Receiver<SessionId>>>,
-    pub fpdiv_const_channel: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -327,6 +320,7 @@ pub struct HoneyBadgerMPCNodeOpts {
     pub k: usize,
     ///Bit size for fixed point
     pub l: usize,
+    pub timeout: Duration,
 }
 
 impl HoneyBadgerMPCNodeOpts {
@@ -341,8 +335,17 @@ impl HoneyBadgerMPCNodeOpts {
         n_prandint: usize,
         l: usize,
         k: usize,
-    ) -> Self {
-        Self {
+        timeout: Duration,
+    ) -> Result<Self, HoneyBadgerError> {
+        //No of parties should not exceed 255
+        if n_parties > 255 {
+            return Err(HoneyBadgerError::InvalidPartySize);
+        }
+        if !(threshold < (n_parties + 2) / 3) {
+            // ceil(n / 3)
+            return Err(HoneyBadgerError::InvalidThreshold(threshold, n_parties));
+        }
+        Ok(Self {
             n_parties,
             threshold,
             n_triples,
@@ -352,7 +355,11 @@ impl HoneyBadgerMPCNodeOpts {
             n_prandint,
             k,
             l,
-        }
+            timeout,
+        })
+    }
+    pub fn set_timeout(&mut self, secs: u64) {
+        self.timeout = Duration::from_secs(secs)
     }
 }
 
@@ -371,49 +378,22 @@ where
         params: Self::MPCOpts,
         input_ids: Vec<ClientId>,
     ) -> Result<Self, HoneyBadgerError> {
-        // Create channels for sub protocol output.
-        let (dou_sha_sender, dou_sha_receiver) = mpsc::channel(128);
-        let (ran_dou_sha_sender, ran_dou_sha_receiver) = mpsc::channel(128);
-        let (triple_sender, triple_receiver) = mpsc::channel(128);
-        let (share_gen_sender, share_gen_reciever) = mpsc::channel(128);
-        let (rand_bit_sender, rand_bit_receiver) = mpsc::channel(128);
-        let (prand_bit_sender, prand_bit_receiver) = mpsc::channel(128);
-        let (prand_int_sender, prand_int_receiver) = mpsc::channel(128);
-        let (fpmul_sender, fpmul_receiver) = mpsc::channel(128);
-        let (fpdiv_const_sender, fpdiv_const_receiver) = mpsc::channel(128);
-
+        if id >= params.n_parties {
+            return Err(HoneyBadgerError::InvalidPartyId);
+        }
         // Create nodes for preprocessing.
-        let dousha_node =
-            DoubleShareNode::new(id, params.n_parties, params.threshold, dou_sha_sender);
-        let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold, rand_bit_sender)?;
-        let prand_bit_node = PRandBitNode::new(
-            id,
-            params.n_parties,
-            params.threshold,
-            prand_bit_sender,
-            prand_int_sender,
-        )?;
-        let ran_dou_sha_node = RanDouShaNode::new(
-            id,
-            ran_dou_sha_sender,
-            params.n_parties,
-            params.threshold,
-            params.threshold + 1,
-        )?;
+        let dousha_node = DoubleShareNode::new(id, params.n_parties, params.threshold);
+        let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold)?;
+        let prand_bit_node = PRandBitNode::new(id, params.n_parties, params.threshold)?;
+        let ran_dou_sha_node =
+            RanDouShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
-        let triple_gen_node =
-            TripleGenNode::new(id, params.n_parties, params.threshold, triple_sender)?;
+        let triple_gen_node = TripleGenNode::new(id, params.n_parties, params.threshold)?;
         let mul_node = Multiply::new(id, params.n_parties, params.threshold)?;
-        let share_gen = RanShaNode::new(
-            id,
-            params.n_parties,
-            params.threshold,
-            params.threshold + 1,
-            share_gen_sender,
-        )?;
-        let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold, fpmul_sender)?;
-        let fpdiv_const_node =
-            FPDivConstNode::new(id, params.n_parties, params.threshold, fpdiv_const_sender)?;
+        let share_gen =
+            RanShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
+        let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold)?;
+        let fpdiv_const_node = FPDivConstNode::new(id, params.n_parties, params.threshold)?;
         let input = InputServer::new(id, params.n_parties, params.threshold, input_ids)?;
         let output = OutputServer::new(id, params.n_parties)?;
         Ok(Self {
@@ -437,17 +417,6 @@ where
                 fpdiv_const: fpdiv_const_node,
             },
             output,
-            outputchannels: OutputChannels {
-                share_gen_channel: Arc::new(Mutex::new(share_gen_reciever)),
-                dou_sha_channel: Arc::new(Mutex::new(dou_sha_receiver)),
-                ran_dou_sha_channel: Arc::new(Mutex::new(ran_dou_sha_receiver)),
-                triple_channel: Arc::new(Mutex::new(triple_receiver)),
-                rand_bit_channel: Arc::new(Mutex::new(rand_bit_receiver)),
-                prand_bit_channel: Arc::new(Mutex::new(prand_bit_receiver)),
-                prand_int_channel: Arc::new(Mutex::new(prand_int_receiver)),
-                fpmul_channel: Arc::new(Mutex::new(fpmul_receiver)),
-                fpdiv_const_channel: Arc::new(Mutex::new(fpdiv_const_receiver)),
-            },
             counters: SubProtocolCounters::new(),
         })
     }
@@ -491,38 +460,68 @@ where
 
         self.operations
             .mul
-            .wait_for_result(session_id, Duration::MAX)
+            .wait_for_result(session_id, self.params.timeout)
             .await
             .map_err(HoneyBadgerError::from)
     }
 
-    async fn process(&mut self, raw_msg: Vec<u8>, net: Arc<N>) -> Result<(), Self::Error> {
+    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
+        let (_, no_rand, _, _) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        if no_rand == 0 {
+            //Run preprocessing
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(network.clone(), &mut rng).await?;
+        }
+        // Extract the preprocessing triple.
+        let rand_value = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(1)?;
+        Ok(rand_value[0].clone())
+    }
+
+    async fn process(
+        &mut self,
+        sender_id: PartyId,
+        raw_msg: Vec<u8>,
+        net: Arc<N>,
+    ) -> Result<(), Self::Error> {
         let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
 
         match wrapped {
             WrappedMessage::Rbc(rbc_msg) => {
+                if sender_id != rbc_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
                 if rbc_msg.session_id.instance_id() != self.params.instance_id {
                     return Err(HoneyBadgerError::InstanceIdError(
                         rbc_msg.session_id.instance_id(),
                     ));
                 }
-
                 match rbc_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Randousha) => {
                         self.preprocess
                             .ran_dou_sha
                             .rbc
                             .process(rbc_msg, net)
-                            .await?
+                            .await?;
+                        self.preprocess.ran_dou_sha.drain_rbc_output().await?;
                     }
                     Some(ProtocolType::Ransha) => {
-                        self.preprocess.share_gen.rbc.process(rbc_msg, net).await?
+                        self.preprocess.share_gen.rbc.process(rbc_msg, net).await?;
+                        self.preprocess.share_gen.drain_rbc_output().await?;
                     }
                     Some(ProtocolType::Input) => {
-                        self.preprocess.input.rbc.process(rbc_msg, net).await?
+                        self.preprocess.input.rbc.process(rbc_msg, net).await?;
+                        self.preprocess.input.drain_rbc_output().await?;
                     }
                     Some(ProtocolType::Mul) => {
-                        self.operations.mul.rbc.process(rbc_msg, net).await?
+                        self.operations.mul.rbc.process(rbc_msg, net).await?;
+                        self.operations.mul.drain_rbc_output().await?;
                     }
                     Some(ProtocolType::RandBit) => {
                         self.preprocess
@@ -530,7 +529,12 @@ where
                             .mult_node
                             .rbc
                             .process(rbc_msg, net)
-                            .await?
+                            .await?;
+                        self.preprocess
+                            .rand_bit
+                            .mult_node
+                            .drain_rbc_output()
+                            .await?;
                     }
                     Some(ProtocolType::FpMul) => {
                         if rbc_msg.session_id.sub_id() == 0 {
@@ -539,14 +543,16 @@ where
                                 .trunc_node
                                 .rbc
                                 .process(rbc_msg, net)
-                                .await?
+                                .await?;
+                            self.type_ops.fpmul.trunc_node.drain_rbc_output().await?;
                         } else {
                             self.type_ops
                                 .fpmul
                                 .mult_node
                                 .rbc
                                 .process(rbc_msg, net)
-                                .await?
+                                .await?;
+                            self.type_ops.fpmul.mult_node.drain_rbc_output().await?;
                         }
                     }
                     Some(ProtocolType::FpDivConst) => {
@@ -555,7 +561,12 @@ where
                             .trunc_node
                             .rbc
                             .process(rbc_msg, net)
-                            .await?
+                            .await?;
+                        self.type_ops
+                            .fpdiv_const
+                            .trunc_node
+                            .drain_rbc_output()
+                            .await?;
                     }
                     _ => {
                         warn!(
@@ -566,10 +577,10 @@ where
                 }
             }
 
-            WrappedMessage::Input(input) => {
-                self.preprocess.input.process(input).await?;
-            }
             WrappedMessage::RanSha(rs_msg) => {
+                if sender_id != rs_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
                 if rs_msg.session_id.instance_id() != self.params.instance_id {
                     return Err(HoneyBadgerError::InstanceIdError(
                         rs_msg.session_id.instance_id(),
@@ -578,6 +589,9 @@ where
                 self.preprocess.share_gen.process(rs_msg, net).await?;
             }
             WrappedMessage::Dousha(ds_msg) => {
+                if sender_id != ds_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
                 if ds_msg.session_id.instance_id() != self.params.instance_id {
                     return Err(HoneyBadgerError::InstanceIdError(
                         ds_msg.session_id.instance_id(),
@@ -586,6 +600,9 @@ where
                 self.preprocess.dou_sha.process(ds_msg).await?;
             }
             WrappedMessage::RanDouSha(rds_msg) => {
+                if sender_id != rds_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
                 if rds_msg.session_id.instance_id() != self.params.instance_id {
                     return Err(HoneyBadgerError::InstanceIdError(
                         rds_msg.session_id.instance_id(),
@@ -594,6 +611,9 @@ where
                 self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
             }
             WrappedMessage::Mul(mul_msg) => {
+                if sender_id != mul_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
                 if mul_msg.session_id.instance_id() != self.params.instance_id {
                     return Err(HoneyBadgerError::InstanceIdError(
                         mul_msg.session_id.instance_id(),
@@ -617,6 +637,9 @@ where
                 }
             }
             WrappedMessage::Triple(triple_msg) => {
+                if sender_id != triple_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
                 if triple_msg.session_id.instance_id() != self.params.instance_id {
                     return Err(HoneyBadgerError::InstanceIdError(
                         triple_msg.session_id.instance_id(),
@@ -625,6 +648,9 @@ where
                 self.preprocess.triple_gen.process(triple_msg).await?;
             }
             WrappedMessage::BatchRecon(batch_msg) => {
+                if sender_id != batch_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
                 if batch_msg.session_id.instance_id() != self.params.instance_id {
                     return Err(HoneyBadgerError::InstanceIdError(
                         batch_msg.session_id.instance_id(),
@@ -685,6 +711,9 @@ where
                 }
             }
             WrappedMessage::RandBit(rand_bit_message) => {
+                if sender_id != rand_bit_message.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
                 if rand_bit_message.session_id.instance_id() != self.params.instance_id {
                     return Err(HoneyBadgerError::InstanceIdError(
                         rand_bit_message.session_id.instance_id(),
@@ -693,6 +722,9 @@ where
                 self.preprocess.rand_bit.process(rand_bit_message).await?;
             }
             WrappedMessage::PRandBit(prand_message) => {
+                if sender_id != prand_message.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
                 if prand_message.session_id.instance_id() != self.params.instance_id {
                     return Err(HoneyBadgerError::InstanceIdError(
                         prand_message.session_id.instance_id(),
@@ -703,62 +735,11 @@ where
                     .process(prand_message, net)
                     .await?;
             }
-            WrappedMessage::Trunc(trunc_message) => {
-                if trunc_message.session_id.instance_id() != self.params.instance_id {
-                    return Err(HoneyBadgerError::InstanceIdError(
-                        trunc_message.session_id.instance_id(),
-                    ));
-                }
-                match trunc_message.session_id.calling_protocol() {
-                    Some(ProtocolType::FpMul) => {
-                        self.type_ops
-                            .fpmul
-                            .trunc_node
-                            .process(trunc_message, net)
-                            .await?;
-                    }
-                    Some(ProtocolType::FpDivConst) => {
-                        self.type_ops
-                            .fpdiv_const
-                            .trunc_node
-                            .process(trunc_message, net)
-                            .await?;
-                    }
-                    _ => {
-                        warn!(
-                            "Unknown protocol ID in session ID: {:?} at truncation",
-                            trunc_message.session_id
-                        );
-                    }
-                }
-            }
+            WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
         }
 
         Ok(())
-    }
-
-    async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
-        // Check if we have a random share available
-        let (_, n_random, _, _) = {
-            let store = self.preprocessing_material.lock().await;
-            store.len()
-        };
-
-        // If no random shares available, generate some
-        if n_random == 0 {
-            let mut rng = StdRng::from_rng(OsRng).unwrap();
-            self.ensure_random_shares(network, &mut rng, 1).await?;
-        }
-
-        // Take one random share from the preprocessing material
-        let shares = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(1)?;
-
-        Ok(shares.into_iter().next().unwrap())
     }
 }
 
@@ -858,25 +839,12 @@ where
                 beaver_triples[0].clone(),
                 r_bits,
                 r_int[0].clone(),
+                self.params.timeout,
                 session_id,
                 net,
             )
-            .await?;
-
-        let mut rx = self.outputchannels.fpmul_channel.lock().await;
-        while let Some(id) = rx.recv().await {
-            if id == session_id {
-                let output = self
-                    .type_ops
-                    .fpmul
-                    .protocol_output
-                    .clone()
-                    .ok_or(FPError::Failed)?;
-
-                return Ok(output);
-            }
-        }
-        Err(HoneyBadgerError::ChannelClosed)
+            .await
+            .map_err(HoneyBadgerError::from)
     }
 
     async fn div_with_const_fixed(
@@ -934,26 +902,17 @@ where
         // 5. Call the division node ---------------------------------------
         self.type_ops
             .fpdiv_const
-            .init(x, y, r_bits_only, r_int[0].clone(), session_id, net.clone())
-            .await?;
-
-        // 6. Wait for output on the channel --------------------------------
-        let mut rx = self.outputchannels.fpdiv_const_channel.lock().await;
-
-        while let Some(id) = rx.recv().await {
-            if id == session_id {
-                let output = self
-                    .type_ops
-                    .fpdiv_const
-                    .protocol_output
-                    .clone()
-                    .ok_or(HoneyBadgerError::FPDivConstError(FPDivConstError::Failed))?;
-
-                return Ok(output);
-            }
-        }
-
-        Err(HoneyBadgerError::ChannelClosed)
+            .init(
+                x,
+                y,
+                r_bits_only,
+                r_int[0].clone(),
+                self.params.timeout,
+                session_id,
+                net.clone(),
+            )
+            .await
+            .map_err(HoneyBadgerError::from)
     }
 
     /// Integer addition (int8/16/32/64)
@@ -1165,28 +1124,23 @@ where
                 // ------------------------
                 // Step 4. Collect triples
                 // ------------------------
-                if let Some(sid) = self.outputchannels.triple_channel.lock().await.recv().await {
-                    if sid == sessionid {
-                        let mut triple_gen_db = self.preprocess.triple_gen.storage.lock().await;
-                        let triple_storage_mutex = triple_gen_db.remove(&sid).unwrap();
-                        let triple_storage = triple_storage_mutex.lock().await;
-                        let triples = triple_storage.protocol_output.clone();
-
-                        self.preprocessing_material.lock().await.add(
-                            Some(triples),
-                            None,
-                            None,
-                            None,
-                        );
-                        assert!(
-                            self.preprocess
-                                .triple_gen
-                                .batch_recon_node
-                                .clear_store(sessionid)
-                                .await
-                        );
-                    }
-                }
+                let triples = self
+                    .preprocess
+                    .triple_gen
+                    .wait_for_result(sessionid, self.params.timeout)
+                    .await?;
+                self.preprocessing_material
+                    .lock()
+                    .await
+                    .add(Some(triples), None, None, None);
+                assert!(
+                    self.preprocess
+                        .triple_gen
+                        .batch_recon_node
+                        .clear_store(sessionid)
+                        .await
+                );
+                assert!(self.preprocess.triple_gen.clear_store(sessionid).await);
 
                 if round_id == 255 {
                     triple_counter = self.counters.triple_counter.get_next().await.unwrap();
@@ -1253,22 +1207,17 @@ where
                 .await?;
 
             // Collect its output
-            if let Some(id) = self
-                .outputchannels
-                .share_gen_channel
+            let output = self
+                .preprocess
+                .share_gen
+                .wait_for_result(sessionid, self.params.timeout)
+                .await?;
+
+            self.preprocessing_material
                 .lock()
                 .await
-                .recv()
-                .await
-            {
-                if id == sessionid {
-                    let output = self.preprocess.share_gen.output(id).await;
-                    self.preprocessing_material
-                        .lock()
-                        .await
-                        .add(None, Some(output), None, None);
-                }
-            }
+                .add(None, Some(output), None, None);
+            assert!(self.preprocess.share_gen.clear_store(sessionid).await);
 
             if round_id == 255 {
                 ran_sha_counter = self.counters.ran_sha_counter.get_next().await.unwrap();
@@ -1328,21 +1277,13 @@ where
                 .init(shares_deg_t, shares_deg_2t, sessionid, network.clone())
                 .await?;
 
-            if let Some(sid) = self
-                .outputchannels
-                .ran_dou_sha_channel
-                .lock()
-                .await
-                .recv()
-                .await
-            {
-                if sid == sessionid {
-                    let mut ran_dou_sha_db = self.preprocess.ran_dou_sha.store.lock().await;
-                    let ran_dou_sha_storage_mutex = ran_dou_sha_db.remove(&sid).unwrap();
-                    let storage = ran_dou_sha_storage_mutex.lock().await;
-                    pair.extend(storage.protocol_output.clone());
-                }
-            }
+            let output = self
+                .preprocess
+                .ran_dou_sha
+                .wait_for_result(sessionid, self.params.timeout)
+                .await?;
+            pair.extend(output);
+            assert!(self.preprocess.ran_dou_sha.clear_store(sessionid).await);
 
             if round_id == 255 {
                 ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await.unwrap();
@@ -1371,22 +1312,12 @@ where
             .init(sessionid, rng, network.clone())
             .await?;
 
-        let mut dou_sha = Vec::new();
-        if let Some(sid) = self
-            .outputchannels
-            .dou_sha_channel
-            .lock()
-            .await
-            .recv()
-            .await
-        {
-            if sid == sessionid {
-                let mut dou_sha_db = self.preprocess.dou_sha.storage.lock().await;
-                let dou_sha_storage_mutex = dou_sha_db.remove(&sid).unwrap();
-                let dou_sha_storage = dou_sha_storage_mutex.lock().await;
-                dou_sha = dou_sha_storage.protocol_output.clone();
-            }
-        }
+        let dou_sha = self
+            .preprocess
+            .dou_sha
+            .wait_for_result(sessionid, self.params.timeout)
+            .await?;
+        assert!(self.preprocess.dou_sha.clear_store(sessionid).await);
 
         Ok(dou_sha)
     }
@@ -1449,29 +1380,18 @@ where
                 random_shares_a,
                 beaver_triples,
                 randbit_sessionid,
+                self.params.timeout,
                 network.clone(),
             )
             .await?;
 
         // Collect its output
-        if let Some(id) = self
-            .outputchannels
-            .rand_bit_channel
-            .lock()
-            .await
-            .recv()
-            .await
-        {
-            if id == randbit_sessionid {
-                let mut share_store = self.preprocess.rand_bit.storage.lock().await;
-                let store_lock = share_store.remove(&id).unwrap();
-                let store = store_lock.lock().await;
-                let output = store.protocol_output.clone().unwrap();
-
-                //Collect the randbit outputs
-                randbit_output.extend(output);
-            }
-        }
+        let output = self
+            .preprocess
+            .rand_bit
+            .wait_for_result(randbit_sessionid, self.params.timeout)
+            .await?;
+        randbit_output.extend(output);
 
         // Clear stores
         self.preprocess.rand_bit.clear_store().await;
@@ -1493,31 +1413,15 @@ where
             .await?;
 
         // Collect its output
-        if let Some(id) = self
-            .outputchannels
-            .prand_bit_channel
+        let output = self
+            .preprocess
+            .prand_bit
+            .wait_for_bit_result(prandbit_sessionid, self.params.timeout)
+            .await?;
+        self.preprocessing_material
             .lock()
             .await
-            .recv()
-            .await
-        {
-            if id == prandbit_sessionid {
-                let mut share_store = self.preprocess.prand_bit.store.lock().await;
-                let store_lock = share_store.remove(&id).unwrap();
-                let store = store_lock.lock().await;
-                let bigbit = store.share_b_p.clone();
-                let smallbit = store.share_b_2.clone();
-                let output: Vec<(ShamirShare<F, 1, Robust>, F2_8)> = bigbit
-                    .iter()
-                    .zip(smallbit)
-                    .map(|(a, b)| (a.clone(), b))
-                    .collect();
-                self.preprocessing_material
-                    .lock()
-                    .await
-                    .add(None, None, Some(output), None);
-            }
-        }
+            .add(None, None, Some(output), None);
 
         self.preprocess.prand_bit.clear_store().await;
         Ok(())
@@ -1563,26 +1467,15 @@ where
             .await?;
 
         // Collect its output
-        if let Some(id) = self
-            .outputchannels
-            .prand_int_channel
+        let output = self
+            .preprocess
+            .prand_bit
+            .wait_for_int_result(sessionid, self.params.timeout)
+            .await?;
+        self.preprocessing_material
             .lock()
             .await
-            .recv()
-            .await
-        {
-            if id == sessionid {
-                let mut share_store = self.preprocess.prand_bit.store.lock().await;
-                let store_lock = share_store.remove(&id).unwrap();
-                let store = store_lock.lock().await;
-                let output = store.share_r_p.clone().unwrap();
-
-                self.preprocessing_material
-                    .lock()
-                    .await
-                    .add(None, None, None, Some(output));
-            }
-        }
+            .add(None, None, None, Some(output));
         // Clear store
         self.preprocess.prand_bit.clear_store().await;
         Ok(())
@@ -1602,7 +1495,6 @@ pub enum WrappedMessage {
     Mul(MultMessage),
     Output(OutputMessage),
     RandBit(RandBitMessage),
-    Trunc(TruncPrMessage),
     PRandBit(PRandBitDMessage),
 }
 

@@ -425,7 +425,7 @@ mod tests {
             );
         }
         let new_shares: Vec<_> = s.iter().map(|s| s.share.clone()).collect();
-        let expected = RobustShare::recover_secret(&new_shares, n).unwrap();
+        let expected = RobustShare::recover_secret(&new_shares, n, t).unwrap();
 
         assert_eq!(Fr::from(5), expected.1);
         s.iter().for_each(|i| assert_eq!(i.bit_length(), bitlen));
