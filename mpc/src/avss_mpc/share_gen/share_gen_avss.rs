@@ -4,7 +4,12 @@ use crate::{
         AvssSessionId, AvssWrappedMessage,
     },
     common::{
-        share::{apply_vandermonde, avss::AvssNode, feldman::FeldmanShamirShare, make_vandermonde},
+        share::{
+            apply_vandermonde,
+            avss::{AvssError, AvssNode},
+            feldman::FeldmanShamirShare,
+            make_vandermonde,
+        },
         ProtocolSessionId, ShamirShare, RBC,
     },
 };
@@ -202,7 +207,11 @@ where
             for i in 0..n {
                 let a_ki = vandermonde_matrix[k][i]; // field element
                 let ci = &shares_deg_t[i].commitments;
-
+                if ci.len() != t + 1 {
+                    return Err(RanShaAvssError::AvssError(
+                        AvssError::InvalidCommitmentLength,
+                    ));
+                }
                 for j in 0..=t {
                     ck[j] += ci[j].mul(a_ki);
                 }

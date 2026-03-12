@@ -136,7 +136,6 @@ pub struct RbcMsg {
     pub payload: ByteSlice, // Actual data being broadcasted (e.g., bytes of a secret or message)
     pub metadata: ByteSlice, // info related to the message shared
     pub msg_type: RbcMessageType, // Type of message like INIT, ECHO, or READY
-    pub msg_len: usize,     // length of the original message
 }
 
 impl<Id: ProtocolSessionId> From<Msg<Id>> for RbcMsg {
@@ -158,7 +157,6 @@ impl<Id: ProtocolSessionId> From<Msg<Id>> for RbcMsg {
             payload,
             metadata,
             msg_type: (&value.msg_type).into(),
-            msg_len: value.msg_len,
         }
     }
 }
@@ -485,7 +483,6 @@ pub extern "C" fn sync_bracha_process(
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
-        msg_len: msg.msg_len,
     };
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
@@ -520,7 +517,6 @@ pub extern "C" fn sync_bracha_broadcast(
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
-        msg_len: msg.msg_len,
     };
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
@@ -556,7 +552,6 @@ pub extern "C" fn sync_bracha_send(
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
-        msg_len: msg.msg_len,
     };
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
@@ -773,7 +768,6 @@ pub extern "C" fn sync_avid_process(
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
-        msg_len: msg.msg_len,
     };
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
@@ -808,7 +802,6 @@ pub extern "C" fn sync_avid_broadcast(
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
-        msg_len: msg.msg_len,
     };
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
@@ -844,7 +837,6 @@ pub extern "C" fn sync_avid_send(
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
-        msg_len: msg.msg_len,
     };
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
@@ -1064,7 +1056,6 @@ pub extern "C" fn sync_aba_process(
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
-        msg_len: msg.msg_len,
     };
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
@@ -1099,7 +1090,6 @@ pub extern "C" fn sync_aba_broadcast(
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
-        msg_len: msg.msg_len,
     };
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()
@@ -1135,7 +1125,6 @@ pub extern "C" fn sync_aba_send(
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
         msg_type: GenericMsgType::from(&msg.msg_type),
-        msg_len: msg.msg_len,
     };
     let result = match &*network {
         GenericNetwork::FakeNetwork(n) => tokio::runtime::Runtime::new()

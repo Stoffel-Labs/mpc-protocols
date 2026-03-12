@@ -10,8 +10,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration, vec};
 use stoffelmpc_mpc::common::ProtocolSessionId;
 use stoffelmpc_mpc::common::{rbc::rbc::Avid, SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::{
-    mul::{multiplication::Multiply, MulError},
-    robust_interpolate::robust_interpolate::RobustShare,
+    mul::multiplication::Multiply, robust_interpolate::robust_interpolate::RobustShare,
     ProtocolType, SessionId, WrappedMessage,
 };
 use stoffelmpc_network::fake_network::SenderId;
@@ -146,19 +145,6 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
                 };
                 // Match the message type and route it appropriately
                 match &wrapped {
-                    WrappedMessage::Mul(msg) => {
-                        let result = mul_node.process(msg.clone()).await;
-
-                        match result {
-                            Ok(()) => {}
-                            Err(MulError::ResultAlreadyReceived(_)) => {
-                                info!("{} already received result", mul_node.id);
-                            }
-                            Err(e) => {
-                                panic!("Node {} encountered unexpected error: {e}", mul_node.id);
-                            }
-                        }
-                    }
                     WrappedMessage::Rbc(msg) => {
                         if let Err(e) = mul_node
                             .rbc
@@ -173,11 +159,14 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
                     }
                     WrappedMessage::BatchRecon(batch_msg) => {
                         match batch_msg.session_id.calling_protocol() {
-                            Some(ProtocolType::Mul) => mul_node
-                                .batch_recon
-                                .process(batch_msg.clone(), Arc::clone(&net_clone))
-                                .await
-                                .expect("batch recon error"),
+                            Some(ProtocolType::Mul) => {
+                                mul_node
+                                    .batch_recon
+                                    .process(batch_msg.clone(), Arc::clone(&net_clone))
+                                    .await
+                                    .expect("batch recon error");
+                                mul_node.drain_batch_recon_output().await.unwrap();
+                            }
                             _ => {
                                 panic!("Unexpected caller of batch recon");
                             }

@@ -142,7 +142,8 @@ mod tests {
 
         let mut handles = vec![];
         for i in 0..n {
-            let mut node = BatchReconNode::new(i, n, t, t).unwrap();
+            let (batch_sender, _batch_receiver) = tokio::sync::mpsc::channel(200);
+            let mut node = BatchReconNode::new(i, n, t, t, batch_sender).unwrap();
             let shares = all_shares[i].clone();
             let net_clone = net[i].clone();
             let inboxes = receivers[i].drain(..).collect::<Vec<_>>();
@@ -163,7 +164,7 @@ mod tests {
                     Err(e) => warn!(id =i,error = ?e,"Sending failure"),
                 }
                 // Lock the session store to update the session state.
-                let session_store = node.get_or_create_store(session_id).await;
+                let session_store = node.get_or_create_store(session_id).await.unwrap();
 
                 while {
                     let s = session_store.lock().await;
@@ -198,7 +199,10 @@ mod tests {
         }
         for handle in handles {
             let recovered = handle.await.unwrap();
-            assert_eq!(recovered[..secrets.len()], secrets[..]);
+            let batch_recon_result: Vec<Fr> =
+                CanonicalDeserialize::deserialize_compressed(recovered.as_slice()).unwrap();
+
+            assert_eq!(batch_recon_result[..secrets.len()], secrets[..]);
         }
     }
 }

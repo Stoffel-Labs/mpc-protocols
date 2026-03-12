@@ -14,18 +14,21 @@ pub fn encode_rs(
     if data_shards == 0 || parity_shards == 0 {
         return Err(ShardError::Config("Shard counts must be > 0".to_string()));
     }
+    let original_len = payload.len() as u64;
+    let mut auth_payload = original_len.to_le_bytes().to_vec();
+    auth_payload.extend_from_slice(&payload);
 
     // Make sure the payload is divisible across data shards
-    let shard_size = (payload.len() + data_shards - 1) / data_shards;
+    let shard_size = (auth_payload.len() + data_shards - 1) / data_shards;
     let mut shards = Vec::with_capacity(data_shards + parity_shards);
 
     // Fill data shards (pad last shard if needed)
     for i in 0..data_shards {
         let start = i * shard_size;
 
-        let shard = if start < payload.len() {
-            let end = usize::min(start + shard_size, payload.len());
-            let mut s = payload[start..end].to_vec();
+        let shard = if start < auth_payload.len() {
+            let end = usize::min(start + shard_size, auth_payload.len());
+            let mut s = auth_payload[start..end].to_vec();
             s.resize(shard_size, 0); // pad if needed
             s
         } else {
@@ -84,7 +87,6 @@ pub fn decode_rs(
 /// Reconstructs the original payload from decoded data shards
 pub fn reconstruct_payload(
     decoded_shards: Vec<Vec<u8>>,
-    original_len: usize,
     data_shards: usize,
 ) -> Result<Vec<u8>, ShardError> {
     if decoded_shards.len() < data_shards {
@@ -96,6 +98,18 @@ pub fn reconstruct_payload(
         .take(data_shards)
         .flatten()
         .collect::<Vec<u8>>();
+    if payload.len() < 8 {
+        return Err(ShardError::Config(
+            "Payload too short for length prefix".to_string(),
+        ));
+    }
+
+    let mut len_bytes = [0u8; 8];
+    len_bytes.copy_from_slice(&payload[0..8]);
+    let original_len = u64::from_le_bytes(len_bytes) as usize;
+
+    payload.drain(0..8);
+
     // Validate and truncate to the original message length
     if original_len > payload.len() {
         return Err(ShardError::Config(
@@ -235,7 +249,7 @@ mod tests {
             decode_rs(shards_map, data_shards, parity_shards).expect("Decoding should succeed");
 
         // Reconstruct payload
-        let reconstructed = reconstruct_payload(decoded_shards, payload.len(), data_shards)
+        let reconstructed = reconstruct_payload(decoded_shards, data_shards)
             .expect("Reconstruction should succeed");
 
         assert_eq!(payload, reconstructed);
