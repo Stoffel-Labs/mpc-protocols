@@ -13,6 +13,8 @@ use stoffelmpc_mpc::{
 };
 use tokio::time::{sleep, Duration};
 use stoffelmpc_network::fake_network::FakeNetwork;
+use stoffelmpc_network::turmoil_network::{TurmoilTestHarness, TurmoilNetwork};
+use stoffelmpc_mpc::common::MPCProtocol;
 
 pub mod utils;
 #[tokio::test]
@@ -76,6 +78,119 @@ async fn test_multiple_clients_parallel_input() {
         for (j, secret) in inputs[i].iter().enumerate() {
             let shares: Vec<ShamirShare<Fr, 1, Robust>> =
                 recovered_shares[j].iter().cloned().collect();
+            let (_, r) = RobustShare::recover_secret(&shares, n).unwrap();
+            assert_eq!(r, *secret);
+        }
+    }
+}
+
+#[test]
+fn test_multiple_clients_parallel_input_turmoil() {
+    setup_tracing();
+    let n = 4;
+    let t = 1;
+    let client_ids = vec![100, 101];
+    let inputs = vec![
+        vec![Fr::from(10), Fr::from(20)],
+        vec![Fr::from(30), Fr::from(40)],
+    ];
+    let masks = vec![
+        vec![Fr::from(11), Fr::from(21)],
+        vec![Fr::from(31), Fr::from(41)],
+    ];
+
+    let local_shares: Vec<_> = masks
+        .iter()
+        .map(|mask| generate_independent_shares(mask, t, n))
+        .collect();
+
+    let mut harness = TurmoilTestHarness::setup(n, client_ids.clone());
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(n + client_ids.len()));
+
+    for (i, &cid) in client_ids.iter().enumerate() {
+        let input = inputs[i].clone();
+        let barrier = barrier.clone();
+        let mut client = InputClient::<Fr, Avid>::new(cid, n, t, 111, input.clone()).unwrap();
+        harness.add_client(cid, async move |network| {
+            let mut counter = 0;
+            while let Some(received) = network.recv().await {
+                let wrapped: WrappedMessage = bincode::deserialize(&received).ok().unwrap();
+                if let WrappedMessage::Input(msg) = wrapped {
+                    if msg.msg_type == InputMessageType::MaskShare {
+                        client.process(msg, network.clone()).await.ok();
+                    }
+                }
+
+                counter += 1;
+                println!("Client {}, counter: {}", cid, counter);
+                if counter == n {
+                    break;
+                }
+            }
+
+            barrier.wait().await;
+            
+            Ok(())
+        });
+    }
+
+    let mut nodes: Vec<HoneyBadgerMPCNode<Fr, Avid>> =
+        create_global_nodes::<Fr, Avid, RobustShare<Fr>, TurmoilNetwork>(n, t, 0, 0, 111, 0, 0, 0, 0, client_ids.clone());
+    let mut recovered_shares = std::sync::Arc::new(tokio::sync::Mutex::new(
+            (0..client_ids.len()).map(|i| vec![vec![]; inputs[i].len()]).collect::<Vec<_>>()
+    ));
+
+    for (j, node) in nodes.iter_mut().enumerate() {
+        let mut node = node.clone();
+        let client_ids = client_ids.clone();
+        let local_shares = local_shares.clone();
+        let recovered_shares = recovered_shares.clone();
+        let barrier = barrier.clone();
+        harness.add_node(node.id, async move |network| {
+            tokio::spawn({
+                let mut node = node.clone();
+                let network = network.clone();
+                async move {
+                    while let Some(raw_msg) = network.recv().await {
+                        if let Err(e) = node.process(raw_msg, network.clone()).await {
+                            tracing::error!("Node {} failed to process message: {e:?}", node.id);
+                        }
+                    }
+                }
+            });
+
+            for (i, cid) in client_ids.iter().enumerate() {
+                node.preprocess
+                    .input
+                    .init(*cid, local_shares[i][j].clone(), 2, network.clone())
+                    .await
+                    .unwrap();
+            }
+            
+            let shares = node.preprocess.input.wait_for_all_inputs(Duration::MAX).await.expect("input error");
+            for (i, &cid) in client_ids.iter().enumerate() {
+                let server_shares = shares.get(&cid).unwrap();
+                let mut recovered_shares = recovered_shares.lock().await;
+
+                for (j, s) in server_shares.iter().enumerate() {
+                    recovered_shares[i][j].push(s.clone());
+                }
+            }
+
+            barrier.wait().await;
+
+            Ok(())
+        });
+    }
+
+    harness.sim.run().unwrap();
+
+    let recovered_shares = std::sync::Arc::try_unwrap(recovered_shares).unwrap().into_inner();
+
+    for (i, &cid) in client_ids.iter().enumerate() {
+        for (j, secret) in inputs[i].iter().enumerate() {
+            let shares: Vec<ShamirShare<Fr, 1, Robust>> =
+                recovered_shares[i][j].iter().cloned().collect();
             let (_, r) = RobustShare::recover_secret(&shares, n).unwrap();
             assert_eq!(r, *secret);
         }

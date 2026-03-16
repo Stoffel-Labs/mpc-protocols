@@ -19,6 +19,7 @@ use stoffelmpc_mpc::honeybadger::{
     HoneyBadgerMPCClient, HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+use stoffelmpc_network::turmoil_network::{TurmoilNetwork, TurmoilNode};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
@@ -366,8 +367,6 @@ pub fn generate_independent_shares<F: FftField>(
 
     shares
 }
-
-//--------------------------NODE--------------------------
 
 pub fn receive<F, R, S, N>(
     mut receivers: Vec<Receiver<Vec<u8>>>,
