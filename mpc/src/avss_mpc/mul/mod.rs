@@ -47,6 +47,8 @@ pub enum MulError {
     Timeout(AvssSessionId),
     #[error("Channel closed")]
     Abort,
+    #[error("invalid session ID: calling_protocol is None")]
+    InvalidSessionId,
 }
 
 #[derive(Clone, Debug, PartialEq)]

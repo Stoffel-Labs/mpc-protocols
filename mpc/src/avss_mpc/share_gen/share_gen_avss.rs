@@ -116,8 +116,12 @@ where
         info!("Receiving init for share from {0:?}", self.id);
         let secret = F::rand(rng);
 
+        let session_proto = session_id
+            .calling_protocol()
+            .ok_or(RanShaAvssError::InvalidSessionId)?;
+
         let avss_sessionid = AvssSessionId::new(
-            session_id.calling_protocol().unwrap(),
+            session_proto,
             AvssSessionId::pack_slot24(session_id.exec_id(), self.id as u8, session_id.round_id()),
             session_id.instance_id(),
         );
@@ -129,13 +133,16 @@ where
             let mut rx = self.avss_output.lock().await;
             rx.recv().await
         } {
-            if id.calling_protocol().unwrap() == session_id.calling_protocol().unwrap()
+            if id.calling_protocol() == Some(session_proto)
                 && id.exec_id() == session_id.exec_id()
                 && id.round_id() == session_id.round_id()
                 && id.instance_id() == session_id.instance_id()
             {
                 let mut store = self.avss.shares.lock().await;
-                let avss_share = store.remove(&id).unwrap().unwrap();
+                let avss_share = store
+                    .remove(&id)
+                    .flatten()
+                    .ok_or(RanShaAvssError::Abort)?;
                 drop(store);
                 let binding = self.get_or_create_store(session_id).await;
                 let mut ransha_storage = binding.lock().await;
@@ -225,7 +232,10 @@ where
         let output = store.computed_r_shares[2 * t..].to_vec();
         store.protocol_output = output.clone();
 
-        let taken_output_sender = store.output_sender.take().unwrap();
+        let taken_output_sender = store
+            .output_sender
+            .take()
+            .ok_or(RanShaAvssError::ResultAlreadyReceived(session_id))?;
         taken_output_sender
             .send(output)
             .map_err(|_| RanShaAvssError::SendError(session_id))?;

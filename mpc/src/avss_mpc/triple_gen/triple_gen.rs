@@ -98,6 +98,10 @@ where
         }
         let batch = a.len();
 
+        let session_proto = session_id
+            .calling_protocol()
+            .ok_or(TripleGenError::InvalidSessionId)?;
+
         // === Step 1: local products (vector) ===
         // c_i_prime[j] = a_i[j] * b_i[j]
         let c_i_prime: Vec<F> = a
@@ -109,7 +113,7 @@ where
         let is_dealer = self.id < m;
         if is_dealer {
             let avss_sid = AvssSessionId::new(
-                session_id.calling_protocol().unwrap(),
+                session_proto,
                 AvssSessionId::pack_slot24(
                     session_id.exec_id(),
                     self.id as u8,
@@ -131,7 +135,7 @@ where
             let mut rx = self.avss_output.lock().await;
             rx.recv().await
         } {
-            let same = done.calling_protocol().unwrap() == session_id.calling_protocol().unwrap()
+            let same = done.calling_protocol() == Some(session_proto)
                 && done.exec_id() == session_id.exec_id()
                 && done.round_id() == session_id.round_id()
                 && done.instance_id() == session_id.instance_id();

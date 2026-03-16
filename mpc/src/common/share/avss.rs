@@ -14,7 +14,7 @@ use chacha20poly1305::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
     mpsc::{self, Receiver, Sender},
@@ -148,7 +148,7 @@ where
     pub t: usize,
     pub sk_i: F,
     pub pk_map: Arc<Vec<G>>,
-    pub shares: Arc<Mutex<BTreeMap<Id, Option<Vec<FeldmanShamirShare<F, G>>>>>>,
+    pub shares: Arc<Mutex<HashMap<Id, Option<Vec<FeldmanShamirShare<F, G>>>>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<Id>>>,
     pub output_sender: Sender<Id>,
@@ -198,7 +198,7 @@ where
             t,
             sk_i,
             pk_map,
-            shares: Arc::new(Mutex::new(BTreeMap::new())),
+            shares: Arc::new(Mutex::new(HashMap::new())),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             output_sender,

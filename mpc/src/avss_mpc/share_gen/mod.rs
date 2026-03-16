@@ -36,6 +36,8 @@ pub enum RanShaAvssError {
     Abort,
     #[error("Party Id is out of bounds")]
     InvalidPartyId,
+    #[error("invalid session ID: calling_protocol is None")]
+    InvalidSessionId,
 }
 
 #[derive(Debug)]

@@ -93,9 +93,20 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             ));
         }
 
-        assert!(session_id.calling_protocol().is_some());
-        assert_eq!(session_id.sub_id(), 0);
-        assert_eq!(session_id.round_id(), 0);
+        if session_id.sub_id() != 0 {
+            return Err(MulError::InvalidInput(
+                "session ID sub_id must be 0 for multiplication".to_string(),
+            ));
+        }
+        if session_id.round_id() != 0 {
+            return Err(MulError::InvalidInput(
+                "session ID round_id must be 0 for multiplication".to_string(),
+            ));
+        }
+
+        let session_proto = session_id
+            .calling_protocol()
+            .ok_or(MulError::InvalidSessionId)?;
 
         let no_of_mul = x.len();
         let storage_bind = self.get_or_create_mult_storage(session_id).await;
@@ -130,7 +141,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         reconst_message.serialize_compressed(&mut bytes_rec_message)?;
 
         let rbc_sessionid = AvssSessionId::new(
-            session_id.calling_protocol().unwrap(),
+            session_proto,
             AvssSessionId::pack_slot24(session_id.exec_id(), 0, self.id as u8),
             session_id.instance_id(),
         );
@@ -284,7 +295,9 @@ fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
     n: usize,
 ) -> Result<(), MulError> {
     if storage.received_shares.len() >= 2 * t + 1 && storage.openings.is_none() {
-        let no_of_mul = storage.no_of_mul.unwrap();
+        let no_of_mul = storage
+            .no_of_mul
+            .ok_or_else(|| MulError::InvalidInput("no_of_mul not set".to_string()))?;
 
         let mut a_sub_x = Vec::new();
         let mut b_sub_y = Vec::new();
@@ -317,9 +330,10 @@ fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
 fn finalize_mul<F: FftField, G: CurveGroup<ScalarField = F>>(
     storage: &MultStorage<F, G>,
 ) -> Result<Vec<FeldmanShamirShare<F, G>>, MulError> {
-    assert!(storage.openings.is_some()); // always ensured by the caller
-
-    let openings = storage.openings.as_ref().unwrap();
+    let openings = storage
+        .openings
+        .as_ref()
+        .ok_or_else(|| MulError::InvalidInput("openings not yet available".to_string()))?;
     let expected_len = storage.share_mult_from_triple.len();
     if storage.inputs.0.len() != expected_len || storage.inputs.1.len() != expected_len {
         return Err(MulError::InvalidInput(

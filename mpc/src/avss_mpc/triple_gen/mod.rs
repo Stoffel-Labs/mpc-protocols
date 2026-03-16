@@ -47,6 +47,8 @@ pub enum TripleGenError {
     ResultAlreadyReceived(AvssSessionId),
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(AvssSessionId),
+    #[error("invalid session ID: calling_protocol is None")]
+    InvalidSessionId,
 }
 
 /// Store for one triple session
