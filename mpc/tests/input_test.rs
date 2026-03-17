@@ -112,21 +112,17 @@ fn test_multiple_clients_parallel_input_turmoil() {
         let barrier = barrier.clone();
         let mut client = InputClient::<Fr, Avid>::new(cid, n, t, 111, input.clone()).unwrap();
         harness.add_client(cid, async move |network| {
-            let mut counter = 0;
-            while let Some(received) = network.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&received).ok().unwrap();
-                if let WrappedMessage::Input(msg) = wrapped {
-                    if msg.msg_type == InputMessageType::MaskShare {
-                        client.process(msg, network.clone()).await.ok();
+            tokio::spawn(async move {
+                while let Some(received) = network.recv().await {
+                    let wrapped: WrappedMessage = bincode::deserialize(&received).ok().unwrap();
+                    if let WrappedMessage::Input(msg) = wrapped {
+                        if msg.msg_type == InputMessageType::MaskShare {
+                            client.process(msg, network.clone()).await.ok();
+                        }
                     }
-                }
 
-                counter += 1;
-                println!("Client {}, counter: {}", cid, counter);
-                if counter == n {
-                    break;
                 }
-            }
+            });
 
             barrier.wait().await;
             
