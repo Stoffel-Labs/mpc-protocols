@@ -48,6 +48,8 @@ pub enum AvssError {
     SendError,
     #[error("Channel closed")]
     Abort,
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -302,6 +304,15 @@ where
             session_id = msg.session_id.as_u64(),
             "Processing AVSS share"
         );
+        match msg.session_id.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(AvssError::InvalidInput(format!(
+                    "Unknown calling protocol in session ID {:?}",
+                    msg.session_id
+                )));
+            }
+        };
         {
             let map = self.shares.lock().await;
             if map.contains_key(&msg.session_id) {
