@@ -89,18 +89,14 @@ where
             while let Some((_, bytes)) = merge_rx.recv().await {
                 let wrapped: WrappedMessage = bincode::deserialize(&bytes).unwrap();
                 match wrapped {
-                    WrappedMessage::RandBit(msg) => {
-                        let _ = node.process(msg).await;
-                    }
                     WrappedMessage::BatchRecon(msg) => {
                         if msg.session_id.sub_id() == 0 {
                             let _ = node.batch_recon.process(msg, net.clone()).await;
+                            node.drain_batch_recon_output().await.unwrap();
                         } else {
                             let _ = node.mult_node.batch_recon.process(msg, net.clone()).await;
+                            node.mult_node.drain_batch_recon_output().await.unwrap();
                         }
-                    }
-                    WrappedMessage::Mul(msg) => {
-                        let _ = node.mult_node.process(msg).await;
                     }
                     _ => {}
                 }

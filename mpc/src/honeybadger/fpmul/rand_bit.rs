@@ -99,6 +99,7 @@ where
             .or_insert(Arc::new(Mutex::new(RandBitStorage::empty())))
             .clone())
     }
+
     pub async fn drain_batch_recon_output(&mut self) -> Result<(), RandBitError> {
         loop {
             let id = {

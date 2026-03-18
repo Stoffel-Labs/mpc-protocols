@@ -245,82 +245,10 @@ impl<F: FftField> BatchReconNode<F> {
                             drop(store);
                             info!(self_id = self.id, "Secrets successfully reconstructed");
 
-<<<<<<< HEAD
-                            // Send the finalization message back to the triple generation or the
-                            // multiplication protocol.
-                            match calling_proto {
-                                ProtocolType::Triple => {
-                                    let mut bytes_message = Vec::new();
-                                    result.serialize_compressed(&mut bytes_message)?;
-                                    let triple_gen_generic_msg =
-                                        WrappedMessage::Triple(TripleGenMessage::new(
-                                            self.id,
-                                            msg.session_id,
-                                            bytes_message,
-                                        ));
-                                    let bytes_generic_msg =
-                                        bincode::serialize(&triple_gen_generic_msg)?;
-                                    net.send(self.id, &bytes_generic_msg).await?;
-                                }
-                                ProtocolType::Mul | ProtocolType::FpMul => {
-                                    let mut bytes_message = Vec::new();
-                                    result.serialize_compressed(&mut bytes_message)?;
-                                    let mult_generic_msg = WrappedMessage::Mul(MultMessage::new(
-                                        self.id,
-                                        msg.session_id,
-                                        bytes_message,
-                                    ));
-                                    let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
-                                    net.send(self.id, &bytes_generic_msg).await?;
-                                }
-                                ProtocolType::RandBit => {
-                                    let mut bytes_message = Vec::new();
-                                    result.serialize_compressed(&mut bytes_message)?;
-                                    if msg.session_id.sub_id() == 0 {
-                                        let rand_generic_msg =
-                                            WrappedMessage::RandBit(RandBitMessage::new(
-                                                self.id,
-                                                msg.session_id,
-                                                bytes_message,
-                                            ));
-                                        let bytes_generic_msg =
-                                            bincode::serialize(&rand_generic_msg)?;
-                                        net.send(self.id, &bytes_generic_msg).await?;
-                                    } else {
-                                        let mult_generic_msg =
-                                            WrappedMessage::Mul(MultMessage::new(
-                                                self.id,
-                                                msg.session_id,
-                                                bytes_message,
-                                            ));
-                                        let bytes_generic_msg =
-                                            bincode::serialize(&mult_generic_msg)?;
-                                        net.send(self.id, &bytes_generic_msg).await?;
-                                    }
-                                }
-                                ProtocolType::PRandBit => {
-                                    let mut bytes_message = Vec::new();
-                                    result.serialize_compressed(&mut bytes_message)?;
-                                    let mult_generic_msg =
-                                        WrappedMessage::PRandBitD(PRandBitDMessage::new(
-                                            self.id,
-                                            PRandMessageType::OutputMessage,
-                                            msg.session_id,
-                                            vec![],
-                                            vec![],
-                                            bytes_message,
-                                        ));
-                                    let bytes_generic_msg = bincode::serialize(&mult_generic_msg)?;
-                                    net.send(self.id, &bytes_generic_msg).await?;
-                                }
-                                _ => return Ok(()),
-                            }
-=======
                             self.output_sender
                                 .send(msg.session_id)
                                 .await
                                 .map_err(|_| BatchReconError::SendError)?;
->>>>>>> origin/dev
                         }
                         Err(e) => {
                             error!(

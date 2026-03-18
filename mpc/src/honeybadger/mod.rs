@@ -692,22 +692,7 @@ where
                     }
                 }
             }
-<<<<<<< HEAD
-            WrappedMessage::RandBit(rand_bit_message) => {
-                if sender_id != rand_bit_message.sender {
-                    return Err(HoneyBadgerError::InvalidPartyId);
-                }
-                if rand_bit_message.session_id.instance_id() != self.params.instance_id {
-                    return Err(HoneyBadgerError::InstanceIdError(
-                        rand_bit_message.session_id.instance_id(),
-                    ));
-                }
-                self.preprocess.rand_bit.process(rand_bit_message).await?;
-            }
             WrappedMessage::PRandBitD(prand_message) => {
-=======
-            WrappedMessage::PRandBit(prand_message) => {
->>>>>>> origin/dev
                 if sender_id != prand_message.sender_id {
                     return Err(HoneyBadgerError::InvalidPartyId);
                 }
@@ -1500,13 +1485,8 @@ pub enum WrappedMessage {
     RanSha(RanShaMessage),
     Dousha(DouShaMessage),
     Output(OutputMessage),
-<<<<<<< HEAD
-    RandBit(RandBitMessage),
     PRandBitD(PRandBitDMessage),
     Trunc(TruncPrMessage),
-=======
-    PRandBit(PRandBitDMessage),
->>>>>>> origin/dev
 }
 
 impl WrappedMessage {

@@ -43,6 +43,7 @@ where
                     }
                     WrappedMessage::BatchRecon(msg) => {
                         node.batch_recon.process(msg, net.clone()).await.unwrap();
+                        node.drain_batch_recon_output().await.unwrap();
                     }
                     _ => {}
                 }

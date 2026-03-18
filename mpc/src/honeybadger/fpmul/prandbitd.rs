@@ -4,13 +4,8 @@ use crate::{
         batch_recon::batch_recon::BatchReconNode,
         fpmul::{
             build_all_f_polys,
-<<<<<<< HEAD
             f256::{build_all_f_polys_2_8, Gf2568, Gf256Domain},
-            PRandBitDMessage, PRandBitDStore, PRandError, PRandMessageType, PrandState,
-=======
-            f256::{build_all_f_polys_2_8, F2_8Domain, F2_8},
             PRandBitDMessage, PRandBitDStore, PRandError, PrandState,
->>>>>>> origin/dev
         },
         mul::concat_sorted,
         robust_interpolate::robust_interpolate::RobustShare,
