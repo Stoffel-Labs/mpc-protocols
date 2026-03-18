@@ -1,5 +1,5 @@
 use crate::{
-    common::{share::shamir::NonRobustShare, SecretSharingScheme},
+    common::{share::shamir::NonRobustShare, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
         double_share::{DouShaError, DouShaMessage, DouShaStorage},
         SessionId, WrappedMessage,
@@ -95,7 +95,6 @@ where
             .or_insert(Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))))
             .clone()
     }
-
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.storage.lock().await;
         store.remove(&session_id).is_some()
@@ -218,7 +217,6 @@ where
             dousha_storage.state = ProtocolState::Finished;
 
             let taken_output_sender = dousha_storage.output_sender.take().unwrap();
-            drop(dousha_storage);
             taken_output_sender
                 .send(output)
                 .map_err(|_| DouShaError::SendError(recv_message.session_id))?;

@@ -5,7 +5,6 @@ use stoffelnet::network_utils::PartyId;
 
 use crate::{common::share::shamir::NonRobustShare, honeybadger::SessionId};
 
-
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum RanDouShaPayload {
     Reconstruct(Vec<u8>),
@@ -24,11 +23,7 @@ pub struct RanDouShaMessage {
 }
 
 impl RanDouShaMessage {
-    pub fn new(
-        sender_id: PartyId,
-        session_id: SessionId,
-        payload: RanDouShaPayload,
-    ) -> Self {
+    pub fn new(sender_id: PartyId, session_id: SessionId, payload: RanDouShaPayload) -> Self {
         Self {
             sender_id,
             session_id,

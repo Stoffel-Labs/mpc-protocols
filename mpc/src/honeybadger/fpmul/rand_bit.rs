@@ -1,4 +1,4 @@
-use crate::common::RBC;
+use crate::common::{ProtocolSessionId, RBC};
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
 use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitMessage, RandBitStorage};
 use crate::honeybadger::mul::concat_sorted;
@@ -55,7 +55,7 @@ where
 impl<F, R> RandBit<F, R>
 where
     F: FftField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     pub fn new(id: PartyId, n_parties: usize, threshold: usize) -> Result<Self, RandBitError> {
         let batch_recon_node = BatchReconNode::new(id, n_parties, threshold, threshold)?;
@@ -120,6 +120,74 @@ where
             Ok(Ok(shares)) => Ok(shares),
         }
     }
+    async fn try_finalize(&self, session_id: SessionId) -> Result<bool, RandBitError> {
+        // ---- phase 1: decide + extract under lock ----
+        let (a_share_array, a_square_array) = {
+            let storage_bind = self.get_or_create_storage(session_id).await?;
+            let storage = storage_bind.lock().await;
+
+            if storage.protocol_state == ProtocolState::Finished {
+                return Ok(true);
+            }
+
+            let Some(a_share_array) = storage.a_share.clone() else {
+                // init not called yet
+                return Ok(false);
+            };
+
+            let batch_size = a_share_array.len() / (self.threshold + 1);
+            if storage.output_open.len() != batch_size {
+                return Ok(false);
+            }
+
+            let a_square_array: Vec<F> = concat_sorted(&storage.output_open);
+            (a_share_array, a_square_array)
+        };
+
+        // ---- phase 2: compute outside lock ----
+        for a_square in &a_square_array {
+            if *a_square == F::zero() {
+                return Err(RandBitError::ZeroSquare);
+            }
+        }
+
+        let mut b_inv_array = Vec::with_capacity(a_square_array.len());
+        for a_square in &a_square_array {
+            let b = a_square.sqrt().ok_or(RandBitError::SquareRoot)?;
+            let b_inv = b.inverse().ok_or(RandBitError::Inverse)?;
+            b_inv_array.push(b_inv);
+        }
+
+        let mut c_share_array = Vec::with_capacity(a_share_array.len());
+        for (a_share, b_inv) in izip!(&a_share_array, &b_inv_array) {
+            c_share_array.push(a_share.clone().mul(*b_inv)?);
+        }
+
+        let two_inv = (F::one() + F::one()).inverse().unwrap();
+        let mut d_share_array = Vec::with_capacity(c_share_array.len());
+        for c_share in &c_share_array {
+            d_share_array.push(c_share.clone().add(F::one())?.mul(two_inv)?);
+        }
+
+        // ---- phase 3: commit + send under lock (once) ----
+        let storage_bind = self.get_or_create_storage(session_id).await?;
+        let mut storage = storage_bind.lock().await;
+
+        if storage.protocol_state == ProtocolState::Finished {
+            return Ok(true);
+        }
+
+        storage.protocol_state = ProtocolState::Finished;
+        storage.protocol_output = Some(d_share_array.clone());
+
+        let sender = storage.output_sender.take().unwrap();
+
+        sender
+            .send(d_share_array)
+            .map_err(|_| RandBitError::SendError(session_id))?;
+
+        Ok(true)
+    }
 
     pub async fn init<N>(
         &mut self,
@@ -151,7 +219,9 @@ where
             storage.protocol_state = ProtocolState::Initialized;
             storage.a_share = Some(a.clone());
         }
-
+        if self.try_finalize(session_id).await? {
+            return Ok(());
+        }
         // Step 2: Execute the multiplication to obtain a^2 mod p.
         let a_copy = a.clone();
         self.mult_node
@@ -165,9 +235,7 @@ where
         for (i, chunk) in a_square_share.chunks(self.threshold + 1).enumerate() {
             let session_id_batch = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                session_id.exec_id(),
-                0,
-                i as u8,
+                SessionId::pack_slot24(session_id.exec_id(), 0, i as u8),
                 session_id.instance_id(),
             );
             self.batch_recon
@@ -196,9 +264,7 @@ where
 
         let session_id = SessionId::new(
             calling_proto,
-            message.session_id.exec_id(),
-            0,
-            0,
+            SessionId::pack_slot24(message.session_id.exec_id(), 0, 0),
             message.session_id.instance_id(),
         );
         let storage_bind = self.get_or_create_storage(session_id).await?;
@@ -206,11 +272,6 @@ where
         if storage.protocol_state == ProtocolState::Finished {
             return Ok(());
         }
-        let a = storage
-            .a_share
-            .clone()
-            .ok_or(RandBitError::NotInitialized)?;
-        let batch_size = a.len() / (self.threshold + 1);
 
         let open: Vec<F> =
             CanonicalDeserialize::deserialize_compressed(message.payload.as_slice())?;
@@ -222,72 +283,14 @@ where
             )));
         }
         storage.output_open.insert(round_id, open);
-        if storage.output_open.len() != batch_size {
-            return Err(RandBitError::WaitForOk);
+        // If not initialized, data is stored but can't finalize yet.
+        // init() will check for stored data and finalize if ready.
+        if storage.a_share.is_none() {
+            return Ok(());
         }
-
-        let a_square_array: Vec<F> = concat_sorted(&storage.output_open);
         drop(storage);
-        // Step 4.
-        for a_square in &a_square_array {
-            if *a_square == F::zero() {
-                return Err(RandBitError::ZeroSquare);
-            }
-        }
-
-        // Step 5.
-        let mut b_array = Vec::new();
-        for a_square in &a_square_array {
-            let b = a_square.sqrt().ok_or(RandBitError::SquareRoot)?;
-            b_array.push(b);
-        }
-
-        // Step 6.
-        let mut b_inv_array = Vec::new();
-        for b in &b_array {
-            let b_inv = b.inverse().ok_or(RandBitError::Inverse)?;
-            b_inv_array.push(b_inv);
-        }
-
-        let a_share_array = self
-            .get_or_create_storage(session_id)
-            .await?
-            .lock()
-            .await
-            .a_share
-            .clone()
-            .ok_or(RandBitError::NotInitialized)?;
-
-        let mut c_share_array = Vec::new();
-        for (a_share, b_inv) in izip!(&a_share_array, &b_inv_array) {
-            let c_share = a_share.clone().mul(b_inv.clone())?;
-            c_share_array.push(c_share);
-        }
-
-        // Step 7.
-        // SAFETY: we can unwrap as the field cannot have characteristic 2.
-        let two_inv = (F::one() + F::one()).inverse().unwrap();
-        let mut d_share_array = Vec::new();
-        for c_share in &c_share_array {
-            let d = c_share.clone().add(F::one())?.mul(two_inv)?;
-            d_share_array.push(d);
-        }
-
-        // Mark the protocol as finished.
-        {
-            let storage_bind = self.get_or_create_storage(session_id).await?;
-            let mut storage = storage_bind.lock().await;
-            storage.protocol_state = ProtocolState::Finished;
-            storage.protocol_output = Some(d_share_array.clone());
-
-            let taken_output_sender = storage.output_sender.take().unwrap();
-            drop(storage);
-            taken_output_sender
-                .send(d_share_array)
-                .map_err(|_| RandBitError::SendError(session_id))?;
-        }
-
-        Ok(())
+        let _done = self.try_finalize(session_id).await?;
+        return Ok(());
     }
 
     pub async fn process(&mut self, message: RandBitMessage) -> Result<(), RandBitError> {
@@ -304,18 +307,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_randbit_storage_limit() {
-        let node = RandBit::<Fr, Avid>::new(0, 5, 1).unwrap();
+        let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
 
         // Fill up storage to the limit (256 sessions)
         for i in 0u8..=255 {
-            let session_id =
-                SessionId::new(crate::honeybadger::ProtocolType::RandBit, i, 0, 0, 111);
-
+            let session_id = SessionId::new(
+                crate::honeybadger::ProtocolType::RandBit,
+                SessionId::pack_slot24(i, 0, 0),
+                111,
+            );
             let _ = node.get_or_create_storage(session_id).await;
         }
 
         // The 257th session should fail
-        let session_id = SessionId::new(crate::honeybadger::ProtocolType::RandBit, 0, 1, 0, 111);
+        let session_id = SessionId::new(
+            crate::honeybadger::ProtocolType::RandBit,
+            SessionId::pack_slot24(0, 1, 0),
+            111,
+        );
         let result = node.get_or_create_storage(session_id).await;
         assert!(
             matches!(result, Err(RandBitError::LimitError(_))),

@@ -7,12 +7,31 @@
 
 #include "../honey_badger_bindings.h"
 
-void setup_bracha_parties(size_t n, size_t t, BrachaOpaque **parties)
+static enum RbcErrorCode wrap_identity(
+    void *ctx,
+    const uint8_t *msg_ptr,
+    size_t msg_len,
+    uint8_t **out_ptr,
+    size_t *out_len)
 {
-    // create n bracha instances
+    (void)ctx;
+
+    uint8_t *buf = rbc_alloc(msg_len);
+    if (!buf)
+        return RbcInternal;
+
+    memcpy(buf, msg_ptr, msg_len);
+    *out_ptr = buf;
+    *out_len = msg_len;
+
+    return RbcSuccess;
+}
+
+void setup_bracha_parties(size_t n, size_t t, BrachaOpaque **parties, RbcWrapCtx w)
+{
     for (size_t i = 0; i < n; i++)
     {
-        enum RbcErrorCode e = bracha_new(i, n, t, &parties[i]);
+        enum RbcErrorCode e = bracha_new(i, n, t, &parties[i], w);
         if (e != RbcSuccess)
         {
             printf("Error in creating bracha instance for party %zu\n", i);
@@ -40,26 +59,26 @@ void *recv_msg(void *arg)
         }
         struct RbcMsg rbc_msg;
         enum RbcErrorCode re = deserialize_rbc_msg(msg, &rbc_msg);
+
         free_bytes_slice(msg);
         if (re != RbcSuccess)
         {
             printf("Error in deserializing rbc message for party %zu, error code: %d\n", params->node_index, re);
-            // free_rbc_msg(rbc_msg);
             pthread_exit(NULL);
         }
         printf("Party %zu received message of length %lu from sender %lu\n", params->node_index, rbc_msg.msg_len, rbc_msg.sender_id);
         // process message
         enum RbcErrorCode e = sync_bracha_process(params->node, rbc_msg, params->net);
+
+        free_rbc_msg(rbc_msg);
         if (e == RbcSessionEnded)
         {
             printf("Bracha protocol finished for party %zu\n", params->node_index);
-            free_rbc_msg(rbc_msg);
             pthread_exit(NULL);
         }
         if (e != RbcSuccess)
         {
             printf("Error in bracha process for party %zu, error code: %d\n", params->node_index, e);
-            free_rbc_msg(rbc_msg);
             pthread_exit(NULL);
         }
     }
@@ -72,12 +91,17 @@ void test_bracha_rbc_basic()
     size_t t = 1;
     uintptr_t channel_buff_size = 500;
     char myString[] = "Hello, MPC!";
-    new_session_id(Rbc, 0, 0, 12);
+    new_session_id(Rbc, 0, 0, 0, 12);
     struct BrachaOpaque *prt_array[n];
     struct FakeNetworkReceiversOpaque *receivers;
     struct NetworkOpaque _net;
 
-    setup_bracha_parties(n, t, prt_array);
+    RbcWrapCtx w = {
+        .ctx = 0,
+        .call = wrap_identity,
+    };
+
+    setup_bracha_parties(n, t, prt_array, w);
     struct NetworkOpaque *net = new_fake_network(n, NULL, channel_buff_size, &receivers);
     // get bracha instance id
     uintptr_t id = get_bracha_id(prt_array[3]);
@@ -87,11 +111,12 @@ void test_bracha_rbc_basic()
     payload.pointer = (uint8_t *)myString;
     payload.len = strlen(myString) + 1;
 
-    uint64_t session_id = new_session_id(Rbc, 0, 0, 12);
+    uint64_t session_id = new_session_id(Rbc, 0, 0, 0, 12);
     // party 0 init
     enum RbcErrorCode e = sync_bracha_init(prt_array[0], payload, session_id, net);
     if (e != RbcSuccess)
     {
+        free_fake_network_receivers(receivers);
         printf("Error in bracha init for party 1, error code: %d\n", e);
         exit(1);
     }
@@ -157,11 +182,13 @@ void test_bracha_rbc_basic()
         }
         printf("Output for party %zu: %s\n", i, output.pointer);
         assert(strcmp((char *)output.pointer, myString) == 0);
+        free_bytes_slice(output);
     }
     for (size_t i = 0; i < n; i++)
     {
         free_bracha(prt_array[i]);
     }
+    free_fake_network_receivers(receivers);
     free_network(net);
 }
 

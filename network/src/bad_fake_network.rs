@@ -5,23 +5,21 @@ use std::{
     cmp::{Ord, Ordering, PartialEq, PartialOrd, Reverse},
     collections::{BinaryHeap, HashMap},
     marker::Send,
-    sync::Arc,
 };
 use tokio::{
     spawn,
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        Mutex,
-    },
+    sync::mpsc::{self, Receiver, Sender},
     task::JoinHandle,
     time::{sleep, Duration, Instant},
 };
 
 use once_cell::sync::Lazy;
+#[cfg(debug_assertions)]
+use tokio::sync::Mutex;
+#[cfg(debug_assertions)]
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::FmtSubscriber;
-
 /*
  * This is a fake network with delays. Every sent message is assigned a delay sampled from some
  * distribution. The message is inserted into a min-heap with the delay as its key.
@@ -64,14 +62,14 @@ use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
 /// 2. Get the next message with the smallest delay.
 /// 3. If the delay has expired (i.e., elapsed_time >= delay), send the message.
 /// 4. If the delay has not yet expired, update the delay by subtracting the elapsed time.
-/// Go to step 1.
+///    Go to step 1.
 /// 5. Add a newly received message (if any).
 /// 6. Update the min-heap with the changes.
 /// 7. Set a timer for the next message to expire or set it to Duration::MAX if there are no
 ///    messages.
 async fn send_next_msgs(
     net_msgs: &mut BinaryHeap<KeyedMessage>,
-    node_channels: &mut Vec<Vec<Sender<Vec<u8>>>>,
+    node_channels: &mut [Vec<Sender<Vec<u8>>>],
     recvd_msg: Option<KeyedMessage>,
     elapsed_time: Duration,
 ) -> Duration {
@@ -101,8 +99,8 @@ async fn send_next_msgs(
             // 3.
             let (from, to, payload) = &msg.1;
             let result = node_channels[*from][*to].send(payload.to_vec()).await;
-            if result.is_err() {
-                panic!("network thread encountered error {}", result.unwrap_err());
+            if let Err(e) = result {
+                panic!("network thread encountered error {}", e);
             }
         } else {
             #[cfg(debug_assertions)]
@@ -127,10 +125,10 @@ async fn send_next_msgs(
 
     // 7.
     let next_msg = net_msgs.peek();
-    if next_msg.is_none() {
-        Duration::MAX
+    if let Some(m) = next_msg {
+        m.0
     } else {
-        next_msg.unwrap().0
+        Duration::MAX
     }
 }
 
@@ -147,7 +145,7 @@ impl PartialEq for KeyedMessage {
 impl Eq for KeyedMessage {}
 impl PartialOrd for KeyedMessage {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(Reverse(self.0).cmp(&Reverse(other.0)))
+        Some(self.cmp(other))
     }
 }
 
@@ -180,8 +178,9 @@ impl BadFakeInnerNetwork {
     ///      those in (1)
     ///   3. receiving endpoints to receive messages from the network, connected to those in (2)
     ///   4. a mapping of client IDs to their corresponding receiving endpoints at the client
-    /// The sending endpoints connected to (1) and (4) are managed by the network and exposed via
-    /// the `BadFakeNetwork::send` and `BadFakeNetwork::send_to_client` functions.
+    ///      The sending endpoints connected to (1) and (4) are managed by the network and exposed via
+    ///      the `BadFakeNetwork::send` and `BadFakeNetwork::send_to_client` functions.
+    #[allow(clippy::type_complexity)]
     pub fn new(
         n_nodes: usize,
         n_clients: Option<Vec<ClientId>>,
@@ -211,11 +210,11 @@ impl BadFakeInnerNetwork {
         // ---- node → node channels ----
         let mut node_channels = vec![Vec::with_capacity(n_nodes); n_nodes];
 
-        for from in 0..n_nodes {
-            for to in 0..n_nodes {
+        for from in node_channels.iter_mut().take(n_nodes) {
+            for to in inboxes.iter_mut().take(n_nodes) {
                 let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
-                node_channels[from].push(tx);
-                inboxes[to].push(rx);
+                from.push(tx);
+                to.push(rx);
             }
         }
 
@@ -226,10 +225,10 @@ impl BadFakeInnerNetwork {
             for client_id in client_ids {
                 let mut row = Vec::with_capacity(n_nodes);
 
-                for to in 0..n_nodes {
+                for to in inboxes.iter_mut().take(n_nodes) {
                     let (tx, rx) = mpsc::channel::<Vec<u8>>(config.channel_buff_size);
                     row.push(tx);
-                    inboxes[to].push(rx);
+                    to.push(rx);
                 }
 
                 client_channels.insert(client_id, row);
@@ -305,7 +304,7 @@ impl BadFakeNetwork {
     /// 2. If a message is received by the delaying thread from a node first,
     ///    a. a random delay for the message is sampled from the given distribution
     ///    b. `send_next_msgs` is called to add the new message and send any messages whose
-    ///       delay has expired
+    ///    delay has expired
     ///    c. The timer's expiration time is updated for the next iteration.
     /// 3. If the current timer expires first,
     ///    a. `send_next_msgs` is called to send any messages whose delay has expired

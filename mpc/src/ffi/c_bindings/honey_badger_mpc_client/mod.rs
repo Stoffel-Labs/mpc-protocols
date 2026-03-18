@@ -3,13 +3,13 @@ use std::{ptr::slice_from_raw_parts, sync::Arc};
 use ark_bls12_381::Fr;
 
 use crate::{
-    common::{rbc::rbc::Bracha, RBC},
+    common::rbc::rbc::Bracha,
     ffi::c_bindings::{
         network::{self, GenericNetwork},
         share::FieldKind,
         ByteSlice, U256Slice, U256,
     },
-    honeybadger::{output, HoneyBadgerError, HoneyBadgerMPCClient},
+    honeybadger::{HoneyBadgerError, HoneyBadgerMPCClient, SessionId},
 };
 
 // opaque pointer for HoneyBadgerMPCClient
@@ -103,7 +103,7 @@ pub extern "C" fn new_honey_badger_mpc_client(
                 .iter()
                 .map(|fr| Fr::from(fr.clone()))
                 .collect::<Vec<_>>();
-            let client = HoneyBadgerMPCClient::<_, Bracha>::new(
+            let client = HoneyBadgerMPCClient::<_, Bracha<SessionId>>::new(
                 id,
                 n,
                 t,
@@ -123,7 +123,7 @@ pub extern "C" fn hb_client_process(
     sender_id: usize,
     raw_msg: ByteSlice,
 ) -> HoneyBadgerErrorCode {
-    let client = unsafe { &mut *(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha>) };
+    let client = unsafe { &mut *(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha<SessionId>>) };
     let network = unsafe { &*(net_ptr as *mut network::GenericNetwork) };
     let msg_slice = unsafe { &*slice_from_raw_parts(raw_msg.pointer, raw_msg.len) };
     let msg = msg_slice.to_vec();
@@ -149,7 +149,8 @@ pub extern "C" fn hb_client_get_output(
 ) -> HoneyBadgerErrorCode {
     match field_kind {
         FieldKind::Bls12_381Fr => {
-            let client = unsafe { &mut *(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha>) };
+            let client =
+                unsafe { &mut *(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha<SessionId>>) };
             let output_client = &client.output;
             let output = output_client.get_output();
             match output {
@@ -170,7 +171,7 @@ pub extern "C" fn hb_client_get_output(
 pub extern "C" fn free_honey_badger_mpc_client(client_ptr: *mut HoneyBadgerMPCClientOpaque) {
     if !client_ptr.is_null() {
         unsafe {
-            let _ = Box::from_raw(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha>);
+            let _ = Box::from_raw(client_ptr as *mut HoneyBadgerMPCClient<Fr, Bracha<SessionId>>);
         }
     }
 }

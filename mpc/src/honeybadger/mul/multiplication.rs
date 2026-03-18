@@ -1,5 +1,5 @@
 use crate::{
-    common::{share::ShareError, SecretSharingScheme, ShamirShare, RBC},
+    common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC},
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         mul::{
@@ -8,7 +8,7 @@ use crate::{
         },
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         triple_gen::ShamirBeaverTriple,
-        SessionId,
+        SessionId, WrappedMessage,
     },
 };
 use ark_ff::FftField;
@@ -139,11 +139,18 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-impl<F: FftField, R: RBC> Multiply<F, R> {
+impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
         let (rbc_sender, rbc_receiver) = mpsc::channel(200);
         let batch_recon = BatchReconNode::<F>::new(id, n, threshold, threshold)?;
-        let rbc = R::new(id, n, threshold, threshold + 1, rbc_sender)?;
+        let rbc = R::new(
+            id,
+            n,
+            threshold,
+            threshold + 1,
+            rbc_sender,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?;
         Ok(Self {
             id,
             n,
@@ -155,7 +162,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         })
     }
     pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {
-        Ok(loop {
+        loop {
             let id = {
                 let mut rx = self.rbc_output.lock().await;
                 match rx.try_recv() {
@@ -176,7 +183,8 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
                     return Err(e);
                 }
             }
-        })
+        }
+        Ok(())
     }
     pub async fn clear_store(&self) {
         let mut store = self.mult_storage.lock().await;
@@ -319,9 +327,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             if !have_batch_recon1[i] {
                 let session_id1 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
-                    session_id.exec_id(),
-                    1,
-                    (2 * i) as u8,
+                    SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i) as u8),
                     session_id.instance_id(),
                 );
                 // Execute batch reconstruction for a-x values
@@ -333,9 +339,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             if !have_batch_recon2[i] {
                 let session_id2 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
-                    session_id.exec_id(),
-                    1,
-                    (2 * i + 1) as u8,
+                    SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i + 1) as u8),
                     session_id.instance_id(),
                 );
                 // Execute batch reconstruction for b-y values
@@ -355,9 +359,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
 
             let sessionid = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                session_id.exec_id(),
-                2,
-                self.id as u8,
+                SessionId::pack_slot24(session_id.exec_id(), 2, self.id as u8),
                 session_id.instance_id(),
             );
 
@@ -396,9 +398,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
 
         let session_id = SessionId::new(
             calling_proto,
-            msg.session_id.exec_id(),
-            0,
-            0,
+            SessionId::pack_slot24(msg.session_id.exec_id(), 0, 0),
             msg.session_id.instance_id(),
         );
 
@@ -458,10 +458,10 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
         }
 
         // 3.
-        let no_of_mul = storage.no_of_mul.ok_or(MulError::InvalidInput(format!(
-            "No. of multiplications not set for node (init not called yet) {}",
-            self.id
-        )))?;
+        let Some(no_of_mul) = storage.no_of_mul else {
+            // init not called yet: buffer-only mode
+            return Ok(());
+        };
         let no_of_batch = no_of_mul / (self.t + 1);
         let share_len = no_of_mul % (self.t + 1);
 
@@ -480,7 +480,7 @@ impl<F: FftField, R: RBC> Multiply<F, R> {
             || storage.output_open_mult2.len() != no_of_batch
             || storage.openings.is_none()
         {
-            return Err(MulError::WaitForOk);
+            return Ok(());
         }
 
         // 6.
@@ -554,8 +554,7 @@ pub mod tests {
     use crate::{
         common::{rbc::rbc::Avid, SecretSharingScheme},
         honeybadger::{
-            robust_interpolate::robust_interpolate::RobustShare, ProtocolType, RbcError,
-            WrappedMessage,
+            robust_interpolate::robust_interpolate::RobustShare, ProtocolType, WrappedMessage,
         },
     };
     use ark_bls12_381::Fr;
@@ -565,7 +564,7 @@ pub mod tests {
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
     use tokio::{
         sync::mpsc::{self, Receiver},
-        time::{sleep, Duration},
+        time::{sleep, Duration, Instant},
     };
 
     async fn construct_input_mul(
@@ -640,7 +639,7 @@ pub mod tests {
         let t = 3;
         let node_id = 0;
         let no_of_mul = 10;
-        let session_id = SessionId::new(ProtocolType::Mul, 123, 0, 0, 111);
+        let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot24(123, 0, 0), 111);
         let mut rng = test_rng();
 
         // 1. Generate Beaver triples
@@ -724,7 +723,7 @@ pub mod tests {
             .collect();
 
         let mut nodes: Vec<_> = (0..n)
-            .map(|i| Multiply::<Fr, Avid>::new(i, n, t).unwrap())
+            .map(|i| Multiply::<Fr, Avid<SessionId>>::new(i, n, t).unwrap())
             .collect();
 
         // all but one node call init
@@ -774,7 +773,6 @@ pub mod tests {
                         WrappedMessage::Rbc(rbc_msg) => {
                             match node.rbc.process(rbc_msg, network[i].clone()).await {
                                 Ok(()) => {}
-                                Err(RbcError::SessionEnded(_)) => {}
                                 Err(e) => {
                                     panic!("unexpected error during RBC: {e}");
                                 }
@@ -793,23 +791,34 @@ pub mod tests {
         }
 
         // wait for left out node to receive messages and calculate result
-        sleep(Duration::from_millis(500)).await;
-
-        let storage_bind = nodes[node_id].get_or_create_mult_storage(session_id).await;
-        let storage = storage_bind.lock().await;
-
         let no_of_batch = no_of_mul / (t + 1);
+        let timeout_duration = Duration::from_secs(10);
+        let start = Instant::now();
 
-        // all openings except for the RBC ones should be there, but enough shares
-        // for reconstruction should be there
-        assert!((0..no_of_batch).all(|i| storage.output_open_mult1.contains_key(&((2 * i) as u8))));
-        assert!(
-            (0..no_of_batch).all(|i| storage.output_open_mult2.contains_key(&((2 * i + 1) as u8)))
-        );
-        assert!(storage.openings.is_none());
-        assert!(storage.received_shares.len() >= 2 * t + 1);
+        loop {
+            let storage_bind = nodes[node_id].get_or_create_mult_storage(session_id).await;
+            let storage = storage_bind.lock().await;
 
-        drop(storage);
+            let has_mult1_keys =
+                (0..no_of_batch).all(|i| storage.output_open_mult1.contains_key(&((2 * i) as u8)));
+            let has_mult2_keys = (0..no_of_batch)
+                .all(|i| storage.output_open_mult2.contains_key(&((2 * i + 1) as u8)));
+            let has_enough_shares = storage.received_shares.len() >= 2 * t + 1;
+
+            if has_mult1_keys && has_mult2_keys && has_enough_shares {
+                // Condition met, verify remaining assertion and continue
+                assert!(storage.openings.is_none());
+                break;
+            }
+
+            drop(storage);
+
+            if start.elapsed() > timeout_duration {
+                panic!("Timeout waiting for storage to be populated");
+            }
+
+            sleep(Duration::from_millis(50)).await;
+        }
 
         // so now we call init...
         assert!(nodes[node_id]
@@ -872,7 +881,7 @@ pub mod tests {
         let node_id = 0;
         let no_of_mul = 10;
         let split_at = no_of_mul - no_of_mul % (t + 1);
-        let session_id = SessionId::new(ProtocolType::Mul, 123, 0, 0, 111);
+        let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot24(123, 0, 0), 111);
         let mut rng = test_rng();
 
         // 1. Generate Beaver triples
@@ -952,7 +961,7 @@ pub mod tests {
         }
 
         // 4. Create node
-        let mut mul_node = Multiply::<Fr, Avid>::new(node_id, n_parties, t).unwrap();
+        let mut mul_node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n_parties, t).unwrap();
 
         let storage_bind = mul_node.get_or_create_mult_storage(session_id).await;
         let mut storage = storage_bind.lock().await;
@@ -981,16 +990,12 @@ pub mod tests {
         {
             let session_id_a = SessionId::new(
                 ProtocolType::Mul,
-                session_id.exec_id(),
-                1,
-                (2 * i) as u8,
+                SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i) as u8),
                 session_id.instance_id(),
             );
             let session_id_b = SessionId::new(
                 ProtocolType::Mul,
-                session_id.exec_id(),
-                1,
-                (2 * i + 1) as u8,
+                SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i + 1) as u8),
                 session_id.instance_id(),
             );
 
@@ -1039,9 +1044,7 @@ pub mod tests {
 
                 let shared_session_id = SessionId::new(
                     ProtocolType::Mul,
-                    session_id.exec_id(),
-                    2,
-                    mul_node.id as u8,
+                    SessionId::pack_slot24(session_id.exec_id(), 2, mul_node.id as u8),
                     session_id.instance_id(),
                 );
 
@@ -1057,9 +1060,6 @@ pub mod tests {
             let result = mul_node.process(msg).await;
             match result {
                 Ok(()) => {}
-                Err(MulError::WaitForOk) => {
-                    info!("waiting");
-                }
                 Err(MulError::Duplicate(e)) => {
                     panic!("duplicate detected: {e}")
                 }

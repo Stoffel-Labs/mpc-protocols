@@ -44,7 +44,7 @@ where
 impl<F, R> FPMulNode<F, R>
 where
     F: PrimeField,
-    R: RBC,
+    R: RBC<Id = SessionId>,
 {
     pub fn new(id: usize, n_parties: usize, threshold: usize) -> Result<Self, FPError> {
         let trunc_node = TruncPrNode::new(id, n_parties, threshold)?;

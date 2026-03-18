@@ -2,7 +2,7 @@ use crate::{common::rbc::RbcError, honeybadger::robust_interpolate::InterpolateE
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::{ClientId, NetworkError};
+use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 use tokio::{sync::watch::error::RecvError, time::error::Elapsed};
 

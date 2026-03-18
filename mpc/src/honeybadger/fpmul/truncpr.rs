@@ -1,11 +1,11 @@
 use crate::{
-    common::{SecretSharingScheme, RBC},
+    common::{ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
         fpmul::{
             mod_pow2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore, TruncState,
         },
         robust_interpolate::robust_interpolate::RobustShare,
-        SessionId,
+        SessionId, WrappedMessage,
     },
 };
 use ark_ff::PrimeField;
@@ -31,10 +31,18 @@ pub struct TruncPrNode<F: PrimeField, R: RBC> {
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
+impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, TruncPrError> {
         let (rbc_sender, rbc_receiver) = mpsc::channel(200);
-        let rbc = R::new(id, n, t, t + 1, rbc_sender)?;
+
+        let rbc = R::new(
+            id,
+            n,
+            t,
+            t + 1,
+            rbc_sender,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?;
         Ok(Self {
             id,
             n,
@@ -46,7 +54,7 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), TruncPrError> {
-        Ok(loop {
+        loop {
             let id = {
                 let mut rx = self.rbc_output.lock().await;
                 match rx.try_recv() {
@@ -67,7 +75,8 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
                     return Err(e);
                 }
             }
-        })
+        }
+        Ok(())
     }
     pub async fn get_or_create_store(&mut self, session: SessionId) -> Arc<Mutex<TruncPrStore<F>>> {
         let mut map = self.store.lock().await;
@@ -112,6 +121,67 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
         }
     }
 
+    async fn try_finalize(
+        &self,
+        session_id: SessionId,
+        store_mutex: Arc<Mutex<TruncPrStore<F>>>,
+    ) -> Result<bool, TruncPrError> {
+        // ---- phase 1: decide + extract (no side effects) ----
+        let (shares, m, r_dash, a) = {
+            let s = store_mutex.lock().await;
+
+            if s.state == TruncState::Finished {
+                return Ok(true);
+            }
+
+            if s.share_a.is_none() || s.r_dash.is_none() {
+                return Ok(false);
+            }
+
+            if s.open_buf.len() < 2 * self.t + 1 {
+                return Ok(false);
+            }
+
+            let shares: Vec<RobustShare<F>> = s.open_buf.values().cloned().collect();
+            let m = s.m;
+            let r_dash = s.r_dash.clone().unwrap();
+            let a = s.share_a.clone().unwrap();
+
+            (shares, m, r_dash, a)
+        };
+
+        // ---- phase 2: compute outside lock ----
+        let (_, c) = RobustShare::recover_secret(&shares, self.n, self.t)?;
+        let c_mod = mod_pow2_from_field::<F>(c, m);
+
+        let a_prime = RobustShare::from_scalar_sub(c_mod, &r_dash);
+        let inv_2m = pow2_f::<F>(m).inverse().expect("2^m invertible mod q");
+        let d = ((a - a_prime)? * inv_2m)?;
+
+        // ---- phase 3: commit + send (one-shot) ----
+        let sender = {
+            let mut s = store_mutex.lock().await;
+
+            if s.state == TruncState::Finished {
+                return Ok(true);
+            }
+
+            s.state = TruncState::Finished;
+            s.share_d = Some(d.clone());
+            s.open_buf.clear();
+
+            s.output_sender
+                .take()
+                .ok_or(TruncPrError::SendError(session_id))?
+        };
+
+        sender
+            .send(d)
+            .map_err(|_| TruncPrError::SendError(session_id))?;
+
+        Ok(true)
+    }
+
     /// Start TruncPr:
     /// - builds [r'] and [r] from preseeded randomness,
     /// - forms share of (b + r) where b = 2^{k-1} + [a],
@@ -152,6 +222,9 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
         s.r_dash = Some(r_dash.clone());
         s.state = TruncState::Initialized;
         drop(s);
+        if self.try_finalize(session, store.clone()).await? {
+            return Ok(());
+        }
         // [r] = 2^m [r''] + [r']
         let r = ((r_int * pow2_f::<F>(m))? + r_dash)?;
 
@@ -166,9 +239,7 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
 
         let sessionid = SessionId::new(
             calling_proto,
-            session.exec_id(),
-            0,
-            self.id as u8,
+            SessionId::pack_slot24(session.exec_id(), 0, self.id as u8),
             session.instance_id(),
         );
         self.rbc
@@ -208,39 +279,8 @@ impl<F: PrimeField, R: RBC> TruncPrNode<F, R> {
         }
         s.open_buf.insert(msg.sender_id, share_i);
 
-        // reconstruct when we have t+1
-        if s.open_buf.len() >= 2 * self.t + 1 {
-            let shares: Vec<RobustShare<F>> = s.open_buf.values().cloned().collect();
-            let (_, c) = RobustShare::recover_secret(&shares, self.n, self.t)?;
-
-            // c' = c mod 2^m  (public integer)
-            let m = s.m;
-            let c_mod = mod_pow2_from_field::<F>(c, m);
-
-            // [a'] = c' - [r']  (work in the field; lift c' into F)
-            let r_dash = s
-                .r_dash
-                .clone()
-                .ok_or(TruncPrError::NotSet("r_dash".to_string()))?;
-            let a_prime = RobustShare::from_scalar_sub(c_mod, &r_dash);
-
-            // [d] = ([a] - [a']) * (2^{-m} mod q)
-            let a = s
-                .share_a
-                .clone()
-                .ok_or(TruncPrError::NotSet("share_a".to_string()))?;
-            let inv_2m = pow2_f::<F>(m).inverse().expect("2^m invertible mod q");
-            let d = ((a - a_prime)? * inv_2m)?;
-
-            s.share_d = Some(d.clone());
-            s.open_buf.clear();
-            s.state = TruncState::Finished;
-            let taken_output_sender = s.output_sender.take().unwrap();
-            drop(s);
-            taken_output_sender
-                .send(d)
-                .map_err(|_| TruncPrError::SendError(msg.session_id))?;
-        }
+        drop(s);
+        self.try_finalize(msg.session_id, store.clone()).await?;
 
         Ok(())
     }
@@ -258,10 +298,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_truncpr_handle_open_invalid_sub_id() {
-        let mut node = TruncPrNode::<Fr, Avid>::new(0, 5, 1).unwrap();
+        let mut node = TruncPrNode::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
 
         // Create a session id with sub_id != 0
-        let session_id = SessionId::new(crate::honeybadger::ProtocolType::Trunc, 0, 1, 0, 111);
+        let session_id = SessionId::new(
+            crate::honeybadger::ProtocolType::Trunc,
+            SessionId::pack_slot24(0, 1, 0),
+            111,
+        );
 
         // Create a dummy payload
         let dummy_share = RobustShare::new(Fr::from(1u8), 0, 1);

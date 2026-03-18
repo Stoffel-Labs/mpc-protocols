@@ -1,5 +1,4 @@
 use ark_bls12_381::Fr;
-use ark_ff::biginteger;
 use ark_ff::{BigInt, BigInteger, PrimeField};
 use num_bigint::BigUint;
 use std::{
@@ -7,7 +6,7 @@ use std::{
     slice,
 };
 
-use crate::honeybadger::SessionId;
+use crate::{common::ProtocolSessionId, honeybadger::SessionId};
 
 pub mod honey_badger_mpc_client;
 pub mod network;
@@ -192,7 +191,11 @@ pub extern "C" fn new_session_id(
     round_id: u8,
     instance_id: u32,
 ) -> u64 {
-    let session_id = SessionId::new(caller.into(), exec_id, sub_id, round_id, instance_id);
+    let session_id = SessionId::new(
+        caller.into(),
+        SessionId::pack_slot24(exec_id, sub_id, round_id),
+        instance_id,
+    );
     session_id.as_u64()
 }
 

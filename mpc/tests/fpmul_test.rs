@@ -9,7 +9,7 @@ use itertools::Itertools;
 use std::collections::HashMap;
 use std::time::Duration;
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::{SecretSharingScheme, ShamirShare, RBC};
+use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC};
 use stoffelmpc_mpc::honeybadger::fpmul::f256::{
     build_all_f_polys_2_8, lagrange_interpolate_f2_8, F2_8Domain, F2_8,
 };
@@ -29,7 +29,11 @@ async fn test_prandbitd_end_to_end() {
     let l = 8;
     let k = 4;
     let batch_size = 2;
-    let session_id = SessionId::new(ProtocolType::PRandBit, 123, 0, 0, 111);
+    let session_id = SessionId::new(
+        ProtocolType::PRandBit,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
     let mut rng = test_rng();
     // Build fake network
     let (network, mut recv, _, _) = test_setup(n, vec![]);
@@ -157,7 +161,11 @@ async fn test_prandbitd_r_reconstruction() {
     let l = 8;
     let k = 4;
     let batch_size = 2;
-    let session_id = SessionId::new(ProtocolType::PRandBit, 123, 0, 0, 222);
+    let session_id = SessionId::new(
+        ProtocolType::PRandBit,
+        SessionId::pack_slot24(123, 0, 0),
+        222,
+    );
     let mut rng = test_rng();
     // Build fake network
     let (network, mut recv, _, _) = test_setup(n, vec![]);
@@ -344,13 +352,13 @@ async fn test_truncpr_end_to_end() {
     let t = 1;
     let k = 16; // total bitlength (example)
     let m = 4; // fractional bits to truncate
-    let session_id = SessionId::new(ProtocolType::Trunc, 123, 0, 0, 999);
+    let session_id = SessionId::new(ProtocolType::Trunc, SessionId::pack_slot24(123, 0, 0), 999);
 
     // === Build fake network ===
     let (network, mut recv, _, _) = test_setup(n, vec![]);
 
     // === Initialize nodes ===
-    let mut nodes: Vec<TruncPrNode<F, Avid>> =
+    let mut nodes: Vec<TruncPrNode<F, Avid<SessionId>>> =
         (0..n).map(|i| TruncPrNode::new(i, n, t).unwrap()).collect();
 
     // === Input secret [a] (same across parties for test) ===

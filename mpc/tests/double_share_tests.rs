@@ -3,7 +3,7 @@ use std::{collections::HashMap, thread, time::Duration};
 use crate::utils::test_utils::test_setup;
 use ark_std::test_rng;
 use stoffelmpc_mpc::{
-    common::{share::shamir::NonRobustShare, SecretSharingScheme},
+    common::{share::shamir::NonRobustShare, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{ProtocolType, SessionId},
 };
 use tokio::sync::mpsc;
@@ -19,7 +19,7 @@ async fn generate_faulty_double_shares_e2e() {
     setup_tracing();
     let n_parties = 5;
     let threshold = 2;
-    let session_id = SessionId::new(ProtocolType::Dousha, 123, 0, 0, 111);
+    let session_id = SessionId::new(ProtocolType::Dousha, SessionId::pack_slot24(123, 0, 0), 111);
 
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 

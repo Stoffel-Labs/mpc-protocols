@@ -1,8 +1,4 @@
-use std::{
-    mem::{self, ManuallyDrop},
-    slice,
-    sync::Arc,
-};
+use std::{mem::ManuallyDrop, slice, sync::Arc};
 
 use crate::{
     common::{
@@ -11,7 +7,7 @@ use crate::{
             rbc_store::{GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAcs, MsgTypeAvid},
             RbcError,
         },
-        RBC,
+        ProtocolSessionId, RbcWrapFn, RBC,
     },
     ffi::c_bindings::{
         free_bytes_slice,
@@ -22,12 +18,11 @@ use crate::{
 };
 
 #[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RbcErrorCode {
     RbcSuccess,
     // Invalid threshold t for n must satisfy t < ceil(n / 3)
     RbcInvalidThreshold,
-    // Session already ended
-    RbcSessionEnded,
     // Unknown Bracha message type
     RbcUnknownMsgType,
     // Message send failed
@@ -101,6 +96,31 @@ pub struct AbaOpaque {
     _data: (),
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
+struct AbaInner {
+    pub _aba: ABA<SessionId>,
+    pub _output_rx: tokio::sync::mpsc::Receiver<SessionId>,
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone)]
+pub struct FfiCtx(pub usize);
+
+// SAFETY: usize handle is thread-safe by construction
+unsafe impl Send for FfiCtx {}
+unsafe impl Sync for FfiCtx {}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RbcWrapCtx {
+    pub ctx: FfiCtx,
+    pub call: extern "C" fn(
+        ctx: *mut core::ffi::c_void,
+        msg_ptr: *const u8,
+        msg_len: usize,
+        out_ptr: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> RbcErrorCode,
+}
 
 #[repr(C)]
 pub struct AbaOutputReceiverOpaque {
@@ -119,8 +139,8 @@ pub struct RbcMsg {
     pub msg_len: usize,     // length of the original message
 }
 
-impl From<Msg> for RbcMsg {
-    fn from(value: Msg) -> Self {
+impl<Id: ProtocolSessionId> From<Msg<Id>> for RbcMsg {
+    fn from(value: Msg<Id>) -> Self {
         let mut payload_bind = ManuallyDrop::new(value.payload);
         let mut metadata_bind = ManuallyDrop::new(value.metadata);
         let payload = ByteSlice {
@@ -135,8 +155,8 @@ impl From<Msg> for RbcMsg {
             sender_id: value.sender_id,
             session_id: value.session_id.as_u64(),
             round_id: value.round_id,
-            payload: payload,
-            metadata: metadata,
+            payload,
+            metadata,
             msg_type: (&value.msg_type).into(),
             msg_len: value.msg_len,
         }
@@ -153,7 +173,6 @@ impl From<RbcError> for RbcErrorCode {
     fn from(value: RbcError) -> Self {
         match value {
             RbcError::InvalidThreshold(_, _) => RbcErrorCode::RbcInvalidThreshold,
-            RbcError::SessionEnded(_) => RbcErrorCode::RbcSessionEnded,
             RbcError::UnknownMsgType(_) => RbcErrorCode::RbcUnknownMsgType,
             RbcError::SendFailed => RbcErrorCode::RbcSendFailed,
             RbcError::Internal(_) => RbcErrorCode::RbcInternal,
@@ -246,6 +265,15 @@ pub extern "C" fn deserialize_rbc_msg(msg: ByteSlice, output_rbc_msg: *mut RbcMs
         _ => return RbcErrorCode::RbcSerializationError,
     }
 }
+
+#[no_mangle]
+pub extern "C" fn rbc_alloc(len: usize) -> *mut u8 {
+    let mut v = Vec::<u8>::with_capacity(len);
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    ptr
+}
+
 /// Creates a new Bracha instance with the given parameters.
 ///
 /// # Arguments
@@ -258,61 +286,83 @@ pub extern "C" fn bracha_new(
     n: usize,
     t: usize,
     bracha_pointer: *mut *mut BrachaOpaque,
-    output_rx: *mut *mut BrachaOutputReceiverOpaque,
+    wrapper: RbcWrapCtx,
 ) -> RbcErrorCode {
-    // Create channel for Bracha completion events
-    let (tx, rx) = tokio::sync::mpsc::channel::<SessionId>(256);
+    let ctx = wrapper.ctx;
+    let call = wrapper.call;
 
-    // k is unused in Bracha, pass 0
-    let bracha = match Bracha::new(id, n, t, 0, tx) {
-        Ok(b) => b,
-        Err(e) => return e.into(),
-    };
+    let rust_wrapper: RbcWrapFn<SessionId> = Arc::new(move |msg| {
+        let wrapped = WrappedMessage::Rbc(msg);
+        let encoded = bincode::serialize(&wrapped)?;
 
-    // Store Bracha
-    let bracha_ptr = Box::into_raw(Box::new(bracha)) as *mut BrachaOpaque;
+        let mut out_ptr = core::ptr::null_mut();
+        let mut out_len = 0;
 
-    // Store Receiver separately
-    let rx_ptr = Box::into_raw(Box::new(rx)) as *mut BrachaOutputReceiverOpaque;
+        let code = (call)(
+            ctx.0 as *mut core::ffi::c_void,
+            encoded.as_ptr(),
+            encoded.len(),
+            &mut out_ptr,
+            &mut out_len,
+        );
 
-    unsafe {
-        *bracha_pointer = bracha_ptr;
-        *output_rx = rx_ptr;
+        if code != RbcErrorCode::RbcSuccess {
+            return Err(RbcError::Internal(format!(
+                "FFI wrapper failed with code {:?}",
+                code
+            )));
+        }
+
+        unsafe { Ok(Vec::from_raw_parts(out_ptr, out_len, out_len)) }
+    });
+
+    // RBC output channel
+    let (output_sender, _output_receiver) = tokio::sync::mpsc::channel(200);
+
+    // k unused for Bracha
+    let res = Bracha::new(id, n, t, 0, output_sender, rust_wrapper);
+
+    match res {
+        Ok(b) => {
+            unsafe {
+                *bracha_pointer = Box::into_raw(Box::new(b)) as *mut BrachaOpaque;
+            }
+            RbcErrorCode::RbcSuccess
+        }
+        Err(e) => e.into(),
     }
-
-    RbcErrorCode::RbcSuccess
 }
 
 #[no_mangle]
 pub extern "C" fn free_bracha(bracha_pointer: *mut BrachaOpaque) {
     if !bracha_pointer.is_null() {
         unsafe {
-            let _ = Box::from_raw(bracha_pointer as *mut Bracha);
+            let _ = Box::from_raw(bracha_pointer as *mut Bracha<SessionId>);
         }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn get_bracha_id(bracha_pointer: *mut BrachaOpaque) -> usize {
-    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha) };
+    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha<SessionId>) };
     bracha.id
 }
 
 #[no_mangle]
 pub extern "C" fn get_bracha_n(bracha_pointer: *mut BrachaOpaque) -> usize {
-    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha) };
+    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha<SessionId>) };
     bracha.n
 }
 
 #[no_mangle]
 pub extern "C" fn get_bracha_t(bracha_pointer: *mut BrachaOpaque) -> usize {
-    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha) };
+    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha<SessionId>) };
     bracha.t
 }
 
 #[no_mangle]
 pub extern "C" fn sync_bracha_clear_store(bracha_pointer: *mut BrachaOpaque) {
-    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha) };
+    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha<SessionId>) };
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(bracha.clear_store());
@@ -324,7 +374,7 @@ pub extern "C" fn has_bracha_session_ended(
     session_id: u64,
     output: *mut bool,
 ) -> RbcErrorCode {
-    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha) };
+    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha<SessionId>) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
@@ -351,7 +401,7 @@ pub extern "C" fn get_bracha_output(
     session_id: u64,
     output: *mut ByteSlice,
 ) -> RbcErrorCode {
-    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha) };
+    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha<SessionId>) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
@@ -385,7 +435,7 @@ pub extern "C" fn sync_bracha_init(
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
     let payload = unsafe { slice::from_raw_parts(payload.pointer, payload.len) }.to_vec();
-    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha) };
+    let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
 
     let result = match network {
@@ -423,7 +473,7 @@ pub extern "C" fn sync_bracha_process(
     msg: RbcMsg,
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
-    let bracha = unsafe { &*(bracha_pointer as *mut Bracha) };
+    let bracha = unsafe { &*(bracha_pointer as *mut Bracha<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
     let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
@@ -458,7 +508,7 @@ pub extern "C" fn sync_bracha_broadcast(
     msg: RbcMsg,
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
-    let bracha = unsafe { &*(bracha_pointer as *mut Bracha) };
+    let bracha = unsafe { &*(bracha_pointer as *mut Bracha<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
     let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
@@ -494,7 +544,7 @@ pub extern "C" fn sync_bracha_send(
     net_ptr: *mut NetworkOpaque,
     recv: usize,
 ) -> RbcErrorCode {
-    let bracha = unsafe { &*(bracha_pointer as *mut Bracha) };
+    let bracha = unsafe { &*(bracha_pointer as *mut Bracha<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
     let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
@@ -531,60 +581,80 @@ pub extern "C" fn avid_new(
     t: usize,
     k: usize,
     avid_pointer: *mut *mut AvidOpaque,
-    output_rx: *mut *mut AvidOutputReceiverOpaque,
+    wrapper: RbcWrapCtx,
 ) -> RbcErrorCode {
-    // Create the channel here
-    let (tx, rx) = tokio::sync::mpsc::channel::<SessionId>(256);
+    let ctx = wrapper.ctx; // FfiCtx(usize)
+    let call = wrapper.call;
 
-    let avid = match Avid::new(id, n, t, k, tx) {
-        Ok(a) => a,
-        Err(e) => return e.into(),
-    };
+    let rust_wrapper: RbcWrapFn<SessionId> = Arc::new(move |msg| {
+        let wrapped = WrappedMessage::Rbc(msg);
+        let encoded = bincode::serialize(&wrapped)?;
 
-    // Store Avid
-    let avid_ptr = Box::into_raw(Box::new(avid)) as *mut AvidOpaque;
+        let mut out_ptr = core::ptr::null_mut();
+        let mut out_len = 0;
 
-    // Store Receiver separately (opaque)
-    let rx_ptr = Box::into_raw(Box::new(rx)) as *mut AvidOutputReceiverOpaque;
+        let code = (call)(
+            ctx.0 as *mut core::ffi::c_void,
+            encoded.as_ptr(),
+            encoded.len(),
+            &mut out_ptr,
+            &mut out_len,
+        );
 
-    unsafe {
-        *avid_pointer = avid_ptr;
-        *output_rx = rx_ptr;
+        if code != RbcErrorCode::RbcSuccess {
+            return Err(RbcError::Internal(format!(
+                "FFI wrapper failed with code {:?}",
+                code
+            )));
+        }
+
+        unsafe { Ok(Vec::from_raw_parts(out_ptr, out_len, out_len)) }
+    });
+
+    let (output_sender, _output_receiver) = tokio::sync::mpsc::channel(200);
+
+    let res = Avid::new(id, n, t, k, output_sender, rust_wrapper);
+    match res {
+        Ok(a) => {
+            unsafe {
+                *avid_pointer = Box::into_raw(Box::new(a)) as *mut AvidOpaque;
+            }
+            RbcErrorCode::RbcSuccess
+        }
+        Err(e) => e.into(),
     }
-
-    RbcErrorCode::RbcSuccess
 }
 
 #[no_mangle]
 pub extern "C" fn free_avid(avid_pointer: *mut AvidOpaque) {
     if !avid_pointer.is_null() {
         unsafe {
-            let _ = Box::from_raw(avid_pointer as *mut Avid);
+            let _ = Box::from_raw(avid_pointer as *mut Avid<SessionId>);
         }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn get_avid_id(avid_pointer: *mut AvidOpaque) -> usize {
-    let avid = unsafe { &mut *(avid_pointer as *mut Avid) };
+    let avid = unsafe { &mut *(avid_pointer as *mut Avid<SessionId>) };
     avid.id
 }
 
 #[no_mangle]
 pub extern "C" fn get_avid_n(avid_pointer: *mut AvidOpaque) -> usize {
-    let avid = unsafe { &mut *(avid_pointer as *mut Avid) };
+    let avid = unsafe { &mut *(avid_pointer as *mut Avid<SessionId>) };
     avid.n
 }
 
 #[no_mangle]
 pub extern "C" fn get_avid_t(avid_pointer: *mut AvidOpaque) -> usize {
-    let avid = unsafe { &mut *(avid_pointer as *mut Avid) };
+    let avid = unsafe { &mut *(avid_pointer as *mut Avid<SessionId>) };
     avid.t
 }
 
 #[no_mangle]
 pub extern "C" fn sync_avid_clear_store(avid_pointer: *mut AvidOpaque) {
-    let avid = unsafe { &mut *(avid_pointer as *mut Avid) };
+    let avid = unsafe { &mut *(avid_pointer as *mut Avid<SessionId>) };
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(avid.clear_store());
@@ -596,7 +666,7 @@ pub extern "C" fn has_avid_session_ended(
     session_id: u64,
     output: *mut bool,
 ) -> RbcErrorCode {
-    let avid = unsafe { &mut *(avid_pointer as *mut Avid) };
+    let avid = unsafe { &mut *(avid_pointer as *mut Avid<SessionId>) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
@@ -623,7 +693,7 @@ pub extern "C" fn get_avid_output(
     session_id: u64,
     output: *mut ByteSlice,
 ) -> RbcErrorCode {
-    let avid = unsafe { &mut *(avid_pointer as *mut Avid) };
+    let avid = unsafe { &mut *(avid_pointer as *mut Avid<SessionId>) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
@@ -657,7 +727,7 @@ pub extern "C" fn sync_avid_init(
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
     let payload = unsafe { slice::from_raw_parts(payload.pointer, payload.len) }.to_vec();
-    let avid = unsafe { &mut *(avid_pointer as *mut Avid) };
+    let avid = unsafe { &mut *(avid_pointer as *mut Avid<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
 
     let result = match network {
@@ -691,7 +761,7 @@ pub extern "C" fn sync_avid_process(
     msg: RbcMsg,
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
-    let avid = unsafe { &*(avid_pointer as *mut Avid) };
+    let avid = unsafe { &*(avid_pointer as *mut Avid<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
     let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
@@ -726,7 +796,7 @@ pub extern "C" fn sync_avid_broadcast(
     msg: RbcMsg,
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
-    let avid = unsafe { &*(avid_pointer as *mut Avid) };
+    let avid = unsafe { &*(avid_pointer as *mut Avid<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
     let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
@@ -762,7 +832,7 @@ pub extern "C" fn sync_avid_send(
     net_ptr: *mut NetworkOpaque,
     recv: usize,
 ) -> RbcErrorCode {
-    let avid = unsafe { &*(avid_pointer as *mut Avid) };
+    let avid = unsafe { &*(avid_pointer as *mut Avid<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
     let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
@@ -791,7 +861,6 @@ pub extern "C" fn sync_avid_send(
     }
 }
 
-/// Creates a new Avid instance with the given parameters.
 #[no_mangle]
 pub extern "C" fn aba_new(
     id: usize,
@@ -799,57 +868,88 @@ pub extern "C" fn aba_new(
     t: usize,
     k: usize,
     aba_pointer: *mut *mut AbaOpaque,
-    output_rx: *mut *mut AbaOutputReceiverOpaque,
+    wrapper: RbcWrapCtx,
 ) -> RbcErrorCode {
-    // Create channel for ABA output events
-    let (tx, rx) = tokio::sync::mpsc::channel::<SessionId>(256);
+    let ctx = wrapper.ctx;
+    let call = wrapper.call;
 
-    let aba = match ABA::new(id, n, t, k, tx) {
-        Ok(a) => a,
-        Err(e) => return e.into(),
-    };
+    let rust_wrapper: RbcWrapFn<SessionId> = Arc::new(move |msg| {
+        let wrapped = WrappedMessage::Rbc(msg);
+        let encoded = bincode::serialize(&wrapped)?;
 
-    let aba_ptr = Box::into_raw(Box::new(aba)) as *mut AbaOpaque;
-    let rx_ptr = Box::into_raw(Box::new(rx)) as *mut AbaOutputReceiverOpaque;
+        let mut out_ptr = core::ptr::null_mut();
+        let mut out_len = 0;
 
-    unsafe {
-        *aba_pointer = aba_ptr;
-        *output_rx = rx_ptr;
+        let code = (call)(
+            ctx.0 as *mut core::ffi::c_void,
+            encoded.as_ptr(),
+            encoded.len(),
+            &mut out_ptr,
+            &mut out_len,
+        );
+
+        if code != RbcErrorCode::RbcSuccess {
+            return Err(RbcError::Internal(format!(
+                "FFI wrapper failed with code {:?}",
+                code
+            )));
+        }
+
+        unsafe { Ok(Vec::from_raw_parts(out_ptr, out_len, out_len)) }
+    });
+
+    // ABA output channel
+    let (output_sender, output_rx) = tokio::sync::mpsc::channel(200);
+
+    let res = ABA::new(id, n, t, k, output_sender, rust_wrapper);
+
+    match res {
+        Ok(aba_instance) => {
+            let inner = AbaInner {
+                _aba: aba_instance,
+                _output_rx: output_rx,
+            };
+
+            unsafe {
+                *aba_pointer = Box::into_raw(Box::new(inner)) as *mut AbaOpaque;
+            }
+
+            RbcErrorCode::RbcSuccess
+        }
+        Err(e) => e.into(),
     }
-
-    RbcErrorCode::RbcSuccess
 }
 
 #[no_mangle]
 pub extern "C" fn free_aba(aba_pointer: *mut AbaOpaque) {
     if !aba_pointer.is_null() {
         unsafe {
-            let _ = Box::from_raw(aba_pointer as *mut ABA);
+            let _ = Box::from_raw(aba_pointer as *mut ABA<SessionId>);
         }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn get_aba_id(aba_pointer: *mut AbaOpaque) -> usize {
-    let aba = unsafe { &mut *(aba_pointer as *mut ABA) };
+    let aba = unsafe { &mut *(aba_pointer as *mut ABA<SessionId>) };
     aba.id
 }
 
 #[no_mangle]
 pub extern "C" fn get_aba_n(aba_pointer: *mut AbaOpaque) -> usize {
-    let aba = unsafe { &mut *(aba_pointer as *mut ABA) };
+    let aba = unsafe { &mut *(aba_pointer as *mut ABA<SessionId>) };
     aba.n
 }
 
 #[no_mangle]
 pub extern "C" fn get_aba_t(aba_pointer: *mut AbaOpaque) -> usize {
-    let aba = unsafe { &mut *(aba_pointer as *mut ABA) };
+    let aba = unsafe { &mut *(aba_pointer as *mut ABA<SessionId>) };
     aba.t
 }
 
 #[no_mangle]
 pub extern "C" fn sync_aba_clear_store(aba_pointer: *mut AbaOpaque) {
-    let aba = unsafe { &mut *(aba_pointer as *mut ABA) };
+    let aba = unsafe { &mut *(aba_pointer as *mut ABA<SessionId>) };
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(aba.clear_store());
@@ -861,7 +961,7 @@ pub extern "C" fn has_aba_session_ended(
     session_id: u64,
     output: *mut bool,
 ) -> RbcErrorCode {
-    let aba = unsafe { &mut *(aba_pointer as *mut ABA) };
+    let aba = unsafe { &mut *(aba_pointer as *mut ABA<SessionId>) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
@@ -888,7 +988,7 @@ pub extern "C" fn get_aba_output(
     session_id: u64,
     output: *mut bool,
 ) -> RbcErrorCode {
-    let aba = unsafe { &mut *(aba_pointer as *mut ABA) };
+    let aba = unsafe { &mut *(aba_pointer as *mut ABA<SessionId>) };
     let session_id = unsafe { SessionId::from_u64(session_id) };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
@@ -918,7 +1018,7 @@ pub extern "C" fn sync_aba_init(
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
     let payload = unsafe { slice::from_raw_parts(payload.pointer, payload.len) }.to_vec();
-    let aba = unsafe { &mut *(aba_pointer as *mut ABA) };
+    let aba = unsafe { &mut *(aba_pointer as *mut ABA<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
 
     let result = match network {
@@ -952,7 +1052,7 @@ pub extern "C" fn sync_aba_process(
     msg: RbcMsg,
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
-    let aba = unsafe { &*(aba_pointer as *mut ABA) };
+    let aba = unsafe { &*(aba_pointer as *mut ABA<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
     let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
@@ -987,7 +1087,7 @@ pub extern "C" fn sync_aba_broadcast(
     msg: RbcMsg,
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
-    let aba = unsafe { &*(aba_pointer as *mut ABA) };
+    let aba = unsafe { &*(aba_pointer as *mut ABA<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
     let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
@@ -1023,7 +1123,7 @@ pub extern "C" fn sync_aba_send(
     net_ptr: *mut NetworkOpaque,
     recv: usize,
 ) -> RbcErrorCode {
-    let aba = unsafe { &*(aba_pointer as *mut ABA) };
+    let aba = unsafe { &*(aba_pointer as *mut ABA<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
     let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
