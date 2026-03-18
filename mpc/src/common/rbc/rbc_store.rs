@@ -15,7 +15,6 @@ pub struct Msg<Id: ProtocolSessionId> {
     pub payload: Vec<u8>, // Actual data being broadcasted (e.g., bytes of a secret or message)
     pub metadata: Vec<u8>, // info related to the message shared
     pub msg_type: GenericMsgType, // Type of message like INIT, ECHO, or READY
-    pub msg_len: usize,   // length of the original message
 }
 
 fn hash_message(message: &[u8]) -> Vec<u8> {
@@ -31,7 +30,6 @@ impl<Id: ProtocolSessionId> Msg<Id> {
         payload: Vec<u8>,
         metadata: Vec<u8>,
         msg_type: GenericMsgType,
-        msg_len: usize,
     ) -> Self {
         Msg {
             sender_id,
@@ -40,7 +38,6 @@ impl<Id: ProtocolSessionId> Msg<Id> {
             payload,
             metadata,
             msg_type,
-            msg_len,
         }
     }
 }

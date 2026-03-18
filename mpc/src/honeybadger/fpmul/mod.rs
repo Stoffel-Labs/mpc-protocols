@@ -14,7 +14,7 @@ use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use stoffelnet::network_utils::{NetworkError, PartyId};
+use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
 
@@ -64,6 +64,8 @@ pub enum RandBitError {
     ResultAlreadyReceived(SessionId),
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(SessionId),
+    #[error("received abort signal")]
+    Abort,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -71,23 +73,6 @@ pub enum ProtocolState {
     Initialized,
     NotInitialized,
     Finished,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RandBitMessage {
-    pub sender: PartyId,
-    pub session_id: SessionId,
-    pub payload: Vec<u8>,
-}
-
-impl RandBitMessage {
-    pub fn new(sender: PartyId, session_id: SessionId, payload: Vec<u8>) -> Self {
-        Self {
-            sender,
-            session_id,
-            payload,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -167,18 +152,11 @@ pub enum PRandError {
     Timeout(SessionId),
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-pub enum PRandMessageType {
-    RissMessage,
-    OutputMessage,
-}
-
 /// Message sent in the Random Double Sharing protocol.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct PRandBitDMessage {
     /// ID of the sender of the message.
     pub sender_id: usize,
-    pub msg_type: PRandMessageType,
     pub session_id: SessionId,
     pub tset: Vec<usize>,
     pub r_t: Vec<i64>,
@@ -189,7 +167,6 @@ impl PRandBitDMessage {
     /// Creates a new PRandBitDMessage.
     pub fn new(
         sender_id: usize,
-        msg_type: PRandMessageType,
         session_id: SessionId,
         tset: Vec<usize>,
         r_t: Vec<i64>,
@@ -197,7 +174,6 @@ impl PRandBitDMessage {
     ) -> Self {
         Self {
             sender_id,
-            msg_type,
             session_id,
             tset,
             r_t,

@@ -4,11 +4,12 @@ use ark_ff::FftField;
 use ark_serialize::CanonicalDeserialize;
 use itertools::izip;
 use stoffelnet::network_utils::{Network, PartyId};
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 use tracing::info;
 
-use crate::honeybadger::triple_gen::{TripleGenError, TripleGenMessage, TripleGenStorage};
+use crate::honeybadger::triple_gen::{TripleGenError, TripleGenStorage};
 use crate::honeybadger::{
     double_share::DoubleShamirShare, triple_gen::ShamirBeaverTriple, SessionId,
 };
@@ -44,6 +45,7 @@ where
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStorage<F>>>>>>,
     /// Batch reconstruction node used in the triple generation
     pub batch_recon_node: BatchReconNode<F>,
+    pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 pub static MAX_TRIPLE_GEN_SESSIONS: usize = 1024;
@@ -53,14 +55,17 @@ where
     F: FftField,
 {
     pub fn new(id: PartyId, n_parties: usize, threshold: usize) -> Result<Self, TripleGenError> {
+        let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
         // batch_recon_node is for opening degree 2t shares
-        let batch_recon_node = BatchReconNode::<F>::new(id, n_parties, threshold, threshold * 2)?;
+        let batch_recon_node =
+            BatchReconNode::<F>::new(id, n_parties, threshold, threshold * 2, batch_sender)?;
         Ok(Self {
             id,
             n_parties,
             threshold,
             storage: Arc::new(Mutex::new(HashMap::new())),
             batch_recon_node,
+            batch_output: Arc::new(Mutex::new(batch_receiver)),
         })
     }
 
@@ -86,6 +91,29 @@ where
         store.remove(&session_id).is_some()
     }
 
+    pub async fn drain_batch_recon_output(&mut self) -> Result<(), TripleGenError> {
+        loop {
+            let id = {
+                let mut rx = self.batch_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(TripleGenError::Abort);
+                    }
+                }
+            };
+
+            let output = self.batch_recon_node.get_store(id).await?;
+            match self.batch_recon_finish_handler(id, output).await {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
     pub async fn wait_for_result(
         &self,
         session_id: SessionId,
@@ -251,19 +279,20 @@ where
 
     pub async fn batch_recon_finish_handler(
         &mut self,
-        message: TripleGenMessage,
+        session_id: SessionId,
+        payload: Vec<u8>,
     ) -> Result<(), TripleGenError> {
         info!("Handling Batch reconstruction results");
         let batch_recon_result: Vec<F> =
-            CanonicalDeserialize::deserialize_compressed(message.payload.as_slice())?;
+            CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
 
         // SHOULD NEVER HAPPEN, since comes from batch reconstruction
-        if message.session_id.sub_id() != 0 {
-            return Err(TripleGenError::SessionIdError(message.session_id));
+        if session_id.sub_id() != 0 {
+            return Err(TripleGenError::SessionIdError(session_id));
         }
 
         // SHOULD ALSO NEVER FAIL, since comes from batch reconstruction
-        let storage_bind = self.get_or_create_store(message.session_id).await?;
+        let storage_bind = self.get_or_create_store(session_id).await?;
         {
             let mut storage = storage_bind.lock().await;
 
@@ -275,14 +304,9 @@ where
             storage.batch_recon_result = Some(batch_recon_result);
         }
 
-        self.try_finalize_triple_gen(message.session_id, storage_bind)
+        self.try_finalize_triple_gen(session_id, storage_bind)
             .await?;
 
-        Ok(())
-    }
-
-    pub async fn process(&mut self, message: TripleGenMessage) -> Result<(), TripleGenError> {
-        self.batch_recon_finish_handler(message).await?;
         Ok(())
     }
 }
