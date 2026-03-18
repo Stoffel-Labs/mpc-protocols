@@ -135,6 +135,7 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub t: usize,
     pub mult_storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<MultStorage<F>>>>>>,
     pub batch_recon: BatchReconNode<F>,
+    pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
@@ -142,7 +143,8 @@ pub struct Multiply<F: FftField, R: RBC> {
 impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
         let (rbc_sender, rbc_receiver) = mpsc::channel(200);
-        let batch_recon = BatchReconNode::<F>::new(id, n, threshold, threshold)?;
+        let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
+        let batch_recon = BatchReconNode::<F>::new(id, n, threshold, threshold, batch_sender)?;
         let rbc = R::new(
             id,
             n,
@@ -157,6 +159,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             t: threshold,
             mult_storage: Arc::new(Mutex::new(HashMap::new())),
             batch_recon,
+            batch_output: Arc::new(Mutex::new(batch_receiver)),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
@@ -177,7 +180,32 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             let output = self.rbc.get_store(id).await?;
             let msg: MultMessage = bincode::deserialize(&output)?;
 
-            match self.open_mult_handler(msg).await {
+            match self
+                .open_mult_handler(msg.sender, msg.session_id, msg.payload)
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+    pub async fn drain_batch_recon_output(&mut self) -> Result<(), MulError> {
+        loop {
+            let id = {
+                let mut rx = self.batch_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(MulError::Abort);
+                    }
+                }
+            };
+            let output = self.batch_recon.get_store(id).await?;
+            match self.open_mult_handler(self.id, id, output).await {
                 Ok(()) => {}
                 Err(e) => {
                     return Err(e);
@@ -385,21 +413,26 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     // `open_mult_handler` mainly serves to receive opened values from batch reconstruction
     // or shares from RBC, from which openings will be manually reconstructed.
     // If `init` has been called, then it can also try to perform the multiplication.
-    pub async fn open_mult_handler(&self, msg: MultMessage) -> Result<(), MulError> {
-        let calling_proto = match msg.session_id.calling_protocol() {
+    pub async fn open_mult_handler(
+        &self,
+        sender: usize,
+        sid: SessionId,
+        payload: Vec<u8>,
+    ) -> Result<(), MulError> {
+        let calling_proto = match sid.calling_protocol() {
             Some(proto) => proto,
             None => {
                 return Err(MulError::InvalidInput(format!(
                     "Unknown calling protocol in session ID {:?}",
-                    msg.session_id
+                    sid
                 )));
             }
         };
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(msg.session_id.exec_id(), 0, 0),
-            msg.session_id.instance_id(),
+            SessionId::pack_slot24(sid.exec_id(), 0, 0),
+            sid.instance_id(),
         );
 
         // 1.
@@ -411,10 +444,9 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         // 2.
-        if msg.session_id.sub_id() == 1 {
-            let open: Vec<F> =
-                CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
-            let round_id = msg.session_id.round_id();
+        if sid.sub_id() == 1 {
+            let open: Vec<F> = CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+            let round_id = sid.round_id();
             let (target_map, label) = if round_id % 2 == 0 {
                 (&mut storage.output_open_mult1, "a-x")
             } else {
@@ -437,24 +469,24 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             );
 
             target_map.insert(round_id, open);
-        } else if msg.session_id.sub_id() == 2 {
+        } else if sid.sub_id() == 2 {
             info!(
                 self_id = self.id,
                 "Received shares for reconstruction using RBC for session_id: {:?}", session_id
             );
-            if storage.received_shares.contains_key(&msg.sender) {
+            if storage.received_shares.contains_key(&sender) {
                 return Err(MulError::Duplicate(format!(
                     "Already received shares for reconstruction using RBC from {}",
-                    msg.sender
+                    sender
                 )));
             }
 
             let open_message: ReconstructionMessage<F> =
-                CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
+                CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
 
             storage
                 .received_shares
-                .insert(msg.sender, (open_message.a_sub_x, open_message.b_sub_y));
+                .insert(sender, (open_message.a_sub_x, open_message.b_sub_y));
         }
 
         // 3.
@@ -496,11 +528,6 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
         info!("Multiplication completed at node {}", self.id);
 
-        Ok(())
-    }
-
-    pub async fn process(&mut self, message: MultMessage) -> Result<(), MulError> {
-        self.open_mult_handler(message).await?;
         Ok(())
     }
 
@@ -769,6 +796,7 @@ pub mod tests {
                                 .process(batchrecon_msg, network[i].clone())
                                 .await
                                 .unwrap();
+                            let _ = node.drain_batch_recon_output().await;
                         }
                         WrappedMessage::Rbc(rbc_msg) => {
                             match node.rbc.process(rbc_msg, network[i].clone()).await {
@@ -778,9 +806,6 @@ pub mod tests {
                                 }
                             }
                             let _ = node.drain_rbc_output().await;
-                        }
-                        WrappedMessage::Mul(input_msg) => {
-                            let _ = node.process(input_msg).await;
                         }
                         _ => {
                             panic!();
@@ -961,7 +986,7 @@ pub mod tests {
         }
 
         // 4. Create node
-        let mut mul_node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n_parties, t).unwrap();
+        let mul_node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n_parties, t).unwrap();
 
         let storage_bind = mul_node.get_or_create_mult_storage(session_id).await;
         let mut storage = storage_bind.lock().await;
@@ -1057,7 +1082,9 @@ pub mod tests {
 
         // 7. Make node handle messages
         for msg in mul_msgs {
-            let result = mul_node.process(msg).await;
+            let result = mul_node
+                .open_mult_handler(msg.sender, msg.session_id, msg.payload)
+                .await;
             match result {
                 Ok(()) => {}
                 Err(MulError::Duplicate(e)) => {

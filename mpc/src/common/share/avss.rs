@@ -82,6 +82,9 @@ where
 pub fn verify_feldman<F: FftField, G: CurveGroup<ScalarField = F>>(
     share: FeldmanShamirShare<F, G>,
 ) -> bool {
+    if share.commitments.len() != share.feldmanshare.degree + 1 {
+        return false;
+    }
     let x = F::from(share.feldmanshare.id as u64);
     let mut rhs = G::zero();
     let mut pow = F::one();
@@ -321,7 +324,10 @@ where
         };
 
         let pk_d: G = CanonicalDeserialize::deserialize_compressed(&msg.dealer_pk[..])?;
-        let cts: &Vec<Vec<u8>> = &msg.encrypted_shares[self.id];
+        let cts: &Vec<Vec<u8>> = msg
+            .encrypted_shares
+            .get(self.id)
+            .ok_or(AvssError::InvalidShare)?;
 
         let ss = pk_d.mul(self.sk_i);
         let key = kdf_from_point(&ss);

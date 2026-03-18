@@ -335,6 +335,9 @@ where
         if share.degree != self.threshold {
             return Err(RanShaError::ShareError(ShareError::DegreeMismatch));
         }
+        if share.id != msg.sender_id {
+            return Err(RanShaError::ShareError(ShareError::IdMismatch));
+        }
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
         if store.state == RanShaState::Finished {

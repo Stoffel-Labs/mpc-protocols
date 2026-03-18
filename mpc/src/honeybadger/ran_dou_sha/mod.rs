@@ -409,6 +409,11 @@ where
         if rec_msg.r_share_deg_t.id != sender_id || rec_msg.r_share_deg_2t.id != sender_id {
             return Err(RanDouShaError::IncorrectID);
         }
+        if rec_msg.r_share_deg_t.degree != self.threshold
+            || rec_msg.r_share_deg_2t.degree != 2 * self.threshold
+        {
+            return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
+        }
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
@@ -442,23 +447,27 @@ where
                 drop(store);
                 // (5) Perform reconstruction for both degrees.
                 // ShamirSecretSharing::reconstruct expects a vector of shares.
-                let reconstructed_r_t = NonRobustShare::recover_secret(
-                    &shares_t_for_recon,
-                    self.n_parties,
-                    self.threshold,
-                )?;
-                let reconstructed_r_2t = NonRobustShare::recover_secret(
-                    &shares_2t_for_recon,
-                    self.n_parties,
-                    self.threshold,
-                )?;
-                let poly1 = DensePolynomial::from_coefficients_slice(&reconstructed_r_t.0);
-                let poly2 = DensePolynomial::from_coefficients_slice(&reconstructed_r_2t.0);
-
-                let ok = (self.threshold == poly1.degree())
-                    && (2 * self.threshold == poly2.degree())
-                    && (reconstructed_r_t.1 == reconstructed_r_2t.1);
-
+                let ok = match (
+                    NonRobustShare::recover_secret(
+                        &shares_t_for_recon,
+                        self.n_parties,
+                        self.threshold,
+                    ),
+                    NonRobustShare::recover_secret(
+                        &shares_2t_for_recon,
+                        self.n_parties,
+                        self.threshold,
+                    ),
+                ) {
+                    (Ok(reconstructed_r_t), Ok(reconstructed_r_2t)) => {
+                        let poly1 = DensePolynomial::from_coefficients_slice(&reconstructed_r_t.0);
+                        let poly2 = DensePolynomial::from_coefficients_slice(&reconstructed_r_2t.0);
+                        (self.threshold == poly1.degree())
+                            && (2 * self.threshold == poly2.degree())
+                            && (reconstructed_r_t.1 == reconstructed_r_2t.1)
+                    }
+                    _ => false,
+                };
                 let msg =
                     RanDouShaMessage::new(self.id, msg.session_id, RanDouShaPayload::Output(ok));
 
@@ -554,7 +563,11 @@ mod tests {
                 SessionId::pack_slot24(exec, 0, round),
                 111,
             );
-            let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
+
+            let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
+            let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
+            let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+
             let mut payload = Vec::new();
             rec_msg.serialize_compressed(&mut payload).unwrap();
             let msg = RanDouShaMessage::new(0, sid, RanDouShaPayload::Reconstruct(payload));
@@ -576,7 +589,9 @@ mod tests {
             SessionId::pack_slot24(255, 0, 255),
             0,
         );
-        let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
+        let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
+        let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
+        let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
         let mut payload = Vec::new();
         rec_msg.serialize_compressed(&mut payload).unwrap();
         let msg = RanDouShaMessage::new(0, over_sid, RanDouShaPayload::Reconstruct(payload));
