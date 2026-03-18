@@ -10,7 +10,6 @@ use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelmpc_mpc::honeybadger::fpmul::rand_bit::RandBit;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
-use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinSet;
 
 mod utils;
@@ -34,7 +33,7 @@ async fn rand_bit_with_small_field_e2e() {
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);
 
     // === Create RandBit nodes ===
-    let mut nodes: Vec<RandBit<GoldilocksField, Avid<SessionId>>> = (0..num_parties)
+    let nodes: Vec<RandBit<GoldilocksField, Avid<SessionId>>> = (0..num_parties)
         .map(|i| RandBit::new(i, num_parties, threshold).unwrap())
         .collect();
 

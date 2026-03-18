@@ -61,10 +61,6 @@ where
                             panic!("Received RBC message without calling protocol: {:?}", msg);
                         }
                     },
-                    // WrappedMessage::Mul(msg) => match node.mult_node.process(msg).await {
-                    //     Ok(()) => {}
-                    //     Err(e) => panic!("Error processing Mul message: {:?}", e),
-                    // },
                     message => {
                         error!("Unexpected message type: {:?}", message)
                     }
