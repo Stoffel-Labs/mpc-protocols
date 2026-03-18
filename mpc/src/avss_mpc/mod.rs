@@ -1,6 +1,14 @@
 use crate::{
     avss_mpc::{
+        input::{
+            input::{AvssInputClient, AvssInputServer},
+            AvssInputError, AvssInputMessage,
+        },
         mul::{multiplication::Multiply, MulError, MultMessage},
+        output::{
+            output::{AvssOutputClient, AvssOutputServer},
+            AvssOutputError, AvssOutputMessage,
+        },
         share_gen::{share_gen_avss::RanShaAvssNode, RanShaAvssError},
         triple_gen::{triple_gen::TripleGenNode, BeaverTriple, TripleGenError},
     },
@@ -28,7 +36,9 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+pub mod input;
 pub mod mul;
+pub mod output;
 pub mod share_gen;
 pub mod triple_gen;
 
@@ -69,6 +79,10 @@ pub enum AvssMPCError {
     InvalidThreshold(usize, usize),
     #[error("Party size is too large")]
     InvalidPartySize,
+    #[error("error in Input: {0:?}")]
+    InputError(#[from] AvssInputError),
+    #[error("error in Output: {0:?}")]
+    OutputError(#[from] AvssOutputError),
 }
 
 #[derive(Clone, Debug)]
@@ -199,6 +213,8 @@ pub struct AvssMPCNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub share_gen_avss: RanShaAvssNode<F, R, G>,
     pub triple_gen: TripleGenNode<F, R, G>,
     pub mul_node: Multiply<F, R, G>,
+    pub input_server: AvssInputServer<F, R, G>,
+    pub output_server: AvssOutputServer,
     pub counters: SubProtocolCounters,
 }
 
@@ -236,6 +252,7 @@ pub struct SubProtocolCounters {
     pub ran_sha_avss_counter: SubProtocolCounter,
     pub triple_counter: SubProtocolCounter,
     pub mul_counter: SubProtocolCounter,
+    pub input_counter: SubProtocolCounter,
 }
 
 impl SubProtocolCounters {
@@ -244,6 +261,7 @@ impl SubProtocolCounters {
             ran_sha_avss_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             triple_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             mul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            input_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -262,7 +280,7 @@ where
     fn setup(
         id: PartyId,
         params: Self::MPCOpts,
-        _input_ids: Vec<ClientId>,
+        input_ids: Vec<ClientId>,
     ) -> Result<Self, AvssMPCError> {
         if id >= params.n_parties {
             return Err(AvssMPCError::InvalidPartyId);
@@ -283,6 +301,9 @@ where
             params.pk_map.clone(),
         )?;
         let mul_node = Multiply::new(id, params.n_parties, params.threshold)?;
+        let input_server =
+            AvssInputServer::new(id, params.n_parties, params.threshold, input_ids)?;
+        let output_server = AvssOutputServer::new(id, params.n_parties)?;
         Ok(Self {
             id,
             preprocessing_material: Arc::new(Mutex::new(AvssMPCNodePreprocMaterial::empty())),
@@ -290,6 +311,8 @@ where
             share_gen_avss,
             triple_gen,
             mul_node,
+            input_server,
+            output_server,
             counters: SubProtocolCounters::new(),
         })
     }
@@ -321,6 +344,10 @@ where
                         self.mul_node.rbc.process(rbc_msg, net).await?;
                         self.mul_node.drain_rbc_output().await?;
                     }
+                    Some(ProtocolType::Input) => {
+                        self.input_server.rbc.process(rbc_msg, net).await?;
+                        self.input_server.drain_rbc_output().await?;
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} in RBC",
@@ -341,8 +368,14 @@ where
                 self.mul_node.process(mul_message).await?
             }
 
+            AvssWrappedMessage::Input(_) => {
+                warn!("Incorrect message received at process function (Input)");
+            }
+            AvssWrappedMessage::Output(_) => {
+                warn!("Incorrect message received at process function (Output)");
+            }
             _ => {
-                warn!("Unknown session ID in AvssMPC",);
+                warn!("Unknown session ID in AvssMPC");
             }
         }
 
@@ -598,6 +631,8 @@ pub enum AvssWrappedMessage {
     Rbc(Msg<AvssSessionId>),
     Avss(AvssMessage<AvssSessionId>),
     Mul(MultMessage),
+    Input(AvssInputMessage),
+    Output(AvssOutputMessage),
 }
 
 impl AvssWrappedMessage {
@@ -620,6 +655,8 @@ pub enum ProtocolType {
     Avss = 2,
     Triple = 3,
     Mul = 4,
+    Input = 5,
+    Output = 6,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -636,6 +673,8 @@ impl ProtocolTag for ProtocolType {
             2 => Some(Self::Avss),
             3 => Some(Self::Triple),
             4 => Some(Self::Mul),
+            5 => Some(Self::Input),
+            6 => Some(Self::Output),
 
             _ => None,
         }
@@ -711,5 +750,70 @@ impl AvssSessionId {
     #[inline]
     pub fn pack_slot24(exec_id: u8, sub_id: u8, round_id: u8) -> u32 {
         ((exec_id as u32) << 16) | ((sub_id as u32) << 8) | round_id as u32
+    }
+}
+
+pub struct AvssMPCClient<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
+    pub id: usize,
+    pub input: AvssInputClient<F, R, G>,
+    pub output: AvssOutputClient<F, G>,
+}
+
+// implement manually because derive(Clone) requires R: Clone, which is not needed at all
+impl<F, R, G> Clone for AvssMPCClient<F, R, G>
+where
+    F: FftField,
+    R: RBC,
+    G: CurveGroup<ScalarField = F>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            input: self.input.clone(),
+            output: self.output.clone(),
+        }
+    }
+}
+
+impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
+    AvssMPCClient<F, R, G>
+{
+    pub fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        instance_id: u32,
+        inputs: Vec<F>,
+        input_len: usize,
+    ) -> Result<Self, AvssMPCError> {
+        let input = AvssInputClient::new(id, n, t, instance_id, inputs)?;
+        let output = AvssOutputClient::new(id, n, t, input_len)?;
+        Ok(Self { id, input, output })
+    }
+
+    pub async fn process<N: Network + Send + Sync>(
+        &mut self,
+        sender_id: ClientId,
+        raw_msg: Vec<u8>,
+        net: Arc<N>,
+    ) -> Result<(), AvssMPCError> {
+        let wrapped: AvssWrappedMessage = bincode::deserialize(&raw_msg)?;
+
+        match wrapped {
+            AvssWrappedMessage::Input(input_msg) => {
+                if sender_id != input_msg.sender_id {
+                    return Err(AvssMPCError::InvalidPartyId);
+                }
+                self.input.process(input_msg, net).await?;
+            }
+            AvssWrappedMessage::Output(output_msg) => {
+                if sender_id != output_msg.sender_id {
+                    return Err(AvssMPCError::InvalidPartyId);
+                }
+                self.output.process(output_msg).await?
+            }
+            _ => warn!("Incorrect message type received at client"),
+        }
+        Ok(())
     }
 }
