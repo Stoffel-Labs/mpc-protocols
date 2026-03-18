@@ -289,7 +289,7 @@ impl<F: FftField> BatchReconNode<F> {
                                     let mut bytes_message = Vec::new();
                                     result.serialize_compressed(&mut bytes_message)?;
                                     let mult_generic_msg =
-                                        WrappedMessage::PRandBit(PRandBitDMessage::new(
+                                        WrappedMessage::PRandBitD(PRandBitDMessage::new(
                                             self.id,
                                             PRandMessageType::OutputMessage,
                                             msg.session_id,

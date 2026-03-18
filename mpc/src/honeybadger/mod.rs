@@ -27,6 +27,7 @@ pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
 
+use crate::honeybadger::fpmul::TruncPrMessage;
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
@@ -44,7 +45,7 @@ use crate::{
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
             fpmul::{FPError, FPMulNode},
-            prandbitd::PRandBitNode,
+            prandbitd::PRandBitDNode,
             rand_bit::RandBit,
             PRandBitDMessage, PRandError, RandBitError, RandBitMessage, TruncPrError,
         },
@@ -233,7 +234,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
     pub rand_bit: RandBit<F, R>,
-    pub prand_bit: PRandBitNode<F, F>,
+    pub prand_bit: PRandBitDNode<F, F>,
 }
 
 #[derive(Clone, Debug)]
@@ -384,7 +385,7 @@ where
         // Create nodes for preprocessing.
         let dousha_node = DoubleShareNode::new(id, params.n_parties, params.threshold);
         let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold)?;
-        let prand_bit_node = PRandBitNode::new(id, params.n_parties, params.threshold)?;
+        let prand_bit_node = PRandBitDNode::new(id, params.n_parties, params.threshold)?;
         let ran_dou_sha_node =
             RanDouShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
@@ -721,7 +722,7 @@ where
                 }
                 self.preprocess.rand_bit.process(rand_bit_message).await?;
             }
-            WrappedMessage::PRandBit(prand_message) => {
+            WrappedMessage::PRandBitD(prand_message) => {
                 if sender_id != prand_message.sender_id {
                     return Err(HoneyBadgerError::InvalidPartyId);
                 }
@@ -734,6 +735,35 @@ where
                     .prand_bit
                     .process(prand_message, net)
                     .await?;
+            }
+            WrappedMessage::Trunc(trunc_message) => {
+                if trunc_message.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        trunc_message.session_id.instance_id(),
+                    ));
+                }
+                match trunc_message.session_id.calling_protocol() {
+                    Some(ProtocolType::FpMul) => {
+                        self.type_ops
+                            .fpmul
+                            .trunc_node
+                            .process(trunc_message, net)
+                            .await?;
+                    }
+                    Some(ProtocolType::FpDivConst) => {
+                        self.type_ops
+                            .fpdiv_const
+                            .trunc_node
+                            .process(trunc_message, net)
+                            .await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} at truncation",
+                            trunc_message.session_id
+                        );
+                    }
+                }
             }
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
@@ -1495,7 +1525,8 @@ pub enum WrappedMessage {
     Mul(MultMessage),
     Output(OutputMessage),
     RandBit(RandBitMessage),
-    PRandBit(PRandBitDMessage),
+    PRandBitD(PRandBitDMessage),
+    Trunc(TruncPrMessage),
 }
 
 impl WrappedMessage {

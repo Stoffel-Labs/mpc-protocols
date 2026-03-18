@@ -440,11 +440,13 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         } else if msg.session_id.sub_id() == 2 {
             info!(
                 self_id = self.id,
-                "Received shares for reconstruction using RBC for session_id: {:?}", session_id
+                sender = msg.sender,
+                "Received shares for reconstruction using RBC for session_id: {:?}",
+                session_id
             );
             if storage.received_shares.contains_key(&msg.sender) {
                 return Err(MulError::Duplicate(format!(
-                    "Already received shares for reconstruction using RBC from {}",
+                    "Already received shares for reconstruction using RBC from party {} inside multiplication in open_mult_handler",
                     msg.sender
                 )));
             }

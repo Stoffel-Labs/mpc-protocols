@@ -75,11 +75,14 @@ where
         self.id
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let mut store = self.store.lock().await;
+        let output_store = {
+            let store = self.store.lock().await;
 
-        let output_store = store
-            .remove(&session_id)
-            .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
+            store
+                .get(&session_id)
+                .cloned()
+                .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?
+        };
 
         let store_lock = output_store.lock().await;
 
@@ -532,11 +535,14 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         store.clear();
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let mut store = self.store.lock().await;
+        let output_store = {
+            let store = self.store.lock().await;
 
-        let output_store = store
-            .remove(&session_id)
-            .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
+            store
+                .get(&session_id)
+                .cloned()
+                .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?
+        };
 
         let store_lock = output_store.lock().await;
 
@@ -556,7 +562,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = session_id.as_u64(),
+            session_id = ?session_id,
             msg_type = "SEND",
             "Sending SEND message for AVID to all parties"
         );
@@ -566,10 +572,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         //Generating the merkle tree out of the shards
         let tree = gen_merkletree(shards.clone());
         let root = tree.root().ok_or_else(|| {
-            RbcError::Internal(format!(
-                "Merkle root missing for session {}",
-                session_id.as_u64()
-            ))
+            RbcError::Internal(format!("Merkle root missing for session {:?}", session_id))
         })?;
 
         // Generating fingerprint for each server and sending it to them along with root and respective shard
@@ -649,7 +652,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling SEND message"
@@ -680,7 +683,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                     store.mark_echo(); // Mark that ECHO has been sent to avoid resending it
                     info!(
                         id = self.id,
-                        session_id = msg.session_id.as_u64(),
+                        session_id = ?msg.session_id,
                         msg_type = "ECHO",
                         "Broadcasting ECHO in response to SEND"
                     );
@@ -736,7 +739,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id.as_u64(),
+                session_id = ?msg.session_id,
                 "Session already ended, ignoring ECHO"
             );
             return Ok(());
@@ -777,7 +780,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 Ok(false) => {
                     warn!(
                         id = self.id,
-                        session_id = msg.session_id.as_u64(),
+                        session_id = ?msg.session_id,
                         sender = msg.sender_id,
                         "Merkle verification failed for ECHO"
                     );
@@ -788,7 +791,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 Err(e) => {
                     warn!(
                         id = self.id,
-                        session_id = msg.session_id.as_u64(),
+                        session_id = ?msg.session_id,
                         sender = msg.sender_id,
                         error = %e,
                         "Merkle verification threw error"
@@ -807,7 +810,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling READY message"
@@ -832,7 +835,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             );
             return Ok(());
         }
-        // If this sender has not already sent an READY, process it.
+        // If this sender has not already sent a READY, process it.
         if !store.has_ready(msg.sender_id) {
             let root = &msg.metadata[0..32];
             let proof_bytes = &msg.metadata[32..];
@@ -924,6 +927,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         }
         Ok(())
     }
+
     //This the logic for sending a READY message in both the echo and ready handler
     async fn send_ready<N: Network + Send + Sync>(
         &self,
@@ -1121,11 +1125,14 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
         coin_store.clear();
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let mut store = self.store.lock().await;
+        let output_store = {
+            let store = self.store.lock().await;
 
-        let output_store = store
-            .remove(&session_id)
-            .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
+            store
+                .get(&session_id)
+                .cloned()
+                .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?
+        };
 
         let store_lock = output_store.lock().await;
 

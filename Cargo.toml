@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "mpc", "network",    
+    "mpc", "network",
 ]
 resolver = "2"
 
@@ -9,8 +9,8 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
-stoffelnet = { git = "https://github.com/Stoffel-Labs/stoffel-networking.git", rev = "bac0841120d7e99f6be867a00dd3c38a6fc5f126" }
-ark-ff = { version = "0.5.0", features = [ "asm" ] }
+stoffelnet = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-networking.git" }
+ark-ff = { version = "0.5.0", features = ["asm"] }
 ark-poly = "0.5.0"
 tokio = { version = "1.46.1", features = ["full"] }
 tracing = "0.1"
