@@ -33,7 +33,7 @@ pub mod share_gen;
 pub mod triple_gen;
 
 #[derive(Error, Debug)]
-pub enum AdkgError {
+pub enum AvssMPCError {
     #[error("network error: {0:?}")]
     NetworkError(#[from] NetworkError),
     #[error("there is not enough preprocessing to complete the protocol")]
@@ -72,8 +72,8 @@ pub enum AdkgError {
 }
 
 #[derive(Clone, Debug)]
-/// Configuration options for the AdkgMPCNode protocol.
-pub struct AdkgNodeOpts<F, G>
+/// Configuration options for the AvssMPCNode protocol.
+pub struct AvssMPCNodeOpts<F, G>
 where
     F: FftField,
     G: CurveGroup<ScalarField = F>,
@@ -92,12 +92,12 @@ where
     pub timeout: Duration,
 }
 
-impl<F, G> AdkgNodeOpts<F, G>
+impl<F, G> AvssMPCNodeOpts<F, G>
 where
     F: FftField,
     G: CurveGroup<ScalarField = F>,
 {
-    /// Creates a new struct of initialization options for the AdkgMPCNode protocol.
+    /// Creates a new struct of initialization options for the AvssMPCNode protocol.
     pub fn new(
         n_parties: usize,
         threshold: usize,
@@ -107,14 +107,14 @@ where
         pk_map: Arc<Vec<G>>,
         instance_id: u32,
         timeout: Duration,
-    ) -> Result<Self, AdkgError> {
+    ) -> Result<Self, AvssMPCError> {
         //No of parties should not exceed 255
         if n_parties > 255 {
-            return Err(AdkgError::InvalidPartySize);
+            return Err(AvssMPCError::InvalidPartySize);
         }
         if !(threshold < (n_parties + 2) / 3) {
             // ceil(n / 3)
-            return Err(AdkgError::InvalidThreshold(threshold, n_parties));
+            return Err(AvssMPCError::InvalidThreshold(threshold, n_parties));
         }
         Ok(Self {
             n_parties,
@@ -133,14 +133,14 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct AdkgNodePreprocMaterial<F: FftField, G: CurveGroup<ScalarField = F>> {
+pub struct AvssMPCNodePreprocMaterial<F: FftField, G: CurveGroup<ScalarField = F>> {
     /// A pool of verifiable random shares
     v_random_shares: Vec<FeldmanShamirShare<F, G>>,
     /// A pool of beaver triples
     triples: Vec<BeaverTriple<F, G>>,
 }
 
-impl<F, G> AdkgNodePreprocMaterial<F, G>
+impl<F, G> AvssMPCNodePreprocMaterial<F, G>
 where
     F: FftField,
     G: CurveGroup<ScalarField = F>,
@@ -173,29 +173,29 @@ where
     pub fn take_v_random_shares(
         &mut self,
         n_shares: usize,
-    ) -> Result<Vec<FeldmanShamirShare<F, G>>, AdkgError> {
+    ) -> Result<Vec<FeldmanShamirShare<F, G>>, AvssMPCError> {
         if n_shares > self.v_random_shares.len() {
-            return Err(AdkgError::NotEnoughPreprocessing);
+            return Err(AvssMPCError::NotEnoughPreprocessing);
         }
         Ok(self.v_random_shares.drain(0..n_shares).collect())
     }
-    pub fn take_triples(&mut self, n_shares: usize) -> Result<Vec<BeaverTriple<F, G>>, AdkgError> {
+    pub fn take_triples(&mut self, n_shares: usize) -> Result<Vec<BeaverTriple<F, G>>, AvssMPCError> {
         if n_shares > self.triples.len() {
-            return Err(AdkgError::NotEnoughPreprocessing);
+            return Err(AvssMPCError::NotEnoughPreprocessing);
         }
         Ok(self.triples.drain(0..n_shares).collect())
     }
 }
 
-/// Information pertaining a AdkgMPCNode protocol participant.
+/// Information pertaining a AvssMPCNode protocol participant.
 #[derive(Clone, Debug)]
-pub struct AdkgNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
+pub struct AvssMPCNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
     /// ID of the current execution node.
     pub id: PartyId,
     /// Preprocessing material used in the protocol execution.
-    pub preprocessing_material: Arc<Mutex<AdkgNodePreprocMaterial<F, G>>>,
+    pub preprocessing_material: Arc<Mutex<AvssMPCNodePreprocMaterial<F, G>>>,
     // Preprocessing parameters.
-    pub params: AdkgNodeOpts<F, G>,
+    pub params: AvssMPCNodeOpts<F, G>,
     pub share_gen_avss: RanShaAvssNode<F, R, G>,
     pub triple_gen: TripleGenNode<F, R, G>,
     pub mul_node: Multiply<F, R, G>,
@@ -206,15 +206,15 @@ pub struct AdkgNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
 pub struct SubProtocolCounter(Arc<Mutex<Option<u8>>>);
 
 trait GetNext<T> {
-    async fn get_next(&self) -> Result<T, AdkgError>;
+    async fn get_next(&self) -> Result<T, AvssMPCError>;
 }
 
 impl GetNext<u8> for SubProtocolCounter {
-    async fn get_next(&self) -> Result<u8, AdkgError> {
+    async fn get_next(&self) -> Result<u8, AvssMPCError> {
         let mut counter = self.0.lock().await;
 
         match &mut *counter {
-            None => Err(AdkgError::LimitError),
+            None => Err(AvssMPCError::LimitError),
             Some(value) => {
                 let current = *value;
                 if *value == 255 {
@@ -249,23 +249,23 @@ impl SubProtocolCounters {
 }
 
 #[async_trait]
-impl<F, R, N, G> MPCProtocol<F, FeldmanShamirShare<F, G>, N> for AdkgNode<F, R, G>
+impl<F, R, N, G> MPCProtocol<F, FeldmanShamirShare<F, G>, N> for AvssMPCNode<F, R, G>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
     R: RBC<Id = AvssSessionId>,
     G: CurveGroup<ScalarField = F>,
 {
-    type MPCOpts = AdkgNodeOpts<F, G>;
-    type Error = AdkgError;
+    type MPCOpts = AvssMPCNodeOpts<F, G>;
+    type Error = AvssMPCError;
 
     fn setup(
         id: PartyId,
         params: Self::MPCOpts,
         _input_ids: Vec<ClientId>,
-    ) -> Result<Self, AdkgError> {
+    ) -> Result<Self, AvssMPCError> {
         if id >= params.n_parties {
-            return Err(AdkgError::InvalidPartyId);
+            return Err(AvssMPCError::InvalidPartyId);
         }
         let share_gen_avss = RanShaAvssNode::new(
             id,
@@ -285,7 +285,7 @@ where
         let mul_node = Multiply::new(id, params.n_parties, params.threshold)?;
         Ok(Self {
             id,
-            preprocessing_material: Arc::new(Mutex::new(AdkgNodePreprocMaterial::empty())),
+            preprocessing_material: Arc::new(Mutex::new(AvssMPCNodePreprocMaterial::empty())),
             params,
             share_gen_avss,
             triple_gen,
@@ -303,10 +303,10 @@ where
         match wrapped {
             AvssWrappedMessage::Rbc(rbc_msg) => {
                 if sender_id != rbc_msg.sender_id {
-                    return Err(AdkgError::InvalidPartyId);
+                    return Err(AvssMPCError::InvalidPartyId);
                 }
                 if rbc_msg.session_id.instance_id() != self.params.instance_id {
-                    return Err(AdkgError::InstanceIdError(rbc_msg.session_id.instance_id()));
+                    return Err(AvssMPCError::InstanceIdError(rbc_msg.session_id.instance_id()));
                 }
                 match rbc_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Avss) => {
@@ -331,10 +331,10 @@ where
             }
             AvssWrappedMessage::Mul(mul_message) => {
                 if sender_id != mul_message.sender {
-                    return Err(AdkgError::InvalidPartyId);
+                    return Err(AvssMPCError::InvalidPartyId);
                 }
                 if mul_message.session_id.instance_id() != self.params.instance_id {
-                    return Err(AdkgError::InstanceIdError(
+                    return Err(AvssMPCError::InstanceIdError(
                         mul_message.session_id.instance_id(),
                     ));
                 }
@@ -342,7 +342,7 @@ where
             }
 
             _ => {
-                warn!("Unknown session ID in ADKG",);
+                warn!("Unknown session ID in AvssMPC",);
             }
         }
 
@@ -391,7 +391,7 @@ where
         self.mul_node
             .wait_for_result(session_id, self.params.timeout)
             .await
-            .map_err(AdkgError::from)
+            .map_err(AvssMPCError::from)
     }
     async fn rand(&mut self, network: Arc<N>) -> Result<FeldmanShamirShare<F, G>, Self::Error> {
         let no_rand = {
@@ -414,7 +414,7 @@ where
 }
 
 #[async_trait]
-impl<F, R, N, C> PreprocessingMPCProtocol<F, FeldmanShamirShare<F, C>, N> for AdkgNode<F, R, C>
+impl<F, R, N, C> PreprocessingMPCProtocol<F, FeldmanShamirShare<F, C>, N> for AvssMPCNode<F, R, C>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
@@ -470,7 +470,7 @@ where
         } else {
             let mut triple_counter = self.counters.triple_counter.get_next().await?;
             if (256 - triple_counter as usize) * 255 < total_triples_to_generate / group_size {
-                return Err(AdkgError::LimitError);
+                return Err(AvssMPCError::LimitError);
             }
 
             // ------------------------
@@ -532,7 +532,7 @@ where
     }
 }
 
-impl<F, R, C> AdkgNode<F, R, C>
+impl<F, R, C> AvssMPCNode<F, R, C>
 where
     F: PrimeField,
     R: RBC<Id = AvssSessionId>,
@@ -543,7 +543,7 @@ where
         network: Arc<N>,
         rng: &mut G,
         needed: usize,
-    ) -> Result<(), AdkgError>
+    ) -> Result<(), AvssMPCError>
     where
         N: Network + Send + Sync + 'static,
         G: Rng + Send,
@@ -555,7 +555,7 @@ where
         let mut v_ran_sha_counter = self.counters.ran_sha_avss_counter.get_next().await?;
 
         if (256 - v_ran_sha_counter as usize) * 255 < run {
-            return Err(AdkgError::LimitError);
+            return Err(AvssMPCError::LimitError);
         }
 
         for i in 0..run {
