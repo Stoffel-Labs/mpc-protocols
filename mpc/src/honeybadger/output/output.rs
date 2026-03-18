@@ -105,9 +105,12 @@ impl<F: FftField> OutputClient<F> {
     ///    attempt to reconstruct the output using robust interpolation.
     pub async fn output_handler(&mut self, msg: OutputMessage) -> Result<(), OutputError> {
         // 1.
-        let shares: Vec<RobustShare<F>> =
+        let mut shares: Vec<RobustShare<F>> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 
+        for share in &mut shares {
+            share.id = msg.sender_id;
+        }
         if shares.len() != self.input_len {
             return Err(OutputError::InvalidInput(
                 "Mismatch in input and share length".to_string(),

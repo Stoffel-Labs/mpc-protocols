@@ -49,7 +49,7 @@ pub struct BatchReconStore<F: FftField> {
     pub evals_received: Vec<RobustShare<F>>, // Stores (sender_id, eval_share) messages
     pub reveals_received: Vec<RobustShare<F>>, // Stores (sender_id, y_j_value) messages
     pub y_j: Option<RobustShare<F>>,         // The interpolated y_j value for this node's index
-    pub secrets: Option<Vec<F>>, // The finally reconstructed original secrets (polynomial coefficients)
+    pub secrets: Option<Vec<u8>>, // The finally reconstructed original secrets (polynomial coefficients)
 }
 
 impl<F: FftField> BatchReconStore<F> {
@@ -82,4 +82,6 @@ pub enum BatchReconError {
     InvalidInput(String),
     #[error("inner error: {0}")]
     InterpolateError(#[from] InterpolateError),
+    #[error("error sending the output of the batch reconstruction")]
+    SendError,
 }

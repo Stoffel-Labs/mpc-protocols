@@ -12,7 +12,7 @@ use stoffelmpc_mpc::{
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::utils::test_utils::fan_in_inboxes;
 
@@ -128,10 +128,7 @@ pub fn spawn_receiver_tasks(
                             .process(batch_msg, net_clone.clone())
                             .await
                             .unwrap();
-                    }
-                    WrappedMessage::Triple(triple_gen_msg) => {
-                        debug!("Received triple_gen_msg");
-                        node_bind.process(triple_gen_msg).await.unwrap();
+                        node_bind.drain_batch_recon_output().await.unwrap();
                     }
                     _ => {
                         warn!("received invalid msg type");

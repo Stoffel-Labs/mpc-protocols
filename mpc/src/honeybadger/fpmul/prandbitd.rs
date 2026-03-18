@@ -4,8 +4,13 @@ use crate::{
         batch_recon::batch_recon::BatchReconNode,
         fpmul::{
             build_all_f_polys,
+<<<<<<< HEAD
             f256::{build_all_f_polys_2_8, Gf2568, Gf256Domain},
             PRandBitDMessage, PRandBitDStore, PRandError, PRandMessageType, PrandState,
+=======
+            f256::{build_all_f_polys_2_8, F2_8Domain, F2_8},
+            PRandBitDMessage, PRandBitDStore, PRandError, PrandState,
+>>>>>>> origin/dev
         },
         mul::concat_sorted,
         robust_interpolate::robust_interpolate::RobustShare,
@@ -19,7 +24,7 @@ use rand::Rng;
 use std::{collections::HashMap, sync::Arc, vec};
 use stoffelnet::network_utils::Network;
 use tokio::{
-    sync::Mutex,
+    sync::{mpsc::Receiver, Mutex},
     time::{timeout, Duration},
 };
 use tracing::info;
@@ -32,18 +37,21 @@ pub struct PRandBitDNode<F: PrimeField, G: PrimeField> {
     pub t: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PRandBitDStore<F, G>>>>>>,
     pub batch_recon: BatchReconNode<F>,
+    pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     /// Creates a new PRandBitDNode with empty shares.
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PRandError> {
-        let batch_recon = BatchReconNode::new(id, n, t, t)?;
+        let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
+        let batch_recon = BatchReconNode::new(id, n, t, t, batch_sender)?;
         Ok(Self {
             id,
             n,
             t,
             store: Arc::new(Mutex::new(HashMap::new())),
             batch_recon,
+            batch_output: Arc::new(Mutex::new(batch_receiver)),
         })
     }
 
@@ -51,6 +59,29 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         let mut store = self.store.lock().await;
         self.batch_recon.clear_entire_store().await;
         store.clear();
+    }
+    pub async fn drain_batch_recon_output(&mut self) -> Result<(), PRandError> {
+        loop {
+            let id = {
+                let mut rx = self.batch_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(PRandError::Abort);
+                    }
+                }
+            };
+
+            let output = self.batch_recon.get_store(id).await?;
+            match self.output_handler(id, output).await {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
     }
     pub async fn wait_for_bit_result(
         &self,
@@ -467,7 +498,6 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 if !tset.contains(&j) {
                     let msg = WrappedMessage::PRandBitD(PRandBitDMessage::new(
                         self.id,
-                        PRandMessageType::RissMessage,
                         session_id,
                         tset.clone(),
                         r_t_i.clone(),
@@ -481,7 +511,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         Ok(())
     }
 
-    pub async fn riss_handler<N: Network + Send + Sync>(
+    pub async fn process<N: Network + Send + Sync>(
         &mut self,
         msg: PRandBitDMessage,
         network: Arc<N>,
@@ -535,20 +565,24 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         Ok(())
     }
 
-    pub async fn output_handler(&mut self, msg: PRandBitDMessage) -> Result<(), PRandError> {
+    pub async fn output_handler(
+        &mut self,
+        sid: SessionId,
+        payload: Vec<u8>,
+    ) -> Result<(), PRandError> {
         info!(node_id = self.id, "At output handler");
 
-        let calling_proto = match msg.session_id.calling_protocol() {
+        let calling_proto = match sid.calling_protocol() {
             Some(proto) => proto,
             None => {
-                return Err(PRandError::SessionIdError(msg.session_id));
+                return Err(PRandError::SessionIdError(sid));
             }
         };
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(msg.session_id.exec_id(), 0, 0),
-            msg.session_id.instance_id(),
+            SessionId::pack_slot24(sid.exec_id(), 0, 0),
+            sid.instance_id(),
         );
 
         let binding = self.get_or_create_store(session_id).await;
@@ -559,29 +593,18 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         // deserialize the field element from the payload
         let share_i_list: Vec<F> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
-        let round_id = msg.session_id.round_id();
+            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+        let round_id = sid.round_id();
         if store.output_open.contains_key(&round_id) {
             return Err(PRandError::Duplicate(format!(
-                "Already received from {}",
-                msg.sender_id
+                "Already received for {}",
+                round_id
             )));
         }
         store.output_open.insert(round_id, share_i_list);
         drop(store);
         self.try_finalize_bit(session_id, binding.clone()).await?;
         return Ok(());
-    }
-    pub async fn process<N: Network + Send + Sync>(
-        &mut self,
-        msg: PRandBitDMessage,
-        network: Arc<N>,
-    ) -> Result<(), PRandError> {
-        match msg.msg_type {
-            PRandMessageType::RissMessage => self.riss_handler(msg, network).await?,
-            PRandMessageType::OutputMessage => self.output_handler(msg).await?,
-        }
-        Ok(())
     }
 
     pub async fn get_or_create_store(

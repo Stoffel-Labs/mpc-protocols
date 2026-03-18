@@ -2,15 +2,9 @@ use super::*;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde},
-        ProtocolSessionId, SecretSharingScheme,
+        SecretSharingScheme,
     },
-    honeybadger::{
-        fpmul::{PRandBitDMessage, PRandMessageType, RandBitMessage},
-        mul::MultMessage,
-        robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::TripleGenMessage,
-        ProtocolType, WrappedMessage,
-    },
+    honeybadger::{robust_interpolate::robust_interpolate::RobustShare, WrappedMessage},
 };
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
@@ -18,7 +12,10 @@ use futures::lock::Mutex;
 use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
 use stoffelnet::network_utils::Network;
+use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
+
+pub static MAX_BATCH_RECON_SESSIONS: usize = 1024;
 /// --------------------------BatchRecPub--------------------------
 ///
 /// Goal: Publicly reconstruct t+1 secret-shared values [x₁, ..., x_{t+1}]
@@ -42,11 +39,18 @@ pub struct BatchReconNode<F: FftField> {
     pub t: usize,
     pub degree: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BatchReconStore<F>>>>>>, // Number of malicious parties
+    pub output_sender: Sender<SessionId>,
 }
 
 impl<F: FftField> BatchReconNode<F> {
     /// Creates a new `Node` instance.
-    pub fn new(id: usize, n: usize, t: usize, degree: usize) -> Result<Self, BatchReconError> {
+    pub fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        degree: usize,
+        output_sender: Sender<SessionId>,
+    ) -> Result<Self, BatchReconError> {
         let store = Arc::new(Mutex::new(HashMap::new()));
         Ok(Self {
             id,
@@ -54,6 +58,7 @@ impl<F: FftField> BatchReconNode<F> {
             t,
             degree,
             store,
+            output_sender,
         })
     }
 
@@ -62,9 +67,22 @@ impl<F: FftField> BatchReconNode<F> {
         store.clear();
     }
 
-    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+    pub async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, BatchReconError> {
         let mut store = self.store.lock().await;
-        store.remove(&session_id).is_some()
+
+        let output_store = store.remove(&session_id).ok_or_else(|| {
+            BatchReconError::InvalidInput("Session ID does not exist".to_string())
+        })?;
+
+        let store_lock = output_store.lock().await;
+
+        if store_lock.secrets.is_none() {
+            return Err(BatchReconError::InvalidInput(
+                "Batch reconstruction has not terminated".to_string(),
+            ));
+        }
+
+        Ok(store_lock.secrets.clone().unwrap())
     }
 
     /// Initiates the batch reconstruction protocol for a given node.
@@ -115,15 +133,6 @@ impl<F: FftField> BatchReconNode<F> {
         msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
-        let calling_proto = match msg.session_id.calling_protocol() {
-            Some(proto) => proto,
-            None => {
-                return Err(BatchReconError::InvalidInput(
-                    "Unknown calling protocol".to_string(),
-                ));
-            }
-        };
-
         match msg.msg_type {
             BatchReconMsgType::Eval => {
                 debug!(
@@ -136,7 +145,7 @@ impl<F: FftField> BatchReconNode<F> {
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
                 // Lock the session store to update the session state.
-                let session_store = self.get_or_create_store(msg.session_id).await;
+                let session_store = self.get_or_create_store(msg.session_id).await?;
                 // Lock the session-specific store to access or update the session state.
                 let mut store = session_store.lock().await;
 
@@ -205,7 +214,7 @@ impl<F: FftField> BatchReconNode<F> {
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
                 // Lock the session store to update the session state.
-                let session_store = self.get_or_create_store(msg.session_id).await;
+                let session_store = self.get_or_create_store(msg.session_id).await?;
                 // Lock the session-specific store to access or update the session state.
                 let mut store = session_store.lock().await;
 
@@ -229,10 +238,14 @@ impl<F: FftField> BatchReconNode<F> {
                             let mut result = poly;
                             // Resize the coefficient vector to `t + 1` to get all secrets.
                             result.resize(self.degree + 1, F::zero());
-                            store.secrets = Some(result.clone());
+                            let mut bytes_message = Vec::new();
+                            result.serialize_compressed(&mut bytes_message)?;
+
+                            store.secrets = Some(bytes_message);
                             drop(store);
                             info!(self_id = self.id, "Secrets successfully reconstructed");
 
+<<<<<<< HEAD
                             // Send the finalization message back to the triple generation or the
                             // multiplication protocol.
                             match calling_proto {
@@ -302,6 +315,12 @@ impl<F: FftField> BatchReconNode<F> {
                                 }
                                 _ => return Ok(()),
                             }
+=======
+                            self.output_sender
+                                .send(msg.session_id)
+                                .await
+                                .map_err(|_| BatchReconError::SendError)?;
+>>>>>>> origin/dev
                         }
                         Err(e) => {
                             error!(
@@ -328,11 +347,16 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn get_or_create_store(
         &self,
         session_id: SessionId,
-    ) -> Arc<Mutex<BatchReconStore<F>>> {
+    ) -> Result<Arc<Mutex<BatchReconStore<F>>>, BatchReconError> {
         let mut storage = self.store.lock().await;
-        storage
+        if storage.len() >= MAX_BATCH_RECON_SESSIONS && !storage.contains_key(&session_id) {
+            return Err(BatchReconError::InvalidInput(
+                "Session limit reached".into(),
+            ));
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(BatchReconStore::empty())))
-            .clone()
+            .clone())
     }
 }

@@ -48,6 +48,8 @@ pub enum AvssError {
     SendError,
     #[error("Channel closed")]
     Abort,
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,6 +82,9 @@ where
 pub fn verify_feldman<F: FftField, G: CurveGroup<ScalarField = F>>(
     share: FeldmanShamirShare<F, G>,
 ) -> bool {
+    if share.commitments.len() != share.feldmanshare.degree + 1 {
+        return false;
+    }
     let x = F::from(share.feldmanshare.id as u64);
     let mut rhs = G::zero();
     let mut pow = F::one();
@@ -302,6 +307,15 @@ where
             session_id = msg.session_id.as_u64(),
             "Processing AVSS share"
         );
+        match msg.session_id.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(AvssError::InvalidInput(format!(
+                    "Unknown calling protocol in session ID {:?}",
+                    msg.session_id
+                )));
+            }
+        };
         {
             let map = self.shares.lock().await;
             if map.contains_key(&msg.session_id) {
@@ -310,7 +324,10 @@ where
         };
 
         let pk_d: G = CanonicalDeserialize::deserialize_compressed(&msg.dealer_pk[..])?;
-        let cts: &Vec<Vec<u8>> = &msg.encrypted_shares[self.id];
+        let cts: &Vec<Vec<u8>> = msg
+            .encrypted_shares
+            .get(self.id)
+            .ok_or(AvssError::InvalidShare)?;
 
         let ss = pk_d.mul(self.sk_i);
         let key = kdf_from_point(&ss);

@@ -47,13 +47,13 @@ use crate::{
             fpmul::{FPError, FPMulNode},
             prandbitd::PRandBitDNode,
             rand_bit::RandBit,
-            PRandBitDMessage, PRandError, RandBitError, RandBitMessage, TruncPrError,
+            PRandBitDMessage, PRandError, RandBitError, TruncPrError,
         },
         input::{
             input::{InputClient, InputServer},
             InputError, InputMessage,
         },
-        mul::{multiplication::Multiply, MulError, MultMessage},
+        mul::{multiplication::Multiply, MulError},
         output::{
             output::{OutputClient, OutputServer},
             OutputError, OutputMessage,
@@ -62,7 +62,7 @@ use crate::{
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
-        triple_gen::{TripleGenError, TripleGenMessage},
+        triple_gen::TripleGenError,
     },
 };
 use ark_ff::{FftField, PrimeField};
@@ -611,43 +611,6 @@ where
                 }
                 self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
             }
-            WrappedMessage::Mul(mul_msg) => {
-                if sender_id != mul_msg.sender {
-                    return Err(HoneyBadgerError::InvalidPartyId);
-                }
-                if mul_msg.session_id.instance_id() != self.params.instance_id {
-                    return Err(HoneyBadgerError::InstanceIdError(
-                        mul_msg.session_id.instance_id(),
-                    ));
-                }
-
-                match mul_msg.session_id.calling_protocol() {
-                    Some(ProtocolType::Mul) => self.operations.mul.process(mul_msg).await?,
-                    Some(ProtocolType::RandBit) => {
-                        self.preprocess.rand_bit.mult_node.process(mul_msg).await?
-                    }
-                    Some(ProtocolType::FpMul) => {
-                        self.type_ops.fpmul.mult_node.process(mul_msg).await?
-                    }
-                    _ => {
-                        warn!(
-                            "Unknown protocol ID in session ID: {:?} in MUL",
-                            mul_msg.session_id
-                        );
-                    }
-                }
-            }
-            WrappedMessage::Triple(triple_msg) => {
-                if sender_id != triple_msg.sender_id {
-                    return Err(HoneyBadgerError::InvalidPartyId);
-                }
-                if triple_msg.session_id.instance_id() != self.params.instance_id {
-                    return Err(HoneyBadgerError::InstanceIdError(
-                        triple_msg.session_id.instance_id(),
-                    ));
-                }
-                self.preprocess.triple_gen.process(triple_msg).await?;
-            }
             WrappedMessage::BatchRecon(batch_msg) => {
                 if sender_id != batch_msg.sender_id {
                     return Err(HoneyBadgerError::InvalidPartyId);
@@ -663,13 +626,18 @@ where
                             .mul
                             .batch_recon
                             .process(batch_msg, net)
-                            .await?
+                            .await?;
+                        self.operations.mul.drain_batch_recon_output().await?
                     }
                     Some(ProtocolType::Triple) => {
                         self.preprocess
                             .triple_gen
                             .batch_recon_node
                             .process(batch_msg, net)
+                            .await?;
+                        self.preprocess
+                            .triple_gen
+                            .drain_batch_recon_output()
                             .await?
                     }
                     Some(ProtocolType::RandBit) => {
@@ -678,14 +646,20 @@ where
                                 .rand_bit
                                 .batch_recon
                                 .process(batch_msg, net)
-                                .await?
+                                .await?;
+                            self.preprocess.rand_bit.drain_batch_recon_output().await?;
                         } else {
                             self.preprocess
                                 .rand_bit
                                 .mult_node
                                 .batch_recon
                                 .process(batch_msg, net)
-                                .await?
+                                .await?;
+                            self.preprocess
+                                .rand_bit
+                                .mult_node
+                                .drain_batch_recon_output()
+                                .await?;
                         }
                     }
                     Some(ProtocolType::PRandBit) => {
@@ -693,7 +667,9 @@ where
                             .prand_bit
                             .batch_recon
                             .process(batch_msg, net)
-                            .await?
+                            .await?;
+
+                        self.preprocess.prand_bit.drain_batch_recon_output().await?;
                     }
                     Some(ProtocolType::FpMul) => {
                         self.type_ops
@@ -701,7 +677,12 @@ where
                             .mult_node
                             .batch_recon
                             .process(batch_msg, net)
-                            .await?
+                            .await?;
+                        self.type_ops
+                            .fpmul
+                            .mult_node
+                            .drain_batch_recon_output()
+                            .await?;
                     }
                     _ => {
                         warn!(
@@ -711,6 +692,7 @@ where
                     }
                 }
             }
+<<<<<<< HEAD
             WrappedMessage::RandBit(rand_bit_message) => {
                 if sender_id != rand_bit_message.sender {
                     return Err(HoneyBadgerError::InvalidPartyId);
@@ -723,6 +705,9 @@ where
                 self.preprocess.rand_bit.process(rand_bit_message).await?;
             }
             WrappedMessage::PRandBitD(prand_message) => {
+=======
+            WrappedMessage::PRandBit(prand_message) => {
+>>>>>>> origin/dev
                 if sender_id != prand_message.sender_id {
                     return Err(HoneyBadgerError::InvalidPartyId);
                 }
@@ -1163,13 +1148,6 @@ where
                     .lock()
                     .await
                     .add(Some(triples), None, None, None);
-                assert!(
-                    self.preprocess
-                        .triple_gen
-                        .batch_recon_node
-                        .clear_store(sessionid)
-                        .await
-                );
                 assert!(self.preprocess.triple_gen.clear_store(sessionid).await);
 
                 if round_id == 255 {
@@ -1520,13 +1498,15 @@ pub enum WrappedMessage {
     BatchRecon(BatchReconMsg),
     Input(InputMessage),
     RanSha(RanShaMessage),
-    Triple(TripleGenMessage),
     Dousha(DouShaMessage),
-    Mul(MultMessage),
     Output(OutputMessage),
+<<<<<<< HEAD
     RandBit(RandBitMessage),
     PRandBitD(PRandBitDMessage),
     Trunc(TruncPrMessage),
+=======
+    PRandBit(PRandBitDMessage),
+>>>>>>> origin/dev
 }
 
 impl WrappedMessage {

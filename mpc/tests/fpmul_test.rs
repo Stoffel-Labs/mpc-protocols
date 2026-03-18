@@ -98,6 +98,7 @@ async fn test_prandbitd_end_to_end() {
                     }
                     WrappedMessage::BatchRecon(msg) => {
                         let _ = node.batch_recon.process(msg, net.clone()).await;
+                        let _ = node.drain_batch_recon_output().await;
                     }
                     _ => continue,
                 }

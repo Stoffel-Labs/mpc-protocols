@@ -112,7 +112,6 @@ where
             payload.clone(),
             vec![],
             GenericMsgType::Bracha(MsgType::Init),
-            payload.len(),
         );
         info!(
             id = self.id,
@@ -197,7 +196,6 @@ where
                 msg.payload.clone(),
                 vec![],
                 GenericMsgType::Bracha(MsgType::Echo),
-                msg.payload.len(),
             );
             store.mark_echo(); // Mark that ECHO has been sent.
             info!(
@@ -257,7 +255,6 @@ where
                         msg.payload.clone(),
                         vec![],
                         GenericMsgType::Bracha(MsgType::Ready),
-                        msg.payload.len(),
                     ));
                 }
                 // If ECHO hasn't been sent yet, broadcast the ECHO message.
@@ -270,7 +267,6 @@ where
                         msg.payload.clone(),
                         vec![],
                         GenericMsgType::Bracha(MsgType::Echo),
-                        msg.payload.len(),
                     ));
                 }
             }
@@ -346,7 +342,6 @@ where
                         msg.payload.clone(),
                         vec![],
                         GenericMsgType::Bracha(MsgType::Ready),
-                        msg.payload.clone().len(),
                     ));
                 }
                 // If ECHO hasn't been sent yet, broadcast it along with READY.
@@ -359,7 +354,6 @@ where
                         msg.payload.clone(),
                         vec![],
                         GenericMsgType::Bracha(MsgType::Echo),
-                        msg.payload.len(),
                     ));
                 }
             } else if count >= 2 * self.t + 1 {
@@ -591,7 +585,6 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
                 shard,
                 fp, // [root||fingerprint]
                 GenericMsgType::Avid(MsgTypeAvid::Send),
-                payload.len(),
             );
 
             if let Err(e) = self.send(msg, net.clone(), i).await {
@@ -678,7 +671,6 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                         msg.payload,
                         msg.metadata,
                         GenericMsgType::Avid(MsgTypeAvid::Echo),
-                        msg.msg_len,
                     );
                     store.mark_echo(); // Mark that ECHO has been sent to avoid resending it
                     info!(
@@ -873,14 +865,14 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                     }
 
                     // Final consensus stage: enough READY messages to reconstruct
-                    if ready_count == (self.k + self.t) {
+                    if ready_count >= (self.k + self.t) && !store.ended {
                         let shards = decode_rs(
                             store.get_shards_for_root(&root.to_vec()),
                             self.k,
                             self.n - self.k,
                         )?;
                         //Reconstruct the original message to be broadcasted
-                        let output = reconstruct_payload(shards, msg.msg_len, self.k)?;
+                        let output = reconstruct_payload(shards, self.k)?;
                         store.mark_ended(); //Terminate broadcast
                         store.set_output(output.clone()); //store the output
                         send_output = Some(output);
@@ -1003,7 +995,6 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             payload,
             fingerprint,
             GenericMsgType::Avid(MsgTypeAvid::Ready),
-            msg.msg_len,
         );
         info!(
             id = self.id,
@@ -1177,7 +1168,6 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
             vec![v_r.0 as u8], // [value]
             vec![],
             GenericMsgType::ABA(MsgTypeAba::Est),
-            payload.len(),
         );
 
         // Lock the session store to update the session state.
@@ -1292,7 +1282,6 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                     msg.payload.clone(),
                     msg.metadata.clone(),
                     GenericMsgType::ABA(MsgTypeAba::Est),
-                    msg.msg_len,
                 );
                 self.broadcast(new_msg, net.clone()).await?;
             }
@@ -1309,7 +1298,6 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                         msg.payload,
                         msg.metadata,
                         GenericMsgType::ABA(MsgTypeAba::Aux),
-                        msg.msg_len,
                     );
                     drop(store);
                     self.broadcast(new_msg, net).await?;
@@ -1587,7 +1575,6 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
             vec![value as u8],
             msg.metadata.clone(),
             GenericMsgType::ABA(MsgTypeAba::Est),
-            msg.msg_len,
         );
         self.broadcast(msg, net).await?;
         Ok(())
@@ -1657,7 +1644,6 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
             signshare.to_bytes().to_vec(),
             vec![],
             GenericMsgType::ABA(MsgTypeAba::Coin),
-            msg.msg_len,
         );
         info!(
             session_id = msg.session_id.as_u64(),
@@ -1843,7 +1829,6 @@ impl Dealer {
                 serialized_share,
                 pkset_serial.clone(),
                 msg.msg_type.clone(),
-                msg.msg_len,
             );
 
             let encoded = (wrapper)(key_msg)?;
