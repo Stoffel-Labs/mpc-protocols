@@ -472,7 +472,9 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         } else if sid.sub_id() == 2 {
             info!(
                 self_id = self.id,
-                "Received shares for reconstruction using RBC for session_id: {:?}", session_id
+                sender = sender,
+                "Received shares for reconstruction using RBC for session_id: {:?}",
+                session_id
             );
             if storage.received_shares.contains_key(&sender) {
                 return Err(MulError::Duplicate(format!(

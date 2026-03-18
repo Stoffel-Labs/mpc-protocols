@@ -157,7 +157,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         );
         if storage.received_shares.contains_key(&msg.sender) {
             return Err(MulError::Duplicate(format!(
-                "Already received shares for reconstruction using RBC from {}",
+                "Already received shares for reconstruction using RBC from {} in open handler inside AVSS multiplication",
                 msg.sender
             )));
         }
