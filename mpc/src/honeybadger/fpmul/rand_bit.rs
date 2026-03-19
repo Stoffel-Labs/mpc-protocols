@@ -1,6 +1,6 @@
 use crate::common::{ProtocolSessionId, RBC};
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
-use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitMessage, RandBitStorage};
+use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitStorage};
 use crate::honeybadger::mul::concat_sorted;
 use crate::honeybadger::mul::multiplication::Multiply;
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::ops::{Add, Mul};
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
@@ -50,6 +51,7 @@ where
     pub mult_node: Multiply<F, R>,
     /// Batch reconstruction node to reconstruct `a^2 mod p`.
     pub batch_recon: BatchReconNode<F>,
+    pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 impl<F, R> RandBit<F, R>
@@ -58,7 +60,9 @@ where
     R: RBC<Id = SessionId>,
 {
     pub fn new(id: PartyId, n_parties: usize, threshold: usize) -> Result<Self, RandBitError> {
-        let batch_recon_node = BatchReconNode::new(id, n_parties, threshold, threshold)?;
+        let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
+        let batch_recon_node =
+            BatchReconNode::new(id, n_parties, threshold, threshold, batch_sender)?;
         let mult_node = Multiply::new(id, n_parties, threshold)?;
         Ok(Self {
             id,
@@ -67,6 +71,7 @@ where
             storage: Arc::new(Mutex::new(HashMap::new())),
             mult_node,
             batch_recon: batch_recon_node,
+            batch_output: Arc::new(Mutex::new(batch_receiver)),
         })
     }
 
@@ -94,7 +99,29 @@ where
             .or_insert(Arc::new(Mutex::new(RandBitStorage::empty())))
             .clone())
     }
+    pub async fn drain_batch_recon_output(&mut self) -> Result<(), RandBitError> {
+        loop {
+            let id = {
+                let mut rx = self.batch_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(RandBitError::Abort);
+                    }
+                }
+            };
 
+            let output = self.batch_recon.get_store(id).await?;
+            match self.square_reconstruction_handler(id, output).await {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
     pub async fn wait_for_result(
         &self,
         session_id: SessionId,
@@ -248,24 +275,25 @@ where
 
     async fn square_reconstruction_handler(
         &self,
-        message: RandBitMessage,
+        sid: SessionId,
+        payload: Vec<u8>,
     ) -> Result<(), RandBitError> {
         tracing::info!(
-            "Rand_bit reconstruction msg received from node: {0:?}",
-            message.sender
+            "Rand_bit reconstruction msg received at node: {0:?}",
+            self.id
         );
 
-        let calling_proto = match message.session_id.calling_protocol() {
+        let calling_proto = match sid.calling_protocol() {
             Some(proto) => proto,
             None => {
-                return Err(RandBitError::NoSuchSessionId(message.session_id));
+                return Err(RandBitError::NoSuchSessionId(sid));
             }
         };
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(message.session_id.exec_id(), 0, 0),
-            message.session_id.instance_id(),
+            SessionId::pack_slot24(sid.exec_id(), 0, 0),
+            sid.instance_id(),
         );
         let storage_bind = self.get_or_create_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
@@ -273,13 +301,12 @@ where
             return Ok(());
         }
 
-        let open: Vec<F> =
-            CanonicalDeserialize::deserialize_compressed(message.payload.as_slice())?;
-        let round_id = message.session_id.round_id();
+        let open: Vec<F> = CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+        let round_id = sid.round_id();
         if storage.output_open.contains_key(&round_id) {
             return Err(RandBitError::Duplicate(format!(
-                "Already received from {}",
-                message.sender
+                "Already received for {}",
+                round_id
             )));
         }
         storage.output_open.insert(round_id, open);
@@ -291,11 +318,6 @@ where
         drop(storage);
         let _done = self.try_finalize(session_id).await?;
         return Ok(());
-    }
-
-    pub async fn process(&mut self, message: RandBitMessage) -> Result<(), RandBitError> {
-        self.square_reconstruction_handler(message).await?;
-        Ok(())
     }
 }
 

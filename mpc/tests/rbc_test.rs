@@ -201,7 +201,6 @@ mod tests {
             payload.clone(),
             vec![],
             GenericMsgType::Bracha(MsgType::Ready),
-            payload.clone().len(),
         );
         let echo_msg = Msg::new(
             sender_id,
@@ -210,7 +209,6 @@ mod tests {
             payload.clone(),
             vec![],
             GenericMsgType::Bracha(MsgType::Echo),
-            payload.len(),
         );
 
         // Send READY first
@@ -407,7 +405,6 @@ mod tests {
             payload.clone(),
             vec![],
             GenericMsgType::Avid(MsgTypeAvid::Ready),
-            payload.clone().len(),
         );
         let echo_msg = Msg::new(
             sender_id,
@@ -416,7 +413,6 @@ mod tests {
             payload.clone(),
             vec![],
             GenericMsgType::Avid(MsgTypeAvid::Echo),
-            payload.len(),
         );
 
         // Send READY first
@@ -610,7 +606,6 @@ mod tests {
             vec![],
             vec![],
             GenericMsgType::ABA(MsgTypeAba::Key),
-            0,
         );
         let _ = dealer
             .distribute_keys(
@@ -632,7 +627,6 @@ mod tests {
                 vec![],
                 vec![],
                 GenericMsgType::ABA(MsgTypeAba::Coin),
-                0,
             );
             let _ = aba.init_coin(coin_msg, net[aba.id].clone()).await;
         }
@@ -696,7 +690,6 @@ mod tests {
             vec![],
             vec![],
             GenericMsgType::ABA(MsgTypeAba::Key),
-            0,
         );
         let _ = dealer
             .distribute_keys(
@@ -811,7 +804,6 @@ mod tests {
             vec![],
             vec![],
             GenericMsgType::ABA(MsgTypeAba::Key),
-            0,
         );
         let _ = dealer
             .distribute_keys(

@@ -1,8 +1,7 @@
 use ark_ff::FftField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
-use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::{NetworkError, PartyId};
+use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 use tokio::{
     sync::oneshot::{channel, Receiver, Sender},
@@ -66,6 +65,8 @@ pub enum TripleGenError {
     ResultAlreadyReceived(SessionId),
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(SessionId),
+    #[error("received abort signal")]
+    Abort,
 }
 
 /// Represents a Beaver triple of non-robust Shamir shares.
@@ -124,33 +125,6 @@ where
             protocol_output: Vec::new(),
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
-        }
-    }
-}
-
-/// Generic message for the triple generation protocol.
-///
-/// This generic message contains the payload in bytes of any message sent during the protocol
-/// execution. Any message that is sent in the protocol is converted into bytes that are placed in
-/// the `payload`. Once a party receives a message, it takes the payload and deserialize it to the
-/// specific message sent during the protocol execution.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TripleGenMessage {
-    /// The ID of the party.
-    pub sender_id: PartyId,
-    /// The session ID of the instance.
-    pub session_id: SessionId,
-    /// The payload of the message.
-    pub payload: Vec<u8>,
-}
-
-impl TripleGenMessage {
-    /// Creates a new generic message for the triple generation protocol.
-    pub fn new(sender_id: PartyId, session_id: SessionId, payload: Vec<u8>) -> Self {
-        Self {
-            sender_id,
-            session_id,
-            payload,
         }
     }
 }

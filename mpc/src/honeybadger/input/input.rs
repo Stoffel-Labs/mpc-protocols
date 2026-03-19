@@ -170,6 +170,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         let mut send_over_network = false;
         let mut already_rand_shares = false;
         let mut unknown_client = false;
+        let mut invalid_length = false;
 
         self.status_sender.send_if_modified(|status| {
             match status.get(&client_id) {
@@ -178,6 +179,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
                     false
                 }
                 Some((InputType::MaskedInputs, masked_inputs)) => {
+                    if masked_inputs.len() != shares.len() {
+                        invalid_length = true;
+                        return false;
+                    }
                     let input_shares = calculate_input_shares(masked_inputs, &shares);
 
                     status.insert(client_id, (InputType::InputShares, input_shares));
@@ -200,6 +205,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
             }
         });
 
+        if invalid_length {
+            return Err(InputError::InvalidInput(
+                "Mismatch in masked input and share length".to_string(),
+            ));
+        }
         if unknown_client {
             return Err(InputError::InvalidInput(
                 "Unknown client {client_id}".to_string(),
@@ -249,6 +259,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
 
         let mut unknown_client = false;
         let mut already_masked_inputs = false;
+        let mut invalid_length = false;
 
         self.status_sender
             .send_if_modified(|status| match status.get(&sender_id) {
@@ -257,6 +268,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
                     false
                 }
                 Some((InputType::RandomShares, random_shares)) => {
+                    if masked_inputs_as_shares.len() != random_shares.len() {
+                        invalid_length = true;
+                        return false;
+                    }
                     let input_shares =
                         calculate_input_shares(&masked_inputs_as_shares, random_shares);
 
@@ -285,7 +300,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
                     false
                 }
             });
-
+        if invalid_length {
+            return Err(InputError::InvalidInput(
+                "Mismatch in masked input and share length".to_string(),
+            ));
+        }
         if already_masked_inputs {
             return Err(InputError::Duplicate(format!(
                 "Server {} already received masked inputs from {}",
@@ -392,9 +411,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
         msg: InputMessage,
         net: Arc<N>,
     ) -> Result<(), InputError> {
-        let shares: Vec<RobustShare<F>> =
+        let mut shares: Vec<RobustShare<F>> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
-
+        for share in &mut shares {
+            share.id = msg.sender_id;
+        }
         let mut d = self.client_data.lock().await;
 
         let input_len = d.inputs.len();
