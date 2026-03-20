@@ -77,12 +77,7 @@ pub struct AvssOutputClient<F: FftField, G: CurveGroup<ScalarField = F>> {
 }
 
 impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
-    pub fn new(
-        id: usize,
-        n: usize,
-        t: usize,
-        input_len: usize,
-    ) -> Result<Self, AvssOutputError> {
+    pub fn new(id: usize, n: usize, t: usize, input_len: usize) -> Result<Self, AvssOutputError> {
         let (output_sender, output_receiver) = channel(AvssOutputClientData::<F, G> {
             output: None,
             output_shares: HashMap::new(),
@@ -106,10 +101,7 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
     /// 4. Add the received shares.
     /// 5. If the output has not been reconstructed yet and enough verified shares have
     ///    been received (t+1), reconstruct the output.
-    pub async fn output_handler(
-        &mut self,
-        msg: AvssOutputMessage,
-    ) -> Result<(), AvssOutputError> {
+    pub async fn output_handler(&mut self, msg: AvssOutputMessage) -> Result<(), AvssOutputError> {
         // 1.
         let shares: Vec<FeldmanShamirShare<F, G>> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;

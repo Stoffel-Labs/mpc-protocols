@@ -5,10 +5,7 @@ use ark_ff::UniformRand;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use stoffelmpc_mpc::{
-    avss_mpc::output::{
-        output::{AvssOutputClient, AvssOutputServer},
-        AvssOutputMessage,
-    },
+    avss_mpc::output::{output::AvssOutputClient, AvssOutputMessage},
     common::{share::feldman::FeldmanShamirShare, SecretSharingScheme},
 };
 use tokio::time::Duration;

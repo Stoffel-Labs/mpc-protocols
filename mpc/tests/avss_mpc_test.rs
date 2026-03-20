@@ -296,15 +296,20 @@ async fn preprocessing_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes =
-        create_avss_mpc_nodes::<Fr, Avid<AvssSessionId>, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
-            n_parties,
-            t,
-            no_of_randomshares,
-            no_of_triples,
-            instance_id,
-            Duration::from_secs(30),
-        );
+    let nodes = create_avss_mpc_nodes::<
+        Fr,
+        Avid<AvssSessionId>,
+        FeldmanShamirShare<Fr, G>,
+        FakeNetwork,
+        G,
+    >(
+        n_parties,
+        t,
+        no_of_randomshares,
+        no_of_triples,
+        instance_id,
+        Duration::from_secs(30),
+    );
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
@@ -391,15 +396,20 @@ async fn mul_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes =
-        create_avss_mpc_nodes::<Fr, Avid<AvssSessionId>, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
-            n_parties,
-            t,
-            0,
-            no_of_multiplication,
-            111,
-            Duration::from_secs(30),
-        );
+    let nodes = create_avss_mpc_nodes::<
+        Fr,
+        Avid<AvssSessionId>,
+        FeldmanShamirShare<Fr, G>,
+        FakeNetwork,
+        G,
+    >(
+        n_parties,
+        t,
+        0,
+        no_of_multiplication,
+        111,
+        Duration::from_secs(30),
+    );
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages

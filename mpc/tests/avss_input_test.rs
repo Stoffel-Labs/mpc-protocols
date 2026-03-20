@@ -3,11 +3,9 @@ use utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 use ark_bls12_381::{Fr, G1Projective as G};
 use ark_ff::UniformRand;
 use ark_std::test_rng;
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use stoffelmpc_mpc::{
-    avss_mpc::{
-        input::input::AvssInputServer, AvssMPCClient, AvssSessionId, AvssWrappedMessage,
-    },
+    avss_mpc::{input::input::AvssInputServer, AvssMPCClient, AvssSessionId, AvssWrappedMessage},
     common::{rbc::rbc::Avid, share::feldman::FeldmanShamirShare, SecretSharingScheme, RBC},
 };
 use stoffelmpc_network::fake_network::SenderId;
@@ -35,8 +33,7 @@ async fn test_avss_input_e2e() {
     let ids: Vec<usize> = (1..=n).collect();
 
     // Setup network with one client
-    let (network, mut receivers, client_networks, mut client_recv) =
-        test_setup(n, vec![clientid]);
+    let (network, mut receivers, client_networks, mut client_recv) = test_setup(n, vec![clientid]);
     let client_inboxes = client_recv.remove(&clientid).unwrap();
     let client_network = client_networks.get(&clientid).unwrap().clone();
 
@@ -75,7 +72,12 @@ async fn test_avss_input_e2e() {
     // All but one node call init (to test the late-init case)
     for i in 0..nodes.len() - 1 {
         assert!(nodes[i]
-            .init(clientid, vec![rand_shares[i].clone()], 1, network[i].clone())
+            .init(
+                clientid,
+                vec![rand_shares[i].clone()],
+                1,
+                network[i].clone()
+            )
             .await
             .is_ok());
     }
@@ -148,8 +150,7 @@ async fn test_avss_input_e2e() {
         recovered_shares.push(client_shares[0].clone());
     }
 
-    let (_, recovered_input) =
-        FeldmanShamirShare::<Fr, G>::recover_secret(&recovered_shares, n, t)
-            .expect("recovery failed");
+    let (_, recovered_input) = FeldmanShamirShare::<Fr, G>::recover_secret(&recovered_shares, n, t)
+        .expect("recovery failed");
     assert_eq!(recovered_input, input, "Recovered input does not match");
 }

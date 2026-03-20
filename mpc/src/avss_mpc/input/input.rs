@@ -64,15 +64,6 @@ fn calculate_input_shares<F: FftField, G: CurveGroup<ScalarField = F>>(
         .iter()
         .zip(random_shares)
         .map(|(masked_value, random_share)| {
-            // We need m - r_i. FeldmanShamirShare implements Sub<F> as (share - scalar),
-            // so we compute -(r_i - m) = m - r_i by negating.
-            // Alternatively: (random_share * (-1)) + m
-            // But simpler: use the Sub<F> to get (r_i - m), then negate.
-            //
-            // Actually, let's do it directly:
-            // new_value = masked_value - random_share.value
-            // new_commitments[0] = masked_value*G - random_share.commitments[0]
-            // new_commitments[j] = -random_share.commitments[j] for j > 0
             let neg_share = (random_share.clone() * (-F::one())).unwrap();
             (neg_share + *masked_value).unwrap()
         })
@@ -211,10 +202,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             let wrapped = AvssWrappedMessage::Input(msg);
             let bytes = bincode::serialize(&wrapped)?;
             net.send_to_client(client_id, &bytes).await?;
-            info!(
-                "Server {} sent MaskShare to client {}",
-                self.id, client_id
-            );
+            info!("Server {} sent MaskShare to client {}", self.id, client_id);
         }
 
         Ok(())
@@ -244,8 +232,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                     false
                 }
                 Some((InputType::RandomShares, random_shares)) => {
-                    let input_shares =
-                        calculate_input_shares(&masked_inputs, random_shares);
+                    let input_shares = calculate_input_shares(&masked_inputs, random_shares);
 
                     status.insert(sender_id, (InputType::InputShares, input_shares));
                     info!(
@@ -263,8 +250,8 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                         .map(|m| {
                             FeldmanShamirShare::new(
                                 *m,
-                                0, // dummy id
-                                0, // dummy degree
+                                0,                         // dummy id
+                                0,                         // dummy degree
                                 vec![G::generator() * *m], // dummy commitment
                             )
                             .unwrap()
@@ -450,8 +437,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                 }
             }
             for recon in r_shares {
-                let secret =
-                    FeldmanShamirShare::<F, G>::recover_secret(&recon, self.n, self.t)?;
+                let secret = FeldmanShamirShare::<F, G>::recover_secret(&recon, self.n, self.t)?;
                 masks.push(secret.1);
             }
 

@@ -85,6 +85,71 @@ pub enum AvssMPCError {
     OutputError(#[from] AvssOutputError),
 }
 
+pub struct AvssMPCClient<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
+    pub id: usize,
+    pub input: AvssInputClient<F, R, G>,
+    pub output: AvssOutputClient<F, G>,
+}
+
+// implement manually because derive(Clone) requires R: Clone, which is not needed at all
+impl<F, R, G> Clone for AvssMPCClient<F, R, G>
+where
+    F: FftField,
+    R: RBC,
+    G: CurveGroup<ScalarField = F>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            input: self.input.clone(),
+            output: self.output.clone(),
+        }
+    }
+}
+
+impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
+    AvssMPCClient<F, R, G>
+{
+    pub fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        instance_id: u32,
+        inputs: Vec<F>,
+        input_len: usize,
+    ) -> Result<Self, AvssMPCError> {
+        let input = AvssInputClient::new(id, n, t, instance_id, inputs)?;
+        let output = AvssOutputClient::new(id, n, t, input_len)?;
+        Ok(Self { id, input, output })
+    }
+
+    pub async fn process<N: Network + Send + Sync>(
+        &mut self,
+        sender_id: ClientId,
+        raw_msg: Vec<u8>,
+        net: Arc<N>,
+    ) -> Result<(), AvssMPCError> {
+        let wrapped: AvssWrappedMessage = bincode::deserialize(&raw_msg)?;
+
+        match wrapped {
+            AvssWrappedMessage::Input(input_msg) => {
+                if sender_id != input_msg.sender_id {
+                    return Err(AvssMPCError::InvalidPartyId);
+                }
+                self.input.process(input_msg, net).await?;
+            }
+            AvssWrappedMessage::Output(output_msg) => {
+                if sender_id != output_msg.sender_id {
+                    return Err(AvssMPCError::InvalidPartyId);
+                }
+                self.output.process(output_msg).await?
+            }
+            _ => warn!("Incorrect message type received at client"),
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 /// Configuration options for the AvssMPCNode protocol.
 pub struct AvssMPCNodeOpts<F, G>
@@ -193,7 +258,10 @@ where
         }
         Ok(self.v_random_shares.drain(0..n_shares).collect())
     }
-    pub fn take_triples(&mut self, n_shares: usize) -> Result<Vec<BeaverTriple<F, G>>, AvssMPCError> {
+    pub fn take_triples(
+        &mut self,
+        n_shares: usize,
+    ) -> Result<Vec<BeaverTriple<F, G>>, AvssMPCError> {
         if n_shares > self.triples.len() {
             return Err(AvssMPCError::NotEnoughPreprocessing);
         }
@@ -301,8 +369,7 @@ where
             params.pk_map.clone(),
         )?;
         let mul_node = Multiply::new(id, params.n_parties, params.threshold)?;
-        let input_server =
-            AvssInputServer::new(id, params.n_parties, params.threshold, input_ids)?;
+        let input_server = AvssInputServer::new(id, params.n_parties, params.threshold, input_ids)?;
         let output_server = AvssOutputServer::new(id, params.n_parties)?;
         Ok(Self {
             id,
@@ -329,7 +396,9 @@ where
                     return Err(AvssMPCError::InvalidPartyId);
                 }
                 if rbc_msg.session_id.instance_id() != self.params.instance_id {
-                    return Err(AvssMPCError::InstanceIdError(rbc_msg.session_id.instance_id()));
+                    return Err(AvssMPCError::InstanceIdError(
+                        rbc_msg.session_id.instance_id(),
+                    ));
                 }
                 match rbc_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Avss) => {
@@ -750,70 +819,5 @@ impl AvssSessionId {
     #[inline]
     pub fn pack_slot24(exec_id: u8, sub_id: u8, round_id: u8) -> u32 {
         ((exec_id as u32) << 16) | ((sub_id as u32) << 8) | round_id as u32
-    }
-}
-
-pub struct AvssMPCClient<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
-    pub id: usize,
-    pub input: AvssInputClient<F, R, G>,
-    pub output: AvssOutputClient<F, G>,
-}
-
-// implement manually because derive(Clone) requires R: Clone, which is not needed at all
-impl<F, R, G> Clone for AvssMPCClient<F, R, G>
-where
-    F: FftField,
-    R: RBC,
-    G: CurveGroup<ScalarField = F>,
-{
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id,
-            input: self.input.clone(),
-            output: self.output.clone(),
-        }
-    }
-}
-
-impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
-    AvssMPCClient<F, R, G>
-{
-    pub fn new(
-        id: usize,
-        n: usize,
-        t: usize,
-        instance_id: u32,
-        inputs: Vec<F>,
-        input_len: usize,
-    ) -> Result<Self, AvssMPCError> {
-        let input = AvssInputClient::new(id, n, t, instance_id, inputs)?;
-        let output = AvssOutputClient::new(id, n, t, input_len)?;
-        Ok(Self { id, input, output })
-    }
-
-    pub async fn process<N: Network + Send + Sync>(
-        &mut self,
-        sender_id: ClientId,
-        raw_msg: Vec<u8>,
-        net: Arc<N>,
-    ) -> Result<(), AvssMPCError> {
-        let wrapped: AvssWrappedMessage = bincode::deserialize(&raw_msg)?;
-
-        match wrapped {
-            AvssWrappedMessage::Input(input_msg) => {
-                if sender_id != input_msg.sender_id {
-                    return Err(AvssMPCError::InvalidPartyId);
-                }
-                self.input.process(input_msg, net).await?;
-            }
-            AvssWrappedMessage::Output(output_msg) => {
-                if sender_id != output_msg.sender_id {
-                    return Err(AvssMPCError::InvalidPartyId);
-                }
-                self.output.process(output_msg).await?
-            }
-            _ => warn!("Incorrect message type received at client"),
-        }
-        Ok(())
     }
 }
