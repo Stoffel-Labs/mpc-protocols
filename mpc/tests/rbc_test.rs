@@ -1189,4 +1189,166 @@ mod tests {
     //         );
     //     }
     // }
+
+    /// Verifies that after get_store() consumes a Bracha session, late messages
+    /// do NOT recreate the session or trigger new ECHO/READY broadcasts.
+    #[tokio::test]
+    async fn test_bracha_late_message_after_get_store() {
+        setup_tracing();
+
+        let n = 4;
+        let t = 1;
+        let payload = b"tombstone test bracha".to_vec();
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(200, 0, 0), 1);
+
+        let (parties, net, receivers) =
+            setup_network_and_parties::<Bracha<SessionId>, FakeNetwork>(n, t, t + 1, 500)
+                .await
+                .expect("Failed to set up parties");
+        spawn_parties(&parties, receivers, net.clone()).await;
+
+        // Party 0 initiates broadcast
+        let _ = parties[0]
+            .init(payload.clone(), session_id, net[0].clone())
+            .await;
+
+        // Wait for protocol to complete
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Verify session completed at party 1
+        {
+            let store_map = parties[1].store.lock().await;
+            let session_store = store_map.get(&session_id).expect("Session should exist");
+            let s = session_store.lock().await;
+            assert!(s.ended, "Session should have ended at party 1");
+        }
+
+        // Consume the output via get_store() — this removes the session
+        let output = parties[1]
+            .get_store(session_id)
+            .await
+            .expect("get_store should succeed");
+        assert_eq!(output, payload);
+
+        // Verify session was removed from active store
+        {
+            let store_map = parties[1].store.lock().await;
+            assert!(
+                store_map.get(&session_id).is_none(),
+                "Session should be removed from store after get_store()"
+            );
+        }
+
+        // Verify session is in the tombstone set
+        {
+            let completed = parties[1].completed_sessions.lock().await;
+            assert!(
+                completed.contains(&session_id),
+                "Session should be in completed_sessions tombstone set"
+            );
+        }
+
+        // Now send a late READY message to party 1 for the consumed session
+        let late_msg = Msg::new(
+            3, // from party 3
+            session_id,
+            0,
+            payload.clone(),
+            vec![],
+            GenericMsgType::Bracha(MsgType::Ready),
+        );
+        let _ = parties[1].process(late_msg, net[1].clone()).await;
+
+        // The session should NOT be recreated in the active store
+        {
+            let store_map = parties[1].store.lock().await;
+            assert!(
+                store_map.get(&session_id).is_none(),
+                "Late message must NOT recreate a consumed session"
+            );
+        }
+    }
+
+    /// Verifies that after get_store() consumes an AVID session, late messages
+    /// do NOT recreate the session or trigger new ECHO/READY broadcasts.
+    #[tokio::test]
+    async fn test_avid_late_message_after_get_store() {
+        setup_tracing();
+
+        let n = 4;
+        let t = 1;
+        let k = 2;
+        let payload = b"tombstone test avid".to_vec();
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(201, 0, 0), 1);
+
+        let (parties, net, receivers) =
+            setup_network_and_parties::<Avid<SessionId>, FakeNetwork>(n, t, k, 500)
+                .await
+                .expect("Failed to set up parties");
+        spawn_parties(&parties, receivers, net.clone()).await;
+
+        // Party 0 initiates broadcast
+        let _ = parties[0]
+            .init(payload.clone(), session_id, net[0].clone())
+            .await;
+
+        // Wait for protocol to complete
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Verify session completed at party 1
+        {
+            let store_map = parties[1].store.lock().await;
+            let session_store = store_map.get(&session_id).expect("Session should exist");
+            let s = session_store.lock().await;
+            assert!(s.ended, "Session should have ended at party 1");
+        }
+
+        // Consume the output via get_store() — this removes the session
+        let output = parties[1]
+            .get_store(session_id)
+            .await
+            .expect("get_store should succeed");
+        assert_eq!(output, payload);
+
+        // Verify session was removed from active store
+        {
+            let store_map = parties[1].store.lock().await;
+            assert!(
+                store_map.get(&session_id).is_none(),
+                "Session should be removed from store after get_store()"
+            );
+        }
+
+        // Verify session is in the tombstone set
+        {
+            let completed = parties[1].completed_sessions.lock().await;
+            assert!(
+                completed.contains(&session_id),
+                "Session should be in completed_sessions tombstone set"
+            );
+        }
+
+        // Now send a late ECHO message to party 1 for the consumed session
+        // Using minimal metadata to pass the length check (32 bytes for root)
+        let fake_metadata = vec![0u8; 64]; // 32 root + 32 proof
+        let late_msg = Msg::new(
+            3, // from party 3
+            session_id,
+            0,
+            vec![0u8; 16], // fake shard
+            fake_metadata,
+            GenericMsgType::Avid(MsgTypeAvid::Echo),
+        );
+        // Process should succeed without error (silently ignored)
+        let _ = parties[1].process(late_msg, net[1].clone()).await;
+
+        // The session should NOT be recreated in the active store
+        {
+            let store_map = parties[1].store.lock().await;
+            assert!(
+                store_map.get(&session_id).is_none(),
+                "Late ECHO must NOT recreate a consumed AVID session"
+            );
+        }
+    }
 }

@@ -68,13 +68,13 @@ impl<F: FftField> BatchReconNode<F> {
     }
 
     pub async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, BatchReconError> {
-        let mut store = self.store.lock().await;
+        let store = self.store.lock().await;
 
-        let output_store = store.remove(&session_id).ok_or_else(|| {
+        let output_store = store.get(&session_id).ok_or_else(|| {
             BatchReconError::InvalidInput("Session ID does not exist".to_string())
         })?;
 
-        let store_lock = output_store.lock().await;
+        let mut store_lock = output_store.lock().await;
 
         if store_lock.secrets.is_none() {
             return Err(BatchReconError::InvalidInput(
@@ -82,7 +82,14 @@ impl<F: FftField> BatchReconNode<F> {
             ));
         }
 
-        Ok(store_lock.secrets.clone().unwrap())
+        let output = store_lock.secrets.clone().unwrap();
+        // Clear heavy data but keep the entry so late messages see it's completed.
+        // The `secrets` field remaining Some signals completion to the handler.
+        store_lock.evals_received.clear();
+        store_lock.reveals_received.clear();
+        store_lock.y_j = None;
+
+        Ok(output)
     }
 
     /// Initiates the batch reconstruction protocol for a given node.
@@ -148,6 +155,11 @@ impl<F: FftField> BatchReconNode<F> {
                 let session_store = self.get_or_create_store(msg.session_id).await?;
                 // Lock the session-specific store to access or update the session state.
                 let mut store = session_store.lock().await;
+
+                // Ignore if session already completed
+                if store.secrets.is_some() {
+                    return Ok(());
+                }
 
                 // Store the received evaluation share if it's from a new sender.
                 if !store.evals_received.iter().any(|s| s.id == sender_id) {
@@ -218,6 +230,11 @@ impl<F: FftField> BatchReconNode<F> {
                 // Lock the session-specific store to access or update the session state.
                 let mut store = session_store.lock().await;
 
+                // Ignore if session already completed
+                if store.secrets.is_some() {
+                    return Ok(());
+                }
+
                 // Store the received revealed `y_j` value if it's from a new sender.
                 if !store.reveals_received.iter().any(|s| s.id == sender_id) {
                     store
@@ -278,9 +295,26 @@ impl<F: FftField> BatchReconNode<F> {
     ) -> Result<Arc<Mutex<BatchReconStore<F>>>, BatchReconError> {
         let mut storage = self.store.lock().await;
         if storage.len() >= MAX_BATCH_RECON_SESSIONS && !storage.contains_key(&session_id) {
-            return Err(BatchReconError::InvalidInput(
-                "Session limit reached".into(),
-            ));
+            // Evict completed sessions to make room before failing
+            let completed_keys: Vec<SessionId> = {
+                let mut keys = Vec::new();
+                for (k, v) in storage.iter() {
+                    if let Some(guard) = v.try_lock() {
+                        if guard.secrets.is_some() {
+                            keys.push(*k);
+                        }
+                    }
+                }
+                keys
+            };
+            for k in &completed_keys {
+                storage.remove(k);
+            }
+            if storage.len() >= MAX_BATCH_RECON_SESSIONS {
+                return Err(BatchReconError::InvalidInput(
+                    "Session limit reached".into(),
+                ));
+            }
         }
         Ok(storage
             .entry(session_id)
