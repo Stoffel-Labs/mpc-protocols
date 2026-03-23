@@ -4,7 +4,7 @@ use super::{rbc_store::*, utils::*, RbcError};
 use crate::common::{ProtocolSessionId, RbcWrapFn, RBC};
 use async_trait::async_trait;
 use bincode;
-use std::{collections::HashMap, collections::HashSet, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use threshold_crypto::{
     serde_impl::SerdeSecret, PublicKeySet, SecretKeySet, SecretKeyShare, SignatureShare,
@@ -37,7 +37,6 @@ pub struct Bracha<Id: ProtocolSessionId + 'static> {
     pub t: usize, // Number of allowed malicious parties
     pub k: usize, //threshold (Not really used in Bracha)
     pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
-    pub completed_sessions: Arc<Mutex<HashSet<Id>>>, // Tombstone set for consumed sessions
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
 }
@@ -67,7 +66,6 @@ where
             t,
             k,
             store: Arc::new(Mutex::new(HashMap::new())),
-            completed_sessions: Arc::new(Mutex::new(HashSet::new())),
             output_sender,
             wrapper,
         })
@@ -77,25 +75,19 @@ where
         self.id
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let output = {
-            let mut store = self.store.lock().await;
-            let output_store = store
-                .remove(&session_id)
-                .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
-            let store_lock = output_store.lock().await;
-            if !store_lock.ended {
-                return Err(RbcError::Internal("Rbc has not terminated".to_string()));
-            }
-            store_lock.output.clone()
-        };
-        // Mark session as completed so late messages are silently ignored
-        self.completed_sessions.lock().await.insert(session_id);
-        Ok(output)
+        let store = self.store.lock().await;
+        let output_store = store
+            .get(&session_id)
+            .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
+        let store_lock = output_store.lock().await;
+        if !store_lock.ended {
+            return Err(RbcError::Internal("Rbc has not terminated".to_string()));
+        }
+        Ok(store_lock.output.clone())
     }
 
     async fn clear_store(&self) {
         self.store.lock().await.clear();
-        self.completed_sessions.lock().await.clear();
     }
     /// This initiates the Bracha protocol.
     async fn init<N: Network + Send + Sync>(
@@ -186,16 +178,6 @@ where
         let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
-
-        // Ignore the message if the session has already ended.
-        if store.ended {
-            debug!(
-                id = self.id,
-                session_id = msg.session_id.as_u64(),
-                "Session already ended, ignoring INIT"
-            );
-            return Ok(());
-        }
 
         // Only broadcast the ECHO if it hasn't already been sent.
         if !store.echo {
@@ -408,13 +390,6 @@ where
         Ok(())
     }
     async fn get_or_create_store(&self, session_id: Id) -> Arc<Mutex<BrachaStore>> {
-        // If this session was already completed and consumed, return a dead store
-        if self.completed_sessions.lock().await.contains(&session_id) {
-            return Arc::new(Mutex::new(BrachaStore {
-                ended: true,
-                ..BrachaStore::default()
-            }));
-        }
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store
@@ -502,7 +477,6 @@ pub struct Avid<Id: ProtocolSessionId> {
     pub t: usize,                                              //No. of malicious parties
     pub k: usize,                                              //Threshold
     pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
-    pub completed_sessions: Arc<Mutex<HashSet<Id>>>, // Tombstone set for consumed sessions
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
 }
@@ -535,7 +509,6 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
             t,
             k,
             store: Arc::new(Mutex::new(HashMap::new())),
-            completed_sessions: Arc::new(Mutex::new(HashSet::new())),
             output_sender,
             wrapper,
         })
@@ -545,23 +518,17 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
     }
     async fn clear_store(&self) {
         self.store.lock().await.clear();
-        self.completed_sessions.lock().await.clear();
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let output = {
-            let mut store = self.store.lock().await;
-            let output_store = store
-                .remove(&session_id)
-                .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
-            let store_lock = output_store.lock().await;
-            if !store_lock.ended {
-                return Err(RbcError::Internal("Rbc has not terminated".to_string()));
-            }
-            store_lock.output.clone()
-        };
-        // Mark session as completed so late messages are silently ignored
-        self.completed_sessions.lock().await.insert(session_id);
-        Ok(output)
+        let store = self.store.lock().await;
+        let output_store = store
+            .get(&session_id)
+            .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
+        let store_lock = output_store.lock().await;
+        if !store_lock.ended {
+            return Err(RbcError::Internal("Rbc has not terminated".to_string()));
+        }
+        Ok(store_lock.output.clone())
     }
 
     ///This initiates the Avid protocol.
@@ -677,16 +644,6 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         let session_store = self.get_or_create_store(msg.session_id).await;
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
-
-        // Ignore the message if the session has already ended.
-        if store.ended {
-            debug!(
-                id = self.id,
-                session_id = msg.session_id.as_u64(),
-                "Session already ended, ignoring SEND"
-            );
-            return Ok(());
-        }
 
         // Only broadcast the ECHO if it hasn't already been sent.
         if !store.echo {
@@ -1037,13 +994,6 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         Ok(())
     }
     async fn get_or_create_store(&self, session_id: Id) -> Arc<Mutex<AvidStore>> {
-        // If this session was already completed and consumed, return a dead store
-        if self.completed_sessions.lock().await.contains(&session_id) {
-            return Arc::new(Mutex::new(AvidStore {
-                ended: true,
-                ..AvidStore::default()
-            }));
-        }
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store
@@ -1096,7 +1046,6 @@ pub struct ABA<Id: ProtocolSessionId> {
     pub pkset: Arc<OnceCell<Vec<u8>>>,   //Public key set
     pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<AbaStore>>>>>, // Stores the ABA session state
     pub coin: Arc<Mutex<HashMap<Id, Arc<Mutex<CoinStore>>>>>, // Stores the common coin session state
-    pub completed_sessions: Arc<Mutex<HashSet<Id>>>, // Tombstone set for consumed sessions
     pub output_sender: Sender<Id>,
 
     pub wrapper: RbcWrapFn<Id>,
@@ -1138,7 +1087,6 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
             pkset: Arc::new(OnceCell::new()),
             store: Arc::new(Mutex::new(HashMap::new())),
             coin: Arc::new(Mutex::new(HashMap::new())),
-            completed_sessions: Arc::new(Mutex::new(HashSet::new())),
             output_sender,
             wrapper,
         })
@@ -1149,24 +1097,17 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
     async fn clear_store(&self) {
         self.store.lock().await.clear();
         self.coin.lock().await.clear();
-        self.completed_sessions.lock().await.clear();
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let output = {
-            let mut store = self.store.lock().await;
-            let output_store = store
-                .remove(&session_id)
-                .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
-
-            let store_lock = output_store.lock().await;
-            if !store_lock.ended {
-                return Err(RbcError::Internal("Rbc has not terminated".to_string()));
-            }
-            vec![store_lock.output as u8]
-        };
-        // Mark session as completed so late messages are silently ignored
-        self.completed_sessions.lock().await.insert(session_id);
-        Ok(output)
+        let store = self.store.lock().await;
+        let output_store = store
+            .get(&session_id)
+            .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
+        let store_lock = output_store.lock().await;
+        if !store_lock.ended {
+            return Err(RbcError::Internal("Rbc has not terminated".to_string()));
+        }
+        Ok(vec![store_lock.output as u8])
     }
 
     /// This initiates the ABA protocol.
@@ -1578,13 +1519,6 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
     }
 
     async fn get_or_create_store(&self, session_id: Id) -> Arc<Mutex<AbaStore>> {
-        // If this session was already completed and consumed, return a dead store
-        if self.completed_sessions.lock().await.contains(&session_id) {
-            return Arc::new(Mutex::new(AbaStore {
-                ended: true,
-                ..AbaStore::default()
-            }));
-        }
         let mut store = self.store.lock().await;
         // Get or create the session state for the current session.
         store

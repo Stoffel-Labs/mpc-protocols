@@ -1190,8 +1190,9 @@ mod tests {
     //     }
     // }
 
-    /// Verifies that after get_store() consumes a Bracha session, late messages
-    /// do NOT recreate the session or trigger new ECHO/READY broadcasts.
+    /// Verifies that after get_store() consumes a Bracha session, the session
+    /// entry remains in the store with `ended = true`, preventing late messages
+    /// from triggering new ECHO/READY broadcasts.
     #[tokio::test]
     async fn test_bracha_late_message_after_get_store() {
         setup_tracing();
@@ -1215,42 +1216,31 @@ mod tests {
         // Wait for protocol to complete
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Verify session completed at party 1
-        {
-            let store_map = parties[1].store.lock().await;
-            let session_store = store_map.get(&session_id).expect("Session should exist");
-            let s = session_store.lock().await;
-            assert!(s.ended, "Session should have ended at party 1");
-        }
-
-        // Consume the output via get_store() — this removes the session
+        // Consume the output via get_store()
         let output = parties[1]
             .get_store(session_id)
             .await
             .expect("get_store should succeed");
         assert_eq!(output, payload);
 
-        // Verify session was removed from active store
+        // Session entry should still be in the store (not removed)
         {
             let store_map = parties[1].store.lock().await;
-            assert!(
-                store_map.get(&session_id).is_none(),
-                "Session should be removed from store after get_store()"
-            );
+            let session_store = store_map.get(&session_id).expect("Session entry must remain");
+            let s = session_store.lock().await;
+            assert!(s.ended, "Session must still be marked ended");
         }
 
-        // Verify session is in the tombstone set
-        {
-            let completed = parties[1].completed_sessions.lock().await;
-            assert!(
-                completed.contains(&session_id),
-                "Session should be in completed_sessions tombstone set"
-            );
-        }
+        // get_store should be idempotent — calling again returns same output
+        let output2 = parties[1]
+            .get_store(session_id)
+            .await
+            .expect("get_store should be idempotent");
+        assert_eq!(output2, payload);
 
-        // Now send a late READY message to party 1 for the consumed session
+        // Late READY message should be silently ignored (ended check in handler)
         let late_msg = Msg::new(
-            3, // from party 3
+            3,
             session_id,
             0,
             payload.clone(),
@@ -1259,18 +1249,18 @@ mod tests {
         );
         let _ = parties[1].process(late_msg, net[1].clone()).await;
 
-        // The session should NOT be recreated in the active store
+        // Session should still be ended, no state reset
         {
             let store_map = parties[1].store.lock().await;
-            assert!(
-                store_map.get(&session_id).is_none(),
-                "Late message must NOT recreate a consumed session"
-            );
+            let session_store = store_map.get(&session_id).expect("Session entry must remain");
+            let s = session_store.lock().await;
+            assert!(s.ended, "Session must remain ended after late message");
         }
     }
 
-    /// Verifies that after get_store() consumes an AVID session, late messages
-    /// do NOT recreate the session or trigger new ECHO/READY broadcasts.
+    /// Verifies that after get_store() consumes an AVID session, the session
+    /// entry remains in the store with `ended = true`, preventing late messages
+    /// from triggering new ECHO/READY broadcasts.
     #[tokio::test]
     async fn test_avid_late_message_after_get_store() {
         setup_tracing();
@@ -1295,60 +1285,39 @@ mod tests {
         // Wait for protocol to complete
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Verify session completed at party 1
-        {
-            let store_map = parties[1].store.lock().await;
-            let session_store = store_map.get(&session_id).expect("Session should exist");
-            let s = session_store.lock().await;
-            assert!(s.ended, "Session should have ended at party 1");
-        }
-
-        // Consume the output via get_store() — this removes the session
+        // Consume the output via get_store()
         let output = parties[1]
             .get_store(session_id)
             .await
             .expect("get_store should succeed");
         assert_eq!(output, payload);
 
-        // Verify session was removed from active store
+        // Session entry should still be in the store (not removed)
         {
             let store_map = parties[1].store.lock().await;
-            assert!(
-                store_map.get(&session_id).is_none(),
-                "Session should be removed from store after get_store()"
-            );
+            let session_store = store_map.get(&session_id).expect("Session entry must remain");
+            let s = session_store.lock().await;
+            assert!(s.ended, "Session must still be marked ended");
         }
 
-        // Verify session is in the tombstone set
-        {
-            let completed = parties[1].completed_sessions.lock().await;
-            assert!(
-                completed.contains(&session_id),
-                "Session should be in completed_sessions tombstone set"
-            );
-        }
-
-        // Now send a late ECHO message to party 1 for the consumed session
-        // Using minimal metadata to pass the length check (32 bytes for root)
-        let fake_metadata = vec![0u8; 64]; // 32 root + 32 proof
+        // Late ECHO message should be silently ignored (ended check in handler)
+        let fake_metadata = vec![0u8; 64];
         let late_msg = Msg::new(
-            3, // from party 3
+            3,
             session_id,
             0,
-            vec![0u8; 16], // fake shard
+            vec![0u8; 16],
             fake_metadata,
             GenericMsgType::Avid(MsgTypeAvid::Echo),
         );
-        // Process should succeed without error (silently ignored)
         let _ = parties[1].process(late_msg, net[1].clone()).await;
 
-        // The session should NOT be recreated in the active store
+        // Session should still be ended, no state reset
         {
             let store_map = parties[1].store.lock().await;
-            assert!(
-                store_map.get(&session_id).is_none(),
-                "Late ECHO must NOT recreate a consumed AVID session"
-            );
+            let session_store = store_map.get(&session_id).expect("Session entry must remain");
+            let s = session_store.lock().await;
+            assert!(s.ended, "Session must remain ended after late message");
         }
     }
 }

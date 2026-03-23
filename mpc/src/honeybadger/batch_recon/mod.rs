@@ -11,6 +11,7 @@ use ark_ff::FftField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 
@@ -46,9 +47,10 @@ impl BatchReconMsg {
 }
 
 pub struct BatchReconStore<F: FftField> {
-    pub evals_received: Vec<RobustShare<F>>, // Stores (sender_id, eval_share) messages
+    pub evals_received: Vec<RobustShare<F>>,  // Stores (sender_id, eval_share) messages
     pub reveals_received: Vec<RobustShare<F>>, // Stores (sender_id, y_j_value) messages
-    pub y_j: Option<RobustShare<F>>,         // The interpolated y_j value for this node's index
+    pub reveal_senders: HashSet<usize>,       // Tracks unique Reveal senders for threshold eviction
+    pub y_j: Option<RobustShare<F>>,          // The interpolated y_j value for this node's index
     pub secrets: Option<Vec<u8>>, // The finally reconstructed original secrets (polynomial coefficients)
 }
 
@@ -57,9 +59,16 @@ impl<F: FftField> BatchReconStore<F> {
         Self {
             evals_received: vec![],
             reveals_received: vec![],
+            reveal_senders: HashSet::new(),
             y_j: None,
             secrets: None,
         }
+    }
+
+    /// A session is safe to evict when it has completed and enough parties
+    /// have sent Reveal messages that no further honest messages can arrive.
+    pub fn is_safe_to_evict(&self, n: usize, t: usize) -> bool {
+        self.secrets.is_some() && self.reveal_senders.len() >= n - t
     }
 }
 

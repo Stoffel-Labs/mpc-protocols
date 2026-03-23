@@ -84,7 +84,8 @@ impl<F: FftField> BatchReconNode<F> {
 
         let output = store_lock.secrets.clone().unwrap();
         // Clear heavy data but keep the entry so late messages see it's completed.
-        // The `secrets` field remaining Some signals completion to the handler.
+        // `secrets` and `reveal_senders` are retained: secrets signals completion,
+        // reveal_senders tracks the threshold for safe eviction.
         store_lock.evals_received.clear();
         store_lock.reveals_received.clear();
         store_lock.y_j = None;
@@ -222,38 +223,41 @@ impl<F: FftField> BatchReconNode<F> {
                     "Received Reveal message"
                 );
                 let sender_id = msg.sender_id;
-                let y_j = F::deserialize_compressed(msg.payload.as_slice())
-                    .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
                 // Lock the session store to update the session state.
                 let session_store = self.get_or_create_store(msg.session_id).await?;
-                // Lock the session-specific store to access or update the session state.
                 let mut store = session_store.lock().await;
 
-                // Ignore if session already completed
+                // Always track unique Reveal senders for threshold-based eviction.
+                // A session becomes safe to evict once n-t parties have sent Reveal,
+                // meaning all honest parties have finished and no further legitimate
+                // messages will arrive.
+                if !store.reveal_senders.insert(sender_id) {
+                    // Duplicate Reveal from this sender — nothing to do.
+                    return Ok(());
+                }
+
+                // If already completed, no further processing needed.
                 if store.secrets.is_some() {
                     return Ok(());
                 }
 
-                // Store the received revealed `y_j` value if it's from a new sender.
-                if !store.reveals_received.iter().any(|s| s.id == sender_id) {
-                    store
-                        .reveals_received
-                        .push(RobustShare::new(y_j, sender_id, self.degree));
-                }
-                // Check if we have enough revealed `y_j` values and haven't already reconstructed the secrets.
-                if store.reveals_received.len() >= self.degree + self.t + 1
-                    && store.secrets.is_none()
-                {
+                // Deserialize and store the revealed y_j value.
+                let y_j = F::deserialize_compressed(msg.payload.as_slice())
+                    .map_err(|e| BatchReconError::ArkDeserialization(e))?;
+                store
+                    .reveals_received
+                    .push(RobustShare::new(y_j, sender_id, self.degree));
+
+                // Check if we have enough revealed y_j values to reconstruct the secrets.
+                if store.reveals_received.len() >= self.degree + self.t + 1 {
                     info!(
                         self_id = self.id,
                         "Enough Reveals collected, interpolating secrets"
                     );
-                    // Attempt to interpolate the polynomial whose coefficients are the original secrets.
                     match RobustShare::recover_secret(&store.reveals_received, self.n, self.t) {
                         Ok((poly, _)) => {
                             let mut result = poly;
-                            // Resize the coefficient vector to `t + 1` to get all secrets.
                             result.resize(self.degree + 1, F::zero());
                             let mut bytes_message = Vec::new();
                             result.serialize_compressed(&mut bytes_message)?;
@@ -270,7 +274,7 @@ impl<F: FftField> BatchReconNode<F> {
                         Err(e) => {
                             error!(
                                 self_id = self.id, error = ?e,
-                                "Final secrets interpolation failed "
+                                "Final secrets interpolation failed"
                             );
                             return Err(BatchReconError::InterpolateError(e));
                         }
@@ -295,19 +299,17 @@ impl<F: FftField> BatchReconNode<F> {
     ) -> Result<Arc<Mutex<BatchReconStore<F>>>, BatchReconError> {
         let mut storage = self.store.lock().await;
         if storage.len() >= MAX_BATCH_RECON_SESSIONS && !storage.contains_key(&session_id) {
-            // Evict completed sessions to make room before failing
-            let completed_keys: Vec<SessionId> = {
-                let mut keys = Vec::new();
-                for (k, v) in storage.iter() {
-                    if let Some(guard) = v.try_lock() {
-                        if guard.secrets.is_some() {
-                            keys.push(*k);
-                        }
-                    }
-                }
-                keys
-            };
-            for k in &completed_keys {
+            // Evict sessions that are safe to forget: completed AND enough parties
+            // have sent Reveal that no further honest messages will arrive.
+            let evictable: Vec<SessionId> = storage
+                .iter()
+                .filter_map(|(k, v)| {
+                    v.try_lock()
+                        .filter(|guard| guard.is_safe_to_evict(self.n, self.t))
+                        .map(|_| *k)
+                })
+                .collect();
+            for k in &evictable {
                 storage.remove(k);
             }
             if storage.len() >= MAX_BATCH_RECON_SESSIONS {
