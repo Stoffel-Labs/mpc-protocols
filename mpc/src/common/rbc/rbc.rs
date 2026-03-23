@@ -74,6 +74,7 @@ where
     fn id(&self) -> usize {
         self.id
     }
+    ///Only called when the output is ready
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let mut store = self.store.lock().await;
 
@@ -180,7 +181,17 @@ where
         );
 
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring"
+                );
+                return Ok(());
+            }
+        };
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -222,7 +233,17 @@ where
         let mut broadcast_ready: Option<Msg<Id>> = None;
         let mut broadcast_echo: Option<Msg<Id>> = None;
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring"
+                );
+                return Ok(());
+            }
+        };
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -308,7 +329,17 @@ where
         let mut send_output: Option<Vec<u8>> = None;
 
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring"
+                );
+                return Ok(());
+            }
+        };
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -394,13 +425,25 @@ where
 
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: Id) -> Arc<Mutex<BrachaStore>> {
-        let mut store = self.store.lock().await;
-        // Get or create the session state for the current session.
-        store
-            .entry(session_id)
-            .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
-            .clone()
+    async fn get_or_create_store(&self, session_id: Id) -> Option<Arc<Mutex<BrachaStore>>> {
+        // Step 1: get or create store
+        let store_lock = {
+            let mut store = self.store.lock().await;
+            store
+                .entry(session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
+                .clone()
+        };
+
+        // Step 2: check if already ended
+        {
+            let store_guard = store_lock.lock().await;
+            if store_guard.ended {
+                return None;
+            }
+        } // lock dropped here
+
+        Some(store_lock)
     }
 }
 
@@ -651,7 +694,18 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring SEND"
+                );
+                return Ok(());
+            }
+        };
+
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -720,7 +774,17 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring"
+                );
+                return Ok(());
+            }
+        };
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -811,7 +875,17 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         let mut send_output: Option<Vec<u8>> = None;
 
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring"
+                );
+                return Ok(());
+            }
+        };
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -1003,13 +1077,21 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         self.broadcast(ready_msg, net).await?;
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: Id) -> Arc<Mutex<AvidStore>> {
-        let mut store = self.store.lock().await;
-        // Get or create the session state for the current session.
-        store
-            .entry(session_id)
-            .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
-            .clone()
+    async fn get_or_create_store(&self, session_id: Id) -> Option<Arc<Mutex<AvidStore>>> {
+        let store_lock = {
+            let mut store = self.store.lock().await;
+            store
+                .entry(session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
+                .clone()
+        };
+        {
+            let store_guard = store_lock.lock().await;
+            if store_guard.ended {
+                return None;
+            }
+        }
+        Some(store_lock)
     }
 }
 
