@@ -27,7 +27,6 @@ pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
 
-use crate::honeybadger::fpmul::TruncPrMessage;
 use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
@@ -705,35 +704,6 @@ where
                     .prand_bit
                     .process(prand_message, net)
                     .await?;
-            }
-            WrappedMessage::Trunc(trunc_message) => {
-                if trunc_message.session_id.instance_id() != self.params.instance_id {
-                    return Err(HoneyBadgerError::InstanceIdError(
-                        trunc_message.session_id.instance_id(),
-                    ));
-                }
-                match trunc_message.session_id.calling_protocol() {
-                    Some(ProtocolType::FpMul) => {
-                        self.type_ops
-                            .fpmul
-                            .trunc_node
-                            .process(trunc_message, net)
-                            .await?;
-                    }
-                    Some(ProtocolType::FpDivConst) => {
-                        self.type_ops
-                            .fpdiv_const
-                            .trunc_node
-                            .process(trunc_message, net)
-                            .await?;
-                    }
-                    _ => {
-                        warn!(
-                            "Unknown protocol ID in session ID: {:?} at truncation",
-                            trunc_message.session_id
-                        );
-                    }
-                }
             }
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
@@ -1486,7 +1456,6 @@ pub enum WrappedMessage {
     Dousha(DouShaMessage),
     Output(OutputMessage),
     PRandBitD(PRandBitDMessage),
-    Trunc(TruncPrMessage),
 }
 
 impl WrappedMessage {

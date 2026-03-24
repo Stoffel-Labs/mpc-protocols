@@ -38,9 +38,9 @@ where
             while let Some((_, bytes)) = merge_rx.recv().await {
                 let wrapped: WrappedMessage = bincode::deserialize(&bytes).unwrap();
                 match wrapped {
-                    WrappedMessage::Trunc(msg) => {
-                        node.process(msg, net.clone()).await.unwrap();
-                    }
+                    // WrappedMessage::Trunc(msg) => {
+                    //     node.process(msg, net.clone()).await.unwrap();
+                    // }
                     WrappedMessage::Rbc(msg) => match node.rbc.process(msg, net.clone()).await {
                         Ok(()) => {
                             node.drain_rbc_output().await.unwrap();

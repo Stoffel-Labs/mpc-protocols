@@ -57,7 +57,6 @@ where
         wrapper: RbcWrapFn<Id>,
     ) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
-            // ceil(n / 3)
             return Err(RbcError::InvalidThreshold(t, n));
         }
         Ok(Bracha {

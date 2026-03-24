@@ -56,7 +56,7 @@ pub fn setup_tracing() {
 #[cfg(debug_assertions)]
 static MAX: Mutex<Duration> = Mutex::const_new(Duration::ZERO);
 
-use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId};
+use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId, VerifiedOrdering};
 
 /// 1. Check if there are any messages whose delay has not yet expired. If not, go to step 5.
 /// 2. Get the next message with the smallest delay.
@@ -515,6 +515,9 @@ impl Network for BadFakeNetwork {
 
     fn party_count(&self) -> usize {
         self.inner.nodes.len()
+    }
+    fn verified_ordering(&self) -> Option<VerifiedOrdering> {
+        None
     }
 }
 

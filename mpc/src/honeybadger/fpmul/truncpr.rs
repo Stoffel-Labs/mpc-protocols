@@ -309,16 +309,6 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
         Ok(())
     }
-
-    /// Handle received messages
-    pub async fn process<N: Network>(
-        &mut self,
-        msg: TruncPrMessage,
-        _network: Arc<N>,
-    ) -> Result<(), TruncPrError> {
-        self.handle_open(msg).await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
