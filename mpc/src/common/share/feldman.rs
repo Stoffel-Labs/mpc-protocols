@@ -17,7 +17,7 @@ pub struct FeldmanShamirShare<F: FftField, G: CurveGroup<ScalarField = F>> {
     pub commitments: Vec<G>,
 }
 
-impl<F: FftField, G:  CurveGroup<ScalarField = F>> FeldmanShamirShare<F, G> {
+impl<F: FftField, G: CurveGroup<ScalarField = F>> FeldmanShamirShare<F, G> {
     pub fn new(
         share: F,
         id: usize,
