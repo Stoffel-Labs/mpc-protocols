@@ -68,9 +68,9 @@ impl<F: FftField> BatchReconNode<F> {
     }
 
     pub async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, BatchReconError> {
-        let mut store = self.store.lock().await;
+        let store = self.store.lock().await;
 
-        let output_store = store.remove(&session_id).ok_or_else(|| {
+        let output_store = store.get(&session_id).ok_or_else(|| {
             BatchReconError::InvalidInput("Session ID does not exist".to_string())
         })?;
 

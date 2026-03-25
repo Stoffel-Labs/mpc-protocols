@@ -76,10 +76,10 @@ where
     }
     ///Only called when the output is ready
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let mut store = self.store.lock().await;
+        let store = self.store.lock().await;
 
         let output_store = store
-            .remove(&session_id)
+            .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
         let store_lock = output_store.lock().await;
@@ -569,10 +569,10 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         store.clear();
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let mut store = self.store.lock().await;
+        let store = self.store.lock().await;
 
         let output_store = store
-            .remove(&session_id)
+            .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
         let store_lock = output_store.lock().await;
@@ -1194,10 +1194,10 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
         coin_store.clear();
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let mut store = self.store.lock().await;
+        let store = self.store.lock().await;
 
         let output_store = store
-            .remove(&session_id)
+            .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
         let store_lock = output_store.lock().await;
