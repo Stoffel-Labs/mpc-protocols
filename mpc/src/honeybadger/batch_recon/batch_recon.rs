@@ -68,9 +68,9 @@ impl<F: FftField> BatchReconNode<F> {
     }
 
     pub async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, BatchReconError> {
-        let mut store = self.store.lock().await;
+        let store = self.store.lock().await;
 
-        let output_store = store.remove(&session_id).ok_or_else(|| {
+        let output_store = store.get(&session_id).ok_or_else(|| {
             BatchReconError::InvalidInput("Session ID does not exist".to_string())
         })?;
 
@@ -145,7 +145,10 @@ impl<F: FftField> BatchReconNode<F> {
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
                 // Lock the session store to update the session state.
-                let session_store = self.get_or_create_store(msg.session_id).await?;
+                let session_store = match self.get_or_create_store(msg.session_id).await? {
+                    Some(s) => s,
+                    None => return Ok(()),
+                };
                 // Lock the session-specific store to access or update the session state.
                 let mut store = session_store.lock().await;
 
@@ -214,7 +217,10 @@ impl<F: FftField> BatchReconNode<F> {
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
                 // Lock the session store to update the session state.
-                let session_store = self.get_or_create_store(msg.session_id).await?;
+                let session_store = match self.get_or_create_store(msg.session_id).await? {
+                    Some(s) => s,
+                    None => return Ok(()),
+                };
                 // Lock the session-specific store to access or update the session state.
                 let mut store = session_store.lock().await;
 
@@ -275,16 +281,31 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn get_or_create_store(
         &self,
         session_id: SessionId,
-    ) -> Result<Arc<Mutex<BatchReconStore<F>>>, BatchReconError> {
-        let mut storage = self.store.lock().await;
-        if storage.len() >= MAX_BATCH_RECON_SESSIONS && !storage.contains_key(&session_id) {
-            return Err(BatchReconError::InvalidInput(
-                "Session limit reached".into(),
-            ));
-        }
-        Ok(storage
-            .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(BatchReconStore::empty())))
-            .clone())
+    ) -> Result<Option<Arc<Mutex<BatchReconStore<F>>>>, BatchReconError> {
+        // Step 1: get or create store with limit check
+        let store_lock = {
+            let mut storage = self.store.lock().await;
+
+            if storage.len() >= MAX_BATCH_RECON_SESSIONS && !storage.contains_key(&session_id) {
+                return Err(BatchReconError::InvalidInput(
+                    "Session limit reached".into(),
+                ));
+            }
+
+            storage
+                .entry(session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(BatchReconStore::empty())))
+                .clone()
+        };
+
+        // Step 2: check if ended
+        {
+            let store_guard = store_lock.lock().await;
+            if store_guard.secrets.is_some() {
+                return Ok(None);
+            }
+        } // lock dropped
+
+        Ok(Some(store_lock))
     }
 }

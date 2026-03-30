@@ -144,7 +144,8 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
             };
 
             let output = self.rbc.get_store(id).await?;
-            match self.input_handler(id.sub_id().into(), output).await {
+            let msg: InputMessage = bincode::deserialize(&output)?;
+            match self.input_handler(msg.sender_id, msg.payload).await {
                 Ok(()) => {}
                 Err(e) => {
                     return Err(e);
@@ -470,6 +471,9 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
 
             let mut payload = Vec::new();
             output.serialize_compressed(&mut payload)?;
+            let msg = InputMessage::new(self.client_id, payload);
+            let bytes = bincode::serialize(&msg)?;
+
             //Broadcast to servers
             let sessionid = SessionId::new(
                 ProtocolType::Input,
@@ -481,7 +485,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
                 self.instance_id,
             );
 
-            d.rbc.init(payload, sessionid, net).await?;
+            d.rbc.init(bytes, sessionid, net).await?;
             d.rbc_done = true;
             info!(
                 "Client {} initialized broadcasting of masked input to all servers",
