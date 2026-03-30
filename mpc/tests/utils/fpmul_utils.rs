@@ -1,20 +1,22 @@
+//! This module contains a set of utilities for the FPMul tests.
+
 use crate::utils::test_utils::fan_in_inboxes;
 use ark_ff::{FftField, PrimeField};
 use ark_std::test_rng;
 use std::sync::Arc;
-use std::time::Duration;
-use stoffelmpc_mpc::common::types::fixed::SecretFixedPoint;
 use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use stoffelmpc_mpc::honeybadger::fpmul::fpmul::FPMulNode;
-use stoffelmpc_mpc::honeybadger::mul::MulError;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
-use tracing::{error, warn};
+use tracing::error;
 
+// Simulates the `process` function in the FPMul execution.
+//
+// This function should be only used during testing.
 pub async fn spawn_receiver_tasks<F, R>(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
@@ -71,6 +73,7 @@ where
     set
 }
 
+// Generates an artificial Beaver triple over the big field to test the FPMul protocol.
 pub fn generate_beaver_triple<F>(num_parties: usize, threshold: usize) -> Vec<ShamirBeaverTriple<F>>
 where
     F: FftField + PrimeField,
