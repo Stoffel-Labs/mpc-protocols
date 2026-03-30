@@ -649,24 +649,21 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
 
 //--------------------------MUL--------------------------
 
-pub async fn construct_e2e_input_mul(
+pub async fn construct_e2e_input_mul<F: PrimeField>(
     n_parties: usize,
     n_triples: usize,
     threshold: usize,
-) -> (
-    (Vec<Fr>, Vec<Fr>, Vec<Fr>),
-    Vec<Vec<ShamirBeaverTriple<Fr>>>,
-) {
+) -> ((Vec<F>, Vec<F>, Vec<F>), Vec<Vec<ShamirBeaverTriple<F>>>) {
     let mut rng = test_rng();
     let mut secrets_a = Vec::new();
     let mut secrets_b = Vec::new();
     let mut secrets_c = Vec::new();
-    let mut per_party_triples: Vec<Vec<ShamirBeaverTriple<Fr>>> = vec![Vec::new(); n_parties];
+    let mut per_party_triples: Vec<Vec<ShamirBeaverTriple<F>>> = vec![Vec::new(); n_parties];
 
     for _i in 0..n_triples {
         // sample secrets a,b
-        let a_secret = Fr::rand(&mut rng);
-        let b_secret = Fr::rand(&mut rng);
+        let a_secret = F::rand(&mut rng);
+        let b_secret = F::rand(&mut rng);
         let c_secret = a_secret * b_secret;
 
         // make robust shares for each secret (length == n_parties)

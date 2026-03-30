@@ -420,17 +420,17 @@ pub trait ProtocolTag:
     Copy + Clone + Eq + Ord + std::hash::Hash + Send + Sync + fmt::Debug
 {
     /// Encode the protocol into an 8-bit tag
-    fn to_u8(self) -> u8;
+    fn to_u16(self) -> u16;
 
     /// Decode the protocol from an 8-bit tag
-    fn from_u8(v: u8) -> Option<Self>;
+    fn from_u16(v: u16) -> Option<Self>;
 }
 
 /// Fixed-layout session identifier.
 ///
 /// Layout (u64):
 /// [ protocol | slot24 | instance_id ]
-///   8 bits     24 bits   32 bits
+///   16 bits     24 bits   32 bits
 ///
 /// Interpretation of `slot24` is protocol-defined.
 pub trait ProtocolSessionId:

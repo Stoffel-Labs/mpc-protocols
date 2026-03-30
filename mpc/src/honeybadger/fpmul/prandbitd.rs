@@ -4,7 +4,7 @@ use crate::{
         batch_recon::batch_recon::BatchReconNode,
         fpmul::{
             build_all_f_polys,
-            f256::{build_all_f_polys_2_8, Gf2568, Gf256Domain},
+            f256::{build_all_f_polys_2_8, Gf256, Gf256Domain},
             PRandBitDMessage, PRandBitDStore, PRandError, PrandState,
         },
         mul::concat_sorted,
@@ -14,8 +14,11 @@ use crate::{
 };
 use ark_ff::{BigInteger, PrimeField};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
+use ark_std::rand::{Rng, SeedableRng};
 use itertools::Itertools;
-use rand::Rng;
+use num_bigint::BigUint;
+use num_traits::FromPrimitive;
+use std::ops::Add;
 use std::{collections::HashMap, sync::Arc, vec};
 use stoffelnet::network_utils::Network;
 use tokio::{
@@ -24,7 +27,9 @@ use tokio::{
 };
 use tracing::info;
 
-/// Represents the shares stored by a player
+/// Represents the shares stored by a player.
+///
+/// `F` represents a field in a small field and `G` represents a bigger field.
 #[derive(Debug, Clone)]
 pub struct PRandBitDNode<F: PrimeField, G: PrimeField> {
     pub id: usize,
@@ -82,7 +87,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         &self,
         session_id: SessionId,
         duration: Duration,
-    ) -> Result<Vec<(RobustShare<G>, Gf2568)>, PRandError> {
+    ) -> Result<Vec<(RobustShare<G>, Gf256)>, PRandError> {
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
@@ -178,7 +183,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         for (i, v) in share_r_plus_b.iter().enumerate() {
             let repr = v.into_bigint();
             let lsb = repr.is_odd();
-            let lsb_elem_2 = Gf2568::from(lsb as u8);
+            let lsb_elem_2 = Gf256::from(lsb as u8);
 
             let bytes = repr.to_bytes_le();
             let v_g = G::from_le_bytes_mod_order(&bytes);
@@ -307,7 +312,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
             let mut share_q = vec![RobustShare::new(F::zero(), self.id, self.t); batch_size];
             let mut share_p = vec![RobustShare::new(G::zero(), self.id, self.t); batch_size];
-            let mut share_2 = vec![Gf2568::zero(); batch_size];
+            let mut share_2 = vec![Gf256::zero(); batch_size];
 
             for (tset, r_t) in r_t_map.iter() {
                 let poly_q = &poly_fq[tset];
@@ -319,9 +324,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 let coeff_2 = poly_2.evaluate(xi_2);
 
                 for i in 0..batch_size {
-                    let r_q = F::from(r_t[i]);
-                    let r_p = G::from(r_t[i]);
-                    let r_2 = Gf2568::from((r_t[i] & 1) as u8);
+                    // SAFETY: We must guarantee that the values in r_t[i] don't surpass the order of the field.
+                    let r_q = F::from_le_bytes_mod_order(r_t[i].to_bytes_le().as_slice());
+                    let r_p = G::from_le_bytes_mod_order(r_t[i].to_bytes_le().as_slice());
+                    let r_2 = Gf256::from(r_t[i].clone() & BigUint::from_u8(1).unwrap());
 
                     share_q[i].share[0] += r_q * coeff_q;
                     share_p[i].share[0] += r_p * coeff_p;
@@ -482,10 +488,11 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         // Step 2: P_i samples randomness and sends
         // Random integer range: [0, 2^(l+k)]
-        let bound: i64 = 1 << (l + k);
+        let bound = BigUint::ZERO.add(2 as u32).pow((k + l) as u32);
+        let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
         for tset in tsets {
-            let r_t_i: Vec<i64> = (0..batch_size)
-                .map(|_| rand::thread_rng().gen_range(0, bound + 1))
+            let r_t_i: Vec<BigUint> = (0..batch_size)
+                .map(|_| gen_big_uint_range(&mut rng, &bound))
                 .collect();
 
             // send to all players not in T
@@ -544,10 +551,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         if tset_entry.len() == self.n {
             // Compute r_T = sum of contributions
             let r_t_sum = tset_entry.values().fold(
-                vec![0; tset_entry.values().next().unwrap().len()],
+                vec![BigUint::ZERO; tset_entry.values().next().unwrap().len()],
                 |mut acc, v| {
                     for (a, x) in acc.iter_mut().zip(v) {
-                        *a += *x;
+                        *a += x;
                     }
                     acc
                 },
@@ -614,5 +621,24 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(PRandBitDStore::empty())))
             .clone()
+    }
+}
+
+/// Generates a random number in the range [0, bound] via rejection sampling.
+fn gen_big_uint_range<R>(rng: &mut R, bound: &BigUint) -> BigUint
+where
+    R: Rng,
+{
+    let n_bytes = bound.to_bytes_le().len();
+    let n_bits = bound.bits();
+    let excess_bits = (8 - n_bits % 8) % 8;
+
+    // Rejection sampling.
+    loop {
+        let bytes: Vec<u8> = (0..n_bytes).map(|_| rng.gen()).collect();
+        let candidate = BigUint::from_bytes_le(&bytes) >> excess_bits;
+        if candidate < *bound {
+            return candidate;
+        }
     }
 }

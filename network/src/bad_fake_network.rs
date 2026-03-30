@@ -516,6 +516,7 @@ impl Network for BadFakeNetwork {
     fn party_count(&self) -> usize {
         self.inner.nodes.len()
     }
+
     fn verified_ordering(&self) -> Option<VerifiedOrdering> {
         None
     }
