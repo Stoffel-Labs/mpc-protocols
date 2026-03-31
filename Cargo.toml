@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "mpc", "network",    
+    "mpc", "network",
 ]
 resolver = "2"
 

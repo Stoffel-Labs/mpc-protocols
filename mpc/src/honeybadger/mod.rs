@@ -44,7 +44,7 @@ use crate::{
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
             fpmul::{FPError, FPMulNode},
-            prandbitd::PRandBitNode,
+            prandbitd::PRandBitDNode,
             rand_bit::RandBit,
             PRandBitDMessage, PRandError, RandBitError, TruncPrError,
         },
@@ -233,7 +233,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
     pub rand_bit: RandBit<F, R>,
-    pub prand_bit: PRandBitNode<F, F>,
+    pub prand_bit: PRandBitDNode<F, F>,
 }
 
 #[derive(Clone, Debug)]
@@ -384,7 +384,7 @@ where
         // Create nodes for preprocessing.
         let dousha_node = DoubleShareNode::new(id, params.n_parties, params.threshold);
         let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold)?;
-        let prand_bit_node = PRandBitNode::new(id, params.n_parties, params.threshold)?;
+        let prand_bit_node = PRandBitDNode::new(id, params.n_parties, params.threshold)?;
         let ran_dou_sha_node =
             RanDouShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
@@ -691,7 +691,7 @@ where
                     }
                 }
             }
-            WrappedMessage::PRandBit(prand_message) => {
+            WrappedMessage::PRandBitD(prand_message) => {
                 if sender_id != prand_message.sender_id {
                     return Err(HoneyBadgerError::InvalidPartyId);
                 }
@@ -1455,7 +1455,7 @@ pub enum WrappedMessage {
     RanSha(RanShaMessage),
     Dousha(DouShaMessage),
     Output(OutputMessage),
-    PRandBit(PRandBitDMessage),
+    PRandBitD(PRandBitDMessage),
 }
 
 impl WrappedMessage {

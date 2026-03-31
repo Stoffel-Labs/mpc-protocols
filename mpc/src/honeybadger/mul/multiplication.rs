@@ -475,10 +475,9 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 "Received shares for reconstruction using RBC for session_id: {:?}", session_id
             );
             if storage.received_shares.contains_key(&sender) {
-                return Err(MulError::Duplicate(format!(
-                    "Already received shares for reconstruction using RBC from {}",
-                    sender
-                )));
+                return Err(MulError::Duplicate(
+                    "Already received shares for reconstruction using RBC inside multiplication in open_mult_handler".to_string(),
+                ));
             }
 
             let open_message: ReconstructionMessage<F> =
