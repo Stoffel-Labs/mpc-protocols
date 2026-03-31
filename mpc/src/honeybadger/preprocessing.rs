@@ -1,5 +1,5 @@
 use crate::honeybadger::{
-    fpmul::f256::F2_8, robust_interpolate::robust_interpolate::RobustShare,
+    fpmul::f256::Gf2568, robust_interpolate::robust_interpolate::RobustShare,
     triple_gen::ShamirBeaverTriple, HoneyBadgerError,
 };
 use ark_ff::FftField;
@@ -17,7 +17,7 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     /// A pool of random shares used for inputing private data for the protocol.
     random_shares: Vec<RobustShare<F>>,
     ///A pool of PRandBit outputs for truncation
-    prandbit_shares: Vec<(RobustShare<F>, F2_8)>,
+    prandbit_shares: Vec<(RobustShare<F>, Gf2568)>,
     ///A pool of PRandInt outputs for truncation
     prandint_shares: Vec<RobustShare<F>>,
 }
@@ -41,7 +41,7 @@ where
         &mut self,
         mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
         mut random_shares: Option<Vec<RobustShare<F>>>,
-        mut prandbit_shares: Option<Vec<(RobustShare<F>, F2_8)>>,
+        mut prandbit_shares: Option<Vec<(RobustShare<F>, Gf2568)>>,
         mut prandbit_int: Option<Vec<RobustShare<F>>>,
     ) {
         if let Some(pairs) = &mut triples {
@@ -95,7 +95,7 @@ where
     pub fn take_prandbit_shares(
         &mut self,
         n_prandbit: usize,
-    ) -> Result<Vec<(RobustShare<F>, F2_8)>, HoneyBadgerError> {
+    ) -> Result<Vec<(RobustShare<F>, Gf2568)>, HoneyBadgerError> {
         if n_prandbit > self.prandbit_shares.len() {
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
@@ -150,7 +150,7 @@ pub enum PreprocKind {
 pub enum PreprocContents<F: FftField> {
     BeaverTriples(Vec<Indexed<ShamirBeaverTriple<F>>>),
     RandomShares(Vec<Indexed<RobustShare<F>>>),
-    PRandBits(Vec<Indexed<(RobustShare<F>, F2_8)>>),
+    PRandBits(Vec<Indexed<(RobustShare<F>, Gf2568)>>),
     PRandInts(Vec<Indexed<RobustShare<F>>>),
 }
 

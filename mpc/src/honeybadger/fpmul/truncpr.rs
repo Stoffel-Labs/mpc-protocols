@@ -2,7 +2,7 @@ use crate::{
     common::{ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
         fpmul::{
-            mod_pow2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore, TruncState,
+            mod_pow_2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore, TruncState,
         },
         robust_interpolate::robust_interpolate::RobustShare,
         SessionId, WrappedMessage,
@@ -19,7 +19,7 @@ use tokio::{
     },
     time::{timeout, Duration},
 };
-use tracing::info;
+use tracing::{error, info};
 
 #[derive(Debug, Clone)]
 pub struct TruncPrNode<F: PrimeField, R: RBC> {
@@ -54,13 +54,18 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), TruncPrError> {
+        info!(node_id = self.id, "TruncPr is draining RBC output");
         loop {
             let id = {
                 let mut rx = self.rbc_output.lock().await;
                 match rx.try_recv() {
                     Ok(id) => id,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        error!(
+                            node_id = self.id,
+                            "Channel for RBC in TruncPr is disconnected"
+                        );
                         return Err(TruncPrError::Abort);
                     }
                 }
@@ -69,6 +74,10 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             let output = self.rbc.get_store(id).await?;
             let msg: TruncPrMessage = bincode::deserialize(&output)?;
 
+            info!(
+                node_id = self.id,
+                "TruncPr received RBC output for open handler"
+            );
             match self.handle_open(msg).await {
                 Ok(()) => {}
                 Err(e) => {
@@ -78,6 +87,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         }
         Ok(())
     }
+
     pub async fn get_or_create_store(&mut self, session: SessionId) -> Arc<Mutex<TruncPrStore<F>>> {
         let mut map = self.store.lock().await;
 
@@ -101,10 +111,12 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         duration: Duration,
     ) -> Result<RobustShare<F>, TruncPrError> {
         let output_receiver = {
-            let storage = self.store.lock().await;
-            let storage_bind = match storage.get(&session_id) {
-                Some(value) => value,
-                None => return Err(TruncPrError::NoSuchSessionId(session_id)),
+            let storage_bind = {
+                let storage = self.store.lock().await;
+                match storage.get(&session_id) {
+                    Some(inner_store) => inner_store.clone(),
+                    None => return Err(TruncPrError::NoSuchSessionId(session_id)),
+                }
             };
             let mut storage = storage_bind.lock().await;
 
@@ -152,7 +164,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
         // ---- phase 2: compute outside lock ----
         let (_, c) = RobustShare::recover_secret(&shares, self.n, self.t)?;
-        let c_mod = mod_pow2_from_field::<F>(c, m);
+        let c_mod = mod_pow_2_from_field::<F>(c, m);
 
         let a_prime = RobustShare::from_scalar_sub(c_mod, &r_dash);
         let inv_2m = pow2_f::<F>(m).inverse().expect("2^m invertible mod q");
@@ -196,7 +208,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         session: SessionId,
         network: Arc<N>,
     ) -> Result<(), TruncPrError> {
-        info!(node_id = self.id, "TruncPr start");
+        info!(node_id = self.id, session_id = ?session, "TruncPr start");
 
         let calling_proto = match session.calling_protocol() {
             Some(proto) => proto,
@@ -206,25 +218,29 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         };
 
         let store = self.get_or_create_store(session).await; // k,m already set in store
-        let mut s = store.lock().await;
-        s.k = k;
-        s.m = m;
-        s.share_a = Some(a.clone());
+        let (r_dash, b) = {
+            let mut s = store.lock().await;
+            s.k = k;
+            s.m = m;
+            s.share_a = Some(a.clone());
 
-        // b = 2^{k-1} + [a]   (2^{k-1} is public constant in the field)
-        let b = (a + pow2_f::<F>(k - 1))?;
+            // b = 2^{k-1} + [a]   (2^{k-1} is public constant in the field)
+            let b = (a + pow2_f::<F>(k - 1))?;
 
-        // [r'] = sum_{i=0}^{m-1} 2^i [r_i]
-        let mut r_dash = RobustShare::new(F::zero(), self.id, self.t);
-        for (i, bit_share) in r_bits.iter().take(m).enumerate() {
-            r_dash = (r_dash + (bit_share.clone() * pow2_f::<F>(i))?)?;
-        }
-        s.r_dash = Some(r_dash.clone());
-        s.state = TruncState::Initialized;
-        drop(s);
+            // [r'] = sum_{i=0}^{m-1} 2^i [r_i]
+            let mut r_dash = RobustShare::new(F::zero(), self.id, self.t);
+            for (i, bit_share) in r_bits.iter().take(m).enumerate() {
+                r_dash = (r_dash + (bit_share.clone() * pow2_f::<F>(i))?)?;
+            }
+            s.r_dash = Some(r_dash.clone());
+            s.state = TruncState::Initialized;
+            (r_dash, b)
+        };
+
         if self.try_finalize(session, store.clone()).await? {
             return Ok(());
         }
+
         // [r] = 2^m [r''] + [r']
         let r = ((r_int * pow2_f::<F>(m))? + r_dash)?;
 
@@ -237,7 +253,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         let wrapped = TruncPrMessage::new(self.id, session, payload);
         let bytes_wrapped = bincode::serialize(&wrapped)?;
 
-        let sessionid = SessionId::new(
+        let session_id = SessionId::new(
             calling_proto,
             SessionId::pack_slot24(session.exec_id(), 0, self.id as u8),
             session.instance_id(),
@@ -245,7 +261,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         self.rbc
             .init(
                 bytes_wrapped,
-                sessionid, // A unique session id per node
+                session_id, // A unique session id per node
                 Arc::clone(&network),
             )
             .await?;
@@ -260,26 +276,35 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         );
 
         if msg.session_id.sub_id() != 0 || msg.session_id.round_id() != 0 {
+            error!(
+                "Wrong session. Sub ID or Round ID is not zero. Session ID: {:?}",
+                msg.session_id
+            );
             return Err(TruncPrError::SessionIdError(msg.session_id));
         }
 
         let store = self.get_or_create_store(msg.session_id).await;
-        let mut s = store.lock().await;
+        {
+            let mut s = store.lock().await;
 
-        if s.state == TruncState::Finished {
-            return Ok(());
+            if s.state == TruncState::Finished {
+                return Ok(());
+            }
+            // deserialize incoming share of (b + r)
+            let share_i: RobustShare<F> =
+                CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
+
+            // dedup
+            if s.open_buf.contains_key(&msg.sender_id) {
+                error!(
+                    "Shares where already received from sender {:?}",
+                    msg.sender_id
+                );
+                return Err(TruncPrError::Duplicate(msg.sender_id));
+            }
+            s.open_buf.insert(msg.sender_id, share_i);
         }
-        // de-serialize incoming share of (b + r)
-        let share_i: RobustShare<F> =
-            CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 
-        // dedup
-        if s.open_buf.contains_key(&msg.sender_id) {
-            return Err(TruncPrError::Duplicate(msg.sender_id));
-        }
-        s.open_buf.insert(msg.sender_id, share_i);
-
-        drop(s);
         self.try_finalize(msg.session_id, store.clone()).await?;
 
         Ok(())

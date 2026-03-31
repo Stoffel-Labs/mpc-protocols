@@ -2,7 +2,7 @@ use crate::{
     common::{lagrange_interpolate, rbc::RbcError, share::ShareError},
     honeybadger::{
         batch_recon::BatchReconError,
-        fpmul::f256::{F2_8Error, F2_8},
+        fpmul::f256::{Gf2568, Gf256Error},
         mul::MulError,
         robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId,
@@ -139,7 +139,7 @@ pub enum PRandError {
     #[error("error receiving the result: {0:?}")]
     ReceiveError(SessionId),
     #[error("F2_8 Error: {0}")]
-    F2_8Error(#[from] F2_8Error),
+    F2_8Error(#[from] Gf256Error),
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
     #[error("error in batch reconstruction: {0:?}")]
@@ -188,6 +188,7 @@ pub enum PrandState {
     BitFinished,
     IntFinished,
 }
+
 #[derive(Debug)]
 pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     /// For every maximal unqualified set T that excludes this player,
@@ -200,13 +201,13 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     pub share_r_q: Option<Vec<RobustShare<F>>>, //smaller field
     pub share_r_p: Option<Vec<RobustShare<G>>>, // PrandInt output
     pub share_b_q: Option<Vec<RobustShare<F>>>, //smaller field
-    pub share_r_2: Option<Vec<F2_8>>,
-    pub share_b_2: Vec<F2_8>,           //PrandBitD output
+    pub share_r_2: Option<Vec<Gf2568>>,
+    pub share_b_2: Vec<Gf2568>,         //PrandBitD output
     pub share_b_p: Vec<RobustShare<G>>, //PrandBitD/PrandBitL output
     pub state: PrandState,
-    pub output_bit_sender: Option<Sender<Vec<(RobustShare<G>, F2_8)>>>,
+    pub output_bit_sender: Option<Sender<Vec<(RobustShare<G>, Gf2568)>>>,
     pub output_int_sender: Option<Sender<Vec<RobustShare<G>>>>,
-    pub output_bit_receiver: Option<Receiver<Vec<(RobustShare<G>, F2_8)>>>,
+    pub output_bit_receiver: Option<Receiver<Vec<(RobustShare<G>, Gf2568)>>>,
     pub output_int_receiver: Option<Receiver<Vec<RobustShare<G>>>>,
     pub open_started: bool,
 }
@@ -319,6 +320,7 @@ pub enum TruncState {
     Initialized,
     Finished,
 }
+
 #[derive(Debug)]
 pub struct TruncPrStore<F: PrimeField> {
     pub m: usize,
@@ -355,17 +357,22 @@ pub fn pow2_f<F: PrimeField>(e: usize) -> F {
     F::from(2u64).pow(&[e as u64])
 }
 
-pub fn mod_pow2_from_field<F: PrimeField>(x: F, m: usize) -> F {
+pub fn mod_pow_2_from_field<F: PrimeField>(x: F, m: usize) -> F {
     let bigint = x.into_bigint();
     let mut bytes = bigint.to_bytes_le();
 
-    // Zero out any bits above m
     let full_bytes = m / 8;
     let extra_bits = m % 8;
 
+    let usable_bytes = if extra_bits == 0 {
+        full_bytes
+    } else {
+        full_bytes + 1
+    };
+
     // Truncate extra bytes
-    if bytes.len() > full_bytes {
-        bytes.truncate(full_bytes + 1);
+    if bytes.len() > usable_bytes {
+        bytes.truncate(usable_bytes);
     }
 
     if extra_bits > 0 && !bytes.is_empty() {
@@ -373,6 +380,6 @@ pub fn mod_pow2_from_field<F: PrimeField>(x: F, m: usize) -> F {
         bytes[full_bytes] &= mask;
     }
 
-    // Interpret as an integer modulo q, return as field element
+    // Interpret as an integer modulo q and return it as a field element.
     F::from_le_bytes_mod_order(&bytes)
 }

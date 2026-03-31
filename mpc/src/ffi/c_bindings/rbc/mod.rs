@@ -127,7 +127,6 @@ pub struct AbaOutputReceiverOpaque {
     _data: (),
     _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
 }
-
 #[repr(C)]
 pub struct RbcMsg {
     pub sender_id: usize,         // ID of the sender node
