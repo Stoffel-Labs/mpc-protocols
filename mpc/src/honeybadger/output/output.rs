@@ -74,8 +74,8 @@ pub struct OutputClient<F: FftField> {
     pub n: usize,
     pub t: usize,
     pub input_len: usize,
-    output_sender: Sender<OutputClientData<F>>,
-    output_receiver: Receiver<OutputClientData<F>>,
+    pub output_sender: Sender<OutputClientData<F>>,
+    pub output_receiver: Receiver<OutputClientData<F>>,
 }
 
 impl<F: FftField> OutputClient<F> {

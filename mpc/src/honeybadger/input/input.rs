@@ -62,7 +62,7 @@ use tracing::info;
 /// The exec ID can be a constant `0`, since RBC for the input subprotocol is only called once.
 
 #[derive(PartialEq, Clone, Debug)]
-enum InputType {
+pub enum InputType {
     Empty,
     RandomShares,
     MaskedInputs,
@@ -76,7 +76,7 @@ pub struct InputServer<F: FftField, R: RBC> {
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
     status_sender: Sender<HashMap<ClientId, (InputType, Vec<RobustShare<F>>)>>,
-    status_receiver: Receiver<HashMap<ClientId, (InputType, Vec<RobustShare<F>>)>>,
+    pub status_receiver: Receiver<HashMap<ClientId, (InputType, Vec<RobustShare<F>>)>>,
 }
 
 fn calculate_input_shares<F: FftField>(
@@ -348,7 +348,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
     }
 }
 
-struct InputClientData<F: FftField, R: RBC> {
+pub struct InputClientData<F: FftField, R: RBC> {
     pub rbc: R,
     pub inputs: Vec<F>,
     pub rbc_done: bool,
@@ -360,7 +360,7 @@ pub struct InputClient<F: FftField, R: RBC> {
     pub n: usize,
     pub t: usize,
     pub instance_id: u32,
-    client_data: Arc<Mutex<InputClientData<F, R>>>,
+    pub client_data: Arc<Mutex<InputClientData<F, R>>>,
 }
 
 // implement manually because derive(Clone) requires R: Clone, which is not needed at all
