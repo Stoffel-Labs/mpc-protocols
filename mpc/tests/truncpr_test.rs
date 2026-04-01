@@ -37,7 +37,7 @@ async fn truncpr_e2e() {
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);
 
     // Create the nodes. We don't need to use Arc<Mutex<_>> as the internal storage has an mutex.
-    let mut nodes: Vec<TruncPrNode<Fr, Avid<SessionId>>> = (0..num_parties)
+    let nodes: Vec<TruncPrNode<Fr, Avid<SessionId>>> = (0..num_parties)
         .map(|id| TruncPrNode::new(id, num_parties, threshold).unwrap())
         .collect();
 

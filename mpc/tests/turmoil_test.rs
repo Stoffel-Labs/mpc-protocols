@@ -479,7 +479,7 @@ fn preprocessing_e2e_turmoil() {
     let n_prandbit = 4;
     let n_prandint = 0;
 
-    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10,200)));
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 200)));
 
     let (tx, rx_done) = std::sync::mpsc::channel::<Result<(usize, usize, usize, usize), String>>();
     let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);

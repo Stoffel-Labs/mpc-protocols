@@ -89,7 +89,6 @@ pub fn generate_random_shared_int<F>(
 where
     F: PrimeField,
 {
-    let nu = f64::log2(binomial(num_parties, threshold) as f64).ceil() as u64;
     let bin_coeff = binomial(num_parties, threshold);
     let mut rng = test_rng();
     let mut rand_value = F::zero();
