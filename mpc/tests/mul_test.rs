@@ -69,7 +69,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
     // 1. Setup network
     let (network, mut receivers, _, _) = test_setup(n_parties, vec![]);
     // 2. Generate Beaver triples
-    let (_, beaver_triples) = construct_e2e_input_mul(n_parties, no_of_mul, t).await;
+    let (_, beaver_triples) = construct_e2e_input_mul(n_parties, no_of_mul, t);
 
     // 3. Prepare inputs for multiplication
     let mut x_values = Vec::new();

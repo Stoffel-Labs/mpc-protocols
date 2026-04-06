@@ -11,7 +11,6 @@ use ark_std::test_rng;
 use futures::future::join_all;
 use itertools::Itertools;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::types::fixed::{FixedPointPrecision, SecretFixedPoint};
@@ -26,10 +25,8 @@ use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::{Robust
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use stoffelmpc_network::fake_network::SenderId;
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::info;
-use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::test]
 async fn test_prandbitd_end_to_end() {

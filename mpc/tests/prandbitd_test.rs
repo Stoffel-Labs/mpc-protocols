@@ -3,7 +3,6 @@ use crate::utils::test_utils::{setup_tracing, test_setup};
 use ark_bls12_381::Fr;
 use ark_ff::{One, PrimeField, Zero};
 use num_integer::binomial;
-use std::sync::Arc;
 use std::time::Duration;
 use stoffelmpc_mpc::common::math::goldilocks::GoldilocksField;
 use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme};
@@ -11,7 +10,6 @@ use stoffelmpc_mpc::honeybadger::fpmul::f256::{lagrange_interpolate_f2_8, Gf256D
 use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitDNode;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
-use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinSet;
 use tracing::info;
 
