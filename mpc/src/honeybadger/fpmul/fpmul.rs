@@ -87,7 +87,7 @@ where
 
         let trunc_input = self.mult_node.wait_for_result(session_id, duration).await?;
 
-        self.mult_node.clear_store().await;
+        self.mult_node.clear_store(session_id).await;
         self.trunc_node
             .init(
                 trunc_input[0].clone(),
@@ -105,7 +105,7 @@ where
             .wait_for_result(session_id, duration)
             .await?;
 
-        self.trunc_node.clear_store().await;
+        self.trunc_node.clear_store(session_id).await;
         Ok(SecretFixedPoint::new(trunc_output))
     }
 }

@@ -214,11 +214,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
         Ok(())
     }
-    pub async fn clear_store(&self) {
-        let mut store = self.mult_storage.lock().await;
-        store.clear();
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
         self.batch_recon.clear_entire_store().await;
         self.rbc.clear_store().await;
+        let mut store = self.mult_storage.lock().await;
+        store.remove(&session_id).is_some()
     }
 
     // 1. Take storage lock
