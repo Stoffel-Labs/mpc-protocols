@@ -44,9 +44,12 @@ pub fn turmoil_setup(
         Builder::new()
             .min_message_latency(Duration::from_millis(min))
             .max_message_latency(Duration::from_millis(max))
+            .simulation_duration(Duration::from_secs(120))
             .build()
     } else {
-        Builder::new().build()
+        Builder::new()
+            .simulation_duration(Duration::from_secs(120))
+            .build()
     };
 
     let inner = TurmoilInnerNetwork::new(
@@ -107,7 +110,7 @@ fn ransha_e2e_turmoil() {
         111,
     );
 
-    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 200)));
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
@@ -157,7 +160,7 @@ fn ransha_e2e_turmoil() {
                 }
 
                 let mut msg_count = 0usize;
-                let result = timeout(Duration::from_secs(5), async {
+                let result = timeout(Duration::from_secs(30), async {
                     loop {
                         match rx.recv().await {
                             Some((sender, msg)) => {
@@ -234,7 +237,7 @@ fn ransha_e2e_turmoil() {
 
     drop(tx);
 
-    add_driver(&mut sim, 10);
+    add_driver(&mut sim, 60);
     collect_results(sim, rx_done, n_parties);
 }
 
@@ -477,9 +480,9 @@ fn preprocessing_e2e_turmoil() {
     let no_of_randomshares = 4;
     let instance_id = 111;
     let n_prandbit = 4;
-    let n_prandint = 0;
+    let n_prandint = 4;
 
-    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 200)));
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
 
     let (tx, rx_done) = std::sync::mpsc::channel::<Result<(usize, usize, usize, usize), String>>();
     let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
@@ -601,7 +604,7 @@ fn preprocessing_e2e_turmoil() {
                 assert_eq!(n_triples, 5);
                 assert_eq!(n_shares, 0);
                 assert_eq!(n_pbit, 4);
-                assert_eq!(n_pint, 0);
+                assert_eq!(n_pint, 4);
             }
         }
     }
@@ -621,7 +624,7 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
     let no_of_multiplications = 2;
     let output_values = vec![Fr::from(100), Fr::from(400)];
 
-    let (mut sim, inner) = turmoil_setup(n_parties, client_ids.clone(), Some((10, 200)));
+    let (mut sim, inner) = turmoil_setup(n_parties, client_ids.clone(), Some((10, 2000)));
 
     let (tx, rx_done) = std::sync::mpsc::channel::<Result<(), String>>();
     let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties + 2);

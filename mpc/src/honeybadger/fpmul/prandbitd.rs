@@ -50,10 +50,13 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         })
     }
 
-    pub async fn clear_store(&self) {
-        let mut store = self.store.lock().await;
+    pub async fn clear_store(&self, session_id: SessionId) -> Result<(), PRandError> {
         self.batch_recon.clear_entire_store().await;
-        store.clear();
+        let mut store = self.store.lock().await;
+        store
+            .remove(&session_id)
+            .map(|_| ())
+            .ok_or(PRandError::ClearStoreError(session_id))
     }
     pub async fn drain_batch_recon_output(&mut self) -> Result<(), PRandError> {
         loop {

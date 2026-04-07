@@ -66,6 +66,8 @@ pub enum RandBitError {
     Timeout(SessionId),
     #[error("received abort signal")]
     Abort,
+    #[error("Session id {0:?} does not exist in store")]
+    ClearStoreError(SessionId),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -150,6 +152,8 @@ pub enum PRandError {
     ResultAlreadyReceived(SessionId),
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(SessionId),
+    #[error("Session id {0:?} does not exist in store")]
+    ClearStoreError(SessionId),
 }
 
 /// Message sent in the Random Double Sharing protocol.
@@ -296,6 +300,8 @@ pub enum TruncPrError {
     ResultAlreadyReceived(SessionId),
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(SessionId),
+    #[error("Session id {0:?} does not exist in store")]
+    ClearStoreError(SessionId),
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

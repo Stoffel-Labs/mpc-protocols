@@ -75,11 +75,14 @@ where
         })
     }
 
-    pub async fn clear_store(&self) {
-        let mut store = self.storage.lock().await;
-        store.clear();
-        self.mult_node.clear_store().await;
+    pub async fn clear_store(&self, session_id: SessionId) -> Result<(), RandBitError> {
+        self.mult_node.clear_store(session_id).await?;
         self.batch_recon.clear_entire_store().await;
+        let mut store = self.storage.lock().await;
+        store
+            .remove(&session_id)
+            .map(|_| ())
+            .ok_or(RandBitError::ClearStoreError(session_id))
     }
 
     pub async fn get_or_create_storage(
