@@ -99,10 +99,13 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             .clone()
     }
 
-    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+    pub async fn clear_store(&self, session_id: SessionId) -> Result<(), TruncPrError> {
         self.rbc.clear_store().await;
         let mut store = self.store.lock().await;
-        store.remove(&session_id).is_some()
+        store
+            .remove(&session_id)
+            .map(|_| ())
+            .ok_or(TruncPrError::ClearStoreError(session_id))
     }
 
     pub async fn wait_for_result(

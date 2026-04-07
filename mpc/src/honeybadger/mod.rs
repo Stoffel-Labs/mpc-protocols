@@ -1357,12 +1357,11 @@ where
         randbit_output.extend(output);
 
         // Clear stores
-        assert!(
-            self.preprocess
-                .rand_bit
-                .clear_store(randbit_sessionid)
-                .await
-        );
+
+        self.preprocess
+            .rand_bit
+            .clear_store(randbit_sessionid)
+            .await?;
 
         //Prandbit share generation
         info!("PRandbit share generation");
@@ -1391,12 +1390,10 @@ where
             .await
             .add(None, None, Some(output), None);
 
-        assert!(
-            self.preprocess
-                .prand_bit
-                .clear_store(prandbit_sessionid)
-                .await
-        );
+        self.preprocess
+            .prand_bit
+            .clear_store(prandbit_sessionid)
+            .await?;
         Ok(())
     }
 
@@ -1450,7 +1447,7 @@ where
             .await
             .add(None, None, None, Some(output));
         // Clear store
-        assert!(self.preprocess.prand_bit.clear_store(sessionid).await);
+        self.preprocess.prand_bit.clear_store(sessionid).await?;
         Ok(())
     }
 }
