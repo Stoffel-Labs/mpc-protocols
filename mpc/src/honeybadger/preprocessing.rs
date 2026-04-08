@@ -208,6 +208,7 @@ pub struct PreprocBatch<F: FftField> {
 pub enum PreprocKind {
     /// Random double shares used for secure multiplication (Beaver triples)
     BeaverTriple,
+    BreaverTriplesSmallField,
     /// Random shared values used for secret inputs
     RandomShare,
     RandomSharesSmallField,
@@ -219,6 +220,7 @@ pub enum PreprocKind {
 #[derive(Clone, Debug)]
 pub enum PreprocContents<F: FftField> {
     BeaverTriples(Vec<Indexed<ShamirBeaverTriple<F>>>),
+    BeaverTriplesSmallField(Vec<Indexed<ShamirBeaverTriple<GoldilocksField>>>),
     RandomShares(Vec<Indexed<RobustShare<F>>>),
     RandomSharesSmallField(Vec<Indexed<RobustShare<GoldilocksField>>>),
     PRandBits(Vec<Indexed<(RobustShare<F>, Gf256)>>),
@@ -404,6 +406,11 @@ impl<F: FftField> PreprocBatchOps<F> for PreprocBatch<F> {
             PreprocContents::RandomShares(v) => {
                 cache
                     .random_shares
+                    .extend(v.iter().map(|x| x.value.clone()));
+            }
+            PreprocContents::BeaverTriplesSmallField(v) => {
+                cache
+                    .beaver_triples_small_field
                     .extend(v.iter().map(|x| x.value.clone()));
             }
             PreprocContents::PRandBits(v) => {

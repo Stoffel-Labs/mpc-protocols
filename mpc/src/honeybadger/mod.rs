@@ -1699,6 +1699,7 @@ pub enum ProtocolType {
     FpDivConst = 14,
     TripleSmallField = 15,
     RanShaSmallField = 16,
+    RanDouShaSmallField = 17,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -1727,6 +1728,7 @@ impl ProtocolTag for ProtocolType {
             14 => Some(Self::FpDivConst),
             15 => Some(Self::TripleSmallField),
             16 => Some(Self::RanShaSmallField),
+            17 => Some(Self::RanDouShaSmallField),
             _ => None,
         }
     }

@@ -1492,7 +1492,7 @@ async fn test_rand_bit() {
     let mut handles = Vec::new();
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let mut prand_bit_node = node.preprocess.rand_bit;
+        let mut prand_bit_node = node.preprocess.small_field_preproc.rand_bit;
         let net = network[pid].clone();
 
         // Prepare the input shares for this party
@@ -1532,6 +1532,7 @@ async fn test_rand_bit() {
         let node = nodes[pid].clone();
         let store = node
             .preprocess
+            .small_field_preproc
             .rand_bit
             .storage
             .lock()
