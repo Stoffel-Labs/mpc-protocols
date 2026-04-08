@@ -164,6 +164,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
+
     pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {
         loop {
             let id = {
@@ -192,6 +193,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
         Ok(())
     }
+
     pub async fn drain_batch_recon_output(&mut self) -> Result<(), MulError> {
         loop {
             let id = {

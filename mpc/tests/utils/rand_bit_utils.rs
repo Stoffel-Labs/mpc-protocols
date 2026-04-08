@@ -10,6 +10,7 @@ use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{SessionId, WrappedMessage};
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 /// Creates dummy inputs for the RandBit protocol.
