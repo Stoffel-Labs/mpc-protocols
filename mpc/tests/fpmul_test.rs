@@ -6,18 +6,19 @@ use crate::utils::truncpr_utils::{
 };
 use ark_bls12_381::Fr as G;
 use ark_bn254::{Fr as F, Fr};
-use ark_ff::Field;
+use ark_ff::{Field, PrimeField};
 use ark_std::test_rng;
 use futures::future::join_all;
 use itertools::Itertools;
+use num_bigint::BigUint;
+use num_traits::FromPrimitive;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::types::fixed::{FixedPointPrecision, SecretFixedPoint};
 use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC};
 use stoffelmpc_mpc::honeybadger::fpmul::f256::{
-    build_all_f_polys_2_8, lagrange_interpolate_f2_8, Gf2568, Gf256Domain,
+    build_all_f_polys_2_8, lagrange_interpolate_f2_8, Gf256, Gf256Domain,
 };
 use stoffelmpc_mpc::honeybadger::fpmul::fpmul::FPMulNode;
 use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitDNode;
@@ -26,10 +27,8 @@ use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::{Robust
 use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use stoffelmpc_network::fake_network::SenderId;
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::info;
-use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::test]
 async fn test_prandbitd_end_to_end() {
@@ -134,7 +133,7 @@ async fn test_prandbitd_end_to_end() {
         println!("Recovered b (GF(2^8)) = {:?}", recovered_b_2);
         assert_eq!(
             recovered_b_2,
-            Gf2568::from(1u16),
+            Gf256::from(1u16),
             "Recovered b_2 != expected"
         );
     }
@@ -247,7 +246,7 @@ async fn test_prandbitd_r_reconstruction() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // === Step 1: Collect all r_T values from all nodes ===
-    let mut all_r_t: HashMap<Vec<usize>, Vec<i64>> = HashMap::new();
+    let mut all_r_t: HashMap<Vec<usize>, Vec<BigUint>> = HashMap::new();
     for node in &mut nodes {
         let binding = node.get_or_create_store(session_id).await;
         let store = binding.lock().await;
@@ -300,7 +299,7 @@ async fn test_prandbitd_r_reconstruction() {
             let (_, rec_r) = RobustShare::recover_secret(&shares[i], n, t).unwrap();
             assert_eq!(
                 rec_r,
-                F::from(r_int[i]),
+                F::from_le_bytes_mod_order(&r_int[i].to_bytes_le()),
                 "Reconstructed r mismatch for combo {:?}",
                 combo
             );
@@ -310,7 +309,10 @@ async fn test_prandbitd_r_reconstruction() {
     println!("All r_t values consistent and all Shamir reconstructions matched ground truth");
     // === Step 4: Reconstruct r0 (GF(2^8)) ===
     let domain_2 = Gf256Domain::new(n).unwrap();
-    let expected_r0: Vec<Gf2568> = r_int.iter().map(|i| Gf2568::from((i & 1) as u8)).collect();
+    let expected_r0: Vec<Gf256> = r_int
+        .iter()
+        .map(|i| Gf256::from(i & BigUint::from_u8(1).unwrap()))
+        .collect();
 
     let mut shares_r2 = Vec::new();
     for node in &mut nodes {
@@ -331,7 +333,7 @@ async fn test_prandbitd_r_reconstruction() {
         }
         for i in 0..batch_size {
             let poly = lagrange_interpolate_f2_8(&xs, &ys[i]);
-            let rec_r0 = poly.evaluate(Gf2568::zero());
+            let rec_r0 = poly.evaluate(Gf256::zero());
             assert_eq!(
                 rec_r0, expected_r0[i],
                 "Mismatch in r0 for combo {:?}",
@@ -348,11 +350,11 @@ async fn test_prandbitd_r_reconstruction() {
         let tsets: Vec<Vec<usize>> = store.r_t.keys().cloned().collect();
         let poly_f2 = build_all_f_polys_2_8(n, tsets).unwrap();
         let xi2 = domain_2.element(node.id);
-        let mut recomputed = vec![Gf2568::zero(); batch_size];
+        let mut recomputed = vec![Gf256::zero(); batch_size];
         for (tset, r_t) in store.r_t.iter() {
             let coeff = poly_f2[tset].evaluate(xi2);
             for i in 0..batch_size {
-                let r2 = Gf2568::from((r_t[i] & 1) as u8);
+                let r2 = Gf256::from(r_t[i].clone() & BigUint::from_u8(1).unwrap());
                 recomputed[i] = recomputed[i] + (r2 * coeff);
             }
         }

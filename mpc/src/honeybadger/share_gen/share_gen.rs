@@ -6,7 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{
     common::{
@@ -109,6 +109,7 @@ where
         let mut store = self.store.lock().await;
         store.remove(&session_id).is_some()
     }
+
     pub async fn wait_for_result(
         &self,
         session_id: SessionId,
@@ -134,6 +135,7 @@ where
             Ok(Ok(shares)) => Ok(shares),
         }
     }
+
     async fn try_finalize(&mut self, session_id: SessionId) -> Result<bool, RanShaError> {
         // phase 1: decide + extract under lock
         let output = {
@@ -229,7 +231,13 @@ where
         };
 
         let share: ShamirShare<F, 1, Robust> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())
+                .inspect_err(|err| {
+                    let message_type = msg.msg_type;
+                    error!(
+                        "Error deserializing in receive_shares_handler: {err:?}, {message_type:?}"
+                    );
+                })?;
 
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut ransha_storage = binding.lock().await;
@@ -299,7 +307,9 @@ where
             let share_deg_t = r_deg_t[i].clone();
 
             let mut bytes_rec_message = Vec::new();
-            share_deg_t.serialize_compressed(&mut bytes_rec_message)?;
+            share_deg_t
+                .serialize_compressed(&mut bytes_rec_message)
+                .inspect_err(|err| error!("error serializing r_deg_t"))?;
             let message = WrappedMessage::RanSha(RanShaMessage::new(
                 self.id,
                 RanShaMessageType::ReconstructMessage,
