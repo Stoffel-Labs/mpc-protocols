@@ -85,29 +85,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         }
         Ok(())
     }
-    pub async fn drain_batch_recon_output(&mut self) -> Result<(), PRandError> {
-        loop {
-            let id = {
-                let mut rx = self.batch_output.lock().await;
-                match rx.try_recv() {
-                    Ok(id) => id,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        return Err(PRandError::Abort);
-                    }
-                }
-            };
 
-            let output = self.batch_recon.get_store(id).await?;
-            match self.output_handler(id, output).await {
-                Ok(()) => {}
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
-    }
     pub async fn wait_for_bit_result(
         &self,
         session_id: SessionId,

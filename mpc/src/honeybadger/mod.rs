@@ -1567,7 +1567,7 @@ where
         self.preprocess
             .small_field_preproc
             .rand_bit
-            .clear_store()
+            .clear_store(randbit_sessionid)
             .await;
 
         //Prandbit share generation

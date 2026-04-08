@@ -38,24 +38,24 @@ impl Gf256 {
     }
 
     pub fn new(value: u8) -> Self {
-        Gf2568(value)
+        Gf256(value)
     }
 
     pub fn zero() -> Self {
-        Gf2568(0)
+        Gf256(0)
     }
 
     pub fn one() -> Self {
-        Gf2568(1)
+        Gf256(1)
     }
 
     /// Addition in GF(2^8) is XOR
-    pub fn add(self, other: Gf2568) -> Gf2568 {
-        Gf2568(self.0 ^ other.0)
+    pub fn add(self, other: Gf256) -> Gf256 {
+        Gf256(self.0 ^ other.0)
     }
 
     /// Multiplication in GF(2^8) with reduction by MODULUS
-    pub fn mul(self, other: Gf2568) -> Gf2568 {
+    pub fn mul(self, other: Gf256) -> Gf256 {
         let mut result = 0u16;
         let mut a = self.0 as u16;
         let mut b = other.0 as u16;
