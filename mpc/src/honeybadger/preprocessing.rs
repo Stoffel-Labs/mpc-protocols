@@ -18,16 +18,16 @@ use uuid::Uuid;
 pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     /// A pool of random double shares used for secure multiplication.
     beaver_triples: Vec<ShamirBeaverTriple<F>>,
-    /// A pool of random Breaver triples in the small field.
-    beaver_triples_small_field: Vec<ShamirBeaverTriple<GoldilocksField>>,
     /// A pool of random shares used for inputing private data for the protocol.
     random_shares: Vec<RobustShare<F>>,
+    /// A pool of PRandBit outputs for truncation
+    prandbit_shares: Vec<(RobustShare<F>, Gf256)>,
+    /// A pool of PRandInt outputs for truncation
+    prandint_shares: Vec<RobustShare<F>>,
     /// A pool of random shares in the Goldilocks field for rand bit generation.
     random_shares_small_field: Vec<RobustShare<GoldilocksField>>,
-    ///A pool of PRandBit outputs for truncation
-    prandbit_shares: Vec<(RobustShare<F>, Gf256)>,
-    ///A pool of PRandInt outputs for truncation
-    prandint_shares: Vec<RobustShare<F>>,
+    /// A pool of random Breaver triples in the Goldilocks field.
+    beaver_triples_small_field: Vec<ShamirBeaverTriple<GoldilocksField>>,
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
