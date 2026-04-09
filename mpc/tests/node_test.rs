@@ -963,8 +963,8 @@ async fn test_rand_bit() {
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        no_of_rand_bits,
-        no_of_rand_bits,
+        0,
+        0,
         111,
         0,
         0,
