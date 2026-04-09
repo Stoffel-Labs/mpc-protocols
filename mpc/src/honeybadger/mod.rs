@@ -71,7 +71,6 @@ use ark_std::rand::{Rng, SeedableRng};
 use async_trait::async_trait;
 use bincode::ErrorKind;
 use double_share_generation::DoubleShareNode;
-use num_traits::Float;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};

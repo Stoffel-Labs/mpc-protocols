@@ -9,7 +9,6 @@ use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustS
 use stoffelmpc_mpc::honeybadger::WrappedMessage;
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 pub async fn spawn_receiver_tasks<F, G>(

@@ -309,7 +309,7 @@ where
             let mut bytes_rec_message = Vec::new();
             share_deg_t
                 .serialize_compressed(&mut bytes_rec_message)
-                .inspect_err(|err| error!("error serializing r_deg_t"))?;
+                .inspect_err(|_| error!("error serializing r_deg_t"))?;
             let message = WrappedMessage::RanSha(RanShaMessage::new(
                 self.id,
                 RanShaMessageType::ReconstructMessage,
