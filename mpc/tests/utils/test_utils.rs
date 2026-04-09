@@ -605,7 +605,7 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
 
 //--------------------------MUL--------------------------
 
-pub async fn construct_e2e_input_mul<F: PrimeField>(
+pub fn construct_e2e_input_mul<F: PrimeField + FftField>(
     n_parties: usize,
     n_triples: usize,
     threshold: usize,

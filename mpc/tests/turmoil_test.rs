@@ -552,19 +552,25 @@ fn preprocessing_e2e_turmoil() {
 
                     // only check counts once preprocessing has fully finished
                     if preprocessing_handle.is_finished() {
-                        let (n_triples, _, n_pbit, n_pint) =
-                            node.preprocessing_material.lock().await.len();
-                        if n_triples == 5 && n_pbit == n_prandbit && n_pint == n_prandint {
+                        let length_preproc = node.preprocessing_material.lock().await.len();
+                        if length_preproc.beaver_triples == 5
+                            && length_preproc.prandbit == n_prandbit
+                            && length_preproc.prandint == n_prandint
+                        {
                             break;
                         }
                     }
                 }
 
                 // collect final counts
-                let (n_triples, n_shares, n_pbit, n_pint) =
-                    node.preprocessing_material.lock().await.len();
+                let length_preproc = node.preprocessing_material.lock().await.len();
 
-                let _ = tx.send(Ok((n_triples, n_shares, n_pbit, n_pint)));
+                let _ = tx.send(Ok((
+                    length_preproc.beaver_triples,
+                    length_preproc.random_shr,
+                    length_preproc.prandbit,
+                    length_preproc.prandint,
+                )));
                 let _ = done_tx.send(());
                 Ok(())
             }
@@ -836,8 +842,8 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
 
                     tokio::task::yield_now().await;
 
-                    let (n_triples, _, _, _) = node.preprocessing_material.lock().await.len();
-                    if n_triples >= 3 {
+                    let preproc_length = node.preprocessing_material.lock().await.len();
+                    if preproc_length.beaver_triples >= 3 {
                         break;
                     }
                 }
@@ -1250,6 +1256,8 @@ fn mul_e2e_without_preprocessing_turmoil() {
         for pid in 0..n_parties {
             nodes[pid].preprocessing_material.lock().await.add(
                 Some(triple[pid].clone()),
+                None,
+                None,
                 None,
                 None,
                 None,
