@@ -47,10 +47,14 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
-    pub async fn clear_store(&self) {
-        let mut store = self.mult_storage.lock().await;
-        store.clear();
+    pub async fn clear_store(&self, session_id: AvssSessionId) -> Result<(), MulError> {
         self.rbc.clear_store().await;
+
+        let mut store = self.mult_storage.lock().await;
+        store
+            .remove(&session_id)
+            .map(|_| ())
+            .ok_or(MulError::ClearStoreError(session_id))
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {
@@ -157,7 +161,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         );
         if storage.received_shares.contains_key(&msg.sender) {
             return Err(MulError::Duplicate(format!(
-                "Already received shares for reconstruction using RBC from {}",
+                "Already received shares for reconstruction using RBC from {} in open handler inside AVSS multiplication",
                 msg.sender
             )));
         }

@@ -103,6 +103,8 @@ pub enum MulError {
     Timeout(SessionId),
     #[error("Channel closed")]
     Abort,
+    #[error("Session id {0:?} does not exist in store")]
+    ClearStoreError(SessionId),
 }
 
 /// Generic message for the multiplication protocol.

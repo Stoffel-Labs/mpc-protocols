@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 thiserror.workspace = true
 tracing-subscriber.workspace = true
-stoffelmpc-network = { path = "../network/"}
+stoffelmpc-network = { path = "../network/" }
 ark-ff.workspace = true
 serde.workspace = true
 ark-serialize.workspace = true
@@ -29,8 +29,10 @@ stoffelnet.workspace = true
 rustls.workspace = true
 num-bigint.workspace = true
 uuid.workspace = true
-ark-ec.workspace =true
+ark-ec.workspace = true
 chacha20poly1305.workspace = true
+num-integer = "0.1.46"
+turmoil.workspace = true
 
 [dev-dependencies]
 once_cell = "1.21.3"

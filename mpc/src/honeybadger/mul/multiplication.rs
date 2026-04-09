@@ -214,11 +214,14 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
         Ok(())
     }
-    pub async fn clear_store(&self) {
-        let mut store = self.mult_storage.lock().await;
-        store.clear();
+    pub async fn clear_store(&self, session_id: SessionId) -> Result<(), MulError> {
         self.batch_recon.clear_entire_store().await;
         self.rbc.clear_store().await;
+        let mut store = self.mult_storage.lock().await;
+        store
+            .remove(&session_id)
+            .map(|_| ())
+            .ok_or(MulError::ClearStoreError(session_id))
     }
 
     // 1. Take storage lock
@@ -475,10 +478,9 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 "Received shares for reconstruction using RBC for session_id: {:?}", session_id
             );
             if storage.received_shares.contains_key(&sender) {
-                return Err(MulError::Duplicate(format!(
-                    "Already received shares for reconstruction using RBC from {}",
-                    sender
-                )));
+                return Err(MulError::Duplicate(
+                    "Already received shares for reconstruction using RBC inside multiplication in open_mult_handler".to_string(),
+                ));
             }
 
             let open_message: ReconstructionMessage<F> =

@@ -19,14 +19,11 @@ use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{
     HoneyBadgerMPCClient, HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
-use stoffelmpc_network::bad_fake_network::{
-    BadFakeInnerNetwork, BadFakeNetwork, BadFakeNetworkConfig,
-};
 use stoffelmpc_network::fake_network::{
     FakeInnerNetwork, FakeNetwork, FakeNetworkConfig, SenderId,
 };
-use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use stoffelnet::network_utils::{ClientId, Network, NetworkError};
+use tokio::sync::mpsc::{self, Receiver};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
@@ -129,47 +126,6 @@ pub fn test_setup(
         .collect();
 
     (network, receivers, client_networks, client_recv)
-}
-
-pub fn test_setup_bad(
-    n: usize,
-    clientid: Vec<ClientId>,
-) -> (
-    Vec<Arc<BadFakeNetwork>>,
-    Receiver<(PartyId, PartyId, Vec<u8>)>,
-    Vec<Vec<Sender<Vec<u8>>>>,
-    Vec<Vec<Receiver<Vec<u8>>>>,
-    HashMap<ClientId, Arc<BadFakeNetwork>>,
-    HashMap<ClientId, Vec<Receiver<Vec<u8>>>>,
-) {
-    let config = BadFakeNetworkConfig::new(500);
-    let (inner, net_rx, node_channels, receivers, client_recv) =
-        BadFakeInnerNetwork::new(n, Some(clientid.clone()), config);
-
-    // ---- node networks ----
-    let network: Vec<_> = (0..n)
-        .map(|id| Arc::new(BadFakeNetwork::new(id, inner.clone())))
-        .collect();
-
-    // ---- client networks ----
-    let client_networks: HashMap<ClientId, Arc<BadFakeNetwork>> = clientid
-        .into_iter()
-        .map(|client_id| {
-            (
-                client_id,
-                Arc::new(BadFakeNetwork::new_client(client_id, inner.clone())),
-            )
-        })
-        .collect();
-
-    (
-        network,
-        net_rx,
-        node_channels,
-        receivers,
-        client_networks,
-        client_recv,
-    )
 }
 
 pub fn get_reconstruct_input(
@@ -649,7 +605,7 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
 
 //--------------------------MUL--------------------------
 
-pub async fn construct_e2e_input_mul(
+pub fn construct_e2e_input_mul(
     n_parties: usize,
     n_triples: usize,
     threshold: usize,

@@ -57,7 +57,6 @@ where
         wrapper: RbcWrapFn<Id>,
     ) -> Result<Self, RbcError> {
         if !(t < (n + 2) / 3) {
-            // ceil(n / 3)
             return Err(RbcError::InvalidThreshold(t, n));
         }
         Ok(Bracha {
@@ -74,11 +73,12 @@ where
     fn id(&self) -> usize {
         self.id
     }
+    ///Only called when the output is ready
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let mut store = self.store.lock().await;
+        let store = self.store.lock().await;
 
         let output_store = store
-            .remove(&session_id)
+            .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
         let store_lock = output_store.lock().await;
@@ -180,7 +180,17 @@ where
         );
 
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring"
+                );
+                return Ok(());
+            }
+        };
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -222,7 +232,17 @@ where
         let mut broadcast_ready: Option<Msg<Id>> = None;
         let mut broadcast_echo: Option<Msg<Id>> = None;
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring"
+                );
+                return Ok(());
+            }
+        };
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -308,7 +328,17 @@ where
         let mut send_output: Option<Vec<u8>> = None;
 
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring"
+                );
+                return Ok(());
+            }
+        };
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -394,13 +424,25 @@ where
 
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: Id) -> Arc<Mutex<BrachaStore>> {
-        let mut store = self.store.lock().await;
-        // Get or create the session state for the current session.
-        store
-            .entry(session_id)
-            .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
-            .clone()
+    async fn get_or_create_store(&self, session_id: Id) -> Option<Arc<Mutex<BrachaStore>>> {
+        // Step 1: get or create store
+        let store_lock = {
+            let mut store = self.store.lock().await;
+            store
+                .entry(session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
+                .clone()
+        };
+
+        // Step 2: check if already ended
+        {
+            let store_guard = store_lock.lock().await;
+            if store_guard.ended {
+                return None;
+            }
+        } // lock dropped here
+
+        Some(store_lock)
     }
 }
 
@@ -526,10 +568,10 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         store.clear();
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let mut store = self.store.lock().await;
+        let store = self.store.lock().await;
 
         let output_store = store
-            .remove(&session_id)
+            .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
         let store_lock = output_store.lock().await;
@@ -550,7 +592,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = session_id.as_u64(),
+            session_id = ?session_id,
             msg_type = "SEND",
             "Sending SEND message for AVID to all parties"
         );
@@ -560,10 +602,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         //Generating the merkle tree out of the shards
         let tree = gen_merkletree(shards.clone());
         let root = tree.root().ok_or_else(|| {
-            RbcError::Internal(format!(
-                "Merkle root missing for session {}",
-                session_id.as_u64()
-            ))
+            RbcError::Internal(format!("Merkle root missing for session {:?}", session_id))
         })?;
 
         // Generating fingerprint for each server and sending it to them along with root and respective shard
@@ -642,7 +681,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling SEND message"
@@ -651,7 +690,18 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring SEND"
+                );
+                return Ok(());
+            }
+        };
+
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -672,7 +722,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                     store.mark_echo(); // Mark that ECHO has been sent to avoid resending it
                     info!(
                         id = self.id,
-                        session_id = msg.session_id.as_u64(),
+                        session_id = ?msg.session_id,
                         msg_type = "ECHO",
                         "Broadcasting ECHO in response to SEND"
                     );
@@ -720,7 +770,17 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring"
+                );
+                return Ok(());
+            }
+        };
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -728,7 +788,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id.as_u64(),
+                session_id = ?msg.session_id,
                 "Session already ended, ignoring ECHO"
             );
             return Ok(());
@@ -769,7 +829,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 Ok(false) => {
                     warn!(
                         id = self.id,
-                        session_id = msg.session_id.as_u64(),
+                        session_id = ?msg.session_id,
                         sender = msg.sender_id,
                         "Merkle verification failed for ECHO"
                     );
@@ -780,7 +840,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 Err(e) => {
                     warn!(
                         id = self.id,
-                        session_id = msg.session_id.as_u64(),
+                        session_id = ?msg.session_id,
                         sender = msg.sender_id,
                         error = %e,
                         "Merkle verification threw error"
@@ -799,7 +859,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling READY message"
@@ -811,7 +871,17 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         let mut send_output: Option<Vec<u8>> = None;
 
         // Lock the session store to update the session state.
-        let session_store = self.get_or_create_store(msg.session_id).await;
+        let session_store = match self.get_or_create_store(msg.session_id).await {
+            Some(s) => s,
+            None => {
+                debug!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u64(),
+                    "Session already ended, ignoring"
+                );
+                return Ok(());
+            }
+        };
         // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
 
@@ -824,7 +894,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             );
             return Ok(());
         }
-        // If this sender has not already sent an READY, process it.
+        // If this sender has not already sent a READY, process it.
         if !store.has_ready(msg.sender_id) {
             let root = &msg.metadata[0..32];
             let proof_bytes = &msg.metadata[32..];
@@ -916,6 +986,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         }
         Ok(())
     }
+
     //This the logic for sending a READY message in both the echo and ready handler
     async fn send_ready<N: Network + Send + Sync>(
         &self,
@@ -1003,13 +1074,21 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         self.broadcast(ready_msg, net).await?;
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: Id) -> Arc<Mutex<AvidStore>> {
-        let mut store = self.store.lock().await;
-        // Get or create the session state for the current session.
-        store
-            .entry(session_id)
-            .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
-            .clone()
+    async fn get_or_create_store(&self, session_id: Id) -> Option<Arc<Mutex<AvidStore>>> {
+        let store_lock = {
+            let mut store = self.store.lock().await;
+            store
+                .entry(session_id)
+                .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
+                .clone()
+        };
+        {
+            let store_guard = store_lock.lock().await;
+            if store_guard.ended {
+                return None;
+            }
+        }
+        Some(store_lock)
     }
 }
 
@@ -1112,10 +1191,10 @@ impl<Id: ProtocolSessionId + 'static> RBC for ABA<Id> {
         coin_store.clear();
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
-        let mut store = self.store.lock().await;
+        let store = self.store.lock().await;
 
         let output_store = store
-            .remove(&session_id)
+            .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
         let store_lock = output_store.lock().await;
