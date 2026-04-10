@@ -31,12 +31,37 @@ num-bigint.workspace = true
 uuid.workspace = true
 ark-ec.workspace = true
 chacha20poly1305.workspace = true
-num-integer = "0.1.46"
-turmoil.workspace = true
+num-integer.workspace = true
 
 [dev-dependencies]
-once_cell = "1.21.3"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+once_cell.workspace = true
+criterion = { workspace = true }
+turmoil = { workspace = true }
+
 
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bench]]
+name = "mul_bench"
+harness = false
+
+[[bench]]
+name = "preprocessing_bench"
+harness = false
+
+[[bench]]
+name = "fpmul_bench"
+harness = false
+
+[[bench]]
+name = "fpdiv_const_bench"
+harness = false
+
+[[bench]]
+name = "avss_mpc_bench"
+harness = false
+
+[[bench]]
+name = "batch_recon_bench"
+harness = false
