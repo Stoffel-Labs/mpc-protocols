@@ -43,19 +43,19 @@ turmoil = { workspace = true }
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [[bench]]
-name = "mul_bench"
+name = "hmpc_mul_bench"
 harness = false
 
 [[bench]]
-name = "preprocessing_bench"
+name = "hmpc_preprocessing_bench"
 harness = false
 
 [[bench]]
-name = "fpmul_bench"
+name = "hmpc_fpmul_bench"
 harness = false
 
 [[bench]]
-name = "fpdiv_const_bench"
+name = "hmpc_fpdiv_const_bench"
 harness = false
 
 [[bench]]
@@ -63,5 +63,5 @@ name = "avss_mpc_bench"
 harness = false
 
 [[bench]]
-name = "batch_recon_bench"
+name = "hmpc_batch_recon_bench"
 harness = false

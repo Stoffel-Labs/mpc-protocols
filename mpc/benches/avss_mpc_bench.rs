@@ -22,7 +22,6 @@ use stoffelmpc_mpc::{
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use tokio::sync::mpsc::Receiver;
 
-
 fn create_avss_nodes(
     n_parties: usize,
     t: usize,

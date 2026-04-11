@@ -10,7 +10,9 @@ use bench_utils::{create_nodes, spawn_receivers, test_setup};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::{sync::Arc, time::Duration};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::types::fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint};
+use stoffelmpc_mpc::common::types::fixed::{
+    ClearFixedPoint, FixedPointPrecision, SecretFixedPoint,
+};
 use stoffelmpc_mpc::common::MPCTypeOps;
 use stoffelmpc_mpc::common::{PreprocessingMPCProtocol, SecretSharingScheme};
 use stoffelmpc_mpc::honeybadger::{
@@ -118,7 +120,7 @@ fn bench_fpdiv(c: &mut Criterion) {
         (7, 2, 16, 4, 5),
     ];
 
-    let mut group = c.benchmark_group("fpdiv");
+    let mut group = c.benchmark_group("fpdiv_with_const");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(60));
 
@@ -130,8 +132,7 @@ fn bench_fpdiv(c: &mut Criterion) {
                 b.to_async(&rt).iter_custom(|iters| async move {
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        let (nodes, network, xs, divs_vec) =
-                            setup_fpdiv(n, t, k, m, divs).await;
+                        let (nodes, network, xs, divs_vec) = setup_fpdiv(n, t, k, m, divs).await;
                         let start = std::time::Instant::now();
                         run_fpdiv(nodes, network, xs, divs_vec).await;
                         total += start.elapsed();
