@@ -32,7 +32,7 @@ use stoffelmpc_network::{
 };
 use stoffelnet::network_utils::{ClientId, NetworkError};
 use tokio::time::{sleep, timeout, Duration};
-use tracing::info;
+use tracing::{error, info, warn};
 use turmoil::{Builder, Sim};
 
 pub fn turmoil_setup(
@@ -44,7 +44,7 @@ pub fn turmoil_setup(
         Builder::new()
             .min_message_latency(Duration::from_millis(min))
             .max_message_latency(Duration::from_millis(max))
-            .simulation_duration(Duration::from_secs(120))
+            .simulation_duration(Duration::from_secs(300))
             .build()
     } else {
         Builder::new()
@@ -104,11 +104,7 @@ fn ransha_e2e_turmoil() {
     let n_parties = 4;
     let t = 1;
 
-    let session_id = SessionId::new(
-        ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
 
     let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
@@ -520,16 +516,17 @@ fn preprocessing_e2e_turmoil() {
                 let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
                 let network_arc = Arc::new(network);
                 barrier.wait().await;
+                info!("Network set up complete");
 
                 let mut rng = StdRng::from_rng(OsRng).unwrap();
 
-                // run preprocessing concurrently with the message loop
+                // Run preprocessing concurrently with the message loop
                 // since run_preprocessing sends messages that trigger responses
                 let net = network_arc.clone();
                 let mut node_for_init = node.clone();
                 let preprocessing_handle = tokio::spawn(async move {
                     if let Err(e) = node_for_init.run_preprocessing(net, &mut rng).await {
-                        eprintln!("node {} preprocessing error: {:?}", id, e);
+                        error!("Node {} preprocessing error: {:?}", id, e);
                     }
                 });
 
@@ -550,14 +547,16 @@ fn preprocessing_e2e_turmoil() {
 
                     tokio::task::yield_now().await;
 
-                    // only check counts once preprocessing has fully finished
+                    // Only check counts once preprocessing has fully finished
                     if preprocessing_handle.is_finished() {
                         let length_preproc = node.preprocessing_material.lock().await.len();
-                        if length_preproc.beaver_triples == 5
+                        if length_preproc.beaver_triples == 9
                             && length_preproc.prandbit == n_prandbit
                             && length_preproc.prandint == n_prandint
                         {
                             break;
+                        } else {
+                            warn!("The required preprocessing is not yet obtained: Beaver triples: {}, PRandBit: {}, PRandInt: {}", length_preproc.beaver_triples, length_preproc.prandbit, length_preproc.prandint);
                         }
                     }
                 }
@@ -592,7 +591,7 @@ fn preprocessing_e2e_turmoil() {
         Ok::<(), Box<dyn std::error::Error>>(())
     });
 
-    sim.run().unwrap();
+    sim.run().expect("Execution must finish");
 
     let results: Vec<_> = std::iter::from_fn(|| rx_done.try_recv().ok()).collect();
     assert_eq!(
@@ -607,8 +606,8 @@ fn preprocessing_e2e_turmoil() {
         match r {
             Err(e) => panic!("node failed: {}", e),
             Ok((n_triples, n_shares, n_pbit, n_pint)) => {
-                assert_eq!(n_triples, 5);
-                assert_eq!(n_shares, 0);
+                assert_eq!(n_triples, 9);
+                assert_eq!(n_shares, 4);
                 assert_eq!(n_pbit, 4);
                 assert_eq!(n_pint, 4);
             }

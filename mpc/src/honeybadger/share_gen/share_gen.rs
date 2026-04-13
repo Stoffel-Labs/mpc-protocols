@@ -18,7 +18,7 @@ use crate::{
         share_gen::{
             RanShaError, RanShaMessage, RanShaMessageType, RanShaPayload, RanShaState, RanShaStore,
         },
-        ProtocolType, SessionId, WrappedMessage,
+        SessionId, WrappedMessage,
     },
 };
 
@@ -202,7 +202,7 @@ where
             ));
             let bytes_generic_msg = bincode::serialize(&generic_message)?;
 
-            info!("sending shares from {:?} to {:?}", self.id, recipient_id);
+            info!("Sending shares from {:?} to {:?}", self.id, recipient_id);
             network.send(recipient_id, &bytes_generic_msg).await?;
         }
 
@@ -235,6 +235,7 @@ where
                 .inspect_err(|err| {
                     let message_type = msg.msg_type;
                     error!(
+                        id = self.id,
                         "Error deserializing in receive_shares_handler: {err:?}, {message_type:?}"
                     );
                 })?;
@@ -244,7 +245,7 @@ where
         ransha_storage.initial_shares.insert(msg.sender_id, share);
         info!(
             session_id = msg.session_id.as_u64(),
-            "party {:?} received shares from {:?}", self.id, msg.sender_id,
+            "Party {:?} received shares from {:?}", self.id, msg.sender_id,
         );
 
         if msg.sender_id >= self.n_parties {
@@ -288,7 +289,7 @@ where
         N: Network,
     {
         info!(
-            "party {:?} received shares for Random sharing generation",
+            "Party {:?} received shares for random sharing generation",
             self.id
         );
 
@@ -379,7 +380,9 @@ where
             );
             let bytes = bincode::serialize(&result)?;
             let sessionid = SessionId::new(
-                ProtocolType::Ransha,
+                msg.session_id
+                    .calling_protocol()
+                    .expect("Session ID should not be None"),
                 SessionId::pack_slot24(
                     msg.session_id.exec_id(),
                     self.id as u8,

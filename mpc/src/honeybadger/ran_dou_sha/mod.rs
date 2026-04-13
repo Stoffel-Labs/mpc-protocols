@@ -8,7 +8,7 @@ use crate::{
     },
     honeybadger::{
         double_share::DoubleShamirShare, ran_dou_sha::messages::RanDouShaPayload,
-        robust_interpolate::InterpolateError, ProtocolType, SessionId, WrappedMessage,
+        robust_interpolate::InterpolateError, SessionId, WrappedMessage,
     },
 };
 use ark_ff::FftField;
@@ -218,6 +218,7 @@ where
 
         Ok(())
     }
+
     pub async fn wait_for_result(
         &self,
         session_id: SessionId,
@@ -475,7 +476,9 @@ where
 
                 // if the verification succeeds, broadcast true (aka. OK)
                 let sessionid = SessionId::new(
-                    ProtocolType::Randousha,
+                    msg.session_id
+                        .calling_protocol()
+                        .expect("Calling protocol can not be None"),
                     SessionId::pack_slot24(
                         msg.session_id.exec_id(),
                         self.id as u8,

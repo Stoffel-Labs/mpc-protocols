@@ -551,6 +551,19 @@ where
                             .await?;
                         self.preprocess.ran_dou_sha.drain_rbc_output().await?;
                     }
+                    Some(ProtocolType::RanDouShaSmallField) => {
+                        self.preprocess
+                            .small_field_preproc
+                            .ran_dou_sha
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?;
+                        self.preprocess
+                            .small_field_preproc
+                            .ran_dou_sha
+                            .drain_rbc_output()
+                            .await?;
+                    }
                     Some(ProtocolType::Ransha) => {
                         self.preprocess.share_gen.rbc.process(rbc_msg, net).await?;
                         self.preprocess.share_gen.drain_rbc_output().await?;
@@ -631,7 +644,6 @@ where
                     }
                 }
             }
-
             WrappedMessage::RanSha(rs_msg) => {
                 if sender_id != rs_msg.sender_id {
                     return Err(HoneyBadgerError::InvalidPartyId);
@@ -641,22 +653,15 @@ where
                         rs_msg.session_id.instance_id(),
                     ));
                 }
-                self.preprocess.share_gen.process(rs_msg, net).await?;
-            }
-            WrappedMessage::RanShaSmallField(rs_msg) => {
-                if sender_id != rs_msg.sender_id {
-                    return Err(HoneyBadgerError::InvalidPartyId);
+                if let Some(ProtocolType::RanShaSmallField) = rs_msg.session_id.calling_protocol() {
+                    self.preprocess
+                        .small_field_preproc
+                        .share_gen
+                        .process(rs_msg, net)
+                        .await?;
+                } else {
+                    self.preprocess.share_gen.process(rs_msg, net).await?;
                 }
-                if rs_msg.session_id.instance_id() != self.params.instance_id {
-                    return Err(HoneyBadgerError::InstanceIdError(
-                        rs_msg.session_id.instance_id(),
-                    ));
-                }
-                self.preprocess
-                    .small_field_preproc
-                    .share_gen
-                    .process(rs_msg, net)
-                    .await?;
             }
             WrappedMessage::Dousha(ds_msg) => {
                 if sender_id != ds_msg.sender_id {
@@ -667,7 +672,15 @@ where
                         ds_msg.session_id.instance_id(),
                     ));
                 }
-                self.preprocess.dou_sha.process(ds_msg).await?;
+                if let Some(ProtocolType::DouShaSmallField) = ds_msg.session_id.calling_protocol() {
+                    self.preprocess
+                        .small_field_preproc
+                        .dou_sha
+                        .process(ds_msg)
+                        .await?;
+                } else {
+                    self.preprocess.dou_sha.process(ds_msg).await?;
+                }
             }
             WrappedMessage::RanDouSha(rds_msg) => {
                 if sender_id != rds_msg.sender_id {
@@ -678,7 +691,17 @@ where
                         rds_msg.session_id.instance_id(),
                     ));
                 }
-                self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
+                if let Some(ProtocolType::RanDouShaSmallField) =
+                    rds_msg.session_id.calling_protocol()
+                {
+                    self.preprocess
+                        .small_field_preproc
+                        .ran_dou_sha
+                        .process(rds_msg, net)
+                        .await?;
+                } else {
+                    self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
+                }
             }
             WrappedMessage::BatchRecon(batch_msg) => {
                 if sender_id != batch_msg.sender_id {
@@ -862,11 +885,12 @@ where
             (store.len().prandbit, store.len().prandint)
         };
         if no_rand_bit < x.precision().f() || no_rand_int == 0 {
-            //Run preprocessing
+            // Run preprocessing
+            info!("Not enough preprocessing for FPMul. Computing preprocessing.");
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(net.clone(), &mut rng).await?;
         } else {
-            info!("Not enough preprocessing for FPMul. Computing preprocessing.");
+            info!("There is enough preprocessing for FPMul. Computing the multiplication");
         }
         // Extract the preprocessing triple.
         let beaver_triples = self
@@ -1086,6 +1110,8 @@ where
         N: 'async_trait,
         G: Rng + Send,
     {
+        info!("Generating preprocessing material");
+
         // Get how many triples and random shares are already available
         let (no_of_triples_avail, no_of_random_shares_avail) = {
             let store = self.preprocessing_material.lock().await;
@@ -1121,7 +1147,10 @@ where
         };
 
         if no_of_triples == 0 && no_of_random_shares == 0 {
-            info!("There are enough Random shares and Beaver triples");
+            info!(
+                id = self.id,
+                "There are enough Random shares and Beaver triples"
+            );
             // return Ok(());
         } else {
             let mut triple_counter = self.counters.triple_counter.get_next().await?;
@@ -1134,7 +1163,7 @@ where
             // ------------------------
             self.ensure_random_shares(network.clone(), rng, total_random_shares_to_generate)
                 .await?;
-            info!("Random share generation done");
+            info!(id = self.id, "Random share generation done");
 
             // ------------------------
             // Step 2. Ensure RanDouSha pair
@@ -1142,7 +1171,7 @@ where
             let ran_dou_sha_pair = self
                 .ensure_ran_dou_sha_pair(network.clone(), rng, total_triples_to_generate)
                 .await?;
-            info!("Randousha pair generation done");
+            info!(id = self.id, "RanDouSha pair generation done");
 
             // ------------------------
             // Step 3. Generate triples
@@ -1244,20 +1273,19 @@ where
         let shares_per_run = self.params.n_parties - 2 * self.params.threshold;
         let n_iterations = needed.div_ceil(shares_per_run);
         let mut round_id = 0u8;
-        let mut ran_sha_counter = self
-            .counters
-            .rand_bit_small_field_counter
-            .get_next()
-            .await?;
+        let mut ran_sha_counter = self.counters.ran_sha_small_field_counter.get_next().await?;
 
         if (256 - ran_sha_counter as usize) * 255 < n_iterations {
             return Err(HoneyBadgerError::LimitError);
         }
 
         for i in 0..n_iterations {
-            info!("Random share generation in the small field, run {}", i);
+            info!(
+                id = self.id,
+                "Random share generation in the small field, run {}", i
+            );
 
-            let sessionid = SessionId::new(
+            let session_id = SessionId::new(
                 ProtocolType::RanShaSmallField,
                 SessionId::pack_slot24(ran_sha_counter, 0, round_id),
                 self.params.instance_id,
@@ -1267,16 +1295,20 @@ where
             self.preprocess
                 .small_field_preproc
                 .share_gen
-                .init(sessionid, rng, network.clone())
+                .init(session_id, rng, network.clone())
                 .await?;
+
+            info!(id = self.id, "Waiting for results in RanShaSmallField");
 
             // Collect its output
             let output = self
                 .preprocess
                 .small_field_preproc
                 .share_gen
-                .wait_for_result(sessionid, self.params.timeout)
+                .wait_for_result(session_id, self.params.timeout)
                 .await?;
+
+            info!(id = self.id, "RanShaSmallField finished");
 
             self.preprocessing_material.lock().await.add(
                 None,
@@ -1290,7 +1322,7 @@ where
                 self.preprocess
                     .small_field_preproc
                     .share_gen
-                    .clear_store(sessionid)
+                    .clear_store(session_id)
                     .await
             );
 
@@ -1336,6 +1368,7 @@ where
         let missing_triples = needed.saturating_sub(current_triples);
         let triples_per_run = 2 * self.params.threshold + 1;
         let n_iterations = missing_triples.div_ceil(triples_per_run);
+        let n_triples_full_chunks = n_iterations * triples_per_run;
 
         let mut triple_small_field_counter =
             self.counters.triple_small_field_counter.get_next().await?;
@@ -1346,30 +1379,35 @@ where
 
         // Ensure and take random shares in the small field.
         // We need 2 * n_triples random shares.
-        let required_random_shares = 2 * needed;
+        let required_random_shares = 2 * n_triples_full_chunks;
         self.ensure_random_shares_small_field(network.clone(), rng, required_random_shares)
             .await?;
         let random_shares_a = self
             .preprocessing_material
             .lock()
             .await
-            .take_random_shares_small_field(missing_triples)?;
+            .take_random_shares_small_field(n_triples_full_chunks)?;
         let random_shares_b = self
             .preprocessing_material
             .lock()
             .await
-            .take_random_shares_small_field(missing_triples)?;
+            .take_random_shares_small_field(n_triples_full_chunks)?;
 
         // Ensure and take random double shares in the small field. One triple requires one random
         // double share.
         let ran_dou_sha_pair = self
-            .ensure_ran_dou_sha_pair_small_field(network.clone(), rng, missing_triples)
+            .ensure_ran_dou_sha_pair_small_field(network.clone(), rng, n_triples_full_chunks)
             .await?;
-        info!("Randousha pair generation done");
+        let created_ran_dou_sha = ran_dou_sha_pair.len();
+        info!("Randousha pair generation done. Created {created_ran_dou_sha} RanDouSha in the small field");
 
-        let a_chunks = random_shares_a.chunks_exact(triples_per_run);
-        let b_chunks = random_shares_b.chunks_exact(triples_per_run);
-        let r_chunks = ran_dou_sha_pair[..needed].chunks_exact(triples_per_run);
+        let a_chunks = random_shares_a.chunks(triples_per_run);
+        let b_chunks = random_shares_b.chunks(triples_per_run);
+        let r_chunks = ran_dou_sha_pair[..n_triples_full_chunks].chunks(triples_per_run);
+
+        let a_len = a_chunks.len();
+        let b_len = b_chunks.len();
+        let r_len = r_chunks.len();
 
         let mut round_id = 0;
 
@@ -1408,7 +1446,13 @@ where
                 None,
                 None,
             );
-            assert!(self.preprocess.triple_gen.clear_store(session_id).await);
+            assert!(
+                self.preprocess
+                    .small_field_preproc
+                    .triple_gen
+                    .clear_store(session_id)
+                    .await
+            );
 
             if round_id == 255 {
                 triple_small_field_counter = self
@@ -1422,6 +1466,20 @@ where
                 round_id += 1;
             }
         }
+
+        let n_small_field_triples = {
+            let guard = self.preprocessing_material.lock().await;
+            guard.len().beaver_triples_small_field
+        };
+        info!("The number of missing small field triples was {missing_triples}");
+        info!("Triples in the small field generated per run: {triples_per_run}");
+        info!("Number of executed rounds: {round_id}");
+        info!(
+            "Material needed for triple generation in the small field: a vector: {}, b vector: {}, r vector: {}",
+            a_len, b_len, r_len,
+        );
+        info!("Number of runs for small field triples: {n_iterations}");
+        info!("Small field triples generated. The current number of small field triples is {n_small_field_triples}");
 
         Ok(())
     }
@@ -1448,7 +1506,7 @@ where
         }
 
         for i in 0..run {
-            info!("Random share generation run {}", i);
+            info!(id = self.id, run = i, "Random share generation");
 
             let sessionid = SessionId::new(
                 ProtocolType::Ransha,
@@ -1681,23 +1739,33 @@ where
         N: Network + Send + Sync + 'static,
         G: Rng + Send,
     {
+        let dou_sha_session_id = SessionId::new(
+            ProtocolType::DouShaSmallField,
+            SessionId::pack_slot24(
+                sessionid.exec_id(),
+                sessionid.sub_id(),
+                sessionid.round_id(),
+            ),
+            self.params.instance_id,
+        );
+
         self.preprocess
             .small_field_preproc
             .dou_sha
-            .init(sessionid, rng, network.clone())
+            .init(dou_sha_session_id, rng, network.clone())
             .await?;
 
         let dou_sha = self
             .preprocess
             .small_field_preproc
             .dou_sha
-            .wait_for_result(sessionid, self.params.timeout)
+            .wait_for_result(dou_sha_session_id, self.params.timeout)
             .await?;
         assert!(
             self.preprocess
                 .small_field_preproc
                 .dou_sha
-                .clear_store(sessionid)
+                .clear_store(dou_sha_session_id)
                 .await
         );
 
@@ -1714,25 +1782,22 @@ where
         G: Rng + Send,
     {
         // How many shares are already present?
-        let no_shares = {
+        let n_shares = {
             let store = self.preprocessing_material.lock().await;
             store.len().prandbit
         };
 
-        if no_shares >= self.params.n_prandbit {
-            info!("There are enough prandbit shares");
+        if n_shares >= self.params.n_prandbit {
+            info!("There are enough PRandBit shares");
             return Ok(());
         }
 
-        // How many more do we need?
-        let missing = self.params.n_prandbit.saturating_sub(no_shares);
+        // Computing the amount of needed shares.
+        let missing = self.params.n_prandbit.saturating_sub(n_shares);
         let batch = self.params.threshold + 1;
         let total_randbit_to_generate = ((missing + batch - 1) / batch) * batch;
 
         let mut randbit_output: Vec<ShamirShare<GoldilocksField, 1, Robust>> = Vec::new();
-
-        // Randbit share generation
-        info!("Randbit share generation run");
 
         let randbit_sessionid = SessionId::new(
             ProtocolType::RandBit,
@@ -1796,7 +1861,7 @@ where
             .await?;
 
         //Prandbit share generation
-        info!("PRandbit share generation");
+        info!(id = self.id, "PRandbit share generation");
 
         // Run PRandBit protocol
         self.preprocess
@@ -1811,12 +1876,17 @@ where
             )
             .await?;
 
+        info!(id = self.id, "Waiting for PRandBit to finish");
+
         // Collect its output
         let output = self
             .preprocess
             .prand_bit
             .wait_for_bit_result(prandbit_sessionid, self.params.timeout)
             .await?;
+
+        info!(id = self.id, "PRandBit finished successfully");
+
         self.preprocessing_material
             .lock()
             .await
@@ -1849,7 +1919,7 @@ where
 
         //Prandbit share generation
         info!("PRandInt share generation");
-        let sessionid = SessionId::new(
+        let session_id = SessionId::new(
             ProtocolType::PRandInt,
             SessionId::pack_slot24(self.counters.prand_int_counter.get_next().await?, 0, 0),
             self.params.instance_id,
@@ -1859,7 +1929,7 @@ where
         self.preprocess
             .prand_bit
             .generate_riss(
-                sessionid,
+                session_id,
                 vec![],
                 self.params.l,
                 self.params.k,
@@ -1872,14 +1942,14 @@ where
         let output = self
             .preprocess
             .prand_bit
-            .wait_for_int_result(sessionid, self.params.timeout)
+            .wait_for_int_result(session_id, self.params.timeout)
             .await?;
         self.preprocessing_material
             .lock()
             .await
             .add(None, None, None, None, None, Some(output));
         // Clear store
-        self.preprocess.prand_bit.clear_store(sessionid).await?;
+        self.preprocess.prand_bit.clear_store(session_id).await?;
         Ok(())
     }
 }
@@ -1892,7 +1962,6 @@ pub enum WrappedMessage {
     BatchRecon(BatchReconMsg),
     Input(InputMessage),
     RanSha(RanShaMessage),
-    RanShaSmallField(RanShaMessage),
     Dousha(DouShaMessage),
     Output(OutputMessage),
     PRandBitD(PRandBitDMessage),
@@ -1928,6 +1997,7 @@ pub enum ProtocolType {
     TripleSmallField = 15,
     RanShaSmallField = 16,
     RanDouShaSmallField = 17,
+    DouShaSmallField = 18,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -1957,6 +2027,7 @@ impl ProtocolTag for ProtocolType {
             15 => Some(Self::TripleSmallField),
             16 => Some(Self::RanShaSmallField),
             17 => Some(Self::RanDouShaSmallField),
+            18 => Some(Self::DouShaSmallField),
             _ => None,
         }
     }

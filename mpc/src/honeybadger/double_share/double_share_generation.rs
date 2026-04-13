@@ -15,7 +15,7 @@ use tokio::{
     sync::Mutex,
     time::{timeout, Duration},
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::DoubleShamirShare;
 
@@ -95,10 +95,12 @@ where
             .or_insert(Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))))
             .clone()
     }
+
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.storage.lock().await;
         store.remove(&session_id).is_some()
     }
+
     pub async fn wait_for_result(
         &self,
         session_id: SessionId,
@@ -173,7 +175,7 @@ where
         recv_message: DouShaMessage,
     ) -> Result<(), DouShaError> {
         let double_share: DoubleShamirShare<F> =
-            CanonicalDeserialize::deserialize_compressed(recv_message.payload.as_slice())?;
+            CanonicalDeserialize::deserialize_compressed(recv_message.payload.as_slice()).inspect_err(|err| error!(id = self.id, session_id = ?recv_message.session_id, "Error deserializeing a DouShaMessage {err:?}"))?;
         let binding = self.get_or_create_store(recv_message.session_id).await;
         let mut dousha_storage = binding.lock().await;
 
@@ -183,7 +185,7 @@ where
         //todo: Better handle duplicate messages from a sender, check the shares
         if dousha_storage.share.contains_key(&recv_message.sender_id) {
             warn!(
-                session_id = recv_message.session_id.as_u64(),
+                session_id = ?recv_message.session_id,
                 "Duplicate double share received from party {:?}, ignoring.",
                 recv_message.sender_id
             );

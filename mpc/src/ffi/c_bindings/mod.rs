@@ -76,6 +76,7 @@ pub enum ProtocolType {
     TripleSmallField = 15,
     RanShaSmallField = 16,
     RanDouShaSmallField = 17,
+    DouShaSmallField = 18,
 }
 
 impl From<ProtocolType> for crate::honeybadger::ProtocolType {
@@ -101,6 +102,7 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             ProtocolType::RanDouShaSmallField => {
                 crate::honeybadger::ProtocolType::RanDouShaSmallField
             }
+            ProtocolType::DouShaSmallField => crate::honeybadger::ProtocolType::DouShaSmallField,
         }
     }
 }
@@ -128,6 +130,7 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::RanDouShaSmallField => {
                 ProtocolType::RanDouShaSmallField
             }
+            crate::honeybadger::ProtocolType::DouShaSmallField => ProtocolType::DouShaSmallField,
         }
     }
 }

@@ -473,6 +473,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         if smallfield_bits.len() != batch_size
             && session_id.calling_protocol() == Some(ProtocolType::PRandBit)
         {
+            tracing::error!(id = self.id, "Not enough bits from the smaller field");
             return Err(PRandError::NotSet(
                 "Not enough bits from the smaller field".to_string(),
             ));
@@ -541,7 +542,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // Deduplicate per (sender, tset)
         if tset_entry.contains_key(&msg.sender_id) {
             return Err(PRandError::Duplicate(format!(
-                "Already received from {} for tset {:?}",
+                "PRandBit: Already received from {} for tset {:?}",
                 msg.sender_id, msg.tset
             )));
         }
@@ -601,7 +602,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         let round_id = sid.round_id();
         if store.output_open.contains_key(&round_id) {
             return Err(PRandError::Duplicate(format!(
-                "Already received for {}",
+                "PRandBit: Already received for {}",
                 round_id
             )));
         }

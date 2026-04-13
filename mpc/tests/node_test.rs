@@ -133,11 +133,7 @@ async fn ransha_e2e() {
     setup_tracing();
     let n_parties = 4;
     let t = 1;
-    let session_id = SessionId::new(
-        ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -155,7 +151,8 @@ async fn ransha_e2e() {
         Duration::from_secs(30),
         vec![],
     );
-    // spawn tasks to process received messages
+
+    // Spawn tasks to process received messages
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         receivers,
         nodes.clone(),
@@ -821,11 +818,9 @@ async fn preprocessing_e2e() {
         let mut rng = StdRng::from_rng(OsRng).unwrap();
 
         let handle = tokio::spawn(async move {
-            {
-                node.run_preprocessing(net[pid].clone(), &mut rng)
-                    .await
-                    .expect("Preprocessing failed");
-            }
+            node.run_preprocessing(net[pid].clone(), &mut rng)
+                .await
+                .expect("Preprocessing failed");
         });
         handles.push(handle);
     }
@@ -839,8 +834,10 @@ async fn preprocessing_e2e() {
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
         let length_preproc = node.preprocessing_material.lock().await.len();
-        assert_eq!(length_preproc.beaver_triples, 5); //>no_of_triples
-        assert_eq!(length_preproc.random_shr, 0); //>no_of_randomshares
+        // The number of generated triples should be the closest multiple of 2t + 1 greater than the required
+        // number of triples.
+        assert_eq!(length_preproc.beaver_triples, 9);
+        assert_eq!(length_preproc.random_shr, 4);
         assert_eq!(length_preproc.prandbit, 4);
         assert_eq!(length_preproc.prandint, 4);
     }
@@ -1241,7 +1238,7 @@ async fn fpmul_e2e_with_preprocessing() {
         n_prandint,
         bound_l,
         security_k,
-        Duration::from_secs(30),
+        Duration::from_secs(10),
         vec![],
     );
 

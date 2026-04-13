@@ -11,6 +11,7 @@ use ark_ff::FftField;
 use async_trait::async_trait;
 use futures::lock::Mutex;
 use serde::{Deserialize, Serialize};
+use tracing::error;
 use uuid::Uuid;
 
 /// Preprocessing material for the HoneyBadgerMPCNode protocol.
@@ -122,6 +123,7 @@ where
         n_triples: usize,
     ) -> Result<Vec<ShamirBeaverTriple<F>>, HoneyBadgerError> {
         if n_triples > self.beaver_triples.len() {
+            error!("Error trying to take triples: There is no enough preprocessing");
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
         Ok(self.beaver_triples.drain(0..n_triples).collect())
@@ -131,7 +133,11 @@ where
         &mut self,
         n_triples: usize,
     ) -> Result<Vec<ShamirBeaverTriple<GoldilocksField>>, HoneyBadgerError> {
-        if n_triples > self.beaver_triples_small_field.len() {
+        let current_beaver_triples = self.beaver_triples_small_field.len();
+        if n_triples > current_beaver_triples {
+            error!(
+                "Error trying to take triples in the small field: There is no enough preprocessing. Current Beaver triples: {current_beaver_triples}, Needed Beaver triples: {n_triples}"
+            );
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
         Ok(self
@@ -146,6 +152,7 @@ where
         n_shares: usize,
     ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
         if n_shares > self.random_shares.len() {
+            error!("Error trying to take random shares: There is no enough preprocessing");
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
         Ok(self.random_shares.drain(0..n_shares).collect())
@@ -156,6 +163,7 @@ where
         n_shares: usize,
     ) -> Result<Vec<RobustShare<GoldilocksField>>, HoneyBadgerError> {
         if n_shares > self.random_shares_small_field.len() {
+            error!("Error trying to take random shares in the small field: There is no enough preprocessing");
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
         Ok(self.random_shares_small_field.drain(0..n_shares).collect())
@@ -166,6 +174,7 @@ where
         n_prandbit: usize,
     ) -> Result<Vec<(RobustShare<F>, Gf256)>, HoneyBadgerError> {
         if n_prandbit > self.prandbit_shares.len() {
+            error!("Error trying to take PRandBit shares: There is no enough preprocessing");
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
         Ok(self.prandbit_shares.drain(0..n_prandbit).collect())
@@ -176,6 +185,7 @@ where
         n_prandint: usize,
     ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
         if n_prandint > self.prandint_shares.len() {
+            error!("Error trying to take PRandInt shares: There is no enough preprocessing");
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
         Ok(self.prandint_shares.drain(0..n_prandint).collect())
