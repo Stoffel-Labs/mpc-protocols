@@ -546,7 +546,7 @@ mod tests {
     use crate::honeybadger::ran_dou_sha::messages::{
         RanDouShaMessage, RanDouShaPayload, ReconstructionMessage,
     };
-    use crate::honeybadger::SessionId;
+    use crate::honeybadger::{ProtocolType, SessionId};
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
     use std::sync::Arc;

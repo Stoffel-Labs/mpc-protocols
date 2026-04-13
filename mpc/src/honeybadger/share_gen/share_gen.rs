@@ -451,7 +451,7 @@ mod tests {
     use crate::common::rbc::rbc::Avid;
     use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use crate::honeybadger::share_gen::{RanShaMessage, RanShaMessageType, RanShaPayload};
-    use crate::honeybadger::SessionId;
+    use crate::honeybadger::{ProtocolType, SessionId};
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
     use std::sync::Arc;
