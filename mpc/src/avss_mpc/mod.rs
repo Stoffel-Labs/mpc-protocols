@@ -425,17 +425,6 @@ where
                     }
                 }
             }
-            AvssWrappedMessage::Mul(mul_message) => {
-                if sender_id != mul_message.sender {
-                    return Err(AvssMPCError::InvalidPartyId);
-                }
-                if mul_message.session_id.instance_id() != self.params.instance_id {
-                    return Err(AvssMPCError::InstanceIdError(
-                        mul_message.session_id.instance_id(),
-                    ));
-                }
-                self.mul_node.process(mul_message).await?
-            }
 
             AvssWrappedMessage::Input(_) => {
                 warn!("Incorrect message received at process function (Input)");

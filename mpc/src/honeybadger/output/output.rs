@@ -110,6 +110,11 @@ impl<F: FftField> OutputClient<F> {
 
         for share in &mut shares {
             share.id = msg.sender_id;
+            if share.degree != self.t {
+                return Err(OutputError::InvalidInput(
+                    "Invalid share degree".to_string(),
+                ));
+            }
         }
         if shares.len() != self.input_len {
             return Err(OutputError::InvalidInput(

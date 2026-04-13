@@ -3,6 +3,7 @@ use crate::avss_mpc::mul::{
 };
 use crate::avss_mpc::triple_gen::BeaverTriple;
 use crate::avss_mpc::{AvssSessionId, AvssWrappedMessage};
+use crate::common::share::avss::verify_feldman;
 use crate::common::share::feldman::FeldmanShamirShare;
 use crate::common::{share::ShareError, RBC};
 use crate::common::{ProtocolSessionId, SecretSharingScheme};
@@ -300,6 +301,18 @@ fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
                 warn!("Did not recieve the right number of shares to reconstruct using RBC (sent for a-x and for b-y)");
                 continue;
             }
+            // Verify Feldman commitments before accepting shares
+            let mut valid = true;
+            for i in 0..no_of_mul {
+                if !verify_feldman(a[i].clone()) || !verify_feldman(b[i].clone()) {
+                    valid = false;
+                    break;
+                }
+            }
+            if !valid {
+                continue;
+            }
+
             for i in 0..no_of_mul {
                 a_shares[i].push(a[i].clone());
                 b_shares[i].push(b[i].clone());
