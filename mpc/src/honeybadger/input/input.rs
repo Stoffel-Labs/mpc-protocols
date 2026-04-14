@@ -20,6 +20,8 @@ use tracing::{info, warn};
 
 const MAX_INPUT_ELEMENTS: u64 = 65_536;
 
+const MAX_INPUT_ELEMENTS: u64 = 65_536;
+
 /// In the beginning of an MPC calculation, each node has to obtain a share of all clients' inputs.
 /// This happens via the mechanism described in Section 4.1 in the paper: given one random sharing
 /// per client input,
