@@ -206,7 +206,8 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: RanDouShaMessage = bincode::deserialize(&output)?;
+            let mut msg: RanDouShaMessage = bincode::deserialize(&output)?;
+            msg.sender_id = id.sub_id() as usize;
 
             match self.output_handler(msg).await {
                 Ok(()) => {}

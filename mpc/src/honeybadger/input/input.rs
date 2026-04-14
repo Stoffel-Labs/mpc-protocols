@@ -438,6 +438,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
 
         let mut shares: Vec<RobustShare<F>> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
+        if !shares.iter().all(|s| s.id == msg.sender_id) {
+            return Err(InputError::InvalidInput(
+                "Share ID does not match authenticated sender".into(),
+            ));
+        }
         for share in &mut shares {
             share.id = msg.sender_id;
             if share.degree != self.t {

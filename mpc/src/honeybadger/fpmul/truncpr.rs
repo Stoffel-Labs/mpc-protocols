@@ -72,7 +72,8 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: TruncPrMessage = bincode::deserialize(&output)?;
+            let mut msg: TruncPrMessage = bincode::deserialize(&output)?;
+            msg.sender_id = id.round_id() as usize;
 
             info!(
                 node_id = self.id,
