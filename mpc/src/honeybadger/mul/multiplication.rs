@@ -118,6 +118,12 @@ fn reconstruct_rbc<F: FftField>(
         }
     }
     for i in 0..share_len {
+        let required = t + 1;
+        if a_shares[i].len() < required || b_shares[i].len() < required {
+            return Err(InterpolateError::InvalidInput(
+                "Insufficient valid shares for reconstruction".to_string(),
+            ));
+        }
         let a = RobustShare::recover_secret(&a_shares[i], n, t)?;
         let b = RobustShare::recover_secret(&b_shares[i], n, t)?;
 
@@ -179,6 +185,14 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
             let output = self.rbc.get_store(id).await?;
             let msg: MultMessage = bincode::deserialize(&output)?;
+            if msg.sender != id.round_id() as PartyId {
+                warn!(
+        "Dropping RBC output: inner sender {} does not match session's designated sender {}",
+        msg.sender,
+        id.round_id()
+    );
+                continue;
+            }
 
             match self
                 .open_mult_handler(msg.sender, msg.session_id, msg.payload)

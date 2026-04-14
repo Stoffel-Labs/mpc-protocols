@@ -96,6 +96,11 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShare<F> {
         n: usize,
         t: usize,
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), InterpolateError> {
+        if shares.is_empty() {
+            return Err(InterpolateError::InvalidInput(
+                "Share slice is empty".to_string(),
+            ));
+        }
         let degree = shares[0].degree;
         if !shares.iter().all(|share| share.degree == degree) {
             return Err(InterpolateError::ShareError(ShareError::DegreeMismatch));
