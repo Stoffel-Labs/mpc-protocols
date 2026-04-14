@@ -68,7 +68,7 @@ use ark_ff::{FftField, PrimeField};
 use ark_std::rand::rngs::{OsRng, StdRng};
 use ark_std::rand::{Rng, SeedableRng};
 use async_trait::async_trait;
-use bincode::ErrorKind;
+use bincode::{ErrorKind, Options};
 use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
@@ -79,6 +79,10 @@ use thiserror::Error;
 use tokio::{sync::Mutex, time::Duration};
 use tracing::{info, warn};
 use triple_gen::triple_generation::TripleGenNode;
+
+/// Maximum number of bytes accepted from a single network message before deserialization.
+/// Rejects payloads that would cause multi-gigabyte allocations via a crafted length prefix.
+const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
 #[derive(Error, Debug)]
 pub enum HoneyBadgerError {
@@ -177,7 +181,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), HoneyBadgerError> {
-        let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
+        let wrapped: WrappedMessage = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MAX_MESSAGE_SIZE)
+            .deserialize(&raw_msg)?;
 
         match wrapped {
             WrappedMessage::Input(input_msg) => {
@@ -490,7 +498,11 @@ where
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), Self::Error> {
-        let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
+        let wrapped: WrappedMessage = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MAX_MESSAGE_SIZE)
+            .deserialize(&raw_msg)?;
 
         match wrapped {
             WrappedMessage::Rbc(rbc_msg) => {
