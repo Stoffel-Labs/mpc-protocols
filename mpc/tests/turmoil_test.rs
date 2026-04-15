@@ -1,8 +1,11 @@
 mod utils;
 
-use crate::utils::test_utils::{
-    construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
-    generate_independent_shares, setup_tracing,
+use crate::utils::{
+    test_utils::{
+        construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
+        generate_independent_shares, setup_tracing,
+    },
+    turmoil::{add_driver, collect_results, turmoil_setup},
 };
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
@@ -27,75 +30,12 @@ use stoffelmpc_mpc::{
 };
 use stoffelmpc_network::{
     // bad_fake_network::setup_tracing,
-    fake_network::{FakeNetworkConfig, SenderId},
-    turmoil_network::{TurmoilInnerNetwork, TurmoilNetwork},
+    fake_network::SenderId,
+    turmoil_network::TurmoilNetwork,
 };
 use stoffelnet::network_utils::{ClientId, NetworkError};
 use tokio::time::{sleep, timeout, Duration};
 use tracing::info;
-use turmoil::{Builder, Sim};
-
-pub fn turmoil_setup(
-    n_nodes: usize,
-    client_ids: Vec<ClientId>,
-    latency: Option<(u64, u64)>,
-) -> (turmoil::Sim<'static>, TurmoilInnerNetwork) {
-    let sim = if let Some((min, max)) = latency {
-        Builder::new()
-            .min_message_latency(Duration::from_millis(min))
-            .max_message_latency(Duration::from_millis(max))
-            .simulation_duration(Duration::from_secs(120))
-            .build()
-    } else {
-        Builder::new()
-            .simulation_duration(Duration::from_secs(120))
-            .build()
-    };
-
-    let inner = TurmoilInnerNetwork::new(
-        n_nodes,
-        if client_ids.is_empty() {
-            None
-        } else {
-            Some(client_ids)
-        },
-        FakeNetworkConfig::new(100),
-        7000,
-        8000,
-    );
-
-    (sim, inner)
-}
-
-// --- sim setup ---
-
-fn add_driver(sim: &mut Sim, secs: u64) {
-    sim.client("driver", async move {
-        sleep(Duration::from_secs(secs)).await;
-        Ok::<(), Box<dyn std::error::Error>>(())
-    });
-}
-
-// --- result collection ---
-
-fn collect_results(
-    mut sim: Sim,
-    rx_done: std::sync::mpsc::Receiver<Result<(), String>>,
-    expected: usize,
-) {
-    sim.run().unwrap();
-    let results: Vec<_> = std::iter::from_fn(|| rx_done.try_recv().ok()).collect();
-    assert_eq!(
-        results.len(),
-        expected,
-        "not all nodes reported: got {}/{}",
-        results.len(),
-        expected
-    );
-    for r in results {
-        assert!(r.is_ok(), "node failed: {}", r.unwrap_err());
-    }
-}
 
 #[test]
 fn ransha_e2e_turmoil() {

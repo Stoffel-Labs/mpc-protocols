@@ -236,6 +236,7 @@ where
         }
         Ok(())
     }
+
     pub async fn init<Rnd, N>(
         &mut self,
         secrets: Vec<F>,
@@ -379,6 +380,7 @@ where
             let mut map = self.shares.lock().await;
             map.insert(msg.session_id, Some(shares));
         };
+
         self.output_sender
             .send(msg.session_id)
             .await
