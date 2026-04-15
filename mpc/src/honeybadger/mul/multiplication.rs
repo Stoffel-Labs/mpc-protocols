@@ -185,17 +185,19 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
             let output = self.rbc.get_store(id).await?;
             let msg: MultMessage = bincode::deserialize(&output)?;
-            if msg.sender != id.round_id() as PartyId {
+            let authenticated_sender = id.round_id() as usize;
+            if msg.sender != authenticated_sender {
                 warn!(
-        "Dropping RBC output: inner sender {} does not match session's designated sender {}",
-        msg.sender,
-        id.round_id()
-    );
+                    "Dropping 
+                RBC output: inner sender {} does not match session's designated sender {}",
+                    msg.sender,
+                    id.round_id()
+                );
                 continue;
             }
 
             match self
-                .open_mult_handler(msg.sender, msg.session_id, msg.payload)
+                .open_mult_handler(authenticated_sender, msg.session_id, msg.payload)
                 .await
             {
                 Ok(()) => {}

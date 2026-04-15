@@ -19,7 +19,7 @@ use tokio::{
     },
     time::{timeout, Duration},
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct TruncPrNode<F: PrimeField, R: RBC> {
@@ -73,8 +73,15 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
             let output = self.rbc.get_store(id).await?;
             let mut msg: TruncPrMessage = bincode::deserialize(&output)?;
-            msg.sender_id = id.round_id() as usize;
-
+            let authenticated_sender = id.round_id() as usize;
+            if msg.sender_id != authenticated_sender {
+                warn!(
+                    "Dropping RBC output: inner sender_id {} does not match session round_id {}",
+                    msg.sender_id, authenticated_sender
+                );
+                continue;
+            }
+            msg.sender_id = authenticated_sender;
             info!(
                 node_id = self.id,
                 "TruncPr received RBC output for open handler"

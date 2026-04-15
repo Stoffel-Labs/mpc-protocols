@@ -6,7 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     common::{
@@ -79,8 +79,15 @@ where
 
             let output = self.rbc.get_store(id).await?;
             let mut msg: RanShaMessage = bincode::deserialize(&output)?;
-            msg.sender_id = id.sub_id() as usize;
-
+            let authenticated_sender = id.sub_id() as usize;
+            if msg.sender_id != authenticated_sender {
+                warn!(
+                    "Dropping RBC output: inner sender_id {} does not match session sub_id {}",
+                    msg.sender_id, authenticated_sender
+                );
+                continue;
+            }
+            msg.sender_id = authenticated_sender;
             match self.output_handler(msg).await {
                 Ok(()) => {}
                 Err(e) => {

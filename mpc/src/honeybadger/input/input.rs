@@ -15,7 +15,7 @@ use tokio::{
     },
     time::{timeout, Duration},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 const MAX_INPUT_ELEMENTS: u64 = 65_536;
 
@@ -147,7 +147,15 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
 
             let output = self.rbc.get_store(id).await?;
             let msg: InputMessage = bincode::deserialize(&output)?;
-            match self.input_handler(msg.sender_id, msg.payload).await {
+            let authenticated_sender = id.sub_id() as usize;
+            if msg.sender_id != authenticated_sender {
+                warn!(
+                    "Dropping RBC output: inner sender_id {} does not match session sub_id {}",
+                    msg.sender_id, authenticated_sender
+                );
+                continue;
+            }
+            match self.input_handler(authenticated_sender, msg.payload).await {
                 Ok(()) => {}
                 Err(e) => {
                     return Err(e);

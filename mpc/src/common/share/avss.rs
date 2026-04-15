@@ -54,7 +54,6 @@ pub enum AvssError {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvssMessage<Id: ProtocolSessionId> {
-    pub sender_id: PartyId,
     pub session_id: Id,
     pub dealer_pk: Vec<u8>,
     pub public_commitments: Vec<Vec<Vec<u8>>>,
@@ -66,14 +65,12 @@ where
     Id: ProtocolSessionId,
 {
     pub fn new(
-        sender: PartyId,
         session_id: Id,
         dealer_pk: Vec<u8>,
         public_commitments: Vec<Vec<Vec<u8>>>,
         encrypted_shares: Vec<Vec<Vec<u8>>>,
     ) -> Self {
         Self {
-            sender_id: sender,
             session_id,
             dealer_pk,
             public_commitments,
@@ -303,7 +300,6 @@ where
 
         //Broadcast to servers
         let msg = AvssMessage {
-            sender_id: self.id,
             session_id: session_id,
             dealer_pk: pk_d_bytes,
             public_commitments,

@@ -73,6 +73,14 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
 
             let output = self.rbc.get_store(id).await?;
             let msg: MultMessage = bincode::deserialize(&output)?;
+            let authenticated_sender = id.round_id() as usize;
+            if msg.sender != authenticated_sender {
+                warn!(
+                    "Dropping RBC output: inner sender {} does not match session round_id {}",
+                    msg.sender, authenticated_sender
+                );
+                continue;
+            }
 
             match self.open_mult_handler(msg).await {
                 Ok(()) => {}

@@ -28,7 +28,7 @@ use tokio::sync::{
 use tokio::time::{timeout, Duration};
 
 use stoffelnet::network_utils::{Network, NetworkError, PartyId};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Error that occurs during the execution of the Random Double Share Error.
 #[derive(Debug, Error)]
@@ -207,7 +207,15 @@ where
 
             let output = self.rbc.get_store(id).await?;
             let mut msg: RanDouShaMessage = bincode::deserialize(&output)?;
-            msg.sender_id = id.sub_id() as usize;
+            let authenticated_sender = id.sub_id() as usize;
+            if msg.sender_id != authenticated_sender {
+                warn!(
+                    "Dropping RBC output: inner sender_id {} does not match session sub_id {}",
+                    msg.sender_id, authenticated_sender
+                );
+                continue;
+            }
+            msg.sender_id = authenticated_sender;
 
             match self.output_handler(msg).await {
                 Ok(()) => {}
@@ -322,7 +330,6 @@ where
 
         assert_eq!(session_id.sub_id(), 0);
 
-        // todo - should check sender.id == self?
         let vandermonde_matrix = make_vandermonde(self.n_parties, self.n_parties - 1)?;
         // Implementation of Step 1.
         let r_deg_t = apply_vandermonde(&vandermonde_matrix, &shares_deg_t)?;
@@ -507,7 +514,6 @@ where
             RanDouShaPayload::Output(ok) => ok,
         };
         info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, msg.session_id.as_u64(), msg.sender_id, output);
-        // todo - add randousha status so we can omit output_handler
         // abort randousha once received the abort message
         if !output {
             return Err(RanDouShaError::Abort);
