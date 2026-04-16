@@ -53,10 +53,10 @@ where
                     }
                     WrappedMessage::Rbc(msg) => match msg.session_id.calling_protocol() {
                         Some(ProtocolType::FpMul) => {
-                            if msg.session_id.sub_id() == 2 {
+                            if msg.session_id.round_id() == 2 {
                                 node.mult_node.rbc.process(msg, net.clone()).await.unwrap();
                                 node.mult_node.drain_rbc_output().await.unwrap();
-                            } else if msg.session_id.sub_id() == 0 {
+                            } else if msg.session_id.round_id() == 0 {
                                 node.trunc_node.rbc.process(msg, net.clone()).await.unwrap();
                                 node.trunc_node.drain_rbc_output().await.unwrap();
                             } else {

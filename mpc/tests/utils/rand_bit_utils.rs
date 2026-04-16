@@ -89,7 +89,7 @@ where
                 let wrapped: WrappedMessage = bincode::deserialize(&bytes).unwrap();
                 match wrapped {
                     WrappedMessage::BatchRecon(msg) => {
-                        if msg.session_id.sub_id() == 0 {
+                        if msg.session_id.round_id() == 0 {
                             let _ = node.batch_recon.process(msg, net.clone()).await;
                             node.drain_batch_recon_output().await.unwrap();
                         } else {

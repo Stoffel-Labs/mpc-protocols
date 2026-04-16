@@ -73,7 +73,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
             let output = self.rbc.get_store(id).await?;
             let mut msg: TruncPrMessage = bincode::deserialize(&output)?;
-            let authenticated_sender = id.round_id() as usize;
+            let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(
                     "Dropping RBC output: inner sender_id {} does not match session round_id {}",
@@ -270,7 +270,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(session.exec_id(), 0, self.id as u8),
+            SessionId::pack_slot24(session.exec_id(), self.id as u8, 0),
             session.instance_id(),
         );
         self.rbc

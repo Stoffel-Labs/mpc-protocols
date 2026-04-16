@@ -185,13 +185,13 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
             let output = self.rbc.get_store(id).await?;
             let msg: MultMessage = bincode::deserialize(&output)?;
-            let authenticated_sender = id.round_id() as usize;
+            let authenticated_sender = id.sub_id() as usize;
             if msg.sender != authenticated_sender {
                 warn!(
                     "Dropping 
                 RBC output: inner sender {} does not match session's designated sender {}",
                     msg.sender,
-                    id.round_id()
+                    id.sub_id()
                 );
                 continue;
             }
@@ -374,7 +374,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             if !have_batch_recon1[i] {
                 let session_id1 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
-                    SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i) as u8),
+                    SessionId::pack_slot24(session_id.exec_id(), (2 * i) as u8, 1),
                     session_id.instance_id(),
                 );
                 // Execute batch reconstruction for a-x values
@@ -386,7 +386,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             if !have_batch_recon2[i] {
                 let session_id2 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
-                    SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i + 1) as u8),
+                    SessionId::pack_slot24(session_id.exec_id(), (2 * i + 1) as u8, 1),
                     session_id.instance_id(),
                 );
                 // Execute batch reconstruction for b-y values
@@ -406,7 +406,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
             let sessionid = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot24(session_id.exec_id(), 2, self.id as u8),
+                SessionId::pack_slot24(session_id.exec_id(), self.id as u8, 2),
                 session_id.instance_id(),
             );
 
@@ -463,19 +463,19 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         // 2.
-        if sid.sub_id() == 1 {
+        if sid.round_id() == 1 {
             let open: Vec<F> = CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-            let round_id = sid.round_id();
-            let (target_map, label) = if round_id % 2 == 0 {
+            let dealer_id = sid.sub_id();
+            let (target_map, label) = if dealer_id % 2 == 0 {
                 (&mut storage.output_open_mult1, "a-x")
             } else {
                 (&mut storage.output_open_mult2, "b-y")
             };
 
-            if target_map.contains_key(&round_id) {
+            if target_map.contains_key(&dealer_id) {
                 return Err(MulError::Duplicate(format!(
                     "Received duplicate of round {}",
-                    round_id
+                    dealer_id
                 )));
             }
 
@@ -484,11 +484,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 "Received opened {} values for session_id: {:?} and round {:?}",
                 label,
                 session_id,
-                round_id
+                dealer_id
             );
 
-            target_map.insert(round_id, open);
-        } else if sid.sub_id() == 2 {
+            target_map.insert(dealer_id, open);
+        } else if sid.round_id() == 2 {
             info!(
                 self_id = self.id,
                 "Received shares for reconstruction using RBC for session_id: {:?}", session_id
@@ -1043,12 +1043,12 @@ pub mod tests {
         {
             let session_id_a = SessionId::new(
                 ProtocolType::Mul,
-                SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i) as u8),
+                SessionId::pack_slot24(session_id.exec_id(), (2 * i) as u8, 1),
                 session_id.instance_id(),
             );
             let session_id_b = SessionId::new(
                 ProtocolType::Mul,
-                SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i + 1) as u8),
+                SessionId::pack_slot24(session_id.exec_id(), (2 * i + 1) as u8, 1),
                 session_id.instance_id(),
             );
 
@@ -1097,7 +1097,7 @@ pub mod tests {
 
                 let shared_session_id = SessionId::new(
                     ProtocolType::Mul,
-                    SessionId::pack_slot24(session_id.exec_id(), 2, mul_node.id as u8),
+                    SessionId::pack_slot24(session_id.exec_id(), mul_node.id as u8, 2),
                     session_id.instance_id(),
                 );
 

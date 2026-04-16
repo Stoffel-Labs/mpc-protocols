@@ -73,7 +73,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
 
             let output = self.rbc.get_store(id).await?;
             let msg: MultMessage = bincode::deserialize(&output)?;
-            let authenticated_sender = id.round_id() as usize;
+            let authenticated_sender = id.sub_id() as usize;
             if msg.sender != authenticated_sender {
                 warn!(
                     "Dropping RBC output: inner sender {} does not match session round_id {}",
@@ -144,7 +144,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
 
         let rbc_sessionid = AvssSessionId::new(
             session_id.calling_protocol().unwrap(),
-            AvssSessionId::pack_slot24(session_id.exec_id(), 0, self.id as u8),
+            AvssSessionId::pack_slot24(session_id.exec_id(), self.id as u8, 0),
             session_id.instance_id(),
         );
 

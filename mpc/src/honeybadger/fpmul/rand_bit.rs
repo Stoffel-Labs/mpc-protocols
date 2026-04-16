@@ -266,7 +266,7 @@ where
         for (i, chunk) in a_square_share.chunks(self.threshold + 1).enumerate() {
             let session_id_batch = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot24(session_id.exec_id(), 0, i as u8),
+                SessionId::pack_slot24(session_id.exec_id(), i as u8, 0),
                 session_id.instance_id(),
             );
             self.batch_recon
@@ -306,14 +306,14 @@ where
         }
 
         let open: Vec<F> = CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-        let round_id = sid.round_id();
-        if storage.output_open.contains_key(&round_id) {
+        let dealer_id = sid.sub_id();
+        if storage.output_open.contains_key(&dealer_id) {
             return Err(RandBitError::Duplicate(format!(
                 "Already received for {}",
-                round_id
+                dealer_id
             )));
         }
-        storage.output_open.insert(round_id, open);
+        storage.output_open.insert(dealer_id, open);
         // If not initialized, data is stored but can't finalize yet.
         // init() will check for stored data and finalize if ready.
         if storage.a_share.is_none() {

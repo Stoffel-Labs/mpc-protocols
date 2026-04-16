@@ -418,7 +418,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 for (i, chunk) in share_rplusb.chunks(self.t + 1).enumerate() {
                     let session_id_batch = SessionId::new(
                         calling_proto,
-                        SessionId::pack_slot24(session_id.exec_id(), 0, i as u8),
+                        SessionId::pack_slot24(session_id.exec_id(), i as u8, 0),
                         session_id.instance_id(),
                     );
                     self.batch_recon
@@ -592,14 +592,14 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // deserialize the field element from the payload
         let share_i_list: Vec<F> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-        let round_id = sid.round_id();
-        if store.output_open.contains_key(&round_id) {
+        let dealer_id = sid.sub_id();
+        if store.output_open.contains_key(&dealer_id) {
             return Err(PRandError::Duplicate(format!(
                 "Already received for {}",
-                round_id
+                dealer_id
             )));
         }
-        store.output_open.insert(round_id, share_i_list);
+        store.output_open.insert(dealer_id, share_i_list);
         drop(store);
         self.try_finalize_bit(session_id, binding.clone()).await?;
         return Ok(());
