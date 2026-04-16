@@ -1358,8 +1358,7 @@ fn mul_e2e_without_preprocessing_turmoil() {
     }
 }
 
-#[test]
-fn fpmul_e2e_with_preprocessing() {
+fn fpmul_e2e_with_preprocessing(node_delay: Option<(usize, Duration)>) {
     setup_tracing();
 
     let n_parties = 4;
@@ -1411,7 +1410,7 @@ fn fpmul_e2e_with_preprocessing() {
         n_prandint,
         bound_l,
         security_k,
-        Duration::from_secs(30),
+        Duration::from_secs(300),
         vec![],
     );
 
@@ -1521,6 +1520,18 @@ fn fpmul_e2e_with_preprocessing() {
         Ok::<(), Box<dyn std::error::Error>>(())
     });
 
+    if let Some((slow_node_id, delay)) = node_delay {
+        for id in 0..n_parties {
+            if id != slow_node_id {
+                sim.set_link_latency(
+                    format!("node{}", slow_node_id),
+                    format!("node{}", id),
+                    delay,
+                );
+            }
+        }
+    }
+
     sim.run().unwrap();
 
     let shares_result: Result<Vec<_>, _> = std::iter::from_fn(|| rx_out.try_recv().ok()).collect();
@@ -1534,7 +1545,18 @@ fn fpmul_e2e_with_preprocessing() {
 }
 
 #[test]
-fn fpdiv_const_e2e() {
+fn fpmul_e2e_with_preprocessing_node_delayed() {
+    let slow_node = 0;
+    let delay = Duration::from_secs(5);
+    fpmul_e2e_with_preprocessing(Some((slow_node, delay)));
+}
+
+#[test]
+fn fpmul_e2e_with_preprocessing_without_delay() {
+    fpmul_e2e_with_preprocessing(None);
+}
+
+fn fpdiv_const_e2e(node_delay: Option<(usize, Duration)>) {
     setup_tracing();
     let n_parties = 4;
     let t = 1;
@@ -1729,6 +1751,18 @@ fn fpdiv_const_e2e() {
         Ok::<(), Box<dyn std::error::Error>>(())
     });
 
+    if let Some((slow_node_id, delay)) = node_delay {
+        for id in 0..n_parties {
+            if id != slow_node_id {
+                sim.set_link_latency(
+                    format!("node{}", slow_node_id),
+                    format!("node{}", id),
+                    delay,
+                );
+            }
+        }
+    }
+
     sim.run().unwrap();
 
     let shares_result: Result<Vec<_>, _> = std::iter::from_fn(|| rx_out.try_recv().ok()).collect();
@@ -1742,4 +1776,16 @@ fn fpdiv_const_e2e() {
 
     // 2.75 * 2^4 = 44
     assert_eq!(rec, Fr::from(44u64));
+}
+
+#[test]
+fn fpdiv_const_e2e_delayed() {
+    let slow_node = 0;
+    let delay = Duration::from_secs(5);
+    fpdiv_const_e2e(Some((slow_node, delay)));
+}
+
+#[test]
+fn fpdiv_const_e2e_without_delay() {
+    fpdiv_const_e2e(None);
 }
