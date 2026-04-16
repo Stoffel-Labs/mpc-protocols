@@ -1358,7 +1358,7 @@ fn mul_e2e_without_preprocessing_turmoil() {
     }
 }
 
-fn fpmul_e2e_with_preprocessing(node_delay: Option<(usize, Duration)>) {
+fn fpmul_e2e_with_preprocessing(node_delay: Option<Vec<(usize, Duration)>>) {
     setup_tracing();
 
     let n_parties = 4;
@@ -1520,14 +1520,16 @@ fn fpmul_e2e_with_preprocessing(node_delay: Option<(usize, Duration)>) {
         Ok::<(), Box<dyn std::error::Error>>(())
     });
 
-    if let Some((slow_node_id, delay)) = node_delay {
-        for id in 0..n_parties {
-            if id != slow_node_id {
-                sim.set_link_latency(
-                    format!("node{}", slow_node_id),
-                    format!("node{}", id),
-                    delay,
-                );
+    if let Some(slow_nodes) = node_delay {
+        for (slow_node_id, delay) in slow_nodes {
+            for other_id in 0..n_parties {
+                if slow_node_id != other_id {
+                    sim.set_link_latency(
+                        format!("node{}", slow_node_id),
+                        format!("node{}", other_id),
+                        delay,
+                    );
+                }
             }
         }
     }
@@ -1548,7 +1550,7 @@ fn fpmul_e2e_with_preprocessing(node_delay: Option<(usize, Duration)>) {
 fn fpmul_e2e_with_preprocessing_node_delayed() {
     let slow_node = 0;
     let delay = Duration::from_secs(5);
-    fpmul_e2e_with_preprocessing(Some((slow_node, delay)));
+    fpmul_e2e_with_preprocessing(Some(vec![(slow_node, delay)]));
 }
 
 #[test]
@@ -1556,7 +1558,7 @@ fn fpmul_e2e_with_preprocessing_without_delay() {
     fpmul_e2e_with_preprocessing(None);
 }
 
-fn fpdiv_const_e2e(node_delay: Option<(usize, Duration)>) {
+fn fpdiv_const_e2e(node_delay: Option<Vec<(usize, Duration)>>) {
     setup_tracing();
     let n_parties = 4;
     let t = 1;
@@ -1751,14 +1753,16 @@ fn fpdiv_const_e2e(node_delay: Option<(usize, Duration)>) {
         Ok::<(), Box<dyn std::error::Error>>(())
     });
 
-    if let Some((slow_node_id, delay)) = node_delay {
-        for id in 0..n_parties {
-            if id != slow_node_id {
-                sim.set_link_latency(
-                    format!("node{}", slow_node_id),
-                    format!("node{}", id),
-                    delay,
-                );
+    if let Some(slow_nodes) = node_delay {
+        for (slow_node_id, delay) in slow_nodes {
+            for other_id in 0..n_parties {
+                if slow_node_id != other_id {
+                    sim.set_link_latency(
+                        format!("node{}", slow_node_id),
+                        format!("node{}", other_id),
+                        delay,
+                    );
+                }
             }
         }
     }
@@ -1782,7 +1786,7 @@ fn fpdiv_const_e2e(node_delay: Option<(usize, Duration)>) {
 fn fpdiv_const_e2e_delayed() {
     let slow_node = 0;
     let delay = Duration::from_secs(5);
-    fpdiv_const_e2e(Some((slow_node, delay)));
+    fpdiv_const_e2e(Some(vec![(slow_node, delay)]));
 }
 
 #[test]
