@@ -287,7 +287,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         let share_len = x.len() % (self.t + 1);
 
         // 1.
-        let storage_bind = self.get_or_create_mult_storage(session_id).await;
+        let storage_bind = self.get_or_create_mult_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
 
         // 2.
@@ -455,7 +455,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         );
 
         // 1.
-        let storage_bind = self.get_or_create_mult_storage(session_id).await;
+        let storage_bind = self.get_or_create_mult_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
 
         if storage.protocol_state == MultProtocolState::Finished {
@@ -552,16 +552,17 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     pub async fn get_or_create_mult_storage(
         &self,
         session_id: SessionId,
-    ) -> Arc<Mutex<MultStorage<F>>> {
+    ) -> Result<Arc<Mutex<MultStorage<F>>>, MulError> {
         let mut storage = self.mult_storage.lock().await;
 
-        // should never occur, since only exec ID changes for different runs
-        assert!(storage.len() <= 256);
-
-        storage
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            warn!("Mul session limit reached");
+            return Err(MulError::LimitError);
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(MultStorage::empty())))
-            .clone()
+            .clone())
     }
 
     pub async fn wait_for_result(
@@ -839,7 +840,10 @@ pub mod tests {
         let start = Instant::now();
 
         loop {
-            let storage_bind = nodes[node_id].get_or_create_mult_storage(session_id).await;
+            let storage_bind = nodes[node_id]
+                .get_or_create_mult_storage(session_id)
+                .await
+                .unwrap();
             let storage = storage_bind.lock().await;
 
             let has_mult1_keys =
@@ -875,7 +879,10 @@ pub mod tests {
             .await
             .is_ok());
 
-        let storage_bind = nodes[node_id].get_or_create_mult_storage(session_id).await;
+        let storage_bind = nodes[node_id]
+            .get_or_create_mult_storage(session_id)
+            .await
+            .unwrap();
         let storage = storage_bind.lock().await;
 
         // openings via RBC should be there now
@@ -1006,7 +1013,10 @@ pub mod tests {
         // 4. Create node
         let mul_node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n_parties, t).unwrap();
 
-        let storage_bind = mul_node.get_or_create_mult_storage(session_id).await;
+        let storage_bind = mul_node
+            .get_or_create_mult_storage(session_id)
+            .await
+            .unwrap();
         let mut storage = storage_bind.lock().await;
         storage.inputs = (
             x_inputs_per_node[node_id].clone(),

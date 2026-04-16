@@ -22,7 +22,7 @@ use tokio::{
     sync::{mpsc::Receiver, Mutex},
     time::{timeout, Duration},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 /// Represents the shares stored by a player
 #[derive(Debug, Clone)]
@@ -234,7 +234,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     {
         // Phase 0: Terminal fast-path
         {
-            let binding = self.get_or_create_store(session_id).await;
+            let binding = self.get_or_create_store(session_id).await?;
             let store = binding.lock().await;
 
             match calling_proto {
@@ -254,7 +254,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         // Phase 1: Check readiness + decide what must be done
         let (batch_size, r_t_map, share_b_q, need_compute, need_open_start) = {
-            let binding = self.get_or_create_store(session_id).await;
+            let binding = self.get_or_create_store(session_id).await?;
             let store = binding.lock().await;
 
             let Some(batch_size) = store.batch_size else {
@@ -340,7 +340,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // ============================================================
         // Phase 3: Commit derived shares + PRandInt finish
         // ============================================================
-        let binding = self.get_or_create_store(session_id).await;
+        let binding = self.get_or_create_store(session_id).await?;
 
         let (int_sender, int_out) = {
             let mut store = binding.lock().await;
@@ -457,7 +457,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // Step 1: compute all maximal unqualified sets
         let tsets: Vec<Vec<usize>> = (0..self.n).combinations(self.t).collect();
 
-        let binding = self.get_or_create_store(session_id).await;
+        let binding = self.get_or_create_store(session_id).await?;
         let mut store = binding.lock().await;
         let my_tsets: Vec<Vec<usize>> = tsets
             .clone()
@@ -523,7 +523,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             }
         };
 
-        let binding = self.get_or_create_store(msg.session_id).await;
+        let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
         // Get or create entry for this tset
@@ -583,7 +583,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             sid.instance_id(),
         );
 
-        let binding = self.get_or_create_store(session_id).await;
+        let binding = self.get_or_create_store(session_id).await?;
         let mut store = binding.lock().await;
         if store.state == PrandState::BitFinished {
             return Ok(());
@@ -608,14 +608,16 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
-    ) -> Arc<Mutex<PRandBitDStore<F, G>>> {
+    ) -> Result<Arc<Mutex<PRandBitDStore<F, G>>>, PRandError> {
         let mut storage = self.store.lock().await;
 
-        // should never happen, since only exec ID changes for different runs
-        assert!(storage.len() <= 256);
-        storage
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            warn!("PRandBitD session limit reached");
+            return Err(PRandError::LimitError);
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(PRandBitDStore::empty())))
-            .clone()
+            .clone())
     }
 }

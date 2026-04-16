@@ -111,7 +111,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         assert_eq!(session_id.round_id(), 0);
 
         let no_of_mul = x.len();
-        let storage_bind = self.get_or_create_mult_storage(session_id).await;
+        let storage_bind = self.get_or_create_mult_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
 
         storage.no_of_mul = Some(no_of_mul);
@@ -159,7 +159,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     }
 
     pub async fn open_mult_handler(&self, msg: MultMessage) -> Result<(), MulError> {
-        let storage_bind = self.get_or_create_mult_storage(msg.session_id).await;
+        let storage_bind = self.get_or_create_mult_storage(msg.session_id).await?;
         let mut storage = storage_bind.lock().await;
         if storage.protocol_state == MultProtocolState::Finished {
             return Ok(());
@@ -196,16 +196,16 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     pub async fn get_or_create_mult_storage(
         &self,
         session_id: AvssSessionId,
-    ) -> Arc<Mutex<MultStorage<F, G>>> {
+    ) -> Result<Arc<Mutex<MultStorage<F, G>>>, MulError> {
         let mut storage = self.mult_storage.lock().await;
-
-        // should never occur, since only exec ID changes for different runs
-        assert!(storage.len() <= 256);
-
-        storage
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            warn!("AVSS Mul session limit reached");
+            return Err(MulError::LimitError);
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(MultStorage::empty())))
-            .clone()
+            .clone())
     }
 
     pub async fn wait_for_result(

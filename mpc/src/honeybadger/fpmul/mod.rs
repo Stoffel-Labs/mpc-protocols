@@ -154,6 +154,8 @@ pub enum PRandError {
     Timeout(SessionId),
     #[error("Session id {0:?} does not exist in store")]
     ClearStoreError(SessionId),
+    #[error("Store Limit")]
+    LimitError,
 }
 
 /// Message sent in the Random Double Sharing protocol.
@@ -302,6 +304,8 @@ pub enum TruncPrError {
     Timeout(SessionId),
     #[error("Session id {0:?} does not exist in store")]
     ClearStoreError(SessionId),
+    #[error("Store Limit")]
+    LimitError,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

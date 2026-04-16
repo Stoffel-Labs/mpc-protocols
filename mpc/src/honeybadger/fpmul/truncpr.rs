@@ -96,15 +96,19 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         Ok(())
     }
 
-    pub async fn get_or_create_store(&mut self, session: SessionId) -> Arc<Mutex<TruncPrStore<F>>> {
+    pub async fn get_or_create_store(
+        &mut self,
+        session: SessionId,
+    ) -> Result<Arc<Mutex<TruncPrStore<F>>>, TruncPrError> {
         let mut map = self.store.lock().await;
-
-        // should always hold, since only exec ID changes between different sessions
-        assert!(map.len() <= 256);
-
-        map.entry(session)
+        if map.len() >= 256 && !map.contains_key(&session) {
+            warn!("TruncPr session limit reached");
+            return Err(TruncPrError::LimitError);
+        }
+        Ok(map
+            .entry(session)
             .or_insert((|| Arc::new(Mutex::new(TruncPrStore::empty())))())
-            .clone()
+            .clone())
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> Result<(), TruncPrError> {
@@ -228,7 +232,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             }
         };
 
-        let store = self.get_or_create_store(session).await; // k,m already set in store
+        let store = self.get_or_create_store(session).await?; // k,m already set in store
         let (r_dash, b) = {
             let mut s = store.lock().await;
             s.k = k;
@@ -294,7 +298,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             return Err(TruncPrError::SessionIdError(msg.session_id));
         }
 
-        let store = self.get_or_create_store(msg.session_id).await;
+        let store = self.get_or_create_store(msg.session_id).await?;
         {
             let mut s = store.lock().await;
 

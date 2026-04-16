@@ -17,7 +17,7 @@ use tokio::sync::{
     mpsc::{self},
     Mutex,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone, Debug)]
 pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
@@ -67,13 +67,18 @@ where
     async fn get_or_create_store(
         &mut self,
         sid: AvssSessionId,
-    ) -> Arc<Mutex<TripleGenStore<F, C>>> {
+    ) -> Result<Arc<Mutex<TripleGenStore<F, C>>>, TripleGenError> {
         let mut map = self.store.lock().await;
-        map.entry(sid)
+        if map.len() >= 256 && !map.contains_key(&sid) {
+            warn!("AVSS TripleGen session limit reached");
+            return Err(TripleGenError::LimitError);
+        }
+        Ok(map
+            .entry(sid)
             .or_insert(Arc::new(Mutex::new(TripleGenStore::empty(
                 2 * self.threshold + 1,
             ))))
-            .clone()
+            .clone())
     }
 
     pub async fn gen_triple<N, G>(
@@ -123,7 +128,7 @@ where
         }
 
         // Create store once
-        let store_ref = self.get_or_create_store(session_id).await;
+        let store_ref = self.get_or_create_store(session_id).await?;
         let xs: Vec<F> = (0..m).map(|i| F::from((i + 1) as u64)).collect();
 
         // === Step 3: collect dealer outputs, then lagrange-combine component-wise ===

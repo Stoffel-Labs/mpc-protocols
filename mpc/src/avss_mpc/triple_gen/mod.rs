@@ -47,6 +47,8 @@ pub enum TripleGenError {
     ResultAlreadyReceived(AvssSessionId),
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(AvssSessionId),
+    #[error("Store Limit")]
+    LimitError,
 }
 
 /// Store for one triple session

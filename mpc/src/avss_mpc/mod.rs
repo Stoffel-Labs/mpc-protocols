@@ -400,6 +400,21 @@ where
                         rbc_msg.session_id.instance_id(),
                     ));
                 }
+                if rbc_msg.msg_type.is_dealer_message() {
+                    let expected_dealer = match rbc_msg.session_id.calling_protocol() {
+                        Some(ProtocolType::Mul) => rbc_msg.session_id.round_id() as usize,
+                        _ => rbc_msg.session_id.sub_id() as usize,
+                    };
+                    if rbc_msg.sender_id != expected_dealer {
+                        warn!(
+                            "Rejecting dealer message: 
+                            sender {} is not expected dealer {} for session {:?}",
+                            rbc_msg.sender_id, expected_dealer, rbc_msg.session_id
+                        );
+                        return Err(AvssMPCError::InvalidPartyId);
+                    }
+                }
+
                 match rbc_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Avss) => {
                         self.share_gen_avss.avss.rbc.process(rbc_msg, net).await?;

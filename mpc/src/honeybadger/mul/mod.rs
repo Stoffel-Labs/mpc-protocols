@@ -105,6 +105,8 @@ pub enum MulError {
     Abort,
     #[error("Session id {0:?} does not exist in store")]
     ClearStoreError(SessionId),
+    #[error("Store Limit")]
+    LimitError,
 }
 
 /// Generic message for the multiplication protocol.
