@@ -412,8 +412,10 @@ fn test_input_protocol_e2e_turmoil() {
     }
 }
 
-#[test]
-fn preprocessing_e2e_turmoil() {
+fn preprocessing_e2e_turmoil(
+    node_delay: Option<Vec<(usize, Duration)>>,
+    node_freeze_start: Option<DelayedStart>,
+) {
     setup_tracing();
 
     let n_parties = 4;
@@ -518,8 +520,34 @@ fn preprocessing_e2e_turmoil() {
     drop(tx);
     drop(done_tx);
 
+    if let Some(delayed_start) = &node_freeze_start {
+        for delayed_node in &delayed_start.delayed_nodes {
+            for other_id in 0..n_parties {
+                if *delayed_node != other_id {
+                    sim.hold(format!("node{}", delayed_node), format!("node{}", other_id));
+                }
+            }
+        }
+    }
+
     let mut done_rx = done_rx;
     sim.client("driver", async move {
+        if let Some(delayed_start) = node_freeze_start {
+            tokio::time::sleep(delayed_start.time).await;
+
+            // Now, the nodes connect again
+            for freezed_node in delayed_start.delayed_nodes {
+                for other_id in 0..n_parties {
+                    if freezed_node != other_id {
+                        turmoil::release(
+                            format!("node{}", freezed_node),
+                            format!("node{}", other_id),
+                        );
+                    }
+                }
+            }
+        }
+
         let mut count = 0;
         while count < n_parties {
             match done_rx.recv().await {
@@ -529,6 +557,20 @@ fn preprocessing_e2e_turmoil() {
         }
         Ok::<(), Box<dyn std::error::Error>>(())
     });
+
+    if let Some(delayed_nodes) = node_delay {
+        for (slow_node, delay) in delayed_nodes {
+            for other_id in 0..n_parties {
+                if slow_node != other_id {
+                    sim.set_link_latency(
+                        format!("node{}", slow_node),
+                        format!("node{}", other_id),
+                        delay,
+                    );
+                }
+            }
+        }
+    }
 
     sim.run().unwrap();
 
@@ -552,6 +594,28 @@ fn preprocessing_e2e_turmoil() {
             }
         }
     }
+}
+
+#[test]
+fn preprocessing_e2e_with_delay() {
+    let slow_nodes = Some(vec![(0, Duration::from_secs(3))]);
+    preprocessing_e2e_turmoil(slow_nodes, None);
+}
+
+#[test]
+fn preprocessing_e2e_without_delay() {
+    preprocessing_e2e_turmoil(None, None);
+}
+
+#[test]
+fn preprocessing_e2e_with_freeze_start() {
+    preprocessing_e2e_turmoil(
+        None,
+        Some(DelayedStart {
+            delayed_nodes: vec![0],
+            time: Duration::from_secs(3),
+        }),
+    );
 }
 
 #[test]
@@ -1358,7 +1422,16 @@ fn mul_e2e_without_preprocessing_turmoil() {
     }
 }
 
-fn fpmul_e2e_with_preprocessing(node_delay: Option<Vec<(usize, Duration)>>) {
+#[derive(Clone)]
+struct DelayedStart {
+    delayed_nodes: Vec<usize>,
+    time: Duration,
+}
+
+fn fpmul_e2e_with_preprocessing(
+    node_delay: Option<Vec<(usize, Duration)>>,
+    node_freeze_start: Option<DelayedStart>,
+) {
     setup_tracing();
 
     let n_parties = 4;
@@ -1509,7 +1582,33 @@ fn fpmul_e2e_with_preprocessing(node_delay: Option<Vec<(usize, Duration)>>) {
     drop(tx_out);
     drop(tx_client);
 
+    if let Some(delayed_start) = &node_freeze_start {
+        for freezed_node in &delayed_start.delayed_nodes {
+            for other_id in 0..n_parties {
+                if *freezed_node != other_id {
+                    sim.hold(format!("node{}", freezed_node), format!("node{}", other_id));
+                }
+            }
+        }
+    }
+
     sim.client("driver", async move {
+        if let Some(delayed_start) = node_freeze_start {
+            tokio::time::sleep(delayed_start.time).await;
+
+            // Now, the nodes connect again
+            for freezed_node in delayed_start.delayed_nodes {
+                for other_id in 0..n_parties {
+                    if freezed_node != other_id {
+                        turmoil::release(
+                            format!("node{}", freezed_node),
+                            format!("node{}", other_id),
+                        );
+                    }
+                }
+            }
+        }
+
         let mut count = 0;
         while count < n_parties {
             match rx_client.recv().await {
@@ -1550,15 +1649,29 @@ fn fpmul_e2e_with_preprocessing(node_delay: Option<Vec<(usize, Duration)>>) {
 fn fpmul_e2e_with_preprocessing_node_delayed() {
     let slow_node = 0;
     let delay = Duration::from_secs(5);
-    fpmul_e2e_with_preprocessing(Some(vec![(slow_node, delay)]));
+    fpmul_e2e_with_preprocessing(Some(vec![(slow_node, delay)]), None);
+}
+
+#[test]
+fn fpmul_e2e_with_preprocessing_freezing_start() {
+    fpmul_e2e_with_preprocessing(
+        None,
+        Some(DelayedStart {
+            delayed_nodes: vec![0],
+            time: Duration::from_secs(3),
+        }),
+    );
 }
 
 #[test]
 fn fpmul_e2e_with_preprocessing_without_delay() {
-    fpmul_e2e_with_preprocessing(None);
+    fpmul_e2e_with_preprocessing(None, None);
 }
 
-fn fpdiv_const_e2e(node_delay: Option<Vec<(usize, Duration)>>) {
+fn fpdiv_const_e2e(
+    node_delay: Option<Vec<(usize, Duration)>>,
+    node_freeze_start: Option<DelayedStart>,
+) {
     setup_tracing();
     let n_parties = 4;
     let t = 1;
@@ -1742,7 +1855,33 @@ fn fpdiv_const_e2e(node_delay: Option<Vec<(usize, Duration)>>) {
     drop(tx_out);
     drop(tx_client);
 
+    if let Some(delayed_start) = &node_freeze_start {
+        for freezed_node in &delayed_start.delayed_nodes {
+            for other_id in 0..n_parties {
+                if *freezed_node != other_id {
+                    sim.hold(format!("node{}", freezed_node), format!("node{}", other_id));
+                }
+            }
+        }
+    }
+
     sim.client("driver", async move {
+        if let Some(delayed_start) = node_freeze_start {
+            tokio::time::sleep(delayed_start.time).await;
+
+            // Now, the nodes connect again
+            for freezed_node in delayed_start.delayed_nodes {
+                for other_id in 0..n_parties {
+                    if freezed_node != other_id {
+                        turmoil::release(
+                            format!("node{}", freezed_node),
+                            format!("node{}", other_id),
+                        );
+                    }
+                }
+            }
+        }
+
         let mut count = 0;
         while count < n_parties {
             match rx_client.recv().await {
@@ -1786,10 +1925,21 @@ fn fpdiv_const_e2e(node_delay: Option<Vec<(usize, Duration)>>) {
 fn fpdiv_const_e2e_delayed() {
     let slow_node = 0;
     let delay = Duration::from_secs(5);
-    fpdiv_const_e2e(Some(vec![(slow_node, delay)]));
+    fpdiv_const_e2e(Some(vec![(slow_node, delay)]), None);
 }
 
 #[test]
 fn fpdiv_const_e2e_without_delay() {
-    fpdiv_const_e2e(None);
+    fpdiv_const_e2e(None, None);
+}
+
+#[test]
+fn fpdiv_const_e2e_freeze_start() {
+    fpdiv_const_e2e(
+        None,
+        Some(DelayedStart {
+            delayed_nodes: vec![0],
+            time: Duration::from_secs(3),
+        }),
+    );
 }
