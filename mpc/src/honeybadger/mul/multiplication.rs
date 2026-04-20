@@ -8,11 +8,12 @@ use crate::{
         },
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         triple_gen::ShamirBeaverTriple,
-        SessionId, WrappedMessage,
+        SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use bincode::Options;
 use itertools::izip;
 use std::{
     collections::HashMap,
@@ -184,7 +185,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: MultMessage = bincode::deserialize(&output)?;
+            let msg: MultMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender != authenticated_sender {
                 warn!(

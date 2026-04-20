@@ -5,11 +5,12 @@ use crate::{
             mod_pow_2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore, TruncState,
         },
         robust_interpolate::robust_interpolate::RobustShare,
-        SessionId, WrappedMessage,
+        SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use bincode::Options;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use tokio::{
@@ -72,7 +73,11 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             };
 
             let output = self.rbc.get_store(id).await?;
-            let mut msg: TruncPrMessage = bincode::deserialize(&output)?;
+            let mut msg: TruncPrMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(

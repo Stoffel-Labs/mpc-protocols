@@ -8,13 +8,13 @@ use crate::{
     },
     honeybadger::{
         double_share::DoubleShamirShare, ran_dou_sha::messages::RanDouShaPayload,
-        robust_interpolate::InterpolateError, ProtocolType, SessionId, WrappedMessage,
+        robust_interpolate::InterpolateError, ProtocolType, SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalSerialize, SerializationError};
-use bincode::ErrorKind;
+use bincode::{ErrorKind, Options};
 use messages::{RanDouShaMessage, ReconstructionMessage};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -206,7 +206,11 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let mut msg: RanDouShaMessage = bincode::deserialize(&output)?;
+            let mut msg: RanDouShaMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(

@@ -2,12 +2,14 @@ use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
+use bincode::Options;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 
+use crate::honeybadger::MAX_MESSAGE_SIZE;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde, ShareError},
@@ -78,7 +80,11 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let mut msg: RanShaMessage = bincode::deserialize(&output)?;
+            let mut msg: RanShaMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(

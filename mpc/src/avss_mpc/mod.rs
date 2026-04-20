@@ -28,13 +28,14 @@ use ark_std::rand::{
     Rng, SeedableRng,
 };
 use async_trait::async_trait;
-use bincode::ErrorKind;
+use bincode::{ErrorKind, Options};
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Duration};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
 pub mod input;
 pub mod mul;
@@ -129,7 +130,11 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), AvssMPCError> {
-        let wrapped: AvssWrappedMessage = bincode::deserialize(&raw_msg)?;
+        let wrapped: AvssWrappedMessage = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MAX_MESSAGE_SIZE)
+            .deserialize(&raw_msg)?;
 
         match wrapped {
             AvssWrappedMessage::Input(input_msg) => {
@@ -389,7 +394,11 @@ where
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), Self::Error> {
-        let wrapped: AvssWrappedMessage = bincode::deserialize(&raw_msg)?;
+        let wrapped: AvssWrappedMessage = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MAX_MESSAGE_SIZE)
+            .deserialize(&raw_msg)?;
         match wrapped {
             AvssWrappedMessage::Rbc(rbc_msg) => {
                 if sender_id != rbc_msg.sender_id {
