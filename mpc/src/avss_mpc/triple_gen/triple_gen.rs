@@ -95,12 +95,12 @@ where
     {
         info!("party {} starting triple gen", self.id);
 
-        let t = self.threshold;
-        let m = 2 * t + 1;
-
         if a.len() != b.len() {
             return Err(TripleGenError::InvalidShareLength);
         }
+        let t = self.threshold;
+        let m = 2 * t + 1;
+
         let batch = a.len();
 
         // === Step 1: local products (vector) ===

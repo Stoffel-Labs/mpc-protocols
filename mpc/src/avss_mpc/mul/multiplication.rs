@@ -178,6 +178,25 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         let open_message: ReconstructionMessage<F, G> =
             CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 
+        // Validate degree and Feldman commitments before storing
+        for share in open_message
+            .a_sub_x
+            .iter()
+            .chain(open_message.b_sub_y.iter())
+        {
+            if share.feldmanshare.degree != self.t {
+                return Err(MulError::InvalidInput(format!(
+                    "Invalid share degree from sender {}",
+                    msg.sender
+                )));
+            }
+            if !verify_feldman(share.clone()) {
+                return Err(MulError::InvalidInput(format!(
+                    "Feldman verification failed for share from sender {}",
+                    msg.sender
+                )));
+            }
+        }
         storage
             .received_shares
             .insert(msg.sender, (open_message.a_sub_x, open_message.b_sub_y));
@@ -185,11 +204,6 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         let _ = self.try_finalize_mul(msg.session_id, storage_bind).await?;
         info!("Multiplication completed at node {}", self.id);
 
-        Ok(())
-    }
-
-    pub async fn process(&mut self, message: MultMessage) -> Result<(), MulError> {
-        self.open_mult_handler(message).await?;
         Ok(())
     }
 

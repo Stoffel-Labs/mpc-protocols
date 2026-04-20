@@ -112,8 +112,14 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
             ));
         }
 
-        // 2. Verify Feldman commitments
+        // 2. Verify Feldman commitments and degree
         for share in &shares {
+            if share.feldmanshare.degree != self.t {
+                return Err(AvssOutputError::InvalidInput(format!(
+                    "Invalid share degree from server {}",
+                    msg.sender_id
+                )));
+            }
             if !verify_feldman(share.clone()) {
                 return Err(AvssOutputError::VerificationFailed(format!(
                     "Feldman verification failed for share from server {}",
