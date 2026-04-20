@@ -86,6 +86,12 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
                 );
                 continue;
             }
+            if msg.session_id.exec_id() != id.exec_id()
+                || msg.session_id.instance_id() != id.instance_id()
+            {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
             msg.sender_id = authenticated_sender;
             info!(
                 node_id = self.id,

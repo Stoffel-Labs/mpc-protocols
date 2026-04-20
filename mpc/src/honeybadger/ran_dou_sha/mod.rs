@@ -8,7 +8,8 @@ use crate::{
     },
     honeybadger::{
         double_share::DoubleShamirShare, ran_dou_sha::messages::RanDouShaPayload,
-        robust_interpolate::InterpolateError, ProtocolType, SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
+        robust_interpolate::InterpolateError, ProtocolType, SessionId, WrappedMessage,
+        MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::FftField;
@@ -219,6 +220,13 @@ where
                 );
                 continue;
             }
+            if msg.session_id.exec_id() != id.exec_id()
+                || msg.session_id.instance_id() != id.instance_id()
+            {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
+
             msg.sender_id = authenticated_sender;
 
             match self.output_handler(msg).await {

@@ -20,7 +20,7 @@ use tokio::sync::{
     mpsc::{self, Receiver, Sender},
     Mutex,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
@@ -232,6 +232,12 @@ where
                 .allow_trailing_bytes()
                 .with_limit(MAX_MESSAGE_SIZE)
                 .deserialize(&output)?;
+
+            if msg.session_id != id {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
+
             match self.process(msg).await {
                 Ok(()) => {}
                 Err(e) => {
