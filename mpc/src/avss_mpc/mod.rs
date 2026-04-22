@@ -446,15 +446,17 @@ where
                     }
                 }
             }
-
+            AvssWrappedMessage::Avss(_) => {
+                warn!("Incorrect message received at process function (Avss)");
+            }
+            AvssWrappedMessage::Mul(_) => {
+                warn!("Incorrect message received at process function (Input)");
+            }
             AvssWrappedMessage::Input(_) => {
                 warn!("Incorrect message received at process function (Input)");
             }
             AvssWrappedMessage::Output(_) => {
                 warn!("Incorrect message received at process function (Output)");
-            }
-            _ => {
-                warn!("Unknown session ID in AvssMPC");
             }
         }
 
