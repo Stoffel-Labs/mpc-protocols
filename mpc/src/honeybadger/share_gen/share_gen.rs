@@ -99,6 +99,11 @@ where
                 warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
                 continue;
             }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != id.sub_id()
+            {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
 
             msg.sender_id = authenticated_sender;
             match self.output_handler(msg).await {

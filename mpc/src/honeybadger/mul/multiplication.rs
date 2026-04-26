@@ -206,6 +206,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
                 continue;
             }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != id.sub_id()
+            {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
 
             match self
                 .open_mult_handler(authenticated_sender, msg.session_id, msg.payload)
