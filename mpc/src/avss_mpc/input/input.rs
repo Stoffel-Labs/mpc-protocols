@@ -147,6 +147,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         let mut send_over_network = false;
         let mut already_rand_shares = false;
         let mut unknown_client = false;
+        let mut invalid_length = false;
 
         self.status_sender.send_if_modified(|status| {
             match status.get(&client_id) {
@@ -162,6 +163,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                         .iter()
                         .map(|s| s.feldmanshare.share[0])
                         .collect();
+                    if masked_values.len() != shares.len() {
+                        invalid_length = true;
+                        return false;
+                    }
                     let input_shares = calculate_input_shares(&masked_values, &shares);
 
                     status.insert(client_id, (InputType::InputShares, input_shares));
@@ -187,6 +192,11 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         if unknown_client {
             return Err(AvssInputError::InvalidInput(
                 "Unknown client {client_id}".to_string(),
+            ));
+        }
+        if invalid_length {
+            return Err(AvssInputError::InvalidInput(
+                "masked_inputs length does not match shares length".to_string(),
             ));
         }
         if already_rand_shares {
@@ -224,6 +234,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
 
         let mut unknown_client = false;
         let mut already_masked_inputs = false;
+        let mut invalid_length = false;
 
         self.status_sender
             .send_if_modified(|status| match status.get(&sender_id) {
@@ -232,6 +243,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                     false
                 }
                 Some((InputType::RandomShares, random_shares)) => {
+                    if masked_inputs.len() != random_shares.len() {
+                        invalid_length = true;
+                        return false;
+                    }
                     let input_shares = calculate_input_shares(&masked_inputs, random_shares);
 
                     status.insert(sender_id, (InputType::InputShares, input_shares));
@@ -271,6 +286,13 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                 }
             });
 
+        if invalid_length {
+            return Err(AvssInputError::InvalidInput(format!(
+                "masked_inputs length {} does not match expected {}",
+                masked_inputs.len(),
+                sender_id
+            )));
+        }
         if already_masked_inputs {
             return Err(AvssInputError::Duplicate(format!(
                 "Server {} already received masked inputs from {}",
