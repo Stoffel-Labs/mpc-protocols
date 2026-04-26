@@ -394,6 +394,12 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
 
         // Verify Feldman commitments on received shares
         for share in &shares {
+            if share.feldmanshare.degree != self.t {
+                return Err(AvssInputError::InvalidInput(format!(
+                    "Invalid share degree from server {}",
+                    msg.sender_id
+                )));
+            }
             if !verify_feldman(share.clone()) {
                 return Err(AvssInputError::VerificationFailed(format!(
                     "Feldman verification failed for share from server {}",
@@ -425,19 +431,30 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             self.client_id, msg.sender_id
         );
 
-        let mut r_shares = vec![vec![]; input_len];
-        let mut masks = vec![];
-        let mut output = vec![];
-        // For Feldman shares, we need t+1 shares to reconstruct (degree t polynomial)
         if d.received_shares.len() >= self.t + 1 {
-            info!("Received enough shares to reconstruct");
-            for (_, r_share) in d.received_shares.iter() {
-                for i in 0..input_len {
-                    r_shares[i].push(r_share[i].clone());
+            let mut masks = vec![];
+            let mut output = vec![];
+            let mut consistent_groups: Vec<Option<Vec<FeldmanShamirShare<F, G>>>> =
+                vec![None; input_len];
+
+            for i in 0..input_len {
+                let mut by_commitment: HashMap<Vec<u8>, Vec<FeldmanShamirShare<F, G>>> =
+                    HashMap::new();
+                for (_, shares) in d.received_shares.iter() {
+                    let share = &shares[i];
+                    let mut key = Vec::new();
+                    share.commitments.serialize_compressed(&mut key)?;
+                    by_commitment.entry(key).or_default().push(share.clone());
+                }
+                match by_commitment.into_values().find(|g| g.len() >= self.t + 1) {
+                    Some(group) => consistent_groups[i] = Some(group),
+                    None => return Ok(()), // not enough consistent shares yet, wait for more
                 }
             }
-            for recon in r_shares {
-                let secret = FeldmanShamirShare::<F, G>::recover_secret(&recon, self.n, self.t)?;
+
+            info!("Received enough consistent shares to reconstruct");
+            for group in consistent_groups.into_iter().flatten() {
+                let secret = FeldmanShamirShare::<F, G>::recover_secret(&group, self.n, self.t)?;
                 masks.push(secret.1);
             }
 

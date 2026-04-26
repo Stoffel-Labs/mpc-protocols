@@ -49,6 +49,8 @@ pub enum MulError {
     Abort,
     #[error("Session id {0:?} does not exist in store")]
     ClearStoreError(AvssSessionId),
+    #[error("Store Limit")]
+    LimitError,
 }
 
 #[derive(Clone, Debug, PartialEq)]
