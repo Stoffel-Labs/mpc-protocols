@@ -28,13 +28,14 @@ use ark_std::rand::{
     Rng, SeedableRng,
 };
 use async_trait::async_trait;
-use bincode::ErrorKind;
+use bincode::{ErrorKind, Options};
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Duration};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
 pub mod input;
 pub mod mul;
@@ -129,7 +130,11 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), AvssMPCError> {
-        let wrapped: AvssWrappedMessage = bincode::deserialize(&raw_msg)?;
+        let wrapped: AvssWrappedMessage = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MAX_MESSAGE_SIZE)
+            .deserialize(&raw_msg)?;
 
         match wrapped {
             AvssWrappedMessage::Input(input_msg) => {
@@ -389,7 +394,11 @@ where
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), Self::Error> {
-        let wrapped: AvssWrappedMessage = bincode::deserialize(&raw_msg)?;
+        let wrapped: AvssWrappedMessage = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MAX_MESSAGE_SIZE)
+            .deserialize(&raw_msg)?;
         match wrapped {
             AvssWrappedMessage::Rbc(rbc_msg) => {
                 if sender_id != rbc_msg.sender_id {
@@ -400,6 +409,18 @@ where
                         rbc_msg.session_id.instance_id(),
                     ));
                 }
+                if rbc_msg.msg_type.is_dealer_message() {
+                    let expected_dealer = rbc_msg.session_id.sub_id() as usize;
+                    if rbc_msg.sender_id != expected_dealer {
+                        warn!(
+                            "Rejecting dealer message: 
+                            sender {} is not expected dealer {} for session {:?}",
+                            rbc_msg.sender_id, expected_dealer, rbc_msg.session_id
+                        );
+                        return Err(AvssMPCError::InvalidPartyId);
+                    }
+                }
+
                 match rbc_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Avss) => {
                         self.share_gen_avss.avss.rbc.process(rbc_msg, net).await?;
@@ -425,26 +446,17 @@ where
                     }
                 }
             }
-            AvssWrappedMessage::Mul(mul_message) => {
-                if sender_id != mul_message.sender {
-                    return Err(AvssMPCError::InvalidPartyId);
-                }
-                if mul_message.session_id.instance_id() != self.params.instance_id {
-                    return Err(AvssMPCError::InstanceIdError(
-                        mul_message.session_id.instance_id(),
-                    ));
-                }
-                self.mul_node.process(mul_message).await?
+            AvssWrappedMessage::Avss(_) => {
+                warn!("Incorrect message received at process function (Avss)");
             }
-
+            AvssWrappedMessage::Mul(_) => {
+                warn!("Incorrect message received at process function (Input)");
+            }
             AvssWrappedMessage::Input(_) => {
                 warn!("Incorrect message received at process function (Input)");
             }
             AvssWrappedMessage::Output(_) => {
                 warn!("Incorrect message received at process function (Output)");
-            }
-            _ => {
-                warn!("Unknown session ID in AvssMPC");
             }
         }
 

@@ -2,9 +2,10 @@ use crate::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use crate::honeybadger::input::InputError;
 use crate::honeybadger::input::InputMessage;
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use crate::honeybadger::{ProtocolType, SessionId, WrappedMessage};
+use crate::honeybadger::{ProtocolType, SessionId, WrappedMessage, MAX_MESSAGE_SIZE};
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
+use bincode::Options;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stoffelnet::network_utils::{ClientId, Network, PartyId};
@@ -15,7 +16,9 @@ use tokio::{
     },
     time::{timeout, Duration},
 };
-use tracing::info;
+use tracing::{info, warn};
+
+const MAX_INPUT_ELEMENTS: u64 = 65_536;
 
 /// In the beginning of an MPC calculation, each node has to obtain a share of all clients' inputs.
 /// This happens via the mechanism described in Section 4.1 in the paper: given one random sharing
@@ -144,8 +147,20 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: InputMessage = bincode::deserialize(&output)?;
-            match self.input_handler(msg.sender_id, msg.payload).await {
+            let msg: InputMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
+            let authenticated_sender = id.sub_id() as usize;
+            if msg.sender_id != authenticated_sender {
+                warn!(
+                    "Dropping RBC output: inner sender_id {} does not match session sub_id {}",
+                    msg.sender_id, authenticated_sender
+                );
+                continue;
+            }
+            match self.input_handler(authenticated_sender, msg.payload).await {
                 Ok(()) => {}
                 Err(e) => {
                     return Err(e);
@@ -250,6 +265,15 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         );
 
         let masked_inputs_as_shares: Vec<RobustShare<F>> = {
+            if payload.len() < 8 {
+                return Err(InputError::InvalidInput("Payload too short".to_string()));
+            }
+            let declared_len = u64::from_le_bytes(payload[..8].try_into().unwrap());
+            if declared_len > MAX_INPUT_ELEMENTS {
+                return Err(InputError::InvalidInput(
+                    "Declared input length exceeds maximum".to_string(),
+                ));
+            }
             let masked_inputs: Vec<F> =
                 ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
             masked_inputs
@@ -412,19 +436,31 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
         msg: InputMessage,
         net: Arc<N>,
     ) -> Result<(), InputError> {
-        let mut shares: Vec<RobustShare<F>> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
-        for share in &mut shares {
-            share.id = msg.sender_id;
-        }
         let mut d = self.client_data.lock().await;
-
         let input_len = d.inputs.len();
 
-        if shares.len() != input_len {
+        if msg.payload.len() < 8 {
+            return Err(InputError::InvalidInput("Payload too short".to_string()));
+        }
+        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap()) as usize;
+        if declared_len != input_len {
             return Err(InputError::InvalidInput(
                 "Mismatch in input and share length".to_string(),
             ));
+        }
+
+        let mut shares: Vec<RobustShare<F>> =
+            ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
+        if !shares.iter().all(|s| s.id == msg.sender_id) {
+            return Err(InputError::InvalidInput(
+                "Share ID does not match authenticated sender".into(),
+            ));
+        }
+        for share in &mut shares {
+            share.id = msg.sender_id;
+            if share.degree != self.t {
+                return Err(InputError::InvalidInput("Invalid share degree".to_string()));
+            }
         }
 
         // happens if less than `n` messages were sufficient for reconstruction

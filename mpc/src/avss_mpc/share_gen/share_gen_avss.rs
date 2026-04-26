@@ -25,7 +25,7 @@ use tokio::{
     },
     time::{timeout, Duration},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone, Debug)]
 pub struct RanShaAvssNode<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
@@ -74,12 +74,16 @@ where
     pub async fn get_or_create_store(
         &mut self,
         session_id: AvssSessionId,
-    ) -> Arc<Mutex<RanShaAvssStore<F, C>>> {
+    ) -> Result<Arc<Mutex<RanShaAvssStore<F, C>>>, RanShaAvssError> {
         let mut storage = self.store.lock().await;
-        storage
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            warn!("RanShaAvss session limit reached");
+            return Err(RanShaAvssError::LimitError);
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(RanShaAvssStore::empty(self.n_parties))))
-            .clone()
+            .clone())
     }
 
     pub async fn wait_for_result(
@@ -142,7 +146,7 @@ where
                 let mut store = self.avss.shares.lock().await;
                 let avss_share = store.remove(&id).unwrap().unwrap();
                 drop(store);
-                let binding = self.get_or_create_store(session_id).await;
+                let binding = self.get_or_create_store(session_id).await?;
                 let mut ransha_storage = binding.lock().await;
                 let sender_id = id.sub_id();
                 if usize::from(sender_id) >= self.n_parties {
@@ -221,7 +225,7 @@ where
         }
 
         // Store results
-        let bind_store = self.get_or_create_store(session_id).await;
+        let bind_store = self.get_or_create_store(session_id).await?;
         let mut store = bind_store.lock().await;
 
         store.computed_r_shares = (0..n)

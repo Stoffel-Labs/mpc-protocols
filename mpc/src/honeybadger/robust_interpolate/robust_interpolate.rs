@@ -96,6 +96,20 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShare<F> {
         n: usize,
         t: usize,
     ) -> Result<(Vec<Self::SecretType>, Self::SecretType), InterpolateError> {
+        // n >= 3t + 1 is required for Byzantine fault tolerance
+        if n < 3 * t + 1 {
+            return Err(InterpolateError::InvalidInput(format!(
+                "n ({}) must be >= 3t + 1 ({}) for Byzantine fault tolerance",
+                n,
+                3 * t + 1
+            )));
+        }
+
+        if shares.is_empty() {
+            return Err(InterpolateError::InvalidInput(
+                "Share slice is empty".to_string(),
+            ));
+        }
         let degree = shares[0].degree;
         if !shares.iter().all(|share| share.degree == degree) {
             return Err(InterpolateError::ShareError(ShareError::DegreeMismatch));

@@ -2,13 +2,15 @@ use crate::avss_mpc::mul::{
     MulError, MultMessage, MultProtocolState, MultStorage, ReconstructionMessage,
 };
 use crate::avss_mpc::triple_gen::BeaverTriple;
-use crate::avss_mpc::{AvssSessionId, AvssWrappedMessage};
+use crate::avss_mpc::{AvssSessionId, AvssWrappedMessage, MAX_MESSAGE_SIZE};
+use crate::common::share::avss::verify_feldman;
 use crate::common::share::feldman::FeldmanShamirShare;
 use crate::common::{share::ShareError, RBC};
 use crate::common::{ProtocolSessionId, SecretSharingScheme};
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use bincode::Options;
 use itertools::izip;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
@@ -71,7 +73,25 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: MultMessage = bincode::deserialize(&output)?;
+            let msg: MultMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
+            let authenticated_sender = id.sub_id() as usize;
+            if msg.sender != authenticated_sender {
+                warn!(
+                    "Dropping RBC output: inner sender {} does not match session round_id {}",
+                    msg.sender, authenticated_sender
+                );
+                continue;
+            }
+            if msg.session_id.exec_id() != id.exec_id()
+                || msg.session_id.instance_id() != id.instance_id()
+            {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
 
             match self.open_mult_handler(msg).await {
                 Ok(()) => {}
@@ -102,7 +122,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         assert_eq!(session_id.round_id(), 0);
 
         let no_of_mul = x.len();
-        let storage_bind = self.get_or_create_mult_storage(session_id).await;
+        let storage_bind = self.get_or_create_mult_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
 
         storage.no_of_mul = Some(no_of_mul);
@@ -135,7 +155,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
 
         let rbc_sessionid = AvssSessionId::new(
             session_id.calling_protocol().unwrap(),
-            AvssSessionId::pack_slot24(session_id.exec_id(), 0, self.id as u8),
+            AvssSessionId::pack_slot24(session_id.exec_id(), self.id as u8, 0),
             session_id.instance_id(),
         );
 
@@ -150,7 +170,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     }
 
     pub async fn open_mult_handler(&self, msg: MultMessage) -> Result<(), MulError> {
-        let storage_bind = self.get_or_create_mult_storage(msg.session_id).await;
+        let storage_bind = self.get_or_create_mult_storage(msg.session_id).await?;
         let mut storage = storage_bind.lock().await;
         if storage.protocol_state == MultProtocolState::Finished {
             return Ok(());
@@ -169,6 +189,25 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         let open_message: ReconstructionMessage<F, G> =
             CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 
+        // Validate degree and Feldman commitments before storing
+        for share in open_message
+            .a_sub_x
+            .iter()
+            .chain(open_message.b_sub_y.iter())
+        {
+            if share.feldmanshare.degree != self.t {
+                return Err(MulError::InvalidInput(format!(
+                    "Invalid share degree from sender {}",
+                    msg.sender
+                )));
+            }
+            if !verify_feldman(share.clone()) {
+                return Err(MulError::InvalidInput(format!(
+                    "Feldman verification failed for share from sender {}",
+                    msg.sender
+                )));
+            }
+        }
         storage
             .received_shares
             .insert(msg.sender, (open_message.a_sub_x, open_message.b_sub_y));
@@ -179,24 +218,19 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         Ok(())
     }
 
-    pub async fn process(&mut self, message: MultMessage) -> Result<(), MulError> {
-        self.open_mult_handler(message).await?;
-        Ok(())
-    }
-
     pub async fn get_or_create_mult_storage(
         &self,
         session_id: AvssSessionId,
-    ) -> Arc<Mutex<MultStorage<F, G>>> {
+    ) -> Result<Arc<Mutex<MultStorage<F, G>>>, MulError> {
         let mut storage = self.mult_storage.lock().await;
-
-        // should never occur, since only exec ID changes for different runs
-        assert!(storage.len() <= 256);
-
-        storage
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            warn!("AVSS Mul session limit reached");
+            return Err(MulError::LimitError);
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(MultStorage::empty())))
-            .clone()
+            .clone())
     }
 
     pub async fn wait_for_result(
@@ -300,6 +334,18 @@ fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
                 warn!("Did not recieve the right number of shares to reconstruct using RBC (sent for a-x and for b-y)");
                 continue;
             }
+            // Verify Feldman commitments before accepting shares
+            let mut valid = true;
+            for i in 0..no_of_mul {
+                if !verify_feldman(a[i].clone()) || !verify_feldman(b[i].clone()) {
+                    valid = false;
+                    break;
+                }
+            }
+            if !valid {
+                continue;
+            }
+
             for i in 0..no_of_mul {
                 a_shares[i].push(a[i].clone());
                 b_shares[i].push(b[i].clone());
