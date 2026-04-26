@@ -190,6 +190,11 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             )));
         }
 
+        if msg.payload.len() as u64 > MAX_MESSAGE_SIZE {
+            return Err(MulError::InvalidInput(
+                "Payload exceeds size limit".to_string(),
+            ));
+        }
         let open_message: ReconstructionMessage<F, G> =
             CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 

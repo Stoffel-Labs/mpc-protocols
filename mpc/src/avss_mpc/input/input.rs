@@ -18,6 +18,8 @@ use tokio::{
 };
 use tracing::info;
 
+const MAX_INPUT_ELEMENTS: u64 = 65_536;
+
 /// In the beginning of an MPC calculation, each node has to obtain a share of all clients' inputs.
 /// This follows the same pattern as HoneyBadger's input protocol but uses FeldmanShamirShare
 /// with Feldman commitment verification:
@@ -229,6 +231,17 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             self.id, sender_id
         );
 
+        if payload.len() < 8 {
+            return Err(AvssInputError::InvalidInput(
+                "Payload too short".to_string(),
+            ));
+        }
+        let declared_len = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        if declared_len > MAX_INPUT_ELEMENTS {
+            return Err(AvssInputError::InvalidInput(
+                "Declared input length exceeds maximum".to_string(),
+            ));
+        }
         let masked_inputs: Vec<F> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
 
@@ -401,12 +414,23 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         msg: AvssInputMessage,
         net: Arc<N>,
     ) -> Result<(), AvssInputError> {
+        if msg.payload.len() < 8 {
+            return Err(AvssInputError::InvalidInput(
+                "Payload too short".to_string(),
+            ));
+        }
+        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap()) as usize;
+        let input_len = self.client_data.lock().await.inputs.len();
+        if declared_len != input_len {
+            return Err(AvssInputError::InvalidInput(
+                "Mismatch in input and share length".to_string(),
+            ));
+        }
+
         let shares: Vec<FeldmanShamirShare<F, G>> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 
         let mut d = self.client_data.lock().await;
-
-        let input_len = d.inputs.len();
 
         if shares.len() != input_len {
             return Err(AvssInputError::InvalidInput(
