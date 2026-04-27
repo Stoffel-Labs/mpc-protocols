@@ -238,11 +238,11 @@ where
         let output = store.computed_r_shares[2 * t..].to_vec();
         store.protocol_output = output.clone();
 
-        let taken_output_sender = store.output_sender.take().unwrap();
-        taken_output_sender
-            .send(output)
-            .map_err(|_| RanShaAvssError::SendError(session_id))?;
-
+        if let Some(sender) = store.output_sender.take() {
+            sender
+                .send(output)
+                .map_err(|_| RanShaAvssError::SendError(session_id))?;
+        }
         Ok(())
     }
 }

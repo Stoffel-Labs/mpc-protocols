@@ -346,14 +346,12 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         {
             let shares_mult = finalize_mul(&storage)?;
 
-            // never None because checked at the beginning
-            let taken_output_sender = storage.output_sender.take().unwrap();
-
-            taken_output_sender
-                .send(shares_mult)
-                .map_err(|_| MulError::SendError(session_id))?;
             storage.protocol_state = MultProtocolState::Finished;
-
+            if let Some(sender) = storage.output_sender.take() {
+                sender
+                    .send(shares_mult)
+                    .map_err(|_| MulError::SendError(session_id))?;
+            }
             info!("Multiplication completed at node {}", self.id);
 
             return Ok(());
@@ -552,14 +550,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         // 6.
         let shares_mult = finalize_mul(&storage)?;
 
-        // never None because checked at the beginning
-        let taken_output_sender = storage.output_sender.take().unwrap();
-
-        taken_output_sender
-            .send(shares_mult)
-            .map_err(|_| MulError::SendError(session_id))?;
         storage.protocol_state = MultProtocolState::Finished;
-
+        if let Some(sender) = storage.output_sender.take() {
+            let _ = sender.send(shares_mult);
+        }
         info!("Multiplication completed at node {}", self.id);
 
         Ok(())
