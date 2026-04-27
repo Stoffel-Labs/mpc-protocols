@@ -28,7 +28,7 @@ use stoffelmpc_mpc::{
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         share_gen::{RanShaError, RanShaState},
-        ProtocolType, SessionId, WrappedMessage,
+        HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, ProtocolType, SessionId, WrappedMessage,
     },
 };
 use stoffelmpc_network::{
@@ -40,6 +40,12 @@ use stoffelnet::network_utils::{ClientId, NetworkError};
 use tokio::sync::Barrier;
 use tokio::time::{sleep, timeout, Duration};
 use tracing::{error, info};
+
+#[derive(Clone)]
+struct DelayedStart {
+    delayed_nodes: Vec<usize>,
+    time: Duration,
+}
 
 #[test]
 fn ransha_e2e_turmoil() {
@@ -1422,10 +1428,223 @@ fn mul_e2e_without_preprocessing_turmoil() {
     }
 }
 
-#[derive(Clone)]
-struct DelayedStart {
-    delayed_nodes: Vec<usize>,
-    time: Duration,
+fn fpmul_e2e_with_lazy_preprocessing(
+    node_delay: Option<Vec<(usize, Duration)>>,
+    node_freeze_start: Option<DelayedStart>,
+) {
+    setup_tracing();
+
+    let n_parties = 4;
+    let t = 1;
+    let k = 16; // total bitlength
+    let m = 4; // fractional bits to truncate
+    let mut rng = test_rng();
+    let bound_l = 8;
+    let security_k = 4;
+    let precision = FixedPointPrecision::new(k, m);
+
+    // Setup of the network.
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
+    let (tx_out, rx_out) = std::sync::mpsc::channel();
+    let (tx_client, mut rx_client) = tokio::sync::broadcast::channel(n_parties);
+
+    // Prepare inputs for multiplication
+    let mut a_fix = Vec::new();
+    let mut b_fix = Vec::new();
+
+    // x = 5.5 * 2^4=88, y = 3.25 * 2^4=52
+    // x * y = 17.875 * 2^8 = 4576
+    // 17.875 * 2^8 / 2^4 = 4576 / 2^4
+    // 17.875 * 2^4 = 286
+    let x = RobustShare::compute_shares(Fr::from(88), n_parties, t, None, &mut rng).unwrap();
+    let y = RobustShare::compute_shares(Fr::from(52), n_parties, t, None, &mut rng).unwrap();
+    for i in 0..n_parties {
+        a_fix.push(SecretFixedPoint::new_with_precision(
+            x[i].clone(),
+            precision,
+        ));
+        b_fix.push(SecretFixedPoint::new_with_precision(
+            y[i].clone(),
+            precision,
+        ));
+    }
+
+    // There is no preprocessing available. The party must generate it.
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        bound_l,
+        security_k,
+        Duration::from_secs(300),
+        vec![],
+    );
+
+    let barrier_net = Arc::new(Barrier::new(n_parties));
+
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        let inner = inner.clone();
+        let a = a_fix[pid].clone();
+        let b = b_fix[pid].clone();
+        let barrier = barrier_net.clone();
+        let tx_out = tx_out.clone();
+        let tx_client = tx_client.clone();
+        sim.host(format!("node{}", pid), move || {
+            let mut node = node.clone();
+            let inner = inner.clone();
+            let a = a.clone();
+            let b = b.clone();
+            let barrier = barrier.clone();
+            let tx_out = tx_out.clone();
+            let tx_client = tx_client.clone();
+
+            async move {
+                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(pid), inner).await;
+                let net_arc = Arc::new(network);
+                barrier.wait().await;
+
+                let mul_handle = tokio::spawn({
+                    let a = a.clone();
+                    let b = b.clone();
+                    let mut node = node.clone();
+                    let net_arc = net_arc.clone();
+                    async move { node.mul_fixed(a, b, net_arc.clone()).await }
+                });
+
+                // Simulation of the process function.
+                loop {
+                    match rx.recv().await {
+                        Some((sender, msg)) => {
+                            let sender_id = match sender {
+                                SenderId::Node(i) => i,
+                                SenderId::Client(i) => i,
+                            };
+                            if let Err(e) = node.process(sender_id, msg, net_arc.clone()).await {
+                                error!("node {} process error: {:?}", pid, e);
+                            }
+                        }
+                        None => break,
+                    }
+
+                    tokio::task::yield_now().await;
+
+                    if mul_handle.is_finished() {
+                        break;
+                    }
+                }
+
+                let mul_share = match mul_handle.await {
+                    Ok(Ok(shares)) => shares,
+                    Ok(Err(e)) => {
+                        let _ = tx_out.send(Err(format!("node {} mul error: {:?}", pid, e)));
+                        let _ = tx_client.send(());
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        let _ = tx_out.send(Err(format!("node {} join error: {:?}", pid, e)));
+                        let _ = tx_client.send(());
+                        return Ok(());
+                    }
+                };
+
+                if mul_share.value().degree != t {
+                    let _ = tx_out.send(Err(format!(
+                        "node {} share degree {} != {}",
+                        pid,
+                        mul_share.value().degree,
+                        t
+                    )));
+                    let _ = tx_client.send(());
+                    return Ok(());
+                }
+                if mul_share.value().id != pid {
+                    let _ = tx_out.send(Err(format!("node {} share id mismatch", pid)));
+                    let _ = tx_client.send(());
+                    return Ok(());
+                }
+
+                let _ = tx_out.send(Ok((pid, mul_share)));
+                let _ = tx_client.send(());
+
+                Ok(())
+            }
+        });
+    }
+
+    drop(tx_out);
+    drop(tx_client);
+
+    if let Some(delayed_start) = &node_freeze_start {
+        for freezed_node in &delayed_start.delayed_nodes {
+            for other_id in 0..n_parties {
+                if *freezed_node != other_id {
+                    sim.hold(format!("node{}", freezed_node), format!("node{}", other_id));
+                }
+            }
+        }
+    }
+
+    sim.client("driver", async move {
+        if let Some(delayed_start) = node_freeze_start {
+            tokio::time::sleep(delayed_start.time).await;
+
+            // Now, the nodes connect again
+            for freezed_node in delayed_start.delayed_nodes {
+                for other_id in 0..n_parties {
+                    if freezed_node != other_id {
+                        turmoil::release(
+                            format!("node{}", freezed_node),
+                            format!("node{}", other_id),
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut count = 0;
+        while count < n_parties {
+            match rx_client.recv().await {
+                Ok(()) => count += 1,
+                Err(_) => break,
+            }
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    });
+
+    if let Some(slow_nodes) = node_delay {
+        for (slow_node_id, delay) in slow_nodes {
+            for other_id in 0..n_parties {
+                if slow_node_id != other_id {
+                    sim.set_link_latency(
+                        format!("node{}", slow_node_id),
+                        format!("node{}", other_id),
+                        delay,
+                    );
+                }
+            }
+        }
+    }
+
+    sim.run().unwrap();
+
+    let shares_result: Result<Vec<_>, _> = std::iter::from_fn(|| rx_out.try_recv().ok()).collect();
+    let shares: Vec<_> = shares_result
+        .unwrap()
+        .into_iter()
+        .map(|(_, share)| share.value().clone())
+        .collect();
+    let (_, rec) = RobustShare::recover_secret(&shares, n_parties, t).expect("interpolate failed");
+    assert_eq!(rec, Fr::from(286));
+}
+
+#[test]
+fn fpmul_e2e_with_lazy_preprocessing_without_delay() {
+    fpmul_e2e_with_lazy_preprocessing(None, None);
 }
 
 fn fpmul_e2e_with_preprocessing(
@@ -1942,4 +2161,158 @@ fn fpdiv_const_e2e_freeze_start() {
             time: Duration::from_secs(3),
         }),
     );
+}
+
+#[test]
+fn preprocess_e2e_with_one_node_crash() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+    let l = 8;
+    let k = 4;
+    let no_of_triples = 7;
+    let no_of_randomshares = 4;
+    let instance_id = 111;
+    let n_prandbit = 4;
+    let n_prandint = 4;
+
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
+
+    let (tx_out, rx_out) =
+        std::sync::mpsc::channel::<Result<(usize, usize, usize, usize), String>>();
+    let (tx_client, mut rx_client) = tokio::sync::broadcast::channel::<()>(n_parties);
+    let parameters = HoneyBadgerMPCNodeOpts::new(
+        n_parties,
+        t,
+        no_of_triples,
+        no_of_randomshares,
+        instance_id,
+        n_prandbit,
+        n_prandint,
+        l,
+        k,
+        Duration::from_secs(30),
+    )
+    .expect("Parameters should be created correctly");
+    let inner = inner.clone();
+    let nodes = (0..n_parties)
+        .map(|id| {
+            <HoneyBadgerMPCNode<Fr, Avid<SessionId>> as MPCProtocol<
+                Fr,
+                RobustShare<Fr>,
+                TurmoilNetwork,
+            >>::setup(id, parameters.clone(), vec![])
+            .expect("Node should be created")
+        })
+        .collect::<Vec<_>>();
+
+    for id in 0..n_parties {
+        let inner = inner.clone();
+        let tx = tx_out.clone();
+        let done_tx = tx_client.clone();
+        let node = nodes[id].clone();
+
+        sim.host(format!("node{}", id), move || {
+            let tx = tx.clone();
+            let done_tx = done_tx.clone();
+            let mut node = node.clone();
+            let inner = inner.clone();
+            async move {
+                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
+                let network_arc = Arc::new(network);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                let mut rng = StdRng::from_rng(OsRng).unwrap();
+
+                // run preprocessing concurrently with the message loop
+                // since run_preprocessing sends messages that trigger responses
+                let net = network_arc.clone();
+                let mut node_for_init = node.clone();
+                let preprocessing_handle = tokio::spawn(async move {
+                    if let Err(e) = node_for_init.run_preprocessing(net, &mut rng).await {
+                        eprintln!("node {} preprocessing error: {:?}", id, e);
+                    }
+                });
+
+                loop {
+                    match rx.recv().await {
+                        Some((sender, msg)) => {
+                            let sender_id = match sender {
+                                SenderId::Node(i) => i,
+                                SenderId::Client(i) => i,
+                            };
+                            if let Err(e) = node.process(sender_id, msg, network_arc.clone()).await
+                            {
+                                eprintln!("node {} process error: {:?}", id, e);
+                            }
+                        }
+                        None => break,
+                    }
+
+                    tokio::task::yield_now().await;
+
+                    // only check counts once preprocessing has fully finished
+                    if preprocessing_handle.is_finished() {
+                        let (n_triples, _, n_pbit, n_pint) =
+                            node.preprocessing_material.lock().await.len();
+                        if n_triples == 5 && n_pbit == n_prandbit && n_pint == n_prandint {
+                            break;
+                        }
+                    }
+                }
+
+                // collect final counts
+                let (n_triples, n_shares, n_pbit, n_pint) =
+                    node.preprocessing_material.lock().await.len();
+
+                let _ = tx.send(Ok((n_triples, n_shares, n_pbit, n_pint)));
+                let _ = done_tx.send(());
+                Ok(())
+            }
+        });
+    }
+
+    drop(tx_out);
+    drop(tx_client);
+
+    sim.client("driver", async move {
+        let mut count = 0;
+        while count < n_parties {
+            match rx_client.recv().await {
+                Ok(()) => count += 1,
+                Err(_) => break,
+            }
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    });
+
+    for _ in 0..500 {
+        sim.step().expect("The simulator should step safely");
+    }
+
+    sim.crash("node0");
+
+    sim.run()
+        .expect("The simulator should resume the execution");
+
+    let results: Vec<_> = std::iter::from_fn(|| rx_out.try_recv().ok()).collect();
+    assert_eq!(
+        results.len(),
+        n_parties,
+        "not all nodes reported: got {}/{}",
+        results.len(),
+        n_parties
+    );
+
+    for r in results {
+        match r {
+            Err(e) => panic!("node failed: {}", e),
+            Ok((n_triples, n_shares, n_pbit, n_pint)) => {
+                assert_eq!(n_triples, 5);
+                assert_eq!(n_shares, 0);
+                assert_eq!(n_pbit, 4);
+                assert_eq!(n_pint, 4);
+            }
+        }
+    }
 }

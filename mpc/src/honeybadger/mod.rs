@@ -442,11 +442,13 @@ where
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
+
         if no_triples < x.len() {
-            //Run preprocessing
+            // There are no triples. We need to create them.
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(network.clone(), &mut rng).await?;
         }
+
         // Extract the preprocessing triple.
         let beaver_triples = self
             .preprocessing_material
@@ -783,11 +785,13 @@ where
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
+
         if no_rand_bit < x.precision().f() || no_rand_int == 0 {
             //Run preprocessing
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(net.clone(), &mut rng).await?;
         }
+
         // Extract the preprocessing triple.
         let beaver_triples = self
             .preprocessing_material
@@ -1012,13 +1016,14 @@ where
             store.len()
         };
 
+        info!("There are {no_of_triples_avail} triples and {no_of_random_shares_avail} random shares available before preprocessing");
+
         // Desired total counts from protocol parameters
-        let mut no_of_triples = self.params.n_triples;
-        let mut no_of_random_shares = self.params.n_random_shares;
+        let no_of_triples = self.params.n_triples;
+        let no_of_random_shares = self.params.n_random_shares;
         // Each triple batch produces (2t + 1) triples at a time
         let group_size = 2 * self.params.threshold + 1;
         let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
-            no_of_triples = 0;
             0
         } else {
             ((no_of_triples - no_of_triples_avail + group_size - 1) / group_size) * group_size
@@ -1029,18 +1034,16 @@ where
             let baseline = if no_of_random_shares_avail < no_of_random_shares {
                 no_of_random_shares - no_of_random_shares_avail
             } else {
-                no_of_random_shares = 0;
                 0
             };
             baseline + 2 * total_triples_to_generate
         } else if no_of_random_shares_avail < no_of_random_shares {
             no_of_random_shares - no_of_random_shares_avail
         } else {
-            no_of_random_shares = 0;
             0
         };
 
-        if no_of_triples == 0 && no_of_random_shares == 0 {
+        if total_random_shares_to_generate == 0 && total_triples_to_generate == 0 {
             info!("There are enough Random shares and Beaver triples");
             // return Ok(());
         } else {
