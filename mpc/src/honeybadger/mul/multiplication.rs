@@ -515,7 +515,24 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
             let open_message: ReconstructionMessage<F> =
                 CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-
+            for share in open_message
+                .a_sub_x
+                .iter()
+                .chain(open_message.b_sub_y.iter())
+            {
+                if share.id != sender {
+                    return Err(MulError::InvalidInput(format!(
+                        "Invalid share id from sender {}",
+                        sender
+                    )));
+                }
+                if share.degree != self.t {
+                    return Err(MulError::InvalidInput(format!(
+                        "Invalid share degree from sender {}",
+                        sender
+                    )));
+                }
+            }
             storage
                 .received_shares
                 .insert(sender, (open_message.a_sub_x, open_message.b_sub_y));

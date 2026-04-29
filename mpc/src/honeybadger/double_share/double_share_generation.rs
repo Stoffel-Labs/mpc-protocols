@@ -1,5 +1,5 @@
 use crate::{
-    common::{share::shamir::NonRobustShare, ProtocolSessionId, SecretSharingScheme},
+    common::{share::{shamir::NonRobustShare, ShareError}, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
         double_share::{DouShaError, DouShaMessage, DouShaStorage},
         SessionId, WrappedMessage,
@@ -178,6 +178,16 @@ where
     ) -> Result<(), DouShaError> {
         let double_share: DoubleShamirShare<F> =
             CanonicalDeserialize::deserialize_compressed(recv_message.payload.as_slice())?;
+        if double_share.degree_t.id != self.id || double_share.degree_2t.id != self.id {
+            return Err(ShareError::IdMismatch.into());
+        }
+        if double_share.degree_t.degree != self.threshold {
+            return Err(ShareError::DegreeMismatch.into());
+        }
+        if double_share.degree_2t.degree != 2 * self.threshold {
+            return Err(ShareError::DegreeMismatch.into());
+        }
+
         let binding = self.get_or_create_store(recv_message.session_id).await?;
         let mut dousha_storage = binding.lock().await;
 

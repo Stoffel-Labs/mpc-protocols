@@ -258,7 +258,12 @@ where
 
         let share: ShamirShare<F, 1, Robust> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-
+        if share.id != self.id {
+            return Err(ShareError::IdMismatch.into());
+        }
+        if share.degree != self.threshold {
+            return Err(ShareError::DegreeMismatch.into());
+        }
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut ransha_storage = binding.lock().await;
 
