@@ -16,6 +16,7 @@ pub mod ran_dou_sha;
 /// Implementation for the protocol of double share generation.
 pub mod double_share;
 
+pub mod comparison;
 /// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
 pub mod triple_gen;
 
@@ -1515,6 +1516,9 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
+    PreMulCOff = 15,
+    BitLTC1 = 16,
+    Mod2 = 17,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -1541,6 +1545,10 @@ impl ProtocolTag for ProtocolType {
             12 => Some(Self::FpMul),
             13 => Some(Self::Trunc),
             14 => Some(Self::FpDivConst),
+            15 => Some(Self::PreMulCOff),
+            16 => Some(Self::BitLTC1),
+            17 => Some(Self::Mod2),
+            
             _ => None,
         }
     }
