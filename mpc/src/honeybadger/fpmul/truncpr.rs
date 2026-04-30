@@ -1,5 +1,5 @@
 use crate::{
-    common::{ProtocolSessionId, SecretSharingScheme, RBC},
+    common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
         fpmul::{
             mod_pow_2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore, TruncState,
@@ -319,7 +319,12 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             // deserialize incoming share of (b + r)
             let share_i: RobustShare<F> =
                 CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
-
+            if share_i.id != msg.sender_id {
+                return Err(ShareError::IdMismatch.into());
+            }
+            if share_i.degree != self.t {
+                return Err(ShareError::DegreeMismatch.into());
+            }
             // dedup
             if s.open_buf.contains_key(&msg.sender_id) {
                 error!(

@@ -226,6 +226,10 @@ where
                 warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
                 continue;
             }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != 0 {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
 
             msg.sender_id = authenticated_sender;
 
@@ -437,7 +441,17 @@ where
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
-        let sender_id = msg.sender_id;
+        if store.state == RanDouShaState::Finished {
+            return Ok(());
+        }
+        if store.received_r_shares_degree_t.contains_key(&sender_id) {
+            warn!(
+                session_id = msg.session_id.as_u64(),
+                "Duplicate reconstruction share received from party {:?}, ignoring.", sender_id
+            );
+            return Ok(());
+        }
+
         store
             .received_r_shares_degree_t
             .insert(sender_id, rec_msg.r_share_deg_t.clone());
