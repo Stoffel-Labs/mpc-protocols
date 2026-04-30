@@ -92,6 +92,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
                 warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
                 continue;
             }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != 0 {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
 
             match self.open_mult_handler(msg).await {
                 Ok(()) => {}
@@ -186,6 +190,11 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             )));
         }
 
+        if msg.payload.len() as u64 > MAX_MESSAGE_SIZE {
+            return Err(MulError::InvalidInput(
+                "Payload exceeds size limit".to_string(),
+            ));
+        }
         let open_message: ReconstructionMessage<F, G> =
             CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 

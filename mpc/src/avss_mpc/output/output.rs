@@ -103,6 +103,17 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
     ///    been received (t+1), reconstruct the output.
     pub async fn output_handler(&mut self, msg: AvssOutputMessage) -> Result<(), AvssOutputError> {
         // 1.
+        if msg.payload.len() < 8 {
+            return Err(AvssOutputError::InvalidInput(
+                "Payload too short".to_string(),
+            ));
+        }
+        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap()) as usize;
+        if declared_len != self.input_len {
+            return Err(AvssOutputError::InvalidInput(
+                "Declared input length does not match expected".to_string(),
+            ));
+        }
         let shares: Vec<FeldmanShamirShare<F, G>> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 

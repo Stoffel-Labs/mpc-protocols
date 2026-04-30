@@ -206,6 +206,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
                 continue;
             }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != id.sub_id()
+            {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
 
             match self
                 .open_mult_handler(authenticated_sender, msg.session_id, msg.payload)
@@ -341,14 +346,12 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         {
             let shares_mult = finalize_mul(&storage)?;
 
-            // never None because checked at the beginning
-            let taken_output_sender = storage.output_sender.take().unwrap();
-
-            taken_output_sender
-                .send(shares_mult)
-                .map_err(|_| MulError::SendError(session_id))?;
             storage.protocol_state = MultProtocolState::Finished;
-
+            if let Some(sender) = storage.output_sender.take() {
+                sender
+                    .send(shares_mult)
+                    .map_err(|_| MulError::SendError(session_id))?;
+            }
             info!("Multiplication completed at node {}", self.id);
 
             return Ok(());
@@ -512,7 +515,24 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
             let open_message: ReconstructionMessage<F> =
                 CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-
+            for share in open_message
+                .a_sub_x
+                .iter()
+                .chain(open_message.b_sub_y.iter())
+            {
+                if share.id != sender {
+                    return Err(MulError::InvalidInput(format!(
+                        "Invalid share id from sender {}",
+                        sender
+                    )));
+                }
+                if share.degree != self.t {
+                    return Err(MulError::InvalidInput(format!(
+                        "Invalid share degree from sender {}",
+                        sender
+                    )));
+                }
+            }
             storage
                 .received_shares
                 .insert(sender, (open_message.a_sub_x, open_message.b_sub_y));
@@ -547,14 +567,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         // 6.
         let shares_mult = finalize_mul(&storage)?;
 
-        // never None because checked at the beginning
-        let taken_output_sender = storage.output_sender.take().unwrap();
-
-        taken_output_sender
-            .send(shares_mult)
-            .map_err(|_| MulError::SendError(session_id))?;
         storage.protocol_state = MultProtocolState::Finished;
-
+        if let Some(sender) = storage.output_sender.take() {
+            let _ = sender.send(shares_mult);
+        }
         info!("Multiplication completed at node {}", self.id);
 
         Ok(())
