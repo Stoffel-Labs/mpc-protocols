@@ -381,6 +381,7 @@ fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
 
     // Need t+1 verified shares per multiplication to reconstruct
     if a_shares.iter().any(|s| s.len() < t + 1) || b_shares.iter().any(|s| s.len() < t + 1) {
+        warn!("Insufficient shares for reconstruction, waiting for more");
         return Ok(());
     }
     let mut a_sub_x = Vec::new();
