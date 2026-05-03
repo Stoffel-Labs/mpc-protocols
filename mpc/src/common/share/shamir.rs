@@ -115,6 +115,9 @@ impl<F: FftField> SecretSharingScheme<F> for Shamirshare<F> {
             .unzip();
 
         let result_poly = lagrange_interpolate(&x_vals, &y_vals)?;
+        if result_poly.degree() > deg {
+            return Err(ShareError::DegreeMismatch);
+        }
         Ok((result_poly.coeffs.clone(), result_poly[0]))
     }
 }
@@ -215,6 +218,9 @@ impl<F: FftField> SecretSharingScheme<F> for NonRobustShare<F> {
             .unzip();
 
         let result_poly = lagrange_interpolate(&x_vals, &y_vals)?;
+        if result_poly.degree() > deg {
+            return Err(ShareError::DegreeMismatch);
+        }
         Ok((result_poly.coeffs.clone(), result_poly[0]))
     }
 }
