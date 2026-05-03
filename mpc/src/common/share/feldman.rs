@@ -245,6 +245,9 @@ where
             .unzip();
 
         let result_poly = lagrange_interpolate(&x_vals, &y_vals)?;
+        if result_poly.degree() > deg {
+            return Err(ShareError::DegreeMismatch);
+        }
         Ok((result_poly.coeffs.clone(), result_poly[0]))
     }
 }
