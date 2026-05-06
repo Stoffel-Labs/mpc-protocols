@@ -156,6 +156,8 @@ pub enum PRandError {
     ClearStoreError(SessionId),
     #[error("Store Limit")]
     LimitError,
+    #[error("Invalid message: {0}")]
+    InvalidMessage(String),
 }
 
 /// Message sent in the Random Double Sharing protocol.

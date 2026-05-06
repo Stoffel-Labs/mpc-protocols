@@ -267,6 +267,16 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             if store.r_t.len() != total_tsets {
                 return Ok(false);
             }
+            // validate stored r_t lengths before indexing
+            for r_t in store.r_t.values() {
+                if r_t.len() != batch_size {
+                    return Err(PRandError::InvalidMessage(format!(
+                        "stored r_t has length {} but batch_size is {}",
+                        r_t.len(),
+                        batch_size
+                    )));
+                }
+            }
 
             let need_compute =
                 store.share_r_q.is_none() || store.share_r_p.is_none() || store.share_r_2.is_none();
@@ -526,6 +536,25 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
+        if msg.tset.contains(&self.id) {
+            return Err(PRandError::InvalidMessage(format!(
+                "node {} received message for tset that contains itself: {:?}",
+                self.id, msg.tset
+            )));
+        }
+
+        let maybe_batch_size = store.batch_size;
+
+        if let Some(batch_size) = maybe_batch_size {
+            if msg.r_t.len() != batch_size {
+                return Err(PRandError::InvalidMessage(format!(
+                    "r_t length {} does not match batch_size {}",
+                    msg.r_t.len(),
+                    batch_size
+                )));
+            }
+        }
+
         // Get or create entry for this tset
         let tset_entry = store
             .riss_shares
@@ -544,18 +573,25 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         tset_entry.insert(msg.sender_id, msg.r_t);
 
         // Check if we have all expected contributors
-        if tset_entry.len() == self.n {
-            // Compute r_T = sum of contributions
-            let r_t_sum = tset_entry.values().fold(
-                vec![0; tset_entry.values().next().unwrap().len()],
-                |mut acc, v| {
-                    for (a, x) in acc.iter_mut().zip(v) {
-                        *a += *x;
-                    }
-                    acc
-                },
-            );
-            store.r_t.insert(msg.tset.clone(), r_t_sum);
+        let r_t_sum = if tset_entry.len() == self.n {
+            let batch_size = maybe_batch_size
+                .ok_or_else(|| PRandError::NotSet("batch_size not set when folding r_t".into()))?;
+            Some(
+                tset_entry
+                    .values()
+                    .fold(vec![0i64; batch_size], |mut acc, v| {
+                        for (a, x) in acc.iter_mut().zip(v) {
+                            *a += *x;
+                        }
+                        acc
+                    }),
+            )
+        } else {
+            None
+        };
+
+        if let Some(sum) = r_t_sum {
+            store.r_t.insert(msg.tset.clone(), sum);
         }
         drop(store);
         self.try_advance_from_riss(msg.session_id, calling_proto, network.clone())
