@@ -8,7 +8,7 @@
 //!   3. [a0] ← c0 + [r0'] - 2*c0*[r0']  = XOR(c0, [r0'])  (local)
 //!
 //! Each party broadcasts its share of c via one RBC instance.
-//! RBC session IDs: calling_protocol = outer, sub_id = party_id, round_id = 1.
+//! RBC session IDs: calling_protocol = outer, sub_id = party_id, round_id = 0.
 //! Reconstruction fires when n-t shares have been delivered.
 //!
 //! Session routing (add to HoneyBadgerMPCNode.process):
@@ -17,7 +17,7 @@
 use crate::{
     common::{ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
-        comparison::{pre_mulc::PhaseState, Mod2Error},
+        comparison::{pre_mulc::PhaseState, Mod2Error, PRandMPrep},
         robust_interpolate::robust_interpolate::RobustShare,
         SessionId, WrappedMessage,
     },
@@ -33,7 +33,7 @@ use tokio::{
 #[derive(Debug)]
 pub struct Mod2Store<F: PrimeField> {
     pub state: PhaseState,
-    pub r_zero_prime: Option<RobustShare<F>>,
+    pub r_prime: Option<RobustShare<F>>,
     pub received_shares: HashMap<usize, F>, // party_id → share value
     pub output_sender: Option<tokio::sync::oneshot::Sender<RobustShare<F>>>,
     pub output_receiver: Option<tokio::sync::oneshot::Receiver<RobustShare<F>>>,
@@ -44,7 +44,7 @@ impl<F: PrimeField> Mod2Store<F> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         Self {
             state: PhaseState::Waiting,
-            r_zero_prime: None,
+            r_prime: None,
             received_shares: HashMap::new(),
             output_sender: Some(tx),
             output_receiver: Some(rx),
@@ -136,8 +136,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
         &mut self,
         a: RobustShare<F>,
         k: usize,
-        r_double_prime: RobustShare<F>,
-        r_zero_prime: RobustShare<F>,
+        prep: PRandMPrep<F>,
         session: SessionId,
         network: Arc<N>,
     ) -> Result<(), Mod2Error> {
@@ -146,7 +145,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
 
         // c = 2^{k-1} + [a] + 2*[r''] + [r0']
         let c_share =
-            (((a + (r_double_prime * two)?)? + r_zero_prime.clone())? + two_pow_k_minus_1)?;
+            (((a + (prep.r_double_prime * two)?)? + prep.r_prime.clone())? + two_pow_k_minus_1)?;
 
         let calling_proto = session
             .calling_protocol()
@@ -156,7 +155,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
         {
             let store = self.get_or_create_store(session).await?;
             let mut s = store.lock().await;
-            s.r_zero_prime = Some(r_zero_prime);
+            s.r_prime = Some(prep.r_prime);
         }
 
         // Broadcast this party's share of c.
@@ -231,7 +230,9 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
             if s.received_shares.len() < self.n - self.t {
                 return Ok(());
             }
-            let rzp = s.r_zero_prime.clone().ok_or(Mod2Error::Abort)?;
+            let Some(rzp) = s.r_prime.clone() else {
+                return Ok(());
+            };
             (s.received_shares.clone(), rzp)
         };
 

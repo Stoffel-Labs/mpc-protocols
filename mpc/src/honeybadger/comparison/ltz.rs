@@ -8,20 +8,17 @@
 //! Trunc([a], k, k-1) = floor(a / 2^{k-1}) which equals -1 if a < 0, else 0.
 //! Negating gives 1 if a < 0, else 0.
 
+use crate::honeybadger::comparison::{trunc::TruncNode, LTZError, PRandMPrep, PreMulCPrep};
 use crate::{
     common::RBC,
-    honeybadger::{
-        comparison::{trunc::TruncNode, LTZError},
-        robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::ShamirBeaverTriple,
-        SessionId,
-    },
+    honeybadger::{robust_interpolate::robust_interpolate::RobustShare, SessionId},
 };
 use ark_ff::PrimeField;
 use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use tokio::time::Duration;
 
+#[derive(Clone)]
 pub struct LTZNode<F: PrimeField, R: RBC<Id = SessionId>> {
     pub id: usize,
     pub n: usize,
@@ -41,20 +38,15 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> LTZNode<F, R> {
 
     /// Protocol 3.6 LTZ — returns [1] if a < 0, [0] otherwise.
     ///
-    /// `k`: bit length of [a] (signed two's complement).
+    /// `k`: bit length of [a]
     /// All remaining parameters are passed through to Trunc / Mod2m.
     pub async fn run<N: Network + Send + Sync>(
         &mut self,
         a: RobustShare<F>,
         k: usize,
-        r_double_prime: RobustShare<F>,
-        r_prime: RobustShare<F>,
-        r_prime_bits: Vec<RobustShare<F>>,
-        w: Vec<RobustShare<F>>,
-        z: Vec<RobustShare<F>>,
-        triples: Vec<ShamirBeaverTriple<F>>,
-        r_dp_mod2: RobustShare<F>,
-        r_zp_mod2: RobustShare<F>,
+        prandm_prep: PRandMPrep<F>,
+        premulc_prep: PreMulCPrep<F>,
+        mod2_prep: PRandMPrep<F>,
         session: SessionId,
         network: Arc<N>,
         duration: Duration,
@@ -66,14 +58,9 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> LTZNode<F, R> {
                 a,
                 k,
                 k - 1,
-                r_double_prime,
-                r_prime,
-                r_prime_bits,
-                w,
-                z,
-                triples,
-                r_dp_mod2,
-                r_zp_mod2,
+                prandm_prep,
+                premulc_prep,
+                mod2_prep,
                 session,
                 network,
                 duration,

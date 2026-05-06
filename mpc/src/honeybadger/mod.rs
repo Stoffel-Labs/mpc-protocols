@@ -1517,8 +1517,7 @@ pub enum ProtocolType {
     Trunc = 13,
     FpDivConst = 14,
     PreMulCOff = 15,
-    BitLTC1 = 16,
-    Mod2 = 17,
+    LTZ = 16,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -1546,9 +1545,7 @@ impl ProtocolTag for ProtocolType {
             13 => Some(Self::Trunc),
             14 => Some(Self::FpDivConst),
             15 => Some(Self::PreMulCOff),
-            16 => Some(Self::BitLTC1),
-            17 => Some(Self::Mod2),
-            
+            16 => Some(Self::LTZ),
             _ => None,
         }
     }

@@ -12,9 +12,12 @@
 use crate::{
     common::{ProtocolSessionId, RBC},
     honeybadger::{
-        batch_recon::batch_recon::BatchReconNode, comparison::PreMulCError,
-        mul::multiplication::Multiply, robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::ShamirBeaverTriple, ProtocolType, SessionId,
+        batch_recon::batch_recon::BatchReconNode,
+        comparison::{PreMulCError, PreMulCPrep},
+        mul::multiplication::Multiply,
+        robust_interpolate::robust_interpolate::RobustShare,
+        triple_gen::ShamirBeaverTriple,
+        ProtocolType, SessionId,
     },
 };
 use ark_ff::PrimeField;
@@ -225,13 +228,11 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCNode<F, R> {
             let chunk_idx = id.sub_id();
 
             match id.calling_protocol() {
-                Some(ProtocolType::BitLTC1) => {
-                    self.handle_online_batch(parent, chunk_idx, vals).await?
-                }
                 Some(ProtocolType::PreMulCOff) => {
                     self.handle_prep_batch(parent, chunk_idx, vals).await?
                 }
-                _ => warn!("PreMulC: unexpected protocol {:?}", id.calling_protocol()),
+                Some(_) => self.handle_online_batch(parent, chunk_idx, vals).await?,
+                None => warn!("PreMulC: no calling_protocol in {:?}", id),
             }
         }
         Ok(())
@@ -386,9 +387,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCNode<F, R> {
     pub async fn init<N: Network + Send + Sync>(
         &mut self,
         a: Vec<RobustShare<F>>,
-        w: Vec<RobustShare<F>>,
-        z: Vec<RobustShare<F>>,
-        triples: Vec<ShamirBeaverTriple<F>>,
+        prep: PreMulCPrep<F>,
         session: SessionId,
         network: Arc<N>,
         mul_duration: Duration,
@@ -404,14 +403,14 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCNode<F, R> {
             .ok_or(PreMulCError::SessionIdError(session))?;
 
         self.mul
-            .init(session, w, a, triples, Arc::clone(&network))
+            .init(session, prep.w, a, prep.triples, Arc::clone(&network))
             .await?;
         let m_shares = self.mul.wait_for_result(session, mul_duration).await?;
 
         {
             let store = self.get_or_create_online(session).await?;
             let mut s = store.lock().await;
-            s.z_shares = Some(z);
+            s.z_shares = Some(prep.z);
             s.chunks = k / (self.t + 1);
         }
 

@@ -14,14 +14,13 @@
 //!   PreMulCOn BatchRecon (round_id=0): → pre_mul_c.batch_recon
 //!   PreMulCOn BatchRecon (round_id=1): → pre_mul_c.mul.batch_recon
 //!   PreMulCOn RBC        (round_id=2): → pre_mul_c.mul.rbc
-//!   Mod2 BatchRecon      (round_id=0): → mod2.batch_recon
+//!   Mod2      Rbc        (round_id=0): → mod2.rbc.process + mod2.drain_rbc_output
 
 use crate::{
     common::RBC,
     honeybadger::{
-        comparison::{mod2::Mod2Node, pre_mulc::PreMulCNode, BitLTC1Error},
+        comparison::{mod2::Mod2Node, pre_mulc::PreMulCNode, BitLTC1Error, PRandMPrep, PreMulCPrep},
         robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::ShamirBeaverTriple,
         SessionId,
     },
 };
@@ -30,6 +29,7 @@ use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use tokio::time::Duration;
 
+#[derive(Clone)]
 pub struct BitLTC1Node<F: PrimeField, R: RBC<Id = SessionId>> {
     pub id: usize,
     pub n: usize,
@@ -58,35 +58,33 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> BitLTC1Node<F, R> {
 
     /// Protocol 4.5 BitLTC1.
     ///
-    /// `a_bits[i]`: clear bit i of a (public field element, 0 or 1), LSB = index 0.
-    /// `b_bits[i]`: secret share of bit i of b, LSB = index 0.
+    /// `a`:         clear k-bit value to compare against.
+    /// `b_bits[i]`: secret share of bit i of b, LSB = index 0. Length determines k.
     /// `w`, `z`:    PreMulC offline output for `premulc_k(k, t)` elements.
     /// `triples`:   `premulc_k(k, t)` Beaver triples for PreMulC online.
-    /// `r_double_prime`: [r''] from PRandM(k, 1) for Mod2.
-    /// `r_zero_prime`:   [r0'] from PRandM(k, 1) for Mod2.
+    /// `r_double_prime`: [r''] from PRandM(k, 1) for Mod2 (must be a k-bit integer).
+    /// `r_zero_prime`:   [r0'] from PRandM(k, 1) for Mod2 (0 or 1).
     pub async fn run<N: Network + Send + Sync>(
         &mut self,
-        a_bits: Vec<F>,
+        a: F,
         b_bits: Vec<RobustShare<F>>,
-        w: Vec<RobustShare<F>>,
-        z: Vec<RobustShare<F>>,
-        triples: Vec<ShamirBeaverTriple<F>>,
-        r_double_prime: RobustShare<F>,
-        r_zero_prime: RobustShare<F>,
+        premulc_prep: PreMulCPrep<F>,
+        mod2_prep: PRandMPrep<F>,
         session: SessionId,
         network: Arc<N>,
-        mul_duration: Duration,
+        duration: Duration,
     ) -> Result<RobustShare<F>, BitLTC1Error> {
-        let k = a_bits.len();
-        if k == 0 || b_bits.len() != k {
+        let k = b_bits.len();
+        if k == 0 {
             return Err(BitLTC1Error::LengthError);
         }
+        // Decompose the clear value a into k bits, LSB first.
+        let a_int = a.into_bigint().as_ref()[0]; // k <= 64, all bits in first limb
+        let a_bits: Vec<F> = (0..k).map(|i| F::from((a_int >> i) & 1)).collect();
 
         let two = F::one() + F::one();
 
         // ── Step 1: [d_i] = a_i + [b_i] - 2*a_i*[b_i]  (all local) ──────────
-        // Equivalent to XOR(a_i, b_i) as field elements when both are bits.
-        // [d_i] = (1 - 2*a_i)*[b_i] + a_i
         let mut d_shares: Vec<RobustShare<F>> = Vec::with_capacity(k);
         for i in 0..k {
             let coeff = F::one() - two * a_bits[i];
@@ -95,8 +93,6 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> BitLTC1Node<F, R> {
         }
 
         // ── Step 2: PreMulC on [d_{k-1}+1, ..., d_0+1]  (MSB-first) ─────────
-        // PreMulC input[j] = d_shares[k-1-j] + 1.
-        // Padded to premulc_k with trivial [1] shares.
         let pk = Self::premulc_k(k, self.t);
         let one_share = RobustShare::new(F::one(), self.id, self.t);
         let mut premulc_input: Vec<RobustShare<F>> = Vec::with_capacity(pk);
@@ -110,29 +106,23 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> BitLTC1Node<F, R> {
         self.pre_mul_c
             .init(
                 premulc_input,
-                w,
-                z,
-                triples,
+                premulc_prep,
                 session,
                 Arc::clone(&network),
-                mul_duration,
+                duration,
             )
             .await?;
-        let p_shares = self
-            .pre_mul_c
-            .wait_for_result(session, mul_duration)
-            .await?;
-        // p_shares[j] = product of PreMulC inputs 0..=j  (0-indexed).
-        // p_shares[0] = d_{k-1}+1  (MSB prefix of length 1).
-
+        let mut p_shares = self.pre_mul_c.wait_for_result(session, duration).await?;
+        p_shares.reverse();
         // ── Step 3: differences of prefix products ────────────────────────────
-        // [s_j] = [p_j] - [p_{j+1}]  for j = 0..k-2
-        // [s_{k-1}] = [p_{k-1}] - 1
+        // p_shares[0..pk-k] are duplicates from padding with [1]s; valid products
+        // start at index pk-k.
+        let offset = pk - k;
         let mut s_shares: Vec<RobustShare<F>> = Vec::with_capacity(k);
         for j in 0..k - 1 {
-            s_shares.push((p_shares[j].clone() - p_shares[j + 1].clone())?);
+            s_shares.push((p_shares[offset + j].clone() - p_shares[offset + j + 1].clone())?);
         }
-        s_shares.push((p_shares[k - 1].clone() - F::one())?);
+        s_shares.push((p_shares[offset + k - 1].clone() - F::one())?);
 
         // ── Step 4: [s] = Σ [s_j]*(1 - a_j)  (local scalar sum) ─────────────
         let mut s_val = (s_shares[0].clone() * (F::one() - a_bits[0]))?;
@@ -142,19 +132,10 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> BitLTC1Node<F, R> {
         }
 
         // ── Step 5: [u] ← Mod2([s], k) ───────────────────────────────────────
-        // Mod2 session: batch recon messages tagged with ProtocolType::Mod2
-        // so the router sends them to mod2.batch_recon (distinct from pre_mul_c).
         self.mod2
-            .init(
-                s_val,
-                k,
-                r_double_prime,
-                r_zero_prime,
-                session,
-                Arc::clone(&network),
-            )
+            .init(s_val, k, mod2_prep, session, Arc::clone(&network))
             .await?;
-        let u = self.mod2.wait_for_result(session, mul_duration).await?;
+        let u = self.mod2.wait_for_result(session, duration).await?;
 
         Ok(u)
     }

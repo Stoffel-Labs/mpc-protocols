@@ -1,3 +1,6 @@
+use crate::honeybadger::{
+    robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple,
+};
 use crate::{
     common::{rbc::RbcError, share::ShareError},
     honeybadger::{
@@ -5,6 +8,7 @@ use crate::{
         SessionId,
     },
 };
+use ark_ff::PrimeField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use stoffelnet::network_utils::NetworkError;
@@ -17,6 +21,41 @@ pub mod mod2m;
 pub mod pre_mulc;
 pub mod trunc;
 
+#[derive(Clone)]
+pub struct PreMulCPrep<F: PrimeField> {
+    pub w: Vec<RobustShare<F>>,
+    pub z: Vec<RobustShare<F>>,
+    pub triples: Vec<ShamirBeaverTriple<F>>,
+}
+#[derive(Clone)]
+pub struct PRandMPrep<F: PrimeField> {
+    pub r_double_prime: RobustShare<F>,
+    pub r_prime: RobustShare<F>,
+    pub r_prime_bits: Vec<RobustShare<F>>,
+}
+impl<F: PrimeField> PRandMPrep<F> {
+    /// Protocol 2.2 step 3: computes [r'] = Σ_{i=0}^{m-1} 2^i * [b_i].
+    /// `r_double_prime` is the PRandInt(k + κ − m) output.
+    /// `r_prime_bits` must be non-empty (m >= 1), LSB first.
+    pub fn from_prand_outputs(
+        r_double_prime: RobustShare<F>,
+        r_prime_bits: Vec<RobustShare<F>>,
+    ) -> Result<Self, ShareError> {
+        if r_prime_bits.is_empty() {
+            return Err(ShareError::InvalidInput);
+        }
+        let mut r_prime = r_prime_bits[0].clone();
+        for (i, bit) in r_prime_bits.iter().enumerate().skip(1) {
+            let coeff = F::from(2u64).pow([i as u64]);
+            r_prime = (r_prime + (bit.clone() * coeff)?)?;
+        }
+        Ok(Self {
+            r_double_prime,
+            r_prime,
+            r_prime_bits,
+        })
+    }
+}
 #[derive(Debug, Error)]
 pub enum PreMulCError {
     #[error("mul error: {0}")]
@@ -102,8 +141,8 @@ pub enum Mod2Error {
 
 #[derive(Debug, Error)]
 pub enum Mod2mError {
-    #[error("batch recon error: {0:?}")]
-    BatchRecError(#[from] BatchReconError),
+    #[error("rbc error: {0}")]
+    RbcError(#[from] RbcError),
     #[error("bit_ltc1 error: {0}")]
     BitLTC1Error(#[from] BitLTC1Error),
     #[error("share error: {0}")]

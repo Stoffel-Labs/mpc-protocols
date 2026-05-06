@@ -11,9 +11,8 @@
 use crate::{
     common::RBC,
     honeybadger::{
-        comparison::{mod2m::Mod2mNode, TruncError},
+        comparison::{mod2m::Mod2mNode, PRandMPrep, PreMulCPrep, TruncError},
         robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::ShamirBeaverTriple,
         SessionId,
     },
 };
@@ -21,7 +20,7 @@ use ark_ff::PrimeField;
 use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use tokio::time::Duration;
-
+#[derive(Clone)]
 pub struct TruncNode<F: PrimeField, R: RBC<Id = SessionId>> {
     pub id: usize,
     pub n: usize,
@@ -48,41 +47,28 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncNode<F, R> {
         a: RobustShare<F>,
         k: usize,
         m: usize,
-        r_double_prime: RobustShare<F>,
-        r_prime: RobustShare<F>,
-        r_prime_bits: Vec<RobustShare<F>>,
-        w: Vec<RobustShare<F>>,
-        z: Vec<RobustShare<F>>,
-        triples: Vec<ShamirBeaverTriple<F>>,
-        r_dp_mod2: RobustShare<F>,
-        r_zp_mod2: RobustShare<F>,
+        prandm_prep: PRandMPrep<F>,
+        premulc_prep: PreMulCPrep<F>,
+        mod2_prep: PRandMPrep<F>,
         session: SessionId,
         network: Arc<N>,
         duration: Duration,
     ) -> Result<RobustShare<F>, TruncError> {
-        // Step 1: [a'] = Mod2m([a], k, m)
         let a_prime = self
             .mod2m
             .run(
                 a.clone(),
                 k,
                 m,
-                r_double_prime,
-                r_prime,
-                r_prime_bits,
-                w,
-                z,
-                triples,
-                r_dp_mod2,
-                r_zp_mod2,
+                prandm_prep,
+                premulc_prep,
+                mod2_prep,
                 session,
-                network,
+                Arc::clone(&network),
                 duration,
             )
             .await?;
 
-        // Step 2: [d] = ([a] - [a']) * 2^{-m}
-        // 2^m is always invertible in a prime field (p is odd, gcd(2^m, p) = 1).
         let inv_two_m = F::from(2u64)
             .pow([m as u64])
             .inverse()

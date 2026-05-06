@@ -118,8 +118,7 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
             crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
             crate::honeybadger::ProtocolType::PreMulCOff => todo!(),
-            crate::honeybadger::ProtocolType::BitLTC1 => todo!(),
-            crate::honeybadger::ProtocolType::Mod2 => todo!(),
+            crate::honeybadger::ProtocolType::LTZ => todo!(),
         }
     }
 }
