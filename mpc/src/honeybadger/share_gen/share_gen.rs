@@ -2,12 +2,14 @@ use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
+use bincode::Options;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
-use tracing::info;
+use tracing::{info, warn};
 
+use crate::honeybadger::MAX_MESSAGE_SIZE;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde, ShareError},
@@ -78,8 +80,31 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: RanShaMessage = bincode::deserialize(&output)?;
+            let mut msg: RanShaMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
+            let authenticated_sender = id.sub_id() as usize;
+            if msg.sender_id != authenticated_sender {
+                warn!(
+                    "Dropping RBC output: inner sender_id {} does not match session sub_id {}",
+                    msg.sender_id, authenticated_sender
+                );
+                continue;
+            }
+            if msg.session_id.exec_id() != id.exec_id()
+                || msg.session_id.instance_id() != id.instance_id()
+            {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != 0 {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
 
+            msg.sender_id = authenticated_sender;
             match self.output_handler(msg).await {
                 Ok(()) => {}
                 Err(e) => {
@@ -227,21 +252,41 @@ where
             RanShaPayload::Share(s) => s,
             _ => return Err(RanShaError::Abort),
         };
+        if msg.sender_id >= self.n_parties {
+            return Err(RanShaError::InvalidPartyId);
+        }
 
         let share: ShamirShare<F, 1, Robust> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-
+        if share.id != self.id {
+            return Err(ShareError::IdMismatch.into());
+        }
+        if share.degree != self.threshold {
+            return Err(ShareError::DegreeMismatch.into());
+        }
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut ransha_storage = binding.lock().await;
+
+        if ransha_storage.state == RanShaState::FinishedInitialSharing
+            || ransha_storage.state == RanShaState::Finished
+        {
+            return Ok(());
+        }
+
+        if ransha_storage.initial_shares.contains_key(&msg.sender_id) {
+            warn!(
+                session_id = msg.session_id.as_u64(),
+                "Duplicate share received from party {:?}, ignoring.", msg.sender_id
+            );
+            return Ok(());
+        }
+
         ransha_storage.initial_shares.insert(msg.sender_id, share);
         info!(
             session_id = msg.session_id.as_u64(),
             "party {:?} received shares from {:?}", self.id, msg.sender_id,
         );
 
-        if msg.sender_id >= self.n_parties {
-            return Err(RanShaError::InvalidPartyId);
-        }
         ransha_storage.reception_tracker[msg.sender_id] = true;
 
         // Check if the protocol has reached an end

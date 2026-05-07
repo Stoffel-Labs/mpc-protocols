@@ -2,13 +2,14 @@ use crate::avss_mpc::mul::{
     MulError, MultMessage, MultProtocolState, MultStorage, ReconstructionMessage,
 };
 use crate::avss_mpc::triple_gen::BeaverTriple;
-use crate::avss_mpc::{AvssSessionId, AvssWrappedMessage};
+use crate::avss_mpc::{AvssSessionId, AvssWrappedMessage, MAX_MESSAGE_SIZE};
 use crate::common::share::feldman::FeldmanShamirShare;
 use crate::common::{share::ShareError, RBC};
 use crate::common::{ProtocolSessionId, SecretSharingScheme};
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use bincode::Options;
 use itertools::izip;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
@@ -71,7 +72,29 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: MultMessage = bincode::deserialize(&output)?;
+            let msg: MultMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
+            let authenticated_sender = id.sub_id() as usize;
+            if msg.sender != authenticated_sender {
+                warn!(
+                    "Dropping RBC output: inner sender {} does not match session round_id {}",
+                    msg.sender, authenticated_sender
+                );
+                continue;
+            }
+            if msg.session_id.exec_id() != id.exec_id()
+                || msg.session_id.instance_id() != id.instance_id()
+            {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != 0 {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
 
             match self.open_mult_handler(msg).await {
                 Ok(()) => {}
@@ -102,22 +125,6 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         assert_eq!(session_id.round_id(), 0);
 
         let no_of_mul = x.len();
-        let storage_bind = self.get_or_create_mult_storage(session_id).await;
-        let mut storage = storage_bind.lock().await;
-
-        storage.no_of_mul = Some(no_of_mul);
-        storage.inputs = (x.clone(), y.clone());
-        storage.share_mult_from_triple = beaver_triples
-            .iter()
-            .map(|triple| triple.c.clone())
-            .collect();
-        drop(storage);
-        if self
-            .try_finalize_mul(session_id, storage_bind.clone())
-            .await?
-        {
-            return Ok(());
-        }
         let a_sub_x = x
             .iter()
             .zip(beaver_triples.iter())
@@ -129,13 +136,34 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             .map(|(y, triple)| triple.b.clone() - y.clone())
             .collect::<Result<Vec<FeldmanShamirShare<F, G>>, ShareError>>()?;
 
+        let storage_bind = self.get_or_create_mult_storage(session_id).await?;
+        let mut storage = storage_bind.lock().await;
+
+        storage.no_of_mul = Some(no_of_mul);
+        storage.inputs = (x.clone(), y.clone());
+        storage.share_mult_from_triple = beaver_triples
+            .iter()
+            .map(|triple| triple.c.clone())
+            .collect();
+        storage.expected_commitments_a_sub_x =
+            Some(a_sub_x.iter().map(|s| s.commitments.clone()).collect());
+        storage.expected_commitments_b_sub_y =
+            Some(b_sub_y.iter().map(|s| s.commitments.clone()).collect());
+        drop(storage);
+        if self
+            .try_finalize_mul(session_id, storage_bind.clone())
+            .await?
+        {
+            return Ok(());
+        }
+
         let reconst_message = ReconstructionMessage::new(a_sub_x.to_vec(), b_sub_y.to_vec());
         let mut bytes_rec_message = Vec::new();
         reconst_message.serialize_compressed(&mut bytes_rec_message)?;
 
         let rbc_sessionid = AvssSessionId::new(
             session_id.calling_protocol().unwrap(),
-            AvssSessionId::pack_slot24(session_id.exec_id(), 0, self.id as u8),
+            AvssSessionId::pack_slot24(session_id.exec_id(), self.id as u8, 0),
             session_id.instance_id(),
         );
 
@@ -150,7 +178,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     }
 
     pub async fn open_mult_handler(&self, msg: MultMessage) -> Result<(), MulError> {
-        let storage_bind = self.get_or_create_mult_storage(msg.session_id).await;
+        let storage_bind = self.get_or_create_mult_storage(msg.session_id).await?;
         let mut storage = storage_bind.lock().await;
         if storage.protocol_state == MultProtocolState::Finished {
             return Ok(());
@@ -166,9 +194,26 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             )));
         }
 
+        if msg.payload.len() as u64 > MAX_MESSAGE_SIZE {
+            return Err(MulError::InvalidInput(
+                "Payload exceeds size limit".to_string(),
+            ));
+        }
         let open_message: ReconstructionMessage<F, G> =
             CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 
+        for share in open_message
+            .a_sub_x
+            .iter()
+            .chain(open_message.b_sub_y.iter())
+        {
+            if share.feldmanshare.degree != self.t {
+                return Err(MulError::InvalidInput(format!(
+                    "Invalid share degree from sender {}",
+                    msg.sender
+                )));
+            }
+        }
         storage
             .received_shares
             .insert(msg.sender, (open_message.a_sub_x, open_message.b_sub_y));
@@ -179,24 +224,19 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         Ok(())
     }
 
-    pub async fn process(&mut self, message: MultMessage) -> Result<(), MulError> {
-        self.open_mult_handler(message).await?;
-        Ok(())
-    }
-
     pub async fn get_or_create_mult_storage(
         &self,
         session_id: AvssSessionId,
-    ) -> Arc<Mutex<MultStorage<F, G>>> {
+    ) -> Result<Arc<Mutex<MultStorage<F, G>>>, MulError> {
         let mut storage = self.mult_storage.lock().await;
-
-        // should never occur, since only exec ID changes for different runs
-        assert!(storage.len() <= 256);
-
-        storage
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            warn!("AVSS Mul session limit reached");
+            return Err(MulError::LimitError);
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(MultStorage::empty())))
-            .clone()
+            .clone())
     }
 
     pub async fn wait_for_result(
@@ -282,40 +322,80 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     }
 }
 
+fn verify_share_against_commitments<F: FftField, G: CurveGroup<ScalarField = F>>(
+    share: &FeldmanShamirShare<F, G>,
+    expected_commitments: &[G],
+) -> bool {
+    if expected_commitments.len() != share.feldmanshare.degree + 1 {
+        return false;
+    }
+    let x = F::from(share.feldmanshare.id as u64);
+    let mut rhs = G::zero();
+    let mut pow = F::one();
+    for c in expected_commitments {
+        rhs += c.mul(pow);
+        pow *= x;
+    }
+    G::generator().mul(share.feldmanshare.share[0]) == rhs
+}
+
 fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
     storage: &mut MultStorage<F, G>,
     t: usize,
     n: usize,
 ) -> Result<(), MulError> {
-    if storage.received_shares.len() >= 2 * t + 1 && storage.openings.is_none() {
-        let no_of_mul = storage.no_of_mul.unwrap();
+    if storage.received_shares.len() < t + 1 || storage.openings.is_some() {
+        return Ok(());
+    }
+    // Expected commitments are set in init(); if not yet set, init() hasn't run.
+    let (expected_a, expected_b) = match (
+        storage.expected_commitments_a_sub_x.as_ref(),
+        storage.expected_commitments_b_sub_y.as_ref(),
+    ) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return Ok(()),
+    };
 
-        let mut a_sub_x = Vec::new();
-        let mut b_sub_y = Vec::new();
-        let mut a_shares = vec![vec![]; no_of_mul];
-        let mut b_shares = vec![vec![]; no_of_mul];
+    let no_of_mul = storage.no_of_mul.unwrap();
+    let mut a_shares = vec![vec![]; no_of_mul];
+    let mut b_shares = vec![vec![]; no_of_mul];
 
-        for (_, (a, b)) in storage.received_shares.iter() {
-            if a.len() != no_of_mul || b.len() != no_of_mul {
-                warn!("Did not recieve the right number of shares to reconstruct using RBC (sent for a-x and for b-y)");
-                continue;
-            }
-            for i in 0..no_of_mul {
-                a_shares[i].push(a[i].clone());
-                b_shares[i].push(b[i].clone());
-            }
+    for (_, (a, b)) in storage.received_shares.iter() {
+        if a.len() != no_of_mul || b.len() != no_of_mul {
+            warn!("Did not receive the right number of shares to reconstruct");
+            continue;
+        }
+        let valid = (0..no_of_mul).all(|i| {
+            verify_share_against_commitments(&a[i], &expected_a[i])
+                && verify_share_against_commitments(&b[i], &expected_b[i])
+        });
+        if !valid {
+            continue;
         }
 
         for i in 0..no_of_mul {
-            let a = FeldmanShamirShare::recover_secret(&a_shares[i], n, t)?;
-            let b = FeldmanShamirShare::recover_secret(&b_shares[i], n, t)?;
-            a_sub_x.push(a.1);
-            b_sub_y.push(b.1);
+            a_shares[i].push(a[i].clone());
+            b_shares[i].push(b[i].clone());
         }
-        info!("Reconstruction succeeded");
-
-        storage.openings = Some((a_sub_x, b_sub_y));
     }
+
+    // Need t+1 verified shares per multiplication to reconstruct
+    if a_shares.iter().any(|s| s.len() < t + 1) || b_shares.iter().any(|s| s.len() < t + 1) {
+        warn!("Insufficient shares for reconstruction, waiting for more");
+        return Ok(());
+    }
+    let mut a_sub_x = Vec::new();
+    let mut b_sub_y = Vec::new();
+    for i in 0..no_of_mul {
+        let a = FeldmanShamirShare::recover_secret(&a_shares[i], n, t)?;
+        let b = FeldmanShamirShare::recover_secret(&b_shares[i], n, t)?;
+        a_sub_x.push(a.1);
+        b_sub_y.push(b.1);
+    }
+    info!("Reconstruction succeeded");
+
+    storage.openings = Some((a_sub_x, b_sub_y));
+
     Ok(())
 }
 fn finalize_mul<F: FftField, G: CurveGroup<ScalarField = F>>(

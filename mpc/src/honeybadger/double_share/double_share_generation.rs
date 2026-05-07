@@ -1,5 +1,8 @@
 use crate::{
-    common::{share::shamir::NonRobustShare, ProtocolSessionId, SecretSharingScheme},
+    common::{
+        share::{shamir::NonRobustShare, ShareError},
+        ProtocolSessionId, SecretSharingScheme,
+    },
     honeybadger::{
         double_share::{DouShaError, DouShaMessage, DouShaStorage},
         SessionId, WrappedMessage,
@@ -88,12 +91,16 @@ where
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
-    ) -> Arc<Mutex<DouShaStorage<F>>> {
+    ) -> Result<Arc<Mutex<DouShaStorage<F>>>, DouShaError> {
         let mut storage = self.storage.lock().await;
-        storage
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            warn!("DouSha session limit reached");
+            return Err(DouShaError::LimitError);
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))))
-            .clone()
+            .clone())
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.storage.lock().await;
@@ -162,7 +169,7 @@ where
         }
 
         // Update the state of the protocol to Initialized.
-        let storage_access = self.get_or_create_store(session_id).await;
+        let storage_access = self.get_or_create_store(session_id).await?;
         let mut storage = storage_access.lock().await;
         storage.state = ProtocolState::Initialized;
         Ok(())
@@ -174,7 +181,17 @@ where
     ) -> Result<(), DouShaError> {
         let double_share: DoubleShamirShare<F> =
             CanonicalDeserialize::deserialize_compressed(recv_message.payload.as_slice())?;
-        let binding = self.get_or_create_store(recv_message.session_id).await;
+        if double_share.degree_t.id != self.id || double_share.degree_2t.id != self.id {
+            return Err(ShareError::IdMismatch.into());
+        }
+        if double_share.degree_t.degree != self.threshold {
+            return Err(ShareError::DegreeMismatch.into());
+        }
+        if double_share.degree_2t.degree != 2 * self.threshold {
+            return Err(ShareError::DegreeMismatch.into());
+        }
+
+        let binding = self.get_or_create_store(recv_message.session_id).await?;
         let mut dousha_storage = binding.lock().await;
 
         if dousha_storage.state == ProtocolState::Finished {

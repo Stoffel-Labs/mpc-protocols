@@ -104,12 +104,32 @@ impl<F: FftField> OutputClient<F> {
     /// 4. If the output has not been reconstructed yet and enough shares have been received,
     ///    attempt to reconstruct the output using robust interpolation.
     pub async fn output_handler(&mut self, msg: OutputMessage) -> Result<(), OutputError> {
+        if msg.payload.len() < 8 {
+            return Err(OutputError::InvalidInput("Payload too short".to_string()));
+        }
+        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap()) as usize;
+        if declared_len != self.input_len {
+            return Err(OutputError::InvalidInput(
+                "Mismatch in input and share length".to_string(),
+            ));
+        }
         // 1.
         let mut shares: Vec<RobustShare<F>> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 
+        if !shares.iter().all(|s| s.id == msg.sender_id) {
+            return Err(OutputError::InvalidInput(
+                "Share ID does not match authenticated sender".into(),
+            ));
+        }
+
         for share in &mut shares {
             share.id = msg.sender_id;
+            if share.degree != self.t {
+                return Err(OutputError::InvalidInput(
+                    "Invalid share degree".to_string(),
+                ));
+            }
         }
         if shares.len() != self.input_len {
             return Err(OutputError::InvalidInput(

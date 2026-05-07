@@ -48,6 +48,18 @@ pub enum GenericMsgType {
     ABA(MsgTypeAba),
     Acs(MsgTypeAcs),
 }
+impl GenericMsgType {
+    pub fn is_dealer_message(&self) -> bool {
+        match self {
+            GenericMsgType::Bracha(MsgType::Init) => true,
+            GenericMsgType::Bracha(_) => false,
+            GenericMsgType::Avid(MsgTypeAvid::Send) => true,
+            GenericMsgType::Avid(_) => false,
+            GenericMsgType::ABA(_) => false,
+            GenericMsgType::Acs(_) => false,
+        }
+    }
+}
 // Implement Display for GenericMsgType
 impl fmt::Display for GenericMsgType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

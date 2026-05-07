@@ -53,6 +53,8 @@ pub enum DouShaError {
     ResultAlreadyReceived(SessionId),
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(SessionId),
+    #[error("Store Limit")]
+    LimitError,
 }
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]

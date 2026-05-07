@@ -68,7 +68,7 @@ use ark_ff::{FftField, PrimeField};
 use ark_std::rand::rngs::{OsRng, StdRng};
 use ark_std::rand::{Rng, SeedableRng};
 use async_trait::async_trait;
-use bincode::ErrorKind;
+use bincode::{ErrorKind, Options};
 use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
@@ -79,6 +79,10 @@ use thiserror::Error;
 use tokio::{sync::Mutex, time::Duration};
 use tracing::{info, warn};
 use triple_gen::triple_generation::TripleGenNode;
+
+/// Maximum number of bytes accepted from a single network message before deserialization.
+/// Rejects payloads that would cause multi-gigabyte allocations via a crafted length prefix.
+const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
 #[derive(Error, Debug)]
 pub enum HoneyBadgerError {
@@ -177,7 +181,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), HoneyBadgerError> {
-        let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
+        let wrapped: WrappedMessage = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MAX_MESSAGE_SIZE)
+            .deserialize(&raw_msg)?;
 
         match wrapped {
             WrappedMessage::Input(input_msg) => {
@@ -490,7 +498,11 @@ where
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), Self::Error> {
-        let wrapped: WrappedMessage = bincode::deserialize(&raw_msg)?;
+        let wrapped: WrappedMessage = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MAX_MESSAGE_SIZE)
+            .deserialize(&raw_msg)?;
 
         match wrapped {
             WrappedMessage::Rbc(rbc_msg) => {
@@ -502,6 +514,17 @@ where
                         rbc_msg.session_id.instance_id(),
                     ));
                 }
+                if rbc_msg.msg_type.is_dealer_message() {
+                    let expected_dealer = rbc_msg.session_id.sub_id() as usize;
+                    if rbc_msg.sender_id != expected_dealer {
+                        warn!(
+                            "Rejecting dealer message: sender {} is not expected dealer {} for session {:?}",
+                            rbc_msg.sender_id, expected_dealer, rbc_msg.session_id
+                        );
+                        return Err(HoneyBadgerError::InvalidPartyId);
+                    }
+                }
+
                 match rbc_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Randousha) => {
                         self.preprocess
@@ -537,7 +560,7 @@ where
                             .await?;
                     }
                     Some(ProtocolType::FpMul) => {
-                        if rbc_msg.session_id.sub_id() == 0 {
+                        if rbc_msg.session_id.round_id() == 0 {
                             self.type_ops
                                 .fpmul
                                 .trunc_node
@@ -640,7 +663,7 @@ where
                             .await?
                     }
                     Some(ProtocolType::RandBit) => {
-                        if batch_msg.session_id.sub_id() == 0 {
+                        if batch_msg.session_id.round_id() == 0 {
                             self.preprocess
                                 .rand_bit
                                 .batch_recon

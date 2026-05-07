@@ -18,6 +18,8 @@ use tokio::{
 };
 use tracing::info;
 
+const MAX_INPUT_ELEMENTS: u64 = 65_536;
+
 /// In the beginning of an MPC calculation, each node has to obtain a share of all clients' inputs.
 /// This follows the same pattern as HoneyBadger's input protocol but uses FeldmanShamirShare
 /// with Feldman commitment verification:
@@ -147,6 +149,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         let mut send_over_network = false;
         let mut already_rand_shares = false;
         let mut unknown_client = false;
+        let mut invalid_length = false;
 
         self.status_sender.send_if_modified(|status| {
             match status.get(&client_id) {
@@ -162,6 +165,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                         .iter()
                         .map(|s| s.feldmanshare.share[0])
                         .collect();
+                    if masked_values.len() != shares.len() {
+                        invalid_length = true;
+                        return false;
+                    }
                     let input_shares = calculate_input_shares(&masked_values, &shares);
 
                     status.insert(client_id, (InputType::InputShares, input_shares));
@@ -187,6 +194,11 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         if unknown_client {
             return Err(AvssInputError::InvalidInput(
                 "Unknown client {client_id}".to_string(),
+            ));
+        }
+        if invalid_length {
+            return Err(AvssInputError::InvalidInput(
+                "masked_inputs length does not match shares length".to_string(),
             ));
         }
         if already_rand_shares {
@@ -219,11 +231,23 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             self.id, sender_id
         );
 
+        if payload.len() < 8 {
+            return Err(AvssInputError::InvalidInput(
+                "Payload too short".to_string(),
+            ));
+        }
+        let declared_len = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        if declared_len > MAX_INPUT_ELEMENTS {
+            return Err(AvssInputError::InvalidInput(
+                "Declared input length exceeds maximum".to_string(),
+            ));
+        }
         let masked_inputs: Vec<F> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
 
         let mut unknown_client = false;
         let mut already_masked_inputs = false;
+        let mut invalid_length = false;
 
         self.status_sender
             .send_if_modified(|status| match status.get(&sender_id) {
@@ -232,6 +256,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                     false
                 }
                 Some((InputType::RandomShares, random_shares)) => {
+                    if masked_inputs.len() != random_shares.len() {
+                        invalid_length = true;
+                        return false;
+                    }
                     let input_shares = calculate_input_shares(&masked_inputs, random_shares);
 
                     status.insert(sender_id, (InputType::InputShares, input_shares));
@@ -271,6 +299,13 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                 }
             });
 
+        if invalid_length {
+            return Err(AvssInputError::InvalidInput(format!(
+                "masked_inputs length {} does not match expected {}",
+                masked_inputs.len(),
+                sender_id
+            )));
+        }
         if already_masked_inputs {
             return Err(AvssInputError::Duplicate(format!(
                 "Server {} already received masked inputs from {}",
@@ -379,12 +414,23 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         msg: AvssInputMessage,
         net: Arc<N>,
     ) -> Result<(), AvssInputError> {
+        if msg.payload.len() < 8 {
+            return Err(AvssInputError::InvalidInput(
+                "Payload too short".to_string(),
+            ));
+        }
+        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap()) as usize;
+        let input_len = self.client_data.lock().await.inputs.len();
+        if declared_len != input_len {
+            return Err(AvssInputError::InvalidInput(
+                "Mismatch in input and share length".to_string(),
+            ));
+        }
+
         let shares: Vec<FeldmanShamirShare<F, G>> =
             ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
 
         let mut d = self.client_data.lock().await;
-
-        let input_len = d.inputs.len();
 
         if shares.len() != input_len {
             return Err(AvssInputError::InvalidInput(
@@ -394,6 +440,12 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
 
         // Verify Feldman commitments on received shares
         for share in &shares {
+            if share.feldmanshare.degree != self.t {
+                return Err(AvssInputError::InvalidInput(format!(
+                    "Invalid share degree from server {}",
+                    msg.sender_id
+                )));
+            }
             if !verify_feldman(share.clone()) {
                 return Err(AvssInputError::VerificationFailed(format!(
                     "Feldman verification failed for share from server {}",
@@ -425,19 +477,30 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             self.client_id, msg.sender_id
         );
 
-        let mut r_shares = vec![vec![]; input_len];
-        let mut masks = vec![];
-        let mut output = vec![];
-        // For Feldman shares, we need t+1 shares to reconstruct (degree t polynomial)
         if d.received_shares.len() >= self.t + 1 {
-            info!("Received enough shares to reconstruct");
-            for (_, r_share) in d.received_shares.iter() {
-                for i in 0..input_len {
-                    r_shares[i].push(r_share[i].clone());
+            let mut masks = vec![];
+            let mut output = vec![];
+            let mut consistent_groups: Vec<Option<Vec<FeldmanShamirShare<F, G>>>> =
+                vec![None; input_len];
+
+            for i in 0..input_len {
+                let mut by_commitment: HashMap<Vec<u8>, Vec<FeldmanShamirShare<F, G>>> =
+                    HashMap::new();
+                for (_, shares) in d.received_shares.iter() {
+                    let share = &shares[i];
+                    let mut key = Vec::new();
+                    share.commitments.serialize_compressed(&mut key)?;
+                    by_commitment.entry(key).or_default().push(share.clone());
+                }
+                match by_commitment.into_values().find(|g| g.len() >= self.t + 1) {
+                    Some(group) => consistent_groups[i] = Some(group),
+                    None => return Ok(()), // not enough consistent shares yet, wait for more
                 }
             }
-            for recon in r_shares {
-                let secret = FeldmanShamirShare::<F, G>::recover_secret(&recon, self.n, self.t)?;
+
+            info!("Received enough consistent shares to reconstruct");
+            for group in consistent_groups.into_iter().flatten() {
+                let secret = FeldmanShamirShare::<F, G>::recover_secret(&group, self.n, self.t)?;
                 masks.push(secret.1);
             }
 
