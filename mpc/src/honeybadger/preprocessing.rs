@@ -1,6 +1,7 @@
 use crate::honeybadger::{
-    fpmul::f256::Gf2568, robust_interpolate::robust_interpolate::RobustShare,
-    triple_gen::ShamirBeaverTriple, HoneyBadgerError,
+    comparison::PreMulCPrep, fpmul::f256::Gf2568,
+    robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple,
+    HoneyBadgerError,
 };
 use ark_ff::FftField;
 
@@ -15,6 +16,8 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     prandbit_shares: Vec<(RobustShare<F>, Gf2568)>,
     ///A pool of PRandInt outputs for truncation
     prandint_shares: Vec<RobustShare<F>>,
+    /// PreMulC offline outputs (w, z, triples) pre-generated for LTZ comparisons.
+    premulc_ltz: PreMulCPrep<F>,
 }
 
 impl<F> HoneyBadgerMPCNodePreprocMaterial<F>
@@ -28,6 +31,11 @@ where
             beaver_triples: Vec::new(),
             prandbit_shares: Vec::new(),
             prandint_shares: Vec::new(),
+            premulc_ltz: PreMulCPrep {
+                w: Vec::new(),
+                z: Vec::new(),
+                triples: Vec::new(),
+            },
         }
     }
 
@@ -104,6 +112,28 @@ where
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
         Ok(self.prandint_shares.drain(0..n_prandint).collect())
+    }
+    /// Appends w, z and online triples from a batch offline run.
+    pub fn add_premulc_ltz(&mut self, mut prep: PreMulCPrep<F>) {
+        self.premulc_ltz.w.append(&mut prep.w);
+        self.premulc_ltz.z.append(&mut prep.z);
+        self.premulc_ltz.triples.append(&mut prep.triples);
+    }
+
+    pub fn premulc_ltz_len(&self) -> usize {
+        self.premulc_ltz.w.len()
+    }
+
+    /// Drain exactly `pk` elements and return them as one ready-to-use `PreMulCPrep`.
+    pub fn take_premulc_ltz(&mut self, pk: usize) -> Result<PreMulCPrep<F>, HoneyBadgerError> {
+        if self.premulc_ltz.w.len() < pk {
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(PreMulCPrep {
+            w: self.premulc_ltz.w.drain(0..pk).collect(),
+            z: self.premulc_ltz.z.drain(0..pk).collect(),
+            triples: self.premulc_ltz.triples.drain(0..pk).collect(),
+        })
     }
 }
 

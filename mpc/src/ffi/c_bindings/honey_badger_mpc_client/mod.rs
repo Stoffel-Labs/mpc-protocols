@@ -82,6 +82,10 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::InvalidThreshold(_, _) => Self::HoneyBadgerInvalidThesholdError,
             HoneyBadgerError::InvalidPartySize => Self::HoneyBadgerInvalidPartySizeError,
             HoneyBadgerError::InvalidPartyId => Self::HoneyBadgerInvalidPartyIdError,
+            HoneyBadgerError::LTZError(_) => todo!(),
+            HoneyBadgerError::PreMulCError(_) => todo!(),
+            HoneyBadgerError::Mod2error(_) => todo!(),
+            HoneyBadgerError::Mod2merror(_) => todo!(),
         }
     }
 }

@@ -70,6 +70,8 @@ async fn randousha_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
     // spawn tasks to process received messages
@@ -152,6 +154,8 @@ async fn ransha_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
     // spawn tasks to process received messages
@@ -224,6 +228,8 @@ async fn test_input_protocol_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         clientid.clone(),
     );
 
@@ -325,6 +331,8 @@ async fn gen_masks_for_input_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         clientid.clone(),
     );
     //Create nodes for InputClient
@@ -495,6 +503,8 @@ async fn mul_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 
@@ -606,6 +616,8 @@ async fn mul_e2e_with_preprocessing() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         vec![clientid[0]],
     );
 
@@ -772,11 +784,18 @@ async fn preprocessing_e2e() {
     let t = 1;
     let l = 8;
     let k = 4;
-    let no_of_triples = 7;
-    let no_of_randomshares = 4;
+    let no_of_triples = 16;
+    let no_of_randomshares = 16;
     let instance_id = 111;
-    let n_prandbit = 4;
-    let n_prandint = 4;
+    let n_ltz = 2usize;
+    let ltz_bit_len = 8usize;
+    let chunk = t + 1;
+    let pk = ((ltz_bit_len - 1 + chunk - 1) / chunk) * chunk; // = 8
+    let expected_ltz_total = n_ltz * pk; // = 16
+                                         // (ltz_bit_len - 1) for Mod2m + 1 for inner Mod2 = ltz_bit_len per LTZ call
+    let n_prandbit = n_ltz * ltz_bit_len; // = 16
+                                          // 1 for Mod2m + 1 for inner Mod2 = 2 per LTZ call
+    let n_prandint = n_ltz * 2; // = 4
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -794,6 +813,8 @@ async fn preprocessing_e2e() {
         l,
         k,
         Duration::from_secs(30),
+        n_ltz,
+        ltz_bit_len,
         vec![],
     );
 
@@ -833,13 +854,136 @@ async fn preprocessing_e2e() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_shares, n_prandbit, n_prandint) =
-            node.preprocessing_material.lock().await.len();
-        assert_eq!(n_triples, 5); //>no_of_triples
-        assert_eq!(n_shares, 0); //>no_of_randomshares
-        assert_eq!(n_prandbit, 4);
-        assert_eq!(n_prandint, 4);
+        let mut store = node.preprocessing_material.lock().await;
+
+        let (n_triples, n_shares, n_pb, n_pi) = store.len();
+        assert_eq!(n_triples, 0); // ceil(48/3)*3 = 48 − 16 (prandbit) − 32 (ltz) = 0
+        assert_eq!(n_shares, 0); // 48 − 16 (prandbit) − 32 (ltz) = 0
+        assert_eq!(n_pb, n_prandbit);
+        assert_eq!(n_pi, n_prandint);
+
+        // LTZ: all n_ltz * pk offline entries must be ready
+        assert_eq!(
+            store.premulc_ltz_len(),
+            expected_ltz_total,
+            "node {pid}: expected {expected_ltz_total} premulc_ltz entries"
+        );
+
+        // Drain one batch and verify all three vectors have exactly pk elements
+        let batch = store.take_premulc_ltz(pk).expect("take_premulc_ltz failed");
+        assert_eq!(batch.w.len(), pk, "node {pid}: w length");
+        assert_eq!(batch.z.len(), pk, "node {pid}: z length");
+        assert_eq!(batch.triples.len(), pk, "node {pid}: triples length");
+
+        // After draining one batch, n_ltz - 1 batches remain
+        assert_eq!(store.premulc_ltz_len(), expected_ltz_total - pk);
     }
+}
+
+//----------------------------------------LTZ----------------------------------------
+
+#[tokio::test]
+async fn ltz_int_e2e() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 4;
+    let t = 1;
+    let ltz_bit_len = 8usize;
+    let n_ltz = 1usize;
+    let chunk = t + 1;
+    let pk = ((ltz_bit_len - 1 + chunk - 1) / chunk) * chunk; // = 8
+                                                              //prandbit and ltz both draw from the same pool — size to cover both:
+                                                              //ceil((n_ltz*pk + ltz_extra)/group)*group - n_prandbit >= ltz_extra
+    let no_of_triples = n_ltz * pk; // 8
+    let no_of_randomshares = n_ltz * pk; // 8
+    let n_prandbit = n_ltz * ltz_bit_len; // 8: (k-1) for Mod2m + 1 for Mod2
+    let n_prandint = n_ltz * 2; // 2: 1 for Mod2m + 1 for Mod2
+    let instance_id = 333u32;
+
+    // -3 encoded as a field element using negation (same as ltz_run in comparison_test.rs)
+    let a_signed: i64 = -3;
+    let a_field = -Fr::from((-a_signed) as u64);
+    let expected = Fr::from(1u64); // -3 < 0 → 1
+
+    //Setup
+    let mut rng = test_rng();
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        no_of_triples,
+        no_of_randomshares,
+        instance_id,
+        n_prandbit,
+        n_prandint,
+        8,
+        4,
+        Duration::from_secs(30),
+        n_ltz,
+        ltz_bit_len,
+        vec![],
+    );
+
+    //----------------------------------------RECIEVE----------------------------------------
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    //----------------------------------------RUN PREPROCESSING----------------------------------------
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let mut rng = StdRng::from_rng(OsRng).unwrap();
+        handles.push(tokio::spawn(async move {
+            node.run_preprocessing(net[pid].clone(), &mut rng)
+                .await
+                .expect("Preprocessing failed");
+        }));
+    }
+    join_all(handles).await;
+
+    //----------------------------------------PREPARE INPUTS----------------------------------------
+    let a_shares = RobustShare::compute_shares(a_field, n_parties, t, None, &mut rng).unwrap();
+    let a_inputs: Vec<SecretInt<Fr, RobustShare<Fr>>> = a_shares
+        .into_iter()
+        .map(|s| SecretInt::new(s, ltz_bit_len))
+        .collect();
+
+    //----------------------------------------RUN LTZ----------------------------------------
+    let (fin_send, mut fin_recv) = mpsc::channel::<(usize, RobustShare<Fr>)>(n_parties * 2);
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let x = a_inputs[pid].clone();
+        let fin_send = fin_send.clone();
+        handles.push(tokio::spawn(async move {
+            let result = node
+                .ltz_int(x, net[pid].clone())
+                .await
+                .expect("ltz_int failed");
+            fin_send.send((pid, result.share().clone())).await.unwrap();
+        }));
+    }
+    join_all(handles).await;
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+    let mut result_shares: Vec<RobustShare<Fr>> = Vec::new();
+    while let Ok((_, share)) = fin_recv.try_recv() {
+        result_shares.push(share);
+    }
+    let (_, result) =
+        RobustShare::recover_secret(&result_shares, n_parties, t).expect("recover_secret failed");
+    assert_eq!(
+        result, expected,
+        "ltz_int({a_signed}) expected {expected:?}, got {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -873,6 +1017,8 @@ async fn preprocessing_e2e_big() {
         l,
         k,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 
@@ -965,6 +1111,8 @@ async fn test_rand_bit() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 
@@ -1115,6 +1263,8 @@ async fn fpmul_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 
@@ -1233,6 +1383,8 @@ async fn fpmul_e2e_with_preprocessing() {
         bound_l,
         security_k,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 
@@ -1331,6 +1483,8 @@ async fn add_fixed_e2e() {
         8,
         4,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 
@@ -1406,6 +1560,8 @@ async fn sub_fixed_e2e() {
         8,
         4,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 
@@ -1470,6 +1626,8 @@ async fn add_int_e2e() {
         8,
         4,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 
@@ -1534,6 +1692,8 @@ async fn sub_int_e2e() {
         8,
         4,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 
@@ -1596,6 +1756,8 @@ async fn mul_int_e2e_with_preprocessing() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 
@@ -1727,6 +1889,8 @@ async fn fpdiv_const_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 

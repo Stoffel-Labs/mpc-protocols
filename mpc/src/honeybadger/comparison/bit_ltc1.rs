@@ -19,7 +19,9 @@
 use crate::{
     common::RBC,
     honeybadger::{
-        comparison::{mod2::Mod2Node, pre_mulc::PreMulCNode, BitLTC1Error, PRandMPrep, PreMulCPrep},
+        comparison::{
+            mod2::Mod2Node, pre_mulc::PreMulCOnlineNode, BitLTC1Error, PRandMPrep, PreMulCPrep,
+        },
         robust_interpolate::robust_interpolate::RobustShare,
         SessionId,
     },
@@ -29,12 +31,12 @@ use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use tokio::time::Duration;
 
-#[derive(Clone)]
-pub struct BitLTC1Node<F: PrimeField, R: RBC<Id = SessionId>> {
+#[derive(Clone, Debug)]
+pub struct BitLTC1Node<F: PrimeField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub pre_mul_c: PreMulCNode<F, R>,
+    pub pre_mul_c: PreMulCOnlineNode<F, R>,
     pub mod2: Mod2Node<F, R>,
 }
 
@@ -44,7 +46,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> BitLTC1Node<F, R> {
             id,
             n,
             t,
-            pre_mul_c: PreMulCNode::new(id, n, t)?,
+            pre_mul_c: PreMulCOnlineNode::new(id, n, t)?,
             mod2: Mod2Node::new(id, n, t)?,
         })
     }

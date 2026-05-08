@@ -20,8 +20,8 @@ use ark_ff::PrimeField;
 use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use tokio::time::Duration;
-#[derive(Clone)]
-pub struct TruncNode<F: PrimeField, R: RBC<Id = SessionId>> {
+#[derive(Clone, Debug)]
+pub struct TruncNode<F: PrimeField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,

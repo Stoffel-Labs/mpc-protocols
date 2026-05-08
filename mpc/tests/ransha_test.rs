@@ -60,6 +60,8 @@ async fn test_reconstruct_handler_incorrect_share() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         vec![],
     );
 

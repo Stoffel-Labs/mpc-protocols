@@ -413,6 +413,9 @@ where
         y: Vec<Self::Sint>,
         net: Arc<N>,
     ) -> Result<Vec<Self::Sint>, Self::Error>;
+
+    /// x<0 Integer comparison (int8/16/32/64)
+    async fn ltz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
 }
 
 /// A protocol identifier that fits into 8 bits.

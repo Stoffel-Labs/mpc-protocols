@@ -12,11 +12,12 @@ use stoffelmpc_mpc::honeybadger::comparison::bit_ltc1::BitLTC1Node;
 use stoffelmpc_mpc::honeybadger::comparison::ltz::LTZNode;
 use stoffelmpc_mpc::honeybadger::comparison::mod2::Mod2Node;
 use stoffelmpc_mpc::honeybadger::comparison::mod2m::Mod2mNode;
+use stoffelmpc_mpc::honeybadger::comparison::pre_mulc::{PreMulCOfflineNode, PreMulCOnlineNode};
 use stoffelmpc_mpc::honeybadger::comparison::trunc::TruncNode;
 use stoffelmpc_mpc::honeybadger::comparison::{PRandMPrep, PreMulCPrep};
 use stoffelmpc_mpc::honeybadger::{
-    comparison::pre_mulc::PreMulCNode, robust_interpolate::robust_interpolate::RobustShare,
-    triple_gen::ShamirBeaverTriple, ProtocolType, SessionId, WrappedMessage,
+    robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple,
+    ProtocolType, SessionId, WrappedMessage,
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use tokio::sync::mpsc::Receiver;
@@ -149,7 +150,7 @@ async fn collect_result_shares(mut set: JoinSet<RobustShare<Fr>>) -> Vec<RobustS
 fn spawn_premulc_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<PreMulCNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<PreMulCOnlineNode<Fr, Avid<SessionId>>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -217,6 +218,76 @@ fn spawn_premulc_receiver_tasks(
     set
 }
 
+fn spawn_premulcoff_receiver_tasks(
+    num_parties: usize,
+    mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
+    nodes: Vec<PreMulCOfflineNode<Fr, Avid<SessionId>>>,
+    network: Vec<Arc<FakeNetwork>>,
+) -> JoinSet<()> {
+    let mut set = JoinSet::new();
+    for i in 0..num_parties {
+        let mut node = nodes[i].clone();
+        let receiver = receivers.remove(0);
+        let net = network[i].clone();
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
+            .into_iter()
+            .enumerate()
+            .map(|(j, r)| (SenderId::Node(j), r))
+            .collect();
+        let mut merge_rx = fan_in_inboxes(inbox);
+
+        set.spawn(async move {
+            while let Some((_, bytes)) = merge_rx.recv().await {
+                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        warn!("deserialize failed");
+                        continue;
+                    }
+                };
+                match wrapped {
+                    WrappedMessage::BatchRecon(msg) => {
+                        let round = msg.session_id.round_id();
+                        if round == 0 {
+                            node.batch_recon
+                                .process(msg, net.clone())
+                                .await
+                                .expect("batch_recon process failed");
+                            node.drain_batch_recon_output()
+                                .await
+                                .expect("drain_batch_recon_output failed");
+                        } else if round == 1 {
+                            node.mul
+                                .batch_recon
+                                .process(msg, net.clone())
+                                .await
+                                .expect("mul.batch_recon process failed");
+                            node.mul
+                                .drain_batch_recon_output()
+                                .await
+                                .expect("mul.drain_batch_recon_output failed");
+                        } else {
+                            warn!("unexpected round_id {round}");
+                        }
+                    }
+                    WrappedMessage::Rbc(msg) => {
+                        node.mul
+                            .rbc
+                            .process(msg, net.clone())
+                            .await
+                            .expect("rbc process failed");
+                        node.mul
+                            .drain_rbc_output()
+                            .await
+                            .expect("drain_rbc_output failed");
+                    }
+                    _ => warn!("unexpected message type"),
+                }
+            }
+        });
+    }
+    set
+}
 // ── offline e2e ────────────────────────────────────────────────────────────────
 //
 // Runs generate_preprocessing on k=4 random (r, s) pairs.
@@ -257,10 +328,10 @@ async fn premulc_offline_e2e() {
 
     let triples = make_triples(n, t, k);
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<PreMulCNode<Fr, Avid<SessionId>>> = (0..n)
-        .map(|id| PreMulCNode::new(id, n, t).unwrap())
+    let nodes: Vec<PreMulCOfflineNode<Fr, Avid<SessionId>>> = (0..n)
+        .map(|id| PreMulCOfflineNode::new(id, n, t).unwrap())
         .collect();
-    let _recv = spawn_premulc_receiver_tasks(n, receivers, nodes.clone(), network.clone());
+    let _recv = spawn_premulcoff_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut init_set = JoinSet::new();
     for i in 0..n {
@@ -335,8 +406,8 @@ async fn premulc_online_e2e() {
 
     let premulc_prep = make_premulc_prep(k, n, t);
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<PreMulCNode<Fr, Avid<SessionId>>> = (0..n)
-        .map(|id| PreMulCNode::new(id, n, t).unwrap())
+    let nodes: Vec<PreMulCOnlineNode<Fr, Avid<SessionId>>> = (0..n)
+        .map(|id| PreMulCOnlineNode::new(id, n, t).unwrap())
         .collect();
     let _recv = spawn_premulc_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 

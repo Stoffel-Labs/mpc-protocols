@@ -14,7 +14,7 @@ pub mod integer;
 #[derive(Error, Debug)]
 pub enum TypeError {
     #[error("error operating incompatible types - self precision: {current:?}, other precision: {other:?}")]
-    IncompatibleIntegerPrecision { current: usize, other: usize },
+    IncompatibleIntegerBitLength { current: usize, other: usize },
     #[error("error operating incompatible types - self precision: {current:?}, other precision: {other:?}")]
     IncompatibleFixedPointPrecision {
         current: FixedPointPrecision,
@@ -24,4 +24,6 @@ pub enum TypeError {
     ShareError(#[from] ShareError),
     #[error("Division by Zero")]
     DivisionByZero,
+    #[error("Incompatible input length")]
+    IncompatibleInputLength,
 }

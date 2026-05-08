@@ -4,7 +4,7 @@
 //!   PreMulCOff session:    pack_slot24(exec_id, 0, 0)  — preprocessing
 //!   PreMulCOn session:     pack_slot24(exec_id, 0, 0)  — online
 //!   Batch chunks:          pack_slot24(exec_id, chunk_i, 0)  in respective session
-//!   Routing:               drain_batch_recon_output routes by calling_protocol()
+//!   Routing:               batch recon round_id=0 → outer node, round_id=1 → mul sub-node
 //!
 //! k must be a multiple of (t+1).
 //! Caller asserts: session.sub_id() == 0 && session.round_id() == 0.
@@ -87,19 +87,23 @@ impl<F: PrimeField> PreMulCOnlineStore<F> {
         }
     }
 }
-#[derive(Clone)]
-pub struct PreMulCNode<F: PrimeField, R: RBC<Id = SessionId>> {
+
+// ── Offline (preprocessing) node ──────────────────────────────────────────────
+
+/// Protocol 4.2 lines 1–8. Generates ([w_1,…,w_k], [z_1,…,z_k]) from random
+/// shares ([r_i], [s_i]) and Beaver triples.
+#[derive(Clone, Debug)]
+pub struct PreMulCOfflineNode<F: PrimeField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     prep_store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PreMulCPrepStore<F>>>>>>,
-    online_store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PreMulCOnlineStore<F>>>>>>,
     pub mul: Multiply<F, R>,
     pub batch_recon: BatchReconNode<F>,
     batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCNode<F, R> {
+impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PreMulCError> {
         let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
         let batch_recon = BatchReconNode::new(id, n, t, t, batch_sender)?;
@@ -109,7 +113,6 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCNode<F, R> {
             n,
             t,
             prep_store: Arc::new(Mutex::new(HashMap::new())),
-            online_store: Arc::new(Mutex::new(HashMap::new())),
             mul,
             batch_recon,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
@@ -130,27 +133,11 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCNode<F, R> {
             .clone())
     }
 
-    async fn get_or_create_online(
-        &self,
-        session: SessionId,
-    ) -> Result<Arc<Mutex<PreMulCOnlineStore<F>>>, PreMulCError> {
-        let mut map = self.online_store.lock().await;
-        if map.len() >= 256 && !map.contains_key(&session) {
-            return Err(PreMulCError::LimitError);
-        }
-        Ok(map
-            .entry(session)
-            .or_insert_with(|| Arc::new(Mutex::new(PreMulCOnlineStore::new())))
-            .clone())
-    }
-
     pub async fn clear_store(&self, session: SessionId) -> Result<(), PreMulCError> {
         self.batch_recon.clear_entire_store().await;
         self.mul.clear_store(session).await?;
         let mut pmap = self.prep_store.lock().await;
-        let mut omap = self.online_store.lock().await;
-        pmap.remove(&session);
-        omap.remove(&session)
+        pmap.remove(&session)
             .map(|_| ())
             .ok_or(PreMulCError::ClearStoreError(session))
     }
@@ -162,29 +149,6 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCNode<F, R> {
     ) -> Result<(Vec<RobustShare<F>>, Vec<RobustShare<F>>), PreMulCError> {
         let rx = {
             let map = self.prep_store.lock().await;
-            let inner = map
-                .get(&session)
-                .ok_or(PreMulCError::NoSuchSessionId(session))?
-                .clone();
-            let mut s = inner.lock().await;
-            s.output_receiver
-                .take()
-                .ok_or(PreMulCError::ResultAlreadyReceived(session))?
-        };
-        match timeout(duration, rx).await {
-            Err(_) => Err(PreMulCError::Timeout(session)),
-            Ok(Err(_)) => Err(PreMulCError::ReceiveError(session)),
-            Ok(Ok(v)) => Ok(v),
-        }
-    }
-
-    pub async fn wait_for_result(
-        &self,
-        session: SessionId,
-        duration: Duration,
-    ) -> Result<Vec<RobustShare<F>>, PreMulCError> {
-        let rx = {
-            let map = self.online_store.lock().await;
             let inner = map
                 .get(&session)
                 .ok_or(PreMulCError::NoSuchSessionId(session))?
@@ -217,33 +181,25 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCNode<F, R> {
             let output = self.batch_recon.get_store(id).await?;
             let vals: Vec<F> = CanonicalDeserialize::deserialize_compressed(output.as_slice())?;
 
-            let calling_proto = id
-                .calling_protocol()
-                .ok_or(PreMulCError::SessionIdError(id))?;
             let parent = SessionId::new(
-                calling_proto,
+                id.calling_protocol()
+                    .ok_or(PreMulCError::SessionIdError(id))?,
                 SessionId::pack_slot24(id.exec_id(), 0, 0),
                 id.instance_id(),
             );
             let chunk_idx = id.sub_id();
-
-            match id.calling_protocol() {
-                Some(ProtocolType::PreMulCOff) => {
-                    self.handle_prep_batch(parent, chunk_idx, vals).await?
-                }
-                Some(_) => self.handle_online_batch(parent, chunk_idx, vals).await?,
-                None => warn!("PreMulC: no calling_protocol in {:?}", id),
+            if id.calling_protocol() != Some(ProtocolType::PreMulCOff) {
+                warn!("PreMulC: incorrect calling_protocol in {:?}", id);
             }
+            self.handle_prep_batch(parent, chunk_idx, vals).await?;
         }
         Ok(())
     }
 
-    // ── preprocessing ─────────────────────────────────────────────────────────
-
     /// Protocol 4.2 lines 1–8. k must be a multiple of (t+1).
     ///
-    /// After calling this, drive `drain_batch_recon_output` until
-    /// `wait_for_preprocessing` resolves to get ([w_1,…,w_k], [z_1,…,z_k]).
+    /// Drive `drain_batch_recon_output` until `wait_for_preprocessing` resolves
+    /// to get ([w_1,…,w_k], [z_1,…,z_k]).
     pub async fn generate_preprocessing<N: Network + Send + Sync>(
         &mut self,
         r: Vec<RobustShare<F>>,
@@ -274,7 +230,6 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCNode<F, R> {
             st.chunks = k / (self.t + 1);
         }
 
-        // Open [u_i] via batch recon — protocol type PreMulCoff distinguishes from online.
         for (i, chunk) in u_shares.chunks(self.t + 1).enumerate() {
             let batch_session = SessionId::new(
                 calling_proto,
@@ -373,13 +328,126 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCNode<F, R> {
                 .take()
                 .ok_or(PreMulCError::SendError(session))?
         };
+        println!(
+            "w degrees: {:?}",
+            w.iter().map(|s| s.degree).collect::<Vec<_>>()
+        );
+        println!(
+            "z degrees: {:?}",
+            z.iter().map(|s| s.degree).collect::<Vec<_>>()
+        );
+
         sender
             .send((w, z))
             .map_err(|_| PreMulCError::SendError(session))?;
         Ok(true)
     }
+}
 
-    // ── online ────────────────────────────────────────────────────────────────
+// ── Online node ────────────────────────────────────────────────────────────────
+
+/// Protocol 4.2 lines 9–12. Computes prefix products [p_1,…,p_k] from input
+/// shares [a_i] and offline preprocessing output.
+#[derive(Clone, Debug)]
+pub struct PreMulCOnlineNode<F: PrimeField, R: RBC> {
+    pub id: usize,
+    pub n: usize,
+    pub t: usize,
+    online_store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PreMulCOnlineStore<F>>>>>>,
+    pub mul: Multiply<F, R>,
+    pub batch_recon: BatchReconNode<F>,
+    batch_output: Arc<Mutex<Receiver<SessionId>>>,
+}
+
+impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
+    pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PreMulCError> {
+        let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
+        let batch_recon = BatchReconNode::new(id, n, t, t, batch_sender)?;
+        let mul = Multiply::new(id, n, t)?;
+        Ok(Self {
+            id,
+            n,
+            t,
+            online_store: Arc::new(Mutex::new(HashMap::new())),
+            mul,
+            batch_recon,
+            batch_output: Arc::new(Mutex::new(batch_receiver)),
+        })
+    }
+
+    async fn get_or_create_online(
+        &self,
+        session: SessionId,
+    ) -> Result<Arc<Mutex<PreMulCOnlineStore<F>>>, PreMulCError> {
+        let mut map = self.online_store.lock().await;
+        if map.len() >= 256 && !map.contains_key(&session) {
+            return Err(PreMulCError::LimitError);
+        }
+        Ok(map
+            .entry(session)
+            .or_insert_with(|| Arc::new(Mutex::new(PreMulCOnlineStore::new())))
+            .clone())
+    }
+
+    pub async fn clear_store(&self, session: SessionId) -> Result<(), PreMulCError> {
+        self.batch_recon.clear_entire_store().await;
+        self.mul.clear_store(session).await?;
+        let mut omap = self.online_store.lock().await;
+        omap.remove(&session)
+            .map(|_| ())
+            .ok_or(PreMulCError::ClearStoreError(session))
+    }
+
+    pub async fn wait_for_result(
+        &self,
+        session: SessionId,
+        duration: Duration,
+    ) -> Result<Vec<RobustShare<F>>, PreMulCError> {
+        let rx = {
+            let map = self.online_store.lock().await;
+            let inner = map
+                .get(&session)
+                .ok_or(PreMulCError::NoSuchSessionId(session))?
+                .clone();
+            let mut s = inner.lock().await;
+            s.output_receiver
+                .take()
+                .ok_or(PreMulCError::ResultAlreadyReceived(session))?
+        };
+        match timeout(duration, rx).await {
+            Err(_) => Err(PreMulCError::Timeout(session)),
+            Ok(Err(_)) => Err(PreMulCError::ReceiveError(session)),
+            Ok(Ok(v)) => Ok(v),
+        }
+    }
+
+    pub async fn drain_batch_recon_output(&mut self) -> Result<(), PreMulCError> {
+        loop {
+            let id = {
+                let mut rx = self.batch_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(PreMulCError::Abort)
+                    }
+                }
+            };
+
+            let output = self.batch_recon.get_store(id).await?;
+            let vals: Vec<F> = CanonicalDeserialize::deserialize_compressed(output.as_slice())?;
+
+            let parent = SessionId::new(
+                id.calling_protocol()
+                    .ok_or(PreMulCError::SessionIdError(id))?,
+                SessionId::pack_slot24(id.exec_id(), 0, 0),
+                id.instance_id(),
+            );
+            let chunk_idx = id.sub_id();
+            self.handle_online_batch(parent, chunk_idx, vals).await?;
+        }
+        Ok(())
+    }
 
     /// Protocol 4.2 lines 9–12. k must be a multiple of (t+1).
     ///
@@ -512,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_premulc_session_limit() {
-        let node = PreMulCNode::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
+        let node = PreMulCOnlineNode::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
         for i in 0u8..=255 {
             let sid = SessionId::new(
                 crate::honeybadger::ProtocolType::Trunc,

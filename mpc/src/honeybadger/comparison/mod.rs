@@ -8,7 +8,7 @@ use crate::{
         SessionId,
     },
 };
-use ark_ff::PrimeField;
+use ark_ff::FftField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use stoffelnet::network_utils::NetworkError;
@@ -21,19 +21,19 @@ pub mod mod2m;
 pub mod pre_mulc;
 pub mod trunc;
 
-#[derive(Clone)]
-pub struct PreMulCPrep<F: PrimeField> {
+#[derive(Clone, Debug)]
+pub struct PreMulCPrep<F: FftField> {
     pub w: Vec<RobustShare<F>>,
     pub z: Vec<RobustShare<F>>,
     pub triples: Vec<ShamirBeaverTriple<F>>,
 }
 #[derive(Clone)]
-pub struct PRandMPrep<F: PrimeField> {
+pub struct PRandMPrep<F: FftField> {
     pub r_double_prime: RobustShare<F>,
     pub r_prime: RobustShare<F>,
     pub r_prime_bits: Vec<RobustShare<F>>,
 }
-impl<F: PrimeField> PRandMPrep<F> {
+impl<F: FftField> PRandMPrep<F> {
     /// Protocol 2.2 step 3: computes [r'] = Σ_{i=0}^{m-1} 2^i * [b_i].
     /// `r_double_prime` is the PRandInt(k + κ − m) output.
     /// `r_prime_bits` must be non-empty (m >= 1), LSB first.

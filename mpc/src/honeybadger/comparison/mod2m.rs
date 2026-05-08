@@ -47,8 +47,8 @@ impl<F: PrimeField> Mod2mStore<F> {
     }
 }
 
-#[derive(Clone)]
-pub struct Mod2mNode<F: PrimeField, R: RBC<Id = SessionId>> {
+#[derive(Clone, Debug)]
+pub struct Mod2mNode<F: PrimeField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
