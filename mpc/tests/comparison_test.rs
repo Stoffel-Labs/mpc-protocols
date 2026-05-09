@@ -327,6 +327,7 @@ async fn premulc_offline_e2e() {
     }
 
     let triples = make_triples(n, t, k);
+    let v_triples = make_triples(n, t, k - 1);
     let (network, receivers, _, _) = test_setup(n, vec![]);
     let nodes: Vec<PreMulCOfflineNode<Fr, Avid<SessionId>>> = (0..n)
         .map(|id| PreMulCOfflineNode::new(id, n, t).unwrap())
@@ -336,14 +337,15 @@ async fn premulc_offline_e2e() {
     let mut init_set = JoinSet::new();
     for i in 0..n {
         let mut node = nodes[i].clone();
-        let (r, s, tri, net) = (
+        let (r, s, tri, vtri, net) = (
             r_per_party[i].clone(),
             s_per_party[i].clone(),
             triples[i].clone(),
+            v_triples[i].clone(),
             network[i].clone(),
         );
         init_set.spawn(async move {
-            node.generate_preprocessing(r, s, tri, session, net, duration)
+            node.generate_preprocessing(r, s, tri, vtri, session, net, duration)
                 .await
                 .unwrap()
         });

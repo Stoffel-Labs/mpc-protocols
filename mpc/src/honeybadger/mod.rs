@@ -1273,13 +1273,14 @@ where
         // Get how many triples and random shares are already available
         // Extra demand from LTZ: each comparison needs 2*pk triples and 2*pk random shares
         // for the PreMulCOffline protocol (pk offline triples + pk online triples, pk r + pk s).
-        let ltz_extra = if self.params.n_ltz > 0 && self.params.ltz_bit_len >= 2 {
-            let chunk = self.params.threshold + 1;
-            let pk = ((self.params.ltz_bit_len - 1 + chunk - 1) / chunk) * chunk;
-            self.params.n_ltz * 2 * pk
-        } else {
-            0
-        };
+        let (ltz_extra_triples, ltz_extra_shares) =
+            if self.params.n_ltz > 0 && self.params.ltz_bit_len >= 2 {
+                let chunk = self.params.threshold + 1;
+                let pk = ((self.params.ltz_bit_len - 1 + chunk - 1) / chunk) * chunk;
+                (self.params.n_ltz * 3 * pk, self.params.n_ltz * 2 * pk)
+            } else {
+                (0, 0)
+            };
 
         // Get how many triples and random shares are already available
         let (no_of_triples_avail, no_of_random_shares_avail, _, _) = {
@@ -1287,8 +1288,8 @@ where
             store.len()
         };
 
-        let mut no_of_triples = self.params.n_triples + ltz_extra;
-        let mut no_of_random_shares = self.params.n_random_shares + ltz_extra;
+        let mut no_of_triples = self.params.n_triples + ltz_extra_triples;
+        let mut no_of_random_shares = self.params.n_random_shares + ltz_extra_shares;
         // Each triple batch produces (2t + 1) triples at a time
         let group_size = 2 * self.params.threshold + 1;
         let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
@@ -1789,6 +1790,11 @@ where
             .lock()
             .await
             .take_beaver_triples(missing)?;
+        let v_triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(missing - 1)?;
         let online_triples = self
             .preprocessing_material
             .lock()
@@ -1801,6 +1807,7 @@ where
                 r_shares,
                 s_shares,
                 offline_triples,
+                v_triples,
                 session,
                 network.clone(),
                 self.params.timeout,

@@ -857,7 +857,7 @@ async fn preprocessing_e2e() {
         let mut store = node.preprocessing_material.lock().await;
 
         let (n_triples, n_shares, n_pb, n_pi) = store.len();
-        assert_eq!(n_triples, 0); // ceil(48/3)*3 = 48 − 16 (prandbit) − 32 (ltz) = 0
+        assert_eq!(n_triples, 3); // ceil(64/3)*3=66 − 16 (prandbit) − 47 (ltz u+v+online) = 3
         assert_eq!(n_shares, 0); // 48 − 16 (prandbit) − 32 (ltz) = 0
         assert_eq!(n_pb, n_prandbit);
         assert_eq!(n_pi, n_prandint);

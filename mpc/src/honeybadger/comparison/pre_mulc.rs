@@ -41,6 +41,7 @@ pub struct PreMulCPrepStore<F: PrimeField> {
     pub state: PhaseState,
     pub r: Option<Vec<RobustShare<F>>>,
     pub s: Option<Vec<RobustShare<F>>>,
+    pub v: Option<Vec<RobustShare<F>>>,
     pub chunks: usize,
     pub open: HashMap<u8, Vec<F>>,
     pub output_sender:
@@ -56,6 +57,7 @@ impl<F: PrimeField> PreMulCPrepStore<F> {
             state: PhaseState::Waiting,
             r: None,
             s: None,
+            v: None,
             chunks: 0,
             open: HashMap::new(),
             output_sender: Some(tx),
@@ -205,6 +207,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
         r: Vec<RobustShare<F>>,
         s: Vec<RobustShare<F>>,
         triples: Vec<ShamirBeaverTriple<F>>,
+        v_triples: Vec<ShamirBeaverTriple<F>>,
         session: SessionId,
         network: Arc<N>,
         mul_duration: Duration,
@@ -212,21 +215,38 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
         let k = r.len();
         assert_eq!(s.len(), k);
         assert_eq!(k % (self.t + 1), 0, "k must be a multiple of t+1");
+        assert_eq!(
+            v_triples.len(),
+            k - 1,
+            "v_triples must have exactly k-1 elements"
+        );
 
         let calling_proto = session
             .calling_protocol()
             .ok_or(PreMulCError::SessionIdError(session))?;
 
+        // Combine: first k pairs → u_i = r_i * s_i, next k-1 pairs → v_i = r[i+1] * s[i]
+        let mut x = r.clone();
+        x.extend_from_slice(&r[1..]);
+        let mut y = s.clone();
+        y.extend_from_slice(&s[..k - 1]);
+        let mut all_triples = triples;
+        all_triples.extend(v_triples);
+
         self.mul
-            .init(session, r.clone(), s.clone(), triples, Arc::clone(&network))
+            .init(session, x, y, all_triples, Arc::clone(&network))
             .await?;
-        let u_shares = self.mul.wait_for_result(session, mul_duration).await?;
+        let all_shares = self.mul.wait_for_result(session, mul_duration).await?;
+
+        let u_shares = all_shares[..k].to_vec();
+        let v_shares = all_shares[k..].to_vec();
 
         {
             let store = self.get_or_create_prep(session).await?;
             let mut st = store.lock().await;
             st.r = Some(r);
             st.s = Some(s);
+            st.v = Some(v_shares);
             st.chunks = k / (self.t + 1);
         }
 
@@ -266,7 +286,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
         session: SessionId,
         store_mutex: Arc<Mutex<PreMulCPrepStore<F>>>,
     ) -> Result<bool, PreMulCError> {
-        let (r, s_vec, open_map, num_chunks) = {
+        let (r, s_vec, v_vec, open_map, num_chunks) = {
             let s = store_mutex.lock().await;
             if s.state == PhaseState::Finished {
                 return Ok(true);
@@ -280,7 +300,10 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
             let Some(sv) = s.s.clone() else {
                 return Ok(false);
             };
-            (r, sv, s.open.clone(), s.chunks)
+            let Some(vv) = s.v.clone() else {
+                return Ok(false);
+            };
+            (r, sv, vv, s.open.clone(), s.chunks)
         };
 
         // Assemble u_vals from chunks in order.
@@ -297,21 +320,15 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
 
         let k = r.len();
 
-        // Line 5: [v_i] = share_mul([r_{i+1}], [s_i])  for i = 0..k-2  (local).
-        let mut v: Vec<RobustShare<F>> = Vec::with_capacity(k - 1);
-        for i in 0..k - 1 {
-            v.push(r[i + 1].share_mul(&s_vec[i])?);
-        }
-
-        // Lines 6–7: [w_1] = [r_0]; [w_i] = [v_{i-1}] * u_{i-1}^{-1}.
+        // [w_1] = [r_0]; [w_i] = [v_{i-1}] * u_{i-1}^{-1}  — degree-t
         let mut w: Vec<RobustShare<F>> = Vec::with_capacity(k);
         w.push(r[0].clone());
         for i in 1..k {
             let u_inv = u_vals[i - 1].inverse().expect("u != 0");
-            w.push((v[i - 1].clone() * u_inv)?);
+            w.push((v_vec[i - 1].clone() * u_inv)?);
         }
 
-        // Line 8: [z_i] = [s_i] * u_i^{-1}.
+        // [z_i] = [s_i] * u_i^{-1}  — degree-t
         let mut z: Vec<RobustShare<F>> = Vec::with_capacity(k);
         for i in 0..k {
             let u_inv = u_vals[i].inverse().expect("u != 0");
@@ -328,15 +345,6 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
                 .take()
                 .ok_or(PreMulCError::SendError(session))?
         };
-        println!(
-            "w degrees: {:?}",
-            w.iter().map(|s| s.degree).collect::<Vec<_>>()
-        );
-        println!(
-            "z degrees: {:?}",
-            z.iter().map(|s| s.degree).collect::<Vec<_>>()
-        );
-
         sender
             .send((w, z))
             .map_err(|_| PreMulCError::SendError(session))?;
