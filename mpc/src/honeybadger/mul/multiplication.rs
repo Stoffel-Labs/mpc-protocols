@@ -212,6 +212,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 continue;
             }
 
+            if id.round_id() != 2 {
+                warn!("Dropping RBC output: unexpected round_id for Mul RBC message");
+                continue;
+            }
             match self
                 .open_mult_handler(authenticated_sender, msg.session_id, msg.payload)
                 .await
