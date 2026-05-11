@@ -1246,6 +1246,67 @@ where
 
         Ok(SecretInt::new(result_share, k))
     }
+    async fn gtz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        let neg_x = (x * ClearInt::new(-F::one(), k))?;
+        self.ltz_int(neg_x, net).await
+    }
+
+    async fn lez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        let neg_x = (x * ClearInt::new(-F::one(), k))?;
+        let ltz = self.ltz_int(neg_x, net).await?;
+        let k2 = ltz.bit_length();
+        let neg_ltz = (ltz * ClearInt::new(-F::one(), k2))?;
+        Ok((neg_ltz + ClearInt::new(F::one(), k2))?)
+    }
+
+    async fn gez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int(x, net).await?;
+        let k = ltz.bit_length();
+        let neg_ltz = (ltz * ClearInt::new(-F::one(), k))?;
+        Ok((neg_ltz + ClearInt::new(F::one(), k))?)
+    }
+
+    async fn lt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.ltz_int((a - b)?, net).await
+    }
+
+    async fn gt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.ltz_int((b - a)?, net).await
+    }
+
+    async fn le_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int((b - a)?, net).await?;
+        let k = ltz.bit_length();
+        Ok(((ltz * ClearInt::new(-F::one(), k))? + ClearInt::new(F::one(), k))?)
+    }
+
+    async fn ge_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int((a - b)?, net).await?;
+        let k = ltz.bit_length();
+        Ok(((ltz * ClearInt::new(-F::one(), k))? + ClearInt::new(F::one(), k))?)
+    }
 }
 
 #[async_trait]
