@@ -178,8 +178,8 @@ where
             return Err(ShareError::InsufficientShares);
         }
 
-        // All IDs are non-zero (optional, depending on your protocol)
-        if id_list.iter().any(|&id| id == 0) {
+        // All IDs map to non-zero field elements
+        if id_list.iter().any(|&id| F::from(id as u64) == F::ZERO) {
             return Err(ShareError::InvalidInput);
         }
 
@@ -231,7 +231,10 @@ where
         if shares.len() < deg + 1 {
             return Err(ShareError::InsufficientShares);
         }
-        if shares.iter().any(|share| share.feldmanshare.id == 0) {
+        if shares
+            .iter()
+            .any(|share| F::from(share.feldmanshare.id as u64) == F::ZERO)
+        {
             return Err(ShareError::InvalidInput);
         }
         let (x_vals, y_vals): (Vec<F>, Vec<F>) = shares

@@ -7,7 +7,7 @@ use crate::{
             f256::{build_all_f_polys_2_8, Gf2568, Gf256Domain},
             PRandBitDMessage, PRandBitDStore, PRandError, PrandState,
         },
-        mul::concat_sorted,
+        mul::{concat_sorted, deser_bounded_vec},
         robust_interpolate::robust_interpolate::RobustShare,
         ProtocolType, SessionId, WrappedMessage,
     },
@@ -626,8 +626,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         }
 
         // deserialize the field element from the payload
-        let share_i_list: Vec<F> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+        let share_i_list: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), self.n)?;
         let dealer_id = sid.sub_id();
         if store.output_open.contains_key(&dealer_id) {
             return Err(PRandError::Duplicate(format!(

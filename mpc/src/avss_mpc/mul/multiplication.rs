@@ -1,5 +1,6 @@
 use crate::avss_mpc::mul::{
-    MulError, MultMessage, MultProtocolState, MultStorage, ReconstructionMessage,
+    deser_bounded_feldman_vec, MulError, MultMessage, MultProtocolState, MultStorage,
+    ReconstructionMessage,
 };
 use crate::avss_mpc::triple_gen::BeaverTriple;
 use crate::avss_mpc::{AvssSessionId, AvssWrappedMessage, MAX_MESSAGE_SIZE};
@@ -8,7 +9,7 @@ use crate::common::{share::ShareError, RBC};
 use crate::common::{ProtocolSessionId, SecretSharingScheme};
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::CanonicalSerialize;
 use bincode::Options;
 use itertools::izip;
 use std::{collections::HashMap, sync::Arc};
@@ -199,8 +200,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
                 "Payload exceeds size limit".to_string(),
             ));
         }
-        let open_message: ReconstructionMessage<F, G> =
-            CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
+        let mut r = msg.payload.as_slice();
+        let a_sub_x = deser_bounded_feldman_vec::<F, G>(&mut r, self.n, self.t + 1)?;
+        let b_sub_y = deser_bounded_feldman_vec::<F, G>(&mut r, self.n, self.t + 1)?;
+        let open_message = ReconstructionMessage { a_sub_x, b_sub_y };
 
         for share in open_message
             .a_sub_x

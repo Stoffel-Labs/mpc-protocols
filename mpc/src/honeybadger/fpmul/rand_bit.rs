@@ -1,13 +1,12 @@
 use crate::common::{ProtocolSessionId, RBC};
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
 use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitStorage};
-use crate::honeybadger::mul::concat_sorted;
 use crate::honeybadger::mul::multiplication::Multiply;
+use crate::honeybadger::mul::{concat_sorted, deser_bounded_vec};
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::triple_gen::ShamirBeaverTriple;
 use crate::honeybadger::SessionId;
 use ark_ff::FftField;
-use ark_serialize::CanonicalDeserialize;
 use itertools::izip;
 use std::collections::HashMap;
 use std::ops::{Add, Mul};
@@ -305,7 +304,7 @@ where
             return Ok(());
         }
 
-        let open: Vec<F> = CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+        let open: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), self.n_parties)?;
         let dealer_id = sid.sub_id();
         if storage.output_open.contains_key(&dealer_id) {
             return Err(RandBitError::Duplicate(format!(

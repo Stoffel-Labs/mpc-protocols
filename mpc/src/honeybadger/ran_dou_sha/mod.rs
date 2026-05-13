@@ -539,6 +539,10 @@ where
             RanDouShaPayload::Reconstruct(_) => return Err(RanDouShaError::Abort),
             RanDouShaPayload::Output(ok) => ok,
         };
+        if msg.sender_id < self.threshold + 1 || msg.sender_id >= self.n_parties {
+            return Err(RanDouShaError::IncorrectID);
+        }
+
         info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, msg.session_id.as_u64(), msg.sender_id, output);
         // abort randousha once received the abort message
         if !output {

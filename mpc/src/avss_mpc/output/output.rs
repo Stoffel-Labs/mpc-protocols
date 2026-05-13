@@ -1,3 +1,4 @@
+use crate::avss_mpc::mul::deser_bounded_feldman_vec;
 use crate::avss_mpc::output::{AvssOutputError, AvssOutputMessage};
 use crate::avss_mpc::AvssWrappedMessage;
 use crate::common::share::avss::verify_feldman;
@@ -114,9 +115,10 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
                 "Declared input length does not match expected".to_string(),
             ));
         }
-        let shares: Vec<FeldmanShamirShare<F, G>> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
-
+        let shares: Vec<FeldmanShamirShare<F, G>> = {
+            let mut r = msg.payload.as_slice();
+            deser_bounded_feldman_vec::<F, G>(&mut r, self.input_len, self.t + 1)?
+        };
         if shares.len() != self.input_len {
             return Err(AvssOutputError::InvalidInput(
                 "Mismatch in input and share length".to_string(),

@@ -4,7 +4,7 @@ use crate::{
     avss_mpc::AvssSessionId,
     common::{
         rbc::RbcError,
-        share::{feldman::FeldmanShamirShare, ShareError},
+        share::{feldman::FeldmanShamirShare, shamir::Shamirshare, ShareError},
     },
 };
 use ark_ec::CurveGroup;
@@ -147,4 +147,51 @@ where
     ) -> Self {
         Self { a_sub_x, b_sub_y }
     }
+}
+fn deser_bounded_vec<T: CanonicalDeserialize>(
+    r: &mut &[u8],
+    max: usize,
+) -> Result<Vec<T>, SerializationError> {
+    if r.len() < 8 {
+        return Err(SerializationError::InvalidData);
+    }
+    let (head, tail) = r.split_at(8);
+    let len = u64::from_le_bytes(head.try_into().unwrap()) as usize;
+    if len > max {
+        return Err(SerializationError::InvalidData);
+    }
+    *r = tail;
+    (0..len)
+        .map(|_| T::deserialize_compressed(&mut *r))
+        .collect()
+}
+
+pub fn deser_bounded_feldman_vec<F, G>(
+    r: &mut &[u8],
+    max_outer: usize,
+    max_commitments: usize,
+) -> Result<Vec<FeldmanShamirShare<F, G>>, SerializationError>
+where
+    F: FftField,
+    G: CurveGroup<ScalarField = F>,
+{
+    if r.len() < 8 {
+        return Err(SerializationError::InvalidData);
+    }
+    let (head, tail) = r.split_at(8);
+    let len = u64::from_le_bytes(head.try_into().unwrap()) as usize;
+    if len > max_outer {
+        return Err(SerializationError::InvalidData);
+    }
+    *r = tail;
+    (0..len)
+        .map(|_| {
+            let feldmanshare = Shamirshare::<F>::deserialize_compressed(&mut *r)?;
+            let commitments = deser_bounded_vec::<G>(r, max_commitments)?;
+            Ok(FeldmanShamirShare {
+                feldmanshare,
+                commitments,
+            })
+        })
+        .collect()
 }
