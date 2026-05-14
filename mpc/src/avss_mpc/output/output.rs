@@ -1,6 +1,5 @@
-use crate::avss_mpc::mul::deser_bounded_feldman_vec;
 use crate::avss_mpc::output::{AvssOutputError, AvssOutputMessage};
-use crate::avss_mpc::AvssWrappedMessage;
+use crate::avss_mpc::{deser_bounded_feldman_vec, AvssWrappedMessage};
 use crate::common::share::avss::verify_feldman;
 use crate::common::share::feldman::FeldmanShamirShare;
 use crate::common::SecretSharingScheme;

@@ -2,12 +2,13 @@ use crate::{
     common::{share::ShareError, ProtocolSessionId},
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
+        deser_bounded_vec,
         fpmul::{
             build_all_f_polys,
             f256::{build_all_f_polys_2_8, Gf2568, Gf256Domain},
             PRandBitDMessage, PRandBitDStore, PRandError, PrandState,
         },
-        mul::{concat_sorted, deser_bounded_vec},
+        mul::concat_sorted,
         robust_interpolate::robust_interpolate::RobustShare,
         ProtocolType, SessionId, WrappedMessage,
     },

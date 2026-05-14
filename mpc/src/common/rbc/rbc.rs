@@ -264,7 +264,7 @@ where
             store.increment_echo(&msg.payload); // Increment the count for the corresponding payload.
             let count = store.get_echo_count(&msg.payload);
             // If the threshold for receiving echoes is met, broadcast the READY message.
-            if count >= 2 * self.t + 1 {
+            if count >= (self.n + self.t + 2) / 2 {
                 if !store.ready {
                     store.mark_ready(); // Mark the session as ready.
                     broadcast_ready = Some(Msg::new(

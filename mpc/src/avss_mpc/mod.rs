@@ -4,7 +4,7 @@ use crate::{
             input::{AvssInputClient, AvssInputServer},
             AvssInputError, AvssInputMessage,
         },
-        mul::{multiplication::Multiply, MulError, MultMessage},
+        mul::{deser_bounded_vec, multiplication::Multiply, MulError, MultMessage},
         output::{
             output::{AvssOutputClient, AvssOutputServer},
             AvssOutputError, AvssOutputMessage,
@@ -17,12 +17,14 @@ use crate::{
         share::{
             avss::{AvssError, AvssMessage},
             feldman::FeldmanShamirShare,
+            shamir::Shamirshare,
         },
         MPCProtocol, PreprocessingMPCProtocol, ProtocolSessionId, ProtocolTag, RBC,
     },
 };
 use ark_ec::CurveGroup;
 use ark_ff::{FftField, PrimeField};
+use ark_serialize::{CanonicalDeserialize, SerializationError};
 use ark_std::rand::{
     rngs::{OsRng, StdRng},
     Rng, SeedableRng,
@@ -832,4 +834,34 @@ impl AvssSessionId {
     pub fn pack_slot24(exec_id: u8, sub_id: u8, round_id: u8) -> u32 {
         ((exec_id as u32) << 16) | ((sub_id as u32) << 8) | round_id as u32
     }
+}
+
+pub fn deser_bounded_feldman_vec<F, G>(
+    r: &mut &[u8],
+    max_outer: usize,
+    max_commitments: usize,
+) -> Result<Vec<FeldmanShamirShare<F, G>>, SerializationError>
+where
+    F: FftField,
+    G: CurveGroup<ScalarField = F>,
+{
+    if r.len() < 8 {
+        return Err(SerializationError::InvalidData);
+    }
+    let (head, tail) = r.split_at(8);
+    let len = u64::from_le_bytes(head.try_into().unwrap()) as usize;
+    if len > max_outer {
+        return Err(SerializationError::InvalidData);
+    }
+    *r = tail;
+    (0..len)
+        .map(|_| {
+            let feldmanshare = Shamirshare::<F>::deserialize_compressed(&mut *r)?;
+            let commitments = deser_bounded_vec::<G>(r, max_commitments)?;
+            Ok(FeldmanShamirShare {
+                feldmanshare,
+                commitments,
+            })
+        })
+        .collect()
 }
