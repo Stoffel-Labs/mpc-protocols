@@ -1,8 +1,10 @@
 use crate::{
-    common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC},
+    common::{
+        share::ShareError, utils::deser_bounded_vec, ProtocolSessionId, SecretSharingScheme,
+        ShamirShare, RBC,
+    },
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
-        deser_bounded_vec,
         mul::{
             concat_sorted, InterpolateError, MulError, MultMessage, MultProtocolState, MultStorage,
             ReconstructionMessage,

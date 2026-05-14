@@ -1,8 +1,7 @@
 use crate::{
-    common::{share::ShareError, ProtocolSessionId},
+    common::{share::ShareError, utils::deser_bounded_vec, ProtocolSessionId},
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
-        deser_bounded_vec,
         fpmul::{
             build_all_f_polys,
             f256::{build_all_f_polys_2_8, Gf2568, Gf256Domain},

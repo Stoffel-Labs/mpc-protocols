@@ -148,20 +148,3 @@ where
         Self { a_sub_x, b_sub_y }
     }
 }
-pub fn deser_bounded_vec<T: CanonicalDeserialize>(
-    r: &mut &[u8],
-    max: usize,
-) -> Result<Vec<T>, SerializationError> {
-    if r.len() < 8 {
-        return Err(SerializationError::InvalidData);
-    }
-    let (head, tail) = r.split_at(8);
-    let len = u64::from_le_bytes(head.try_into().unwrap()) as usize;
-    if len > max {
-        return Err(SerializationError::InvalidData);
-    }
-    *r = tail;
-    (0..len)
-        .map(|_| T::deserialize_compressed(&mut *r))
-        .collect()
-}

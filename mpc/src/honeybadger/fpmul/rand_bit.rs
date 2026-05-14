@@ -1,3 +1,4 @@
+use crate::common::utils::deser_bounded_vec;
 use crate::common::{ProtocolSessionId, RBC};
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
 use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitStorage};
@@ -5,7 +6,7 @@ use crate::honeybadger::mul::concat_sorted;
 use crate::honeybadger::mul::multiplication::Multiply;
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::triple_gen::ShamirBeaverTriple;
-use crate::honeybadger::{deser_bounded_vec, SessionId};
+use crate::honeybadger::SessionId;
 use ark_ff::FftField;
 use itertools::izip;
 use std::collections::HashMap;

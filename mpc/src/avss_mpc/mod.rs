@@ -4,7 +4,7 @@ use crate::{
             input::{AvssInputClient, AvssInputServer},
             AvssInputError, AvssInputMessage,
         },
-        mul::{deser_bounded_vec, multiplication::Multiply, MulError, MultMessage},
+        mul::{multiplication::Multiply, MulError, MultMessage},
         output::{
             output::{AvssOutputClient, AvssOutputServer},
             AvssOutputError, AvssOutputMessage,
@@ -19,6 +19,7 @@ use crate::{
             feldman::FeldmanShamirShare,
             shamir::Shamirshare,
         },
+        utils::deser_bounded_vec,
         MPCProtocol, PreprocessingMPCProtocol, ProtocolSessionId, ProtocolTag, RBC,
     },
 };
