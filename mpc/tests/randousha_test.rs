@@ -347,8 +347,7 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
-    // first n-(t+1)-1 message should return error
-    for i in 0..n_parties - (threshold + 2) {
+    for i in (threshold + 1)..(n_parties - 1) {
         let output_message = RanDouShaMessage::new(i, session_id, RanDouShaPayload::Output(true));
         let result = randousha_node.output_handler(output_message).await;
         let _ = result.is_ok();
@@ -357,14 +356,16 @@ async fn test_output_handler() {
     assert!(node_store.lock().await.received_ok_msg.len() == n_parties - (threshold + 2));
 
     // existed id should not be counted
-    let output_message = RanDouShaMessage::new(1, session_id, RanDouShaPayload::Output(true));
+    let output_message =
+        RanDouShaMessage::new(threshold + 1, session_id, RanDouShaPayload::Output(true));
     let _ = randousha_node.output_handler(output_message).await.is_ok();
 
     // check the store (n-(t+1)-1 shares)
     assert!(node_store.lock().await.received_ok_msg.len() == n_parties - (threshold + 2));
 
     // should return abort once received false outputMessage
-    let output_message = RanDouShaMessage::new(1, session_id, RanDouShaPayload::Output(false));
+    let output_message =
+        RanDouShaMessage::new(n_parties - 1, session_id, RanDouShaPayload::Output(false));
     let e = randousha_node
         .output_handler(output_message)
         .await
@@ -375,7 +376,7 @@ async fn test_output_handler() {
 
     // should return two t+1 shares once received n-(t+1) Ok message
     let output_message =
-        RanDouShaMessage::new(n_parties, session_id, RanDouShaPayload::Output(true));
+        RanDouShaMessage::new(n_parties - 1, session_id, RanDouShaPayload::Output(true));
     randousha_node
         .output_handler(output_message)
         .await

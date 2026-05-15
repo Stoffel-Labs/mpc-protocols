@@ -1,5 +1,5 @@
 use crate::{
-    common::{share::ShareError, ProtocolSessionId},
+    common::{share::ShareError, utils::deser_bounded_vec, ProtocolSessionId},
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         fpmul::{
@@ -626,8 +626,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         }
 
         // deserialize the field element from the payload
-        let share_i_list: Vec<F> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+        let share_i_list: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), self.n)?;
         let dealer_id = sid.sub_id();
         if store.output_open.contains_key(&dealer_id) {
             return Err(PRandError::Duplicate(format!(

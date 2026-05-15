@@ -1,5 +1,8 @@
 use crate::{
-    common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC},
+    common::{
+        share::ShareError, utils::deser_bounded_vec, ProtocolSessionId, SecretSharingScheme,
+        ShamirShare, RBC,
+    },
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         mul::{
@@ -12,7 +15,7 @@ use crate::{
     },
 };
 use ark_ff::FftField;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::CanonicalSerialize;
 use bincode::Options;
 use itertools::izip;
 use std::{
@@ -212,6 +215,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 continue;
             }
 
+            if id.round_id() != 2 {
+                warn!("Dropping RBC output: unexpected round_id for Mul RBC message");
+                continue;
+            }
             match self
                 .open_mult_handler(authenticated_sender, msg.session_id, msg.payload)
                 .await
@@ -478,7 +485,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
         // 2.
         if sid.round_id() == 1 {
-            let open: Vec<F> = CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+            let open: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), self.n)?;
             let dealer_id = sid.sub_id();
             let (target_map, label) = if dealer_id % 2 == 0 {
                 (&mut storage.output_open_mult1, "a-x")
@@ -513,8 +520,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 ));
             }
 
-            let open_message: ReconstructionMessage<F> =
-                CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+            let mut r = payload.as_slice();
+            let a_sub_x = deser_bounded_vec::<RobustShare<F>>(&mut r, self.n)?;
+            let b_sub_y = deser_bounded_vec::<RobustShare<F>>(&mut r, self.n)?;
+            let open_message = ReconstructionMessage { a_sub_x, b_sub_y };
             for share in open_message
                 .a_sub_x
                 .iter()
