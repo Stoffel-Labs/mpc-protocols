@@ -1,5 +1,5 @@
 use crate::avss_mpc::input::{AvssInputError, AvssInputMessage};
-use crate::avss_mpc::{AvssSessionId, AvssWrappedMessage, ProtocolType};
+use crate::avss_mpc::{deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, ProtocolType};
 use crate::common::share::avss::verify_feldman;
 use crate::common::share::feldman::FeldmanShamirShare;
 use crate::common::{ProtocolSessionId, SecretSharingScheme, RBC};
@@ -427,9 +427,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             ));
         }
 
-        let shares: Vec<FeldmanShamirShare<F, G>> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
-
+        let shares: Vec<FeldmanShamirShare<F, G>> = {
+            let mut r = msg.payload.as_slice();
+            deser_bounded_feldman_vec::<F, G>(&mut r, input_len, self.t + 1)?
+        };
         let mut d = self.client_data.lock().await;
 
         if shares.len() != input_len {
