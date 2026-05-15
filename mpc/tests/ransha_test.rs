@@ -217,7 +217,7 @@ async fn test_output_handler() {
     assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold - 1));
 
     let output_message = RanShaMessage::new(
-        n_parties,
+        2 * threshold - 1, // was: n_parties
         RanShaMessageType::OutputMessage,
         session_id,
         RanShaPayload::Output(true),
