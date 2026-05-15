@@ -548,6 +548,10 @@ where
         if msg.session_id.sub_id() != 0 {
             return Err(RanShaError::SessionIdError(msg.session_id));
         }
+        if msg.sender_id >= 2 * self.threshold {
+            warn!("Rejecting output from non-verifier party {}", msg.sender_id);
+            return Err(RanShaError::InvalidPartyId);
+        }
 
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
