@@ -1010,6 +1010,37 @@ where
         N: 'async_trait,
         G: Rng + Send,
     {
+        self.run_triple_gen_phase(network.clone(), rng).await?;
+
+        // ------------------------
+        // Step 5. Generate Random bits
+        // ------------------------
+        self.ensure_prandbit_shares(network.clone()).await?;
+        info!("PrandBit share generation done");
+
+        // ------------------------
+        // Step 6. Generate Random Int
+        // ------------------------
+        self.ensure_prandint_shares(network.clone()).await?;
+        info!("PrandInt share generation done");
+
+        Ok(())
+    }
+}
+impl<F, R> HoneyBadgerMPCNode<F, R>
+where
+    F: PrimeField,
+    R: RBC<Id = SessionId>,
+{
+    pub async fn run_triple_gen_phase<N, G>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng + Send,
+    {
         // Get how many triples and random shares are already available
         let (no_of_triples_avail, no_of_random_shares_avail, _, _) = {
             let store = self.preprocessing_material.lock().await;
@@ -1045,7 +1076,6 @@ where
 
         if total_random_shares_to_generate == 0 && total_triples_to_generate == 0 {
             info!("There are enough Random shares and Beaver triples");
-            // return Ok(());
         } else {
             let mut triple_counter = self.counters.triple_counter.get_next().await?;
             if (256 - triple_counter as usize) * 255 < total_triples_to_generate / group_size {
@@ -1128,26 +1158,9 @@ where
                 }
             }
         }
-        // ------------------------
-        // Step 5. Generate Random bits
-        // ------------------------
-        self.ensure_prandbit_shares(network.clone()).await?;
-        info!("PrandBit share generation done");
-
-        // ------------------------
-        // Step 6. Generate Random Int
-        // ------------------------
-        self.ensure_prandint_shares(network.clone()).await?;
-        info!("PrandInt share generation done");
-
         Ok(())
     }
-}
-impl<F, R> HoneyBadgerMPCNode<F, R>
-where
-    F: PrimeField,
-    R: RBC<Id = SessionId>,
-{
+
     /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
     async fn ensure_random_shares<G, N>(
         &mut self,
@@ -1300,7 +1313,10 @@ where
         Ok(dou_sha)
     }
 
-    async fn ensure_prandbit_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
+    pub async fn ensure_prandbit_shares<N>(
+        &mut self,
+        network: Arc<N>,
+    ) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
     {
@@ -1412,7 +1428,10 @@ where
         Ok(())
     }
 
-    async fn ensure_prandint_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
+    pub async fn ensure_prandint_shares<N>(
+        &mut self,
+        network: Arc<N>,
+    ) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
     {

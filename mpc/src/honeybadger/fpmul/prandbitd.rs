@@ -432,6 +432,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         Ok(true)
     }
+
     /// Distributed RISS generation
     /// generates shares in multiples of (t+1)
     pub async fn generate_riss<N: Network + Send + Sync>(
@@ -491,7 +492,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 .map(|_| rand::thread_rng().gen_range(0, bound + 1))
                 .collect();
 
-            // send to all players not in T
+            // Send to all players not in T
             for j in 0..self.n {
                 if !tset.contains(&j) {
                     let msg = WrappedMessage::PRandBitD(PRandBitDMessage::new(
@@ -543,7 +544,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // Insert sender’s contribution
         tset_entry.insert(msg.sender_id, msg.r_t);
 
-        // Check if we have all expected contributors
+        // TODO: Here we are expecting n contributions but we are assuming that this part of the
+        // protocol is robust. We need to check if this is correct with respect to the protocol.
+
+        // Check if we have all expected contributors.
         if tset_entry.len() == self.n {
             // Compute r_T = sum of contributions
             let r_t_sum = tset_entry.values().fold(

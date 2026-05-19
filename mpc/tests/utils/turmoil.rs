@@ -39,11 +39,11 @@ pub fn turmoil_setup(
         Builder::new()
             .min_message_latency(Duration::from_millis(min))
             .max_message_latency(Duration::from_millis(max))
-            .simulation_duration(Duration::from_mins(3))
+            .simulation_duration(Duration::from_mins(20))
             .build()
     } else {
         Builder::new()
-            .simulation_duration(Duration::from_mins(3))
+            .simulation_duration(Duration::from_mins(20))
             .build()
     };
 
