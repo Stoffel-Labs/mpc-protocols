@@ -2179,3 +2179,25 @@ fn ransha_e2e_turmoil_with_hold_minority_partition() {
 
     ransha_e2e_turmoil_with_hold(n_parties, t, hold_nodes, hold_time);
 }
+
+#[test]
+fn ransha_e2e_turmoil_with_hold_minority_partition_2_secs() {
+    let n_parties = 10;
+    let t = 3;
+    let hold_time = Duration::from_secs(2);
+
+    let hold_nodes = vec![0, 1];
+
+    ransha_e2e_turmoil_with_hold(n_parties, t, hold_nodes, hold_time);
+}
+
+#[test]
+fn ransha_e2e_turmoil_with_hold_minority_partition_3_secs() {
+    let n_parties = 10;
+    let t = 3;
+    let hold_time = Duration::from_secs(3);
+
+    let hold_nodes = vec![0, 1];
+
+    ransha_e2e_turmoil_with_hold(n_parties, t, hold_nodes, hold_time);
+}
