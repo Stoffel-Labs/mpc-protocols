@@ -260,6 +260,17 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
                 .init_batch_reconstruct(chunk, batch_session, Arc::clone(&network))
                 .await?;
         }
+        {
+            let store = self.get_or_create_prep(session).await?;
+            let ready = {
+                let s = store.lock().await;
+                s.r.is_some() && s.open.len() >= s.chunks
+            };
+            if ready {
+                self.try_finalize_prep(session, store).await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -501,6 +512,17 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
                 .init_batch_reconstruct(chunk, batch_session, Arc::clone(&network))
                 .await?;
         }
+        {
+            let store = self.get_or_create_online(session).await?;
+            let ready = {
+                let s = store.lock().await;
+                s.z_shares.is_some() && s.open.len() >= s.chunks
+            };
+            if ready {
+                self.try_finalize_online(session, store).await?;
+            }
+        }
+
         Ok(())
     }
 

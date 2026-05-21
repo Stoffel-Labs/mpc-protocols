@@ -15,10 +15,14 @@ use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 
 pub mod bit_ltc1;
+pub mod eqz;
+pub mod kor_cl;
+pub mod kor_cs;
 pub mod ltz;
 pub mod mod2;
 pub mod mod2m;
 pub mod pre_mulc;
+pub mod rand_inv_pair;
 pub mod trunc;
 
 #[derive(Clone, Debug)]
@@ -182,4 +186,127 @@ pub enum LTZError {
     TruncError(#[from] TruncError),
     #[error("share error: {0}")]
     ShareError(#[from] ShareError),
+}
+#[derive(Debug, Error)]
+pub enum KOrCSError {
+    #[error("mul error: {0}")]
+    MulError(#[from] MulError),
+    #[error("batch recon error: {0}")]
+    BatchReconError(#[from] BatchReconError),
+    #[error("share error: {0}")]
+    ShareError(#[from] ShareError),
+    #[error("serialization: {0}")]
+    SerializationError(#[from] SerializationError),
+    #[error("bad session id: {0:?}")]
+    SessionIdError(SessionId),
+    #[error("no session: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("send error: {0:?}")]
+    SendError(SessionId),
+    #[error("receive error: {0:?}")]
+    ReceiveError(SessionId),
+    #[error("timeout: {0:?}")]
+    Timeout(SessionId),
+    #[error("session limit")]
+    LimitError,
+    #[error("wrong input length")]
+    LengthError,
+    #[error("abort")]
+    Abort,
+}
+
+#[derive(Debug, Error)]
+pub enum KOrCLError {
+    #[error("rbc error: {0}")]
+    RbcError(#[from] RbcError),
+    #[error("share error: {0}")]
+    ShareError(#[from] ShareError),
+    #[error("kor_cs error: {0}")]
+    KOrCSError(#[from] KOrCSError),
+    #[error("serialization: {0}")]
+    SerializationError(#[from] SerializationError),
+    #[error("no session: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("send error: {0:?}")]
+    SendError(SessionId),
+    #[error("receive error: {0:?}")]
+    ReceiveError(SessionId),
+    #[error("timeout: {0:?}")]
+    Timeout(SessionId),
+    #[error("bad session id: {0:?}")]
+    SessionIdError(SessionId),
+    #[error("session limit")]
+    LimitError,
+    #[error("clear store: {0:?}")]
+    ClearStoreError(SessionId),
+    #[error("abort")]
+    Abort,
+    #[error("wrong input length")]
+    LengthError,
+}
+
+#[derive(Debug, Error)]
+pub enum EQZError {
+    #[error("rbc error: {0}")]
+    RbcError(#[from] RbcError),
+    #[error("share error: {0}")]
+    ShareError(#[from] ShareError),
+    #[error("kor_cl error: {0}")]
+    KOrCLError(#[from] KOrCLError),
+    #[error("serialization: {0}")]
+    SerializationError(#[from] SerializationError),
+    #[error("no session: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("send error: {0:?}")]
+    SendError(SessionId),
+    #[error("receive error: {0:?}")]
+    ReceiveError(SessionId),
+    #[error("timeout: {0:?}")]
+    Timeout(SessionId),
+    #[error("bad session id: {0:?}")]
+    SessionIdError(SessionId),
+    #[error("session limit")]
+    LimitError,
+    #[error("clear store: {0:?}")]
+    ClearStoreError(SessionId),
+    #[error("abort")]
+    Abort,
+    #[error("wrong input length")]
+    LengthError,
+}
+
+#[derive(Debug, Error)]
+pub enum RandInvPairError {
+    #[error("mul error: {0}")]
+    MulError(#[from] MulError),
+    #[error("batch recon error: {0}")]
+    BatchReconError(#[from] BatchReconError),
+    #[error("share error: {0}")]
+    ShareError(#[from] ShareError),
+    #[error("serialization: {0}")]
+    SerializationError(#[from] SerializationError),
+    #[error("no session: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("send error: {0:?}")]
+    SendError(SessionId),
+    #[error("receive error: {0:?}")]
+    ReceiveError(SessionId),
+    #[error("timeout: {0:?}")]
+    Timeout(SessionId),
+    #[error("bad session id: {0:?}")]
+    SessionIdError(SessionId),
+    #[error("session limit")]
+    LimitError,
+    #[error("wrong input length")]
+    LengthError,
+    #[error("abort")]
+    Abort,
 }

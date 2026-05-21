@@ -1876,12 +1876,6 @@ where
             .await
             .map_err(HoneyBadgerError::from)?;
 
-        self.preprocess
-            .premulc
-            .drain_batch_recon_output()
-            .await
-            .map_err(HoneyBadgerError::from)?;
-
         let (w, z) = self
             .preprocess
             .premulc
@@ -1954,6 +1948,10 @@ pub enum ProtocolType {
     FpDivConst = 14,
     PreMulCOff = 15,
     LTZ = 16,
+    RandInvPair = 17,
+    KOr1 = 18,
+    KOr2 = 19,
+    EQZ = 20,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -1982,6 +1980,10 @@ impl ProtocolTag for ProtocolType {
             14 => Some(Self::FpDivConst),
             15 => Some(Self::PreMulCOff),
             16 => Some(Self::LTZ),
+            17 => Some(Self::RandInvPair),
+            18 => Some(Self::KOr1),
+            19 => Some(Self::KOr2),
+            20 => Some(Self::EQZ),
             _ => None,
         }
     }

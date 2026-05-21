@@ -146,7 +146,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2mNode<F, R> {
                     continue;
                 }
                 s.received_shares.entry(sender_id).or_insert(share_val);
-                s.received_shares.len() >= self.n - self.t
+                s.received_shares.len() >= 2 * self.t + 1
             };
 
             if ready {
@@ -166,7 +166,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2mNode<F, R> {
             if s.state == PhaseState::Finished {
                 return Ok(());
             }
-            if s.received_shares.len() < self.n - self.t {
+            if s.received_shares.len() < 2 * self.t + 1 {
                 return Ok(());
             }
             s.received_shares.clone()

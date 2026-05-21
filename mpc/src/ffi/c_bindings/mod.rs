@@ -119,6 +119,10 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
             crate::honeybadger::ProtocolType::PreMulCOff => todo!(),
             crate::honeybadger::ProtocolType::LTZ => todo!(),
+            crate::honeybadger::ProtocolType::KOr1 => todo!(),
+            crate::honeybadger::ProtocolType::KOr2 => todo!(),
+            crate::honeybadger::ProtocolType::EQZ => todo!(),
+            crate::honeybadger::ProtocolType::RandInvPair => todo!(),
         }
     }
 }

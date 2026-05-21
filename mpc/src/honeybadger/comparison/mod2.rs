@@ -171,6 +171,17 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
         c_share.share[0].serialize_compressed(&mut payload)?;
 
         self.rbc.init(payload, rbc_session, network).await?;
+        // If n-t shares already arrived before r_prime was stored, finalize now.
+        {
+            let store = self.get_or_create_store(session).await?;
+            let ready = {
+                let s = store.lock().await;
+                s.r_prime.is_some() && s.received_shares.len() >= 2 * self.t + 1
+            };
+            if ready {
+                self.try_finalize(session, store).await?;
+            }
+        }
         Ok(())
     }
 
@@ -207,7 +218,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
                     continue;
                 }
                 s.received_shares.entry(sender).or_insert(share_val);
-                s.received_shares.len() >= self.n - self.t
+                s.received_shares.len() >= 2 * self.t + 1
             };
 
             if ready {
@@ -227,7 +238,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
             if s.state == PhaseState::Finished {
                 return Ok(());
             }
-            if s.received_shares.len() < self.n - self.t {
+            if s.received_shares.len() < 2 * self.t + 1 {
                 return Ok(());
             }
             let Some(rzp) = s.r_prime.clone() else {
