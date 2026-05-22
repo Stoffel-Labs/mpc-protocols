@@ -124,6 +124,8 @@ fn ransha_e2e_turmoil() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![],
     );
 
@@ -271,6 +273,8 @@ fn test_input_protocol_e2e_turmoil() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         vec![client_id],
@@ -505,6 +509,8 @@ fn preprocessing_e2e_turmoil() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![],
     );
 
@@ -652,6 +658,8 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         vec![input_client_id],
@@ -1050,6 +1058,8 @@ fn randousha_e2e_turmoil() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![],
     );
 
@@ -1252,6 +1262,8 @@ fn mul_e2e_without_preprocessing_turmoil() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         vec![],

@@ -53,6 +53,8 @@ async fn test_multiple_clients_parallel_input() {
             Duration::from_secs(30),
             0,
             0,
+            0,
+            0,
             client_ids.clone(),
         );
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -145,6 +147,8 @@ async fn test_input_recovery_with_missing_server() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![clientid],
     );
 
@@ -229,6 +233,8 @@ async fn test_input_with_too_many_faulty_shares() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         vec![client_id],

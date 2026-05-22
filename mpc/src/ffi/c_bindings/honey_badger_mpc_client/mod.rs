@@ -86,6 +86,10 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::PreMulCError(_) => todo!(),
             HoneyBadgerError::Mod2error(_) => todo!(),
             HoneyBadgerError::Mod2merror(_) => todo!(),
+            HoneyBadgerError::EQZError(_) => todo!(),
+            HoneyBadgerError::KOrCLError(_) => todo!(),
+            HoneyBadgerError::KOrCSError(_) => todo!(),
+            HoneyBadgerError::RandInvPairError(_) => todo!(),
         }
     }
 }

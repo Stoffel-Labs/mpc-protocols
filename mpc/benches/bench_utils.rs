@@ -59,6 +59,8 @@ pub fn create_nodes(
         Duration::from_secs(60),
         0,
         0,
+        0,
+        0,
     )
     .unwrap();
 

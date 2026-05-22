@@ -2,7 +2,7 @@ pub mod utils;
 
 use crate::utils::test_utils::{create_global_nodes, receive, setup_tracing, test_setup};
 use ark_bls12_381::Fr;
-use ark_ff::UniformRand;
+use ark_ff::{Field, UniformRand};
 use ark_std::{
     rand::{
         rngs::{OsRng, StdRng},
@@ -84,12 +84,10 @@ fn make_premulc_prep(pk: usize, n: usize, t: usize) -> Vec<PreMulCPrep<Fr>> {
             if i == 0 {
                 r_vals[0]
             } else {
-                use ark_ff::Field;
                 r_vals[i] * r_vals[i - 1].inverse().unwrap()
             }
         })
         .collect();
-    use ark_ff::Field;
     let z_vals: Vec<Fr> = r_vals.iter().map(|r| r.inverse().unwrap()).collect();
     let triples = make_triples(n, t, pk);
     let mut w_pp = vec![vec![]; n];
@@ -149,6 +147,31 @@ fn make_mod2_prep(k: usize, n: usize, t: usize) -> Vec<PRandMPrep<Fr>> {
         .collect()
 }
 
+/// m random invertible pairs ([r_j], [r_j^{-1}]).
+fn make_rand_inv_pairs(
+    n: usize,
+    t: usize,
+    m: usize,
+) -> Vec<Vec<(RobustShare<Fr>, RobustShare<Fr>)>> {
+    let mut rng = test_rng();
+    let mut per_party: Vec<Vec<(RobustShare<Fr>, RobustShare<Fr>)>> = vec![vec![]; n];
+    for _ in 0..m {
+        let r = loop {
+            let v = Fr::rand(&mut rng);
+            if v != Fr::from(0u64) {
+                break v;
+            }
+        };
+        let r_inv = r.inverse().unwrap();
+        let sr = share_value(r, n, t);
+        let sr_inv = share_value(r_inv, n, t);
+        for p in 0..n {
+            per_party[p].push((sr[p].clone(), sr_inv[p].clone()));
+        }
+    }
+    per_party
+}
+
 // ── Node setup ─────────────────────────────────────────────────────────────────
 
 fn make_nodes() -> (
@@ -169,6 +192,46 @@ fn make_nodes() -> (
         8,
         4,
         Duration::from_secs(30),
+        1,
+        K,
+        0,
+        0,
+        vec![],
+    );
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+    (nodes, network)
+}
+
+fn make_nodes_with_eqz() -> (
+    Vec<HoneyBadgerMPCNode<Fr, Avid<SessionId>>>,
+    Vec<Arc<FakeNetwork>>,
+) {
+    let m = (K as u32).ilog2() as usize + 1; // 4 for K=8
+                                             // n_triples: prandbit generation consumes ~12, rand_inv_pair ~4, runtime ~7 → need ≥23
+                                             // n_random_shares: triple gen + prandbit + rand_inv_pair → generous value
+    let n_triples = 30;
+    let n_random_shares = 60;
+    let n_prandbit = K + m; // 12 — exactly what one eqz_int call needs
+    let n_prandint = 4;
+    let (network, receivers, _, _) = test_setup(N, vec![]);
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        N,
+        T,
+        n_triples,
+        n_random_shares,
+        334u32,
+        n_prandbit,
+        n_prandint,
+        8,
+        4,
+        Duration::from_secs(60),
+        0,
+        0,
         1,
         K,
         vec![],
@@ -200,8 +263,7 @@ async fn do_run_preprocessing(
     join_all(handles).await;
 }
 
-/// Injects synthetic LTZ preprocessing into each node's store so `ltz_int`
-/// skips the expensive `run_preprocessing` network round-trips.
+/// Injects synthetic LTZ preprocessing — skips network round-trips.
 async fn inject_synthetic_ltz_prep(nodes: &[HoneyBadgerMPCNode<Fr, Avid<SessionId>>]) {
     let chunk = T + 1;
     let pk = ((K - 1 + chunk - 1) / chunk) * chunk;
@@ -236,6 +298,62 @@ async fn inject_synthetic_ltz_prep(nodes: &[HoneyBadgerMPCNode<Fr, Avid<SessionI
             .collect();
         prandbit.push((mod2[pid].r_prime.clone(), Gf2568::zero()));
         store.add(None, None, Some(prandbit), None);
+    }
+}
+
+/// Injects synthetic EQZ preprocessing — skips network round-trips.
+///
+/// Injects into each node's store:
+///   - m rand_inv_pairs (for KOrCSPrep)
+///   - 2m-1 beaver triples (m-1 for KOrCS round 1, m for round 2)
+///   - 2 prandint shares (r'' for EQZ masking and KOrCL masking)
+///   - k+m prandbit shares (k bits for EQZ r'_bits, m bits for KOrCL r'_bits)
+async fn inject_synthetic_eqz_prep(nodes: &[HoneyBadgerMPCNode<Fr, Avid<SessionId>>]) {
+    let k = K;
+    let m = (k as u32).ilog2() as usize + 1; // 4 for K=8
+
+    // Properly structured prandm preps so r_prime_bits are real bit shares.
+    // prandm_eqz: k-bit r' → k prandbit entries
+    // prandm_korcl: m-bit r' → m prandbit entries
+    let prandm_eqz = make_prandm_prep(k, k, N, T);
+    let prandm_korcl = make_prandm_prep(k, m, N, T);
+
+    // m random invertible pairs for KOrCSPrep
+    let pairs = make_rand_inv_pairs(N, T, m);
+
+    // (m-1) + m = 2m-1 triples for KOrCS
+    let kor_triples = make_triples(N, T, 2 * m - 1);
+
+    for pid in 0..N {
+        let mut store = nodes[pid].preprocessing_material.lock().await;
+
+        // rand_inv_pairs_eqz pool
+        store.add_rand_inv_pairs_eqz(pairs[pid].clone());
+
+        // beaver_triples pool: 2m-1 triples
+        store.add(Some(kor_triples[pid].clone()), None, None, None);
+
+        // prandint_shares pool: [r''_eqz, r''_korcl]
+        store.add(
+            None,
+            None,
+            None,
+            Some(vec![
+                prandm_eqz[pid].r_double_prime.clone(),
+                prandm_korcl[pid].r_double_prime.clone(),
+            ]),
+        );
+
+        // prandbit_shares pool: k bits then m bits (order matters — eqz_int takes k first)
+        let mut prandbits: Vec<(RobustShare<Fr>, Gf2568)> = prandm_eqz[pid]
+            .r_prime_bits
+            .iter()
+            .map(|s| (s.clone(), Gf2568::zero()))
+            .collect();
+        for s in &prandm_korcl[pid].r_prime_bits {
+            prandbits.push((s.clone(), Gf2568::zero()));
+        }
+        store.add(None, None, Some(prandbits), None);
     }
 }
 
@@ -962,6 +1080,211 @@ async fn ge_int_both_negative_equal() {
         true,
         "ge_int",
         |mut node, a, b, net| async move { node.ge_int(a, b, net).await.expect("ge_int failed") },
+    )
+    .await;
+}
+
+// ── eqz_int ────────────────────────────────────────────────────────────────────
+// eqz_int(a) = 1 if a = 0, else 0
+
+#[tokio::test]
+async fn eqz_int_zero_e2e() {
+    // Full preprocessing — validates the whole stack including rand_inv_pair generation.
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    do_run_preprocessing(&nodes, &network).await;
+    run_unary_ltz(
+        &nodes,
+        &network,
+        0,
+        true,
+        "eqz_int",
+        |mut node, x, net| async move { node.eqz_int(x, net).await.expect("eqz_int failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn eqz_int_nonzero_e2e() {
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    do_run_preprocessing(&nodes, &network).await;
+    run_unary_ltz(
+        &nodes,
+        &network,
+        5,
+        false,
+        "eqz_int",
+        |mut node, x, net| async move { node.eqz_int(x, net).await.expect("eqz_int failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn eqz_int_one() {
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    inject_synthetic_eqz_prep(&nodes).await;
+    run_unary_ltz(
+        &nodes,
+        &network,
+        1,
+        false,
+        "eqz_int",
+        |mut node, x, net| async move { node.eqz_int(x, net).await.expect("eqz_int failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn eqz_int_negative_one() {
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    inject_synthetic_eqz_prep(&nodes).await;
+    run_unary_ltz(
+        &nodes,
+        &network,
+        -1,
+        false,
+        "eqz_int",
+        |mut node, x, net| async move { node.eqz_int(x, net).await.expect("eqz_int failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn eqz_int_max_positive() {
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    inject_synthetic_eqz_prep(&nodes).await;
+    run_unary_ltz(
+        &nodes,
+        &network,
+        127,
+        false,
+        "eqz_int",
+        |mut node, x, net| async move { node.eqz_int(x, net).await.expect("eqz_int failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn eqz_int_most_negative() {
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    inject_synthetic_eqz_prep(&nodes).await;
+    run_unary_ltz(
+        &nodes,
+        &network,
+        -128,
+        false,
+        "eqz_int",
+        |mut node, x, net| async move { node.eqz_int(x, net).await.expect("eqz_int failed") },
+    )
+    .await;
+}
+
+// ── eq_int ─────────────────────────────────────────────────────────────────────
+// eq_int(a, b) = eqz_int(a - b) = 1 if a = b, else 0
+
+#[tokio::test]
+async fn eq_int_equal_e2e() {
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    do_run_preprocessing(&nodes, &network).await;
+    run_binary_ltz(
+        &nodes,
+        &network,
+        5,
+        5,
+        true,
+        "eq_int",
+        |mut node, a, b, net| async move { node.eq_int(a, b, net).await.expect("eq_int failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn eq_int_equal_zero() {
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    inject_synthetic_eqz_prep(&nodes).await;
+    run_binary_ltz(
+        &nodes,
+        &network,
+        0,
+        0,
+        true,
+        "eq_int",
+        |mut node, a, b, net| async move { node.eq_int(a, b, net).await.expect("eq_int failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn eq_int_equal_negative() {
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    inject_synthetic_eqz_prep(&nodes).await;
+    run_binary_ltz(
+        &nodes,
+        &network,
+        -7,
+        -7,
+        true,
+        "eq_int",
+        |mut node, a, b, net| async move { node.eq_int(a, b, net).await.expect("eq_int failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn eq_int_unequal() {
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    inject_synthetic_eqz_prep(&nodes).await;
+    run_binary_ltz(
+        &nodes,
+        &network,
+        3,
+        7,
+        false,
+        "eq_int",
+        |mut node, a, b, net| async move { node.eq_int(a, b, net).await.expect("eq_int failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn eq_int_unequal_signs() {
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    inject_synthetic_eqz_prep(&nodes).await;
+    run_binary_ltz(
+        &nodes,
+        &network,
+        5,
+        -5,
+        false,
+        "eq_int",
+        |mut node, a, b, net| async move { node.eq_int(a, b, net).await.expect("eq_int failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn eq_int_close_values() {
+    setup_tracing();
+    let (nodes, network) = make_nodes_with_eqz();
+    inject_synthetic_eqz_prep(&nodes).await;
+    run_binary_ltz(
+        &nodes,
+        &network,
+        10,
+        11,
+        false,
+        "eq_int",
+        |mut node, a, b, net| async move { node.eq_int(a, b, net).await.expect("eq_int failed") },
     )
     .await;
 }

@@ -42,8 +42,13 @@ use crate::{
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
         comparison::{
-            ltz::LTZNode, pre_mulc::PreMulCOfflineNode, LTZError, Mod2Error, Mod2mError,
-            PRandMPrep, PreMulCError, PreMulCPrep,
+            eqz::EQZNode,
+            kor_cs::KOrCSPrep,
+            ltz::LTZNode,
+            pre_mulc::PreMulCOfflineNode,
+            rand_inv_pair::{RandInvPairNode, RandInvPairPrep},
+            EQZError, KOrCLError, KOrCSError, LTZError, Mod2Error, Mod2mError, PRandMPrep,
+            PreMulCError, PreMulCPrep, RandInvPairError,
         },
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
@@ -152,6 +157,14 @@ pub enum HoneyBadgerError {
     InvalidPartyId,
     #[error("the protocol cannot be executed any more")]
     LimitError,
+    #[error("error in EQZ: {0:?}")]
+    EQZError(#[from] EQZError),
+    #[error("error in KOrCl: {0:?}")]
+    KOrCLError(#[from] KOrCLError),
+    #[error("error in KOrCS: {0:?}")]
+    KOrCSError(#[from] KOrCSError),
+    #[error("error in RandInvPair: {0:?}")]
+    RandInvPairError(#[from] RandInvPairError),
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -244,6 +257,7 @@ pub struct TypeOperations<F: PrimeField, R: RBC> {
     pub fpmul: FPMulNode<F, R>,
     pub fpdiv_const: FPDivConstNode<F, R>,
     pub ltz: LTZNode<F, R>,
+    pub eqz: EQZNode<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -257,6 +271,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub rand_bit: RandBit<F, R>,
     pub prand_bit: PRandBitDNode<F, F>,
     pub premulc: PreMulCOfflineNode<F, R>,
+    pub rand_inv_pair: RandInvPairNode<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -302,6 +317,8 @@ pub struct SubProtocolCounters {
     pub fpdiv_const_counter: SubProtocolCounter,
     pub ltz_counter: SubProtocolCounter,
     pub premulc_ltz_counter: SubProtocolCounter,
+    pub eqz_counter: SubProtocolCounter,
+    pub rand_inv_pair_counter: SubProtocolCounter,
 }
 
 impl SubProtocolCounters {
@@ -320,6 +337,8 @@ impl SubProtocolCounters {
             fpdiv_const_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             ltz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             premulc_ltz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            eqz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            rand_inv_pair_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -352,6 +371,10 @@ pub struct HoneyBadgerMPCNodeOpts {
     pub n_ltz: usize,
     /// Bit length of the integers used in LTZ comparisons (e.g. 8, 16, 32, 64).
     pub ltz_bit_len: usize,
+    /// Number of EQZ (integer equality) operations to pre-generate material for.
+    pub n_eqz: usize,
+    /// Bit length of the integers used in EQZ comparisons.
+    pub eqz_bit_len: usize,
 }
 
 impl HoneyBadgerMPCNodeOpts {
@@ -369,6 +392,8 @@ impl HoneyBadgerMPCNodeOpts {
         timeout: Duration,
         n_ltz: usize,
         ltz_bit_len: usize,
+        n_eqz: usize,
+        eqz_bit_len: usize,
     ) -> Result<Self, HoneyBadgerError> {
         //No of parties should not exceed 255
         if n_parties > 255 {
@@ -391,6 +416,8 @@ impl HoneyBadgerMPCNodeOpts {
             timeout,
             n_ltz,
             ltz_bit_len,
+            n_eqz,
+            eqz_bit_len,
         })
     }
     pub fn set_timeout(&mut self, secs: u64) {
@@ -433,6 +460,8 @@ where
         let output = OutputServer::new(id, params.n_parties)?;
         let ltz_node = LTZNode::new(id, params.n_parties, params.threshold)?;
         let premulc_node = PreMulCOfflineNode::new(id, params.n_parties, params.threshold)?;
+        let eqz_node = EQZNode::new(id, params.n_parties, params.threshold)?;
+        let rand_inv_pair_node = RandInvPairNode::new(id, params.n_parties, params.threshold)?;
 
         Ok(Self {
             id,
@@ -449,12 +478,14 @@ where
                 rand_bit: rand_bit_node,
                 prand_bit: prand_bit_node,
                 premulc: premulc_node,
+                rand_inv_pair: rand_inv_pair_node,
             },
             operations: Operation { mul: mul_node },
             type_ops: TypeOperations {
                 fpmul: fpmul_node,
                 fpdiv_const: fpdiv_const_node,
                 ltz: ltz_node,
+                eqz: eqz_node,
             },
             output,
             counters: SubProtocolCounters::new(),
@@ -686,6 +717,43 @@ where
 
                         _ => warn!("unexpected Rbc round_id"),
                     },
+                    Some(ProtocolType::KOr1) | Some(ProtocolType::KOr2) => {
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?;
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .drain_rbc_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::EQZ) => match rbc_msg.session_id.round_id() {
+                        0 => {
+                            self.type_ops.eqz.rbc.process(rbc_msg, net).await?;
+                            self.type_ops.eqz.drain_rbc_output().await?;
+                        }
+                        1 => {
+                            self.type_ops.eqz.kor_cl.rbc.process(rbc_msg, net).await?;
+                            self.type_ops.eqz.kor_cl.drain_rbc_output().await?;
+                        }
+                        _ => warn!("unexpected EQZ Rbc round_id"),
+                    },
+                    Some(ProtocolType::RandInvPair) => {
+                        self.preprocess
+                            .rand_inv_pair
+                            .mul
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?;
+                        self.preprocess.rand_inv_pair.mul.drain_rbc_output().await?;
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} in RBC",
@@ -869,6 +937,63 @@ where
                         }
                         _ => warn!("unexpected BatchRecon round_id"),
                     },
+                    Some(ProtocolType::KOr1) | Some(ProtocolType::KOr2) => {
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::EQZ) => {
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::RandInvPair) => {
+                        if batch_msg.session_id.round_id() == 0 {
+                            self.preprocess
+                                .rand_inv_pair
+                                .batch_recon
+                                .process(batch_msg, net)
+                                .await?;
+                            self.preprocess
+                                .rand_inv_pair
+                                .drain_batch_recon_output()
+                                .await?;
+                        } else if batch_msg.session_id.round_id() == 1 {
+                            self.preprocess
+                                .rand_inv_pair
+                                .mul
+                                .batch_recon
+                                .process(batch_msg, net)
+                                .await?;
+                            self.preprocess
+                                .rand_inv_pair
+                                .mul
+                                .drain_batch_recon_output()
+                                .await?;
+                        }
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} at Batch reconstruction",
@@ -1307,6 +1432,116 @@ where
         let k = ltz.bit_length();
         Ok(((ltz * ClearInt::new(-F::one(), k))? + ClearInt::new(F::one(), k))?)
     }
+    async fn eqz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        if k == 0 {
+            return Err(HoneyBadgerError::EQZError(
+                crate::honeybadger::comparison::EQZError::LengthError,
+            ));
+        }
+        let m = (k as u32).ilog2() as usize + 1;
+
+        let have_rand_inv = {
+            let store = self.preprocessing_material.lock().await;
+            store.rand_inv_pairs_eqz_len()
+        };
+        let (have_triples, _, have_prandbit, have_prandint) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        if have_rand_inv < m
+            || have_prandbit < k + m
+            || have_prandint < 2
+            || have_triples < (2 * m).saturating_sub(1)
+        {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        let rand_inv_pairs = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_rand_inv_pairs_eqz(m)?;
+
+        let kor1_triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(m.saturating_sub(1))?;
+        let kor2_triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(m)?;
+
+        let prandints = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandint_shares(2)?;
+
+        let prandbits_k = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandbit_shares(k)?;
+        let prandbits_m = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandbit_shares(m)?;
+
+        let eqz_prandm = PRandMPrep::from_prand_outputs(
+            prandints[0].clone(),
+            prandbits_k.iter().map(|(s, _)| s.clone()).collect(),
+        )
+        .map_err(|e| HoneyBadgerError::EQZError(e.into()))?;
+
+        let kor_cl_prandm = PRandMPrep::from_prand_outputs(
+            prandints[1].clone(),
+            prandbits_m.iter().map(|(s, _)| s.clone()).collect(),
+        )
+        .map_err(|e| HoneyBadgerError::EQZError(e.into()))?;
+
+        let kor_cs_prep = KOrCSPrep {
+            rand_inv_pairs,
+            triples_round1: kor1_triples,
+            triples_round2: kor2_triples,
+        };
+
+        let session = SessionId::new(
+            ProtocolType::EQZ,
+            SessionId::pack_slot24(self.counters.eqz_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        let result_share = self
+            .type_ops
+            .eqz
+            .run(
+                x.share().clone(),
+                k,
+                eqz_prandm,
+                kor_cl_prandm,
+                kor_cs_prep,
+                session,
+                net,
+                self.params.timeout,
+            )
+            .await?;
+
+        Ok(SecretInt::new(result_share, k))
+    }
+
+    async fn eq_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.eqz_int((a - b)?, net).await
+    }
 }
 
 #[async_trait]
@@ -1343,14 +1578,23 @@ where
                 (0, 0)
             };
 
+        let (eqz_extra_triples, eqz_extra_shares) =
+            if self.params.n_eqz > 0 && self.params.eqz_bit_len >= 1 {
+                let m = (self.params.eqz_bit_len as u32).ilog2() as usize + 1;
+                (self.params.n_eqz * m, self.params.n_eqz * 2 * m)
+            } else {
+                (0, 0)
+            };
+
         // Get how many triples and random shares are already available
         let (no_of_triples_avail, no_of_random_shares_avail, _, _) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
 
-        let mut no_of_triples = self.params.n_triples + ltz_extra_triples;
-        let mut no_of_random_shares = self.params.n_random_shares + ltz_extra_shares;
+        let mut no_of_triples = self.params.n_triples + ltz_extra_triples + eqz_extra_triples;
+        let mut no_of_random_shares =
+            self.params.n_random_shares + ltz_extra_shares + eqz_extra_shares;
         // Each triple batch produces (2t + 1) triples at a time
         let group_size = 2 * self.params.threshold + 1;
         let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
@@ -1478,6 +1722,12 @@ where
         // ------------------------
         self.ensure_premulc_for_ltz(network.clone()).await?;
         info!("PreMulC LTZ preprocessing done");
+
+        // ------------------------
+        // Step 8. Generate RandInvPairs for EQZ
+        // ------------------------
+        self.ensure_rand_inv_pairs_for_eqz(network.clone()).await?;
+        info!("RandInvPairs EQZ preprocessing done");
 
         Ok(())
     }
@@ -1900,6 +2150,85 @@ where
 
         info!(
             "PreMulC LTZ preprocessing done: {} elements generated",
+            missing
+        );
+        Ok(())
+    }
+    async fn ensure_rand_inv_pairs_for_eqz<N>(
+        &mut self,
+        network: Arc<N>,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
+        if self.params.n_eqz == 0 || self.params.eqz_bit_len < 1 {
+            return Ok(());
+        }
+
+        let m = (self.params.eqz_bit_len as u32).ilog2() as usize + 1;
+        let needed = self.params.n_eqz * m;
+
+        let have = {
+            let store = self.preprocessing_material.lock().await;
+            store.rand_inv_pairs_eqz_len()
+        };
+
+        if have >= needed {
+            info!("There are enough RandInvPair EQZ elements");
+            return Ok(());
+        }
+
+        let missing = needed - have;
+
+        let session = SessionId::new(
+            ProtocolType::RandInvPair,
+            SessionId::pack_slot24(self.counters.rand_inv_pair_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        let r_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(missing)?;
+        let r_prime_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(missing)?;
+        let triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(missing)?;
+
+        self.preprocess
+            .rand_inv_pair
+            .run(
+                RandInvPairPrep {
+                    r_shares,
+                    r_prime_shares,
+                    triples,
+                },
+                session,
+                network.clone(),
+                self.params.timeout,
+            )
+            .await?;
+
+        let pairs = self
+            .preprocess
+            .rand_inv_pair
+            .wait_for_result(session, self.params.timeout)
+            .await?;
+
+        self.preprocessing_material
+            .lock()
+            .await
+            .add_rand_inv_pairs_eqz(pairs);
+
+        info!(
+            "RandInvPairs EQZ preprocessing done: {} elements generated",
             missing
         );
         Ok(())

@@ -18,6 +18,8 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     prandint_shares: Vec<RobustShare<F>>,
     /// PreMulC offline outputs (w, z, triples) pre-generated for LTZ comparisons.
     premulc_ltz: PreMulCPrep<F>,
+    /// Random invertible pairs pre-generated for EQZ comparisons.
+    rand_inv_pairs_eqz: Vec<(RobustShare<F>, RobustShare<F>)>,
 }
 
 impl<F> HoneyBadgerMPCNodePreprocMaterial<F>
@@ -36,6 +38,7 @@ where
                 z: Vec::new(),
                 triples: Vec::new(),
             },
+            rand_inv_pairs_eqz: Vec::new(),
         }
     }
 
@@ -134,6 +137,24 @@ where
             z: self.premulc_ltz.z.drain(0..pk).collect(),
             triples: self.premulc_ltz.triples.drain(0..pk).collect(),
         })
+    }
+
+    pub fn add_rand_inv_pairs_eqz(&mut self, mut pairs: Vec<(RobustShare<F>, RobustShare<F>)>) {
+        self.rand_inv_pairs_eqz.append(&mut pairs);
+    }
+
+    pub fn rand_inv_pairs_eqz_len(&self) -> usize {
+        self.rand_inv_pairs_eqz.len()
+    }
+
+    pub fn take_rand_inv_pairs_eqz(
+        &mut self,
+        n: usize,
+    ) -> Result<Vec<(RobustShare<F>, RobustShare<F>)>, HoneyBadgerError> {
+        if self.rand_inv_pairs_eqz.len() < n {
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self.rand_inv_pairs_eqz.drain(0..n).collect())
     }
 }
 

@@ -450,6 +450,15 @@ where
         b: Self::Sint,
         net: Arc<N>,
     ) -> Result<Self::Sint, Self::Error>;
+    /// a = 0: returns 1 if a = 0, else 0
+    async fn eqz_int(&mut self, a: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
+    /// a = b: returns 1 if a = b, else 0
+    async fn eq_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error>;
 }
 
 /// A protocol identifier that fits into 8 bits.

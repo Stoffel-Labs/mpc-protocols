@@ -72,6 +72,8 @@ async fn randousha_e2e() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![],
     );
     // spawn tasks to process received messages
@@ -156,6 +158,8 @@ async fn ransha_e2e() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![],
     );
     // spawn tasks to process received messages
@@ -228,6 +232,8 @@ async fn test_input_protocol_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         clientid.clone(),
@@ -331,6 +337,8 @@ async fn gen_masks_for_input_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         clientid.clone(),
@@ -505,6 +513,8 @@ async fn mul_e2e() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![],
     );
 
@@ -616,6 +626,8 @@ async fn mul_e2e_with_preprocessing() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         vec![clientid[0]],
@@ -796,6 +808,10 @@ async fn preprocessing_e2e() {
     let n_prandbit = n_ltz * ltz_bit_len; // = 16
                                           // 1 for Mod2m + 1 for inner Mod2 = 2 per LTZ call
     let n_prandint = n_ltz * 2; // = 4
+    let n_eqz = 1usize;
+    let eqz_bit_len = 8usize;
+    let m = (eqz_bit_len as u32).ilog2() as usize + 1; // = 4
+    let expected_eqz_pairs = n_eqz * m; // = 4
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -815,6 +831,8 @@ async fn preprocessing_e2e() {
         Duration::from_secs(30),
         n_ltz,
         ltz_bit_len,
+        n_eqz,
+        eqz_bit_len,
         vec![],
     );
 
@@ -857,8 +875,8 @@ async fn preprocessing_e2e() {
         let mut store = node.preprocessing_material.lock().await;
 
         let (n_triples, n_shares, n_pb, n_pi) = store.len();
-        assert_eq!(n_triples, 3); // ceil(64/3)*3=66 − 16 (prandbit) − 47 (ltz u+v+online) = 3
-        assert_eq!(n_shares, 0); // 48 − 16 (prandbit) − 32 (ltz) = 0
+        assert_eq!(n_triples, 2); // ceil(68/3)*3=69 − 16 (prandbit) − 47 (ltz) − 4 (rand_inv_pair) = 2
+        assert_eq!(n_shares, 0); // 56 − 16 (prandbit) − 32 (ltz) − 8 (rand_inv_pair r+r') = 0
         assert_eq!(n_pb, n_prandbit);
         assert_eq!(n_pi, n_prandint);
 
@@ -869,7 +887,7 @@ async fn preprocessing_e2e() {
             "node {pid}: expected {expected_ltz_total} premulc_ltz entries"
         );
 
-        // Drain one batch and verify all three vectors have exactly pk elements
+        // Drain one LTZ batch and verify all three vectors have exactly pk elements
         let batch = store.take_premulc_ltz(pk).expect("take_premulc_ltz failed");
         assert_eq!(batch.w.len(), pk, "node {pid}: w length");
         assert_eq!(batch.z.len(), pk, "node {pid}: z length");
@@ -877,6 +895,22 @@ async fn preprocessing_e2e() {
 
         // After draining one batch, n_ltz - 1 batches remain
         assert_eq!(store.premulc_ltz_len(), expected_ltz_total - pk);
+        // EQZ: n_eqz * m rand_inv_pairs must be ready
+        assert_eq!(
+            store.rand_inv_pairs_eqz_len(),
+            expected_eqz_pairs,
+            "node {pid}: expected {expected_eqz_pairs} rand_inv_pairs_eqz"
+        );
+        // Drain and verify structure
+        let pairs = store
+            .take_rand_inv_pairs_eqz(expected_eqz_pairs)
+            .expect("take_rand_inv_pairs_eqz failed");
+        assert_eq!(pairs.len(), expected_eqz_pairs, "node {pid}: pairs len");
+        assert_eq!(
+            store.rand_inv_pairs_eqz_len(),
+            0,
+            "node {pid}: pool empty after drain"
+        );
     }
 }
 
@@ -911,6 +945,8 @@ async fn preprocessing_e2e_big() {
         l,
         k,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         vec![],
@@ -1005,6 +1041,8 @@ async fn test_rand_bit() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         vec![],
@@ -1159,6 +1197,8 @@ async fn fpmul_e2e() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![],
     );
 
@@ -1279,6 +1319,8 @@ async fn fpmul_e2e_with_preprocessing() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![],
     );
 
@@ -1379,6 +1421,8 @@ async fn add_fixed_e2e() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![],
     );
 
@@ -1456,6 +1500,8 @@ async fn sub_fixed_e2e() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![],
     );
 
@@ -1520,6 +1566,8 @@ async fn add_int_e2e() {
         8,
         4,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         vec![],
@@ -1588,6 +1636,8 @@ async fn sub_int_e2e() {
         Duration::from_secs(30),
         0,
         0,
+        0,
+        0,
         vec![],
     );
 
@@ -1650,6 +1700,8 @@ async fn mul_int_e2e_with_preprocessing() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         vec![],
@@ -1783,6 +1835,8 @@ async fn fpdiv_const_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
         0,
         0,
         vec![],
