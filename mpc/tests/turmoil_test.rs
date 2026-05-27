@@ -23,6 +23,7 @@ use stoffelmpc_mpc::{
         ShamirShare,
     },
     honeybadger::{
+        batch_recon::{batch_recon::BatchReconNode, BatchReconError},
         fpmul::f256::Gf2568,
         input::input::{InputClient, InputType},
         ran_dou_sha::RanDouShaState,
@@ -2200,4 +2201,164 @@ fn ransha_e2e_turmoil_with_hold_minority_partition_3_secs() {
     let hold_nodes = vec![0, 1];
 
     ransha_e2e_turmoil_with_hold(n_parties, t, hold_nodes, hold_time);
+}
+
+#[test]
+fn batch_reconstruction_with_partition() {
+    setup_tracing();
+    let n_parties = 7;
+    let t = 2;
+    let session_id = SessionId::new(
+        ProtocolType::BatchRecon,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
+
+    let mut _batch_recon_receivers = Vec::new();
+    let mut batch_recon_senders = Vec::new();
+    for i in 0..n_parties {
+        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+        batch_recon_senders.push(tx);
+        _batch_recon_receivers.push(rx);
+    }
+
+    let nodes = (0..n_parties)
+        .map(|id| BatchReconNode::new(id, n_parties, t, t, batch_recon_senders[id]).unwrap())
+        .collect::<Vec<_>>();
+
+    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(), String>>();
+    let (tx_partition, mut rx_partition) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_finished, mut rx_finished) = tokio::sync::mpsc::unbounded_channel();
+
+    // Prepare the input.
+    let mut rng = test_rng();
+    let secrets = (0..t + 1).map(|_| Fr::rand(&mut rng)).collect::<Vec<_>>();
+    let all_shares = generate_independent_shares(&secrets, t, n_parties);
+
+    for id in 0..n_parties {
+        let inner = inner.clone();
+        let node = nodes[id].clone();
+        let tx = tx.clone();
+        let tx_partition = tx_partition.clone();
+        let tx_finished = tx_finished.clone();
+        let shares = all_shares[id].clone();
+
+        sim.host(format!("node{}", id), move || {
+            let inner = inner.clone();
+            let mut node = node.clone();
+            let tx = tx.clone();
+            let tx_partition = tx_partition.clone();
+            let tx_finished = tx_finished.clone();
+            let shares = shares.clone();
+
+            async move {
+                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
+                sleep(Duration::from_millis(50)).await;
+
+                let network_arc = Arc::new(network);
+                let mut rng = StdRng::from_rng(OsRng).unwrap();
+                let node_id = node.id;
+
+                match node
+                    .init_batch_reconstruct(&shares, session_id, network_arc.clone())
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(BatchReconError::NetworkError(NetworkError::SendError)) => {}
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("node {} init error: {:?}", node_id, e)));
+                        return Ok(());
+                    }
+                }
+
+                // Send the signal that the node 0 can be partitioned. I can stop the party here
+                // given that we finished the initialization process.
+                tx_partition
+                    .send(())
+                    .expect("the signal to partition node 0 should be sent correctly");
+
+                let mut msg_count = 0usize;
+                let result = timeout(Duration::from_secs(30), async {
+                    loop {
+                        match rx.recv().await {
+                            Some((sender, raw_msg)) => {
+                                msg_count += 1;
+                                let wrapped: WrappedMessage =
+                                    bincode::deserialize(&raw_msg).unwrap();
+                                match wrapped {
+                                    WrappedMessage::BatchRecon(msg) => {
+                                        node.process(msg, network_arc.clone()).await.unwrap();
+                                    }
+                                    _ => error!(from = ?sender, id = id, "unknown message type"),
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                })
+                .await;
+
+                if result.is_err() {
+                    let _ = tx.send(Err(format!(
+                        "node {} timed out after {} msgs",
+                        node_id, msg_count
+                    )));
+                    return Ok(());
+                }
+
+                let store = node.get_or_create_store(session_id).await.unwrap().unwrap();
+                let store = store.lock().await;
+
+                // TODO: The protocol finished here, validate the results.
+
+                let _ = tx.send(Ok(()));
+                tx_finished
+                    .send(())
+                    .expect("signal that the protocol finished should be sent");
+                Ok(())
+            }
+        });
+    }
+
+    drop(tx);
+
+    let other_nodes: Vec<_> = (0..n_parties)
+        .filter(|node| !hold_nodes.contains(node))
+        .collect();
+
+    sim.client("driver", async move {
+        let mut counter = 0;
+        while let Some(()) = rx_partition.recv().await {
+            counter += 1;
+            if counter == n_parties {
+                for id in &hold_nodes {
+                    for other_id in &other_nodes {
+                        turmoil::hold(format!("node{}", id), format!("node{}", other_id));
+                    }
+                }
+                break;
+            }
+        }
+
+        // This instruct the driver to wait for some time.
+        tokio::time::sleep(hold_time).await;
+
+        for id in &hold_nodes {
+            for other_id in &other_nodes {
+                turmoil::release(format!("node{}", id), format!("node{}", other_id));
+            }
+        }
+
+        // This allows that all the parties finishes. Hence the sim.run() will not suddenly finish.
+        for _ in 0..n_parties {
+            rx_finished.recv().await.unwrap();
+        }
+
+        Ok(())
+    });
+
+    drop(tx_partition);
+    drop(tx_finished);
+    collect_results(sim, rx_done, n_parties);
 }

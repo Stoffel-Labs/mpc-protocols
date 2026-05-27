@@ -2,9 +2,10 @@ use crate::fake_network::{FakeNetworkConfig, FakeNode, SenderId};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId, VerifiedOrdering};
 use tokio::sync::mpsc::Sender;
-use tokio::sync::Mutex;
+use tokio::sync::{Barrier, Mutex};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::mpsc::{self, Receiver},
@@ -20,6 +21,11 @@ pub struct TurmoilInnerNetwork {
     pub client_ids: Vec<ClientId>,
     pub client_hostnames: Vec<String>,
     pub client_ports: Vec<u16>,
+    // Released only after every host (and client) finishes TurmoilNetwork::new.
+    // Prevents the Turmoil pathology where a TcpStream::connect future never
+    // resolves if it arrives after the peer's main task has already moved past
+    // TurmoilNetwork::new. See TURMOIL_CONNECT_HANG_REPORT.md.
+    pub setup_barrier: Arc<Barrier>,
 }
 
 impl TurmoilInnerNetwork {
@@ -48,6 +54,9 @@ impl TurmoilInnerNetwork {
             .map(|(i, _)| base_client_port + i as u16)
             .collect();
 
+        let participant_count = n_nodes + client_ids.len();
+        let setup_barrier = Arc::new(Barrier::new(participant_count));
+
         Self {
             config,
             nodes,
@@ -56,6 +65,7 @@ impl TurmoilInnerNetwork {
             client_ids,
             client_hostnames,
             client_ports,
+            setup_barrier,
         }
     }
 
@@ -108,7 +118,7 @@ impl TurmoilNetwork {
             SenderId::Client(id) => inner.client_listen_addr(id),
         };
         tokio::spawn(start_listener(my_addr, tx.clone()));
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
 
         // dial peers — nodes dial other nodes, clients dial all nodes
         let mut peers = HashMap::new();
@@ -147,6 +157,12 @@ impl TurmoilNetwork {
                 client_streams.insert(*client_id, Arc::new(Mutex::new(stream)));
             }
         }
+        // Wait until every participant has finished dialing. This prevents any
+        // host's main task from moving past TurmoilNetwork::new while other
+        // hosts still have pending dials to it — which would trigger Turmoil's
+        // "connect arrives after listener-parent moved on" hang.
+        // See TURMOIL_CONNECT_HANG_REPORT.md.
+        inner.setup_barrier.wait().await;
 
         (
             Self {
@@ -345,7 +361,7 @@ async fn connect_with_handshake(sender: SenderId, addr: &str) -> Result<TcpStrea
                 return Ok(stream);
             }
             Err(_) => {
-                tokio::task::yield_now().await; // no simulated time cost
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
     }
