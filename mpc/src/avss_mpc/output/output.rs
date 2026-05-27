@@ -1,5 +1,5 @@
 use crate::avss_mpc::output::{AvssOutputError, AvssOutputMessage};
-use crate::avss_mpc::AvssWrappedMessage;
+use crate::avss_mpc::{deser_bounded_feldman_vec, AvssWrappedMessage};
 use crate::common::share::avss::verify_feldman;
 use crate::common::share::feldman::FeldmanShamirShare;
 use crate::common::SecretSharingScheme;
@@ -103,17 +103,35 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
     ///    been received (t+1), reconstruct the output.
     pub async fn output_handler(&mut self, msg: AvssOutputMessage) -> Result<(), AvssOutputError> {
         // 1.
-        let shares: Vec<FeldmanShamirShare<F, G>> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
-
+        if msg.payload.len() < 8 {
+            return Err(AvssOutputError::InvalidInput(
+                "Payload too short".to_string(),
+            ));
+        }
+        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap()) as usize;
+        if declared_len != self.input_len {
+            return Err(AvssOutputError::InvalidInput(
+                "Declared input length does not match expected".to_string(),
+            ));
+        }
+        let shares: Vec<FeldmanShamirShare<F, G>> = {
+            let mut r = msg.payload.as_slice();
+            deser_bounded_feldman_vec::<F, G>(&mut r, self.input_len, self.t + 1)?
+        };
         if shares.len() != self.input_len {
             return Err(AvssOutputError::InvalidInput(
                 "Mismatch in input and share length".to_string(),
             ));
         }
 
-        // 2. Verify Feldman commitments
+        // 2. Verify Feldman commitments and degree
         for share in &shares {
+            if share.feldmanshare.degree != self.t {
+                return Err(AvssOutputError::InvalidInput(format!(
+                    "Invalid share degree from server {}",
+                    msg.sender_id
+                )));
+            }
             if !verify_feldman(share.clone()) {
                 return Err(AvssOutputError::VerificationFailed(format!(
                     "Feldman verification failed for share from server {}",
@@ -137,30 +155,40 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
             share_store.insert(msg.sender_id, shares.clone());
             info!("Received Output share from server {}", msg.sender_id);
 
-            let mut r_shares = vec![vec![]; self.input_len];
-            // 5. For Feldman shares, we need t+1 shares to reconstruct
+            // 5. For Feldman shares, group by commitment fingerprint per output position,
+            //    reconstruct only from a consistent group of t+1 shares.
             if output_data.output.is_none() && share_store.len() >= self.t + 1 {
-                info!("Received enough shares to reconstruct output");
-                for (_, r_share) in share_store.iter() {
-                    for i in 0..self.input_len {
-                        r_shares[i].push(r_share[i].clone());
+                let mut consistent_groups: Vec<Option<Vec<FeldmanShamirShare<F, G>>>> =
+                    vec![None; self.input_len];
+
+                for i in 0..self.input_len {
+                    let mut by_commitment: HashMap<Vec<u8>, Vec<FeldmanShamirShare<F, G>>> =
+                        HashMap::new();
+                    for (_, shares) in share_store.iter() {
+                        let share = &shares[i];
+                        let mut key = Vec::new();
+                        if share.commitments.serialize_compressed(&mut key).is_err() {
+                            return false;
+                        }
+                        by_commitment.entry(key).or_default().push(share.clone());
+                    }
+                    match by_commitment.into_values().find(|g| g.len() >= self.t + 1) {
+                        Some(group) => consistent_groups[i] = Some(group),
+                        None => return false, // not enough consistent shares yet
                     }
                 }
 
+                info!("Received enough consistent shares to reconstruct output");
                 let mut output = Vec::new();
-
-                for output_elem in r_shares {
-                    let secret = match FeldmanShamirShare::<F, G>::recover_secret(
-                        &output_elem,
-                        self.n,
-                        self.t,
-                    ) {
-                        Ok(secret) => secret,
-                        Err(e) => {
-                            recovery_err = Some(e);
-                            return false;
-                        }
-                    };
+                for group in consistent_groups.into_iter().flatten() {
+                    let secret =
+                        match FeldmanShamirShare::<F, G>::recover_secret(&group, self.n, self.t) {
+                            Ok(secret) => secret,
+                            Err(e) => {
+                                recovery_err = Some(e);
+                                return false;
+                            }
+                        };
                     output.push(secret.1);
                 }
                 output_data.output = Some(output);

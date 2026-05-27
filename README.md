@@ -249,3 +249,8 @@ This generates:
 
 - HoneyBadgerMPC — https://eprint.iacr.org/2019/883  
 - Fixed-Point Secure Computation — https://ifca.ai/pub/fc10/31_47.pdf
+
+## Learn More
+
+To learn more about what you can build with Stoffel, visit 
+[stoffelmpc.com](https://stoffelmpc.com?utm_source=github&utm_medium=readme&utm_campaign=mpc-protocols-repo&utm_term=mpc)

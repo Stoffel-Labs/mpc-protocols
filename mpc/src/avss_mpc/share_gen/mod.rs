@@ -36,6 +36,8 @@ pub enum RanShaAvssError {
     Abort,
     #[error("Party Id is out of bounds")]
     InvalidPartyId,
+    #[error("Store Limit")]
+    LimitError,
 }
 
 #[derive(Debug)]

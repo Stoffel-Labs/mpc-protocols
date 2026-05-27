@@ -1,3 +1,4 @@
+use crate::common::utils::deser_bounded_vec;
 use crate::common::{ProtocolSessionId, RBC};
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
 use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitStorage};
@@ -7,7 +8,6 @@ use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::triple_gen::ShamirBeaverTriple;
 use crate::honeybadger::SessionId;
 use ark_ff::FftField;
-use ark_serialize::CanonicalDeserialize;
 use itertools::izip;
 use std::collections::HashMap;
 use std::ops::{Add, Mul};
@@ -266,7 +266,7 @@ where
         for (i, chunk) in a_square_share.chunks(self.threshold + 1).enumerate() {
             let session_id_batch = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot24(session_id.exec_id(), 0, i as u8),
+                SessionId::pack_slot24(session_id.exec_id(), i as u8, 0),
                 session_id.instance_id(),
             );
             self.batch_recon
@@ -305,15 +305,15 @@ where
             return Ok(());
         }
 
-        let open: Vec<F> = CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-        let round_id = sid.round_id();
-        if storage.output_open.contains_key(&round_id) {
+        let open: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), self.n_parties)?;
+        let dealer_id = sid.sub_id();
+        if storage.output_open.contains_key(&dealer_id) {
             return Err(RandBitError::Duplicate(format!(
                 "Already received for {}",
-                round_id
+                dealer_id
             )));
         }
-        storage.output_open.insert(round_id, open);
+        storage.output_open.insert(dealer_id, open);
         // If not initialized, data is stored but can't finalize yet.
         // init() will check for stored data and finalize if ready.
         if storage.a_share.is_none() {
