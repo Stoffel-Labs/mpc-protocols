@@ -9,6 +9,7 @@ use crate::utils::{
 };
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
+use ark_serialize::CanonicalDeserialize;
 use ark_std::{
     rand::{rngs::StdRng, SeedableRng},
     test_rng,
@@ -2203,11 +2204,10 @@ fn ransha_e2e_turmoil_with_hold_minority_partition_3_secs() {
     ransha_e2e_turmoil_with_hold(n_parties, t, hold_nodes, hold_time);
 }
 
-#[test]
-fn batch_reconstruction_with_partition() {
+fn batch_reconstruction_with_partition(hold_nodes: Vec<usize>, n_parties: usize, t: usize) {
     setup_tracing();
-    let n_parties = 7;
-    let t = 2;
+    assert!(hold_nodes.len() <= t);
+
     let session_id = SessionId::new(
         ProtocolType::BatchRecon,
         SessionId::pack_slot24(123, 0, 0),
@@ -2216,18 +2216,16 @@ fn batch_reconstruction_with_partition() {
     let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
 
     let mut _batch_recon_receivers = Vec::new();
-    let mut batch_recon_senders = Vec::new();
-    for i in 0..n_parties {
-        let (tx, rx) = tokio::sync::mpsc::channel(1024);
-        batch_recon_senders.push(tx);
-        _batch_recon_receivers.push(rx);
-    }
 
     let nodes = (0..n_parties)
-        .map(|id| BatchReconNode::new(id, n_parties, t, t, batch_recon_senders[id]).unwrap())
+        .map(|id| {
+            let (tx, rx) = tokio::sync::mpsc::channel(1024);
+            _batch_recon_receivers.push(rx);
+            BatchReconNode::new(id, n_parties, t, t, tx).unwrap()
+        })
         .collect::<Vec<_>>();
 
-    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(), String>>();
+    let (tx_done, rx_done) = std::sync::mpsc::channel::<Result<(), String>>();
     let (tx_partition, mut rx_partition) = tokio::sync::mpsc::unbounded_channel();
     let (tx_finished, mut rx_finished) = tokio::sync::mpsc::unbounded_channel();
 
@@ -2239,25 +2237,26 @@ fn batch_reconstruction_with_partition() {
     for id in 0..n_parties {
         let inner = inner.clone();
         let node = nodes[id].clone();
-        let tx = tx.clone();
+        let tx_done = tx_done.clone();
         let tx_partition = tx_partition.clone();
         let tx_finished = tx_finished.clone();
         let shares = all_shares[id].clone();
+        let secrets = secrets.clone();
 
         sim.host(format!("node{}", id), move || {
             let inner = inner.clone();
             let mut node = node.clone();
-            let tx = tx.clone();
+            let tx_done = tx_done.clone();
             let tx_partition = tx_partition.clone();
             let tx_finished = tx_finished.clone();
             let shares = shares.clone();
+            let secrets = secrets.clone();
 
             async move {
                 let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
                 sleep(Duration::from_millis(50)).await;
 
                 let network_arc = Arc::new(network);
-                let mut rng = StdRng::from_rng(OsRng).unwrap();
                 let node_id = node.id;
 
                 match node
@@ -2267,19 +2266,14 @@ fn batch_reconstruction_with_partition() {
                     Ok(()) => {}
                     Err(BatchReconError::NetworkError(NetworkError::SendError)) => {}
                     Err(e) => {
-                        let _ = tx.send(Err(format!("node {} init error: {:?}", node_id, e)));
+                        let _ = tx_done.send(Err(format!("node {} init error: {:?}", node_id, e)));
                         return Ok(());
                     }
                 }
 
-                // Send the signal that the node 0 can be partitioned. I can stop the party here
-                // given that we finished the initialization process.
-                tx_partition
-                    .send(())
-                    .expect("the signal to partition node 0 should be sent correctly");
-
                 let mut msg_count = 0usize;
                 let result = timeout(Duration::from_secs(30), async {
+                    let mut signaled = false;
                     loop {
                         match rx.recv().await {
                             Some((sender, raw_msg)) => {
@@ -2292,6 +2286,35 @@ fn batch_reconstruction_with_partition() {
                                     }
                                     _ => error!(from = ?sender, id = id, "unknown message type"),
                                 }
+
+                                // If the y_j were received and in place, send a signal to interrupt
+                                // the node.
+                                {
+                                    let store_retrieval =
+                                        node.get_or_create_store(session_id).await.unwrap();
+                                    match store_retrieval {
+                                        Some(store) => {
+                                            // The protocol has not finished yet.
+                                            if store.lock().await.y_j.is_some() && !signaled {
+                                                tx_partition.send(()).unwrap();
+                                                signaled = true;
+                                            }
+                                        }
+                                        None => {
+                                            // The protocol already finished here. However, it is
+                                            // possible that the party did not store the y_j.
+                                            // Case: Consider a n = 10 and t = 1, then, 2t + 1 = 3.
+                                            // Hence the first three nodes may compute all the Evals
+                                            // and only send the Reveals to the other nodes.
+                                            // For this last node y_j = None. Also, the protocol
+                                            // is finished, and this is correct.
+                                            if !signaled {
+                                                tx_partition.send(()).unwrap();
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                             None => break,
                         }
@@ -2300,19 +2323,23 @@ fn batch_reconstruction_with_partition() {
                 .await;
 
                 if result.is_err() {
-                    let _ = tx.send(Err(format!(
+                    let _ = tx_done.send(Err(format!(
                         "node {} timed out after {} msgs",
                         node_id, msg_count
                     )));
                     return Ok(());
                 }
 
-                let store = node.get_or_create_store(session_id).await.unwrap().unwrap();
-                let store = store.lock().await;
+                // Check that the recovered secrets match with the originals.
+                let revealed_secrets = node.get_store(session_id).await.unwrap();
+                let revealed_secrets_field: Vec<Fr> =
+                    CanonicalDeserialize::deserialize_compressed(revealed_secrets.as_slice())
+                        .unwrap();
+                assert_eq!(revealed_secrets_field, secrets);
 
-                // TODO: The protocol finished here, validate the results.
-
-                let _ = tx.send(Ok(()));
+                tx_done
+                    .send(Ok(()))
+                    .expect("signal that the protocol finished correctly should be sent");
                 tx_finished
                     .send(())
                     .expect("signal that the protocol finished should be sent");
@@ -2321,18 +2348,20 @@ fn batch_reconstruction_with_partition() {
         });
     }
 
-    drop(tx);
+    drop(tx_done);
 
     let other_nodes: Vec<_> = (0..n_parties)
         .filter(|node| !hold_nodes.contains(node))
         .collect();
 
+    let hold_nodes_client = hold_nodes.clone();
     sim.client("driver", async move {
+        // Wait for all the nodes to get y_i.
         let mut counter = 0;
         while let Some(()) = rx_partition.recv().await {
             counter += 1;
             if counter == n_parties {
-                for id in &hold_nodes {
+                for id in &hold_nodes_client {
                     for other_id in &other_nodes {
                         turmoil::hold(format!("node{}", id), format!("node{}", other_id));
                     }
@@ -2341,17 +2370,8 @@ fn batch_reconstruction_with_partition() {
             }
         }
 
-        // This instruct the driver to wait for some time.
-        tokio::time::sleep(hold_time).await;
-
-        for id in &hold_nodes {
-            for other_id in &other_nodes {
-                turmoil::release(format!("node{}", id), format!("node{}", other_id));
-            }
-        }
-
         // This allows that all the parties finishes. Hence the sim.run() will not suddenly finish.
-        for _ in 0..n_parties {
+        for _ in 0..n_parties - hold_nodes_client.len() {
             rx_finished.recv().await.unwrap();
         }
 
@@ -2360,5 +2380,29 @@ fn batch_reconstruction_with_partition() {
 
     drop(tx_partition);
     drop(tx_finished);
-    collect_results(sim, rx_done, n_parties);
+    collect_results(sim, rx_done, n_parties - hold_nodes.len());
+}
+
+#[test]
+fn batch_reconstruction_with_partition_n_7_t_2() {
+    let n_parties = 7;
+    let t = 2;
+    let hold_nodes = vec![0, 1];
+    batch_reconstruction_with_partition(hold_nodes, n_parties, t);
+}
+
+#[test]
+fn batch_reconstruction_with_partition_n_7_t_1() {
+    let n_parties = 7;
+    let t = 1;
+    let hold_nodes = vec![0];
+    batch_reconstruction_with_partition(hold_nodes, n_parties, t);
+}
+
+#[test]
+fn batch_reconstruction_with_partition_n_7_t_2_one_hold() {
+    let n_parties = 7;
+    let t = 2;
+    let hold_nodes = vec![0];
+    batch_reconstruction_with_partition(hold_nodes, n_parties, t);
 }
