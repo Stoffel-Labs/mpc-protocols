@@ -1062,16 +1062,10 @@ where
 
         let total_random_shares_to_generate = if total_triples_to_generate > 0 {
             // Always add 2× per triple group
-            let baseline = if no_of_random_shares_avail < no_of_random_shares {
-                no_of_random_shares - no_of_random_shares_avail
-            } else {
-                0
-            };
+            let baseline = no_of_random_shares.saturating_sub(no_of_random_shares_avail);
             baseline + 2 * total_triples_to_generate
-        } else if no_of_random_shares_avail < no_of_random_shares {
-            no_of_random_shares - no_of_random_shares_avail
         } else {
-            0
+            no_of_random_shares.saturating_sub(no_of_random_shares_avail)
         };
 
         if total_random_shares_to_generate == 0 && total_triples_to_generate == 0 {
