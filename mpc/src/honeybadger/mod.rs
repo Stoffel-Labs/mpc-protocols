@@ -17,16 +17,17 @@ pub mod ran_dou_sha;
 pub mod double_share;
 
 pub mod comparison;
-/// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
-pub mod triple_gen;
-
 pub mod fpdiv;
 pub mod fpmul;
 pub mod input;
 pub mod mul;
+pub mod mul_pub;
 pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
+/// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
+pub mod triple_gen;
+pub mod zero_share;
 
 use crate::{
     common::{
@@ -72,6 +73,7 @@ use crate::{
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
         triple_gen::TripleGenError,
+        zero_share::ZeroShaMessage,
     },
 };
 use ark_ff::{FftField, PrimeField};
@@ -1018,6 +1020,9 @@ where
             }
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
+            WrappedMessage::ZeroSha(_) => {
+                warn!("Incorrect message recieved at process function")
+            }
         }
 
         Ok(())
@@ -2246,6 +2251,7 @@ pub enum WrappedMessage {
     Dousha(DouShaMessage),
     Output(OutputMessage),
     PRandBitD(PRandBitDMessage),
+    ZeroSha(ZeroShaMessage),
 }
 
 impl WrappedMessage {
@@ -2281,6 +2287,8 @@ pub enum ProtocolType {
     KOr1 = 18,
     KOr2 = 19,
     EQZ = 20,
+    ZeroSha = 21,
+    MulPub = 22,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -2313,6 +2321,8 @@ impl ProtocolTag for ProtocolType {
             18 => Some(Self::KOr1),
             19 => Some(Self::KOr2),
             20 => Some(Self::EQZ),
+            21 => Some(Self::ZeroSha),
+            22 => Some(Self::MulPub),
             _ => None,
         }
     }

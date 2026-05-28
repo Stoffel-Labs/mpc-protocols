@@ -123,6 +123,8 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::KOr2 => todo!(),
             crate::honeybadger::ProtocolType::EQZ => todo!(),
             crate::honeybadger::ProtocolType::RandInvPair => todo!(),
+            crate::honeybadger::ProtocolType::ZeroSha => todo!(),
+            crate::honeybadger::ProtocolType::MulPub => todo!(),
         }
     }
 }
