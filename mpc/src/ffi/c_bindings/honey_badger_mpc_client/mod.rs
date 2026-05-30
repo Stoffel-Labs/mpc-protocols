@@ -90,6 +90,8 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::KOrCLError(_) => todo!(),
             HoneyBadgerError::KOrCSError(_) => todo!(),
             HoneyBadgerError::RandInvPairError(_) => todo!(),
+            HoneyBadgerError::MulPubError(_) => todo!(),
+            HoneyBadgerError::ZeroShaError(_) => todo!(),
         }
     }
 }

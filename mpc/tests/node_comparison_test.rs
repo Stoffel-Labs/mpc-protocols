@@ -196,6 +196,7 @@ fn make_nodes() -> (
         K,
         0,
         0,
+        0,
         vec![],
     );
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -211,10 +212,12 @@ fn make_nodes_with_eqz() -> (
     Vec<HoneyBadgerMPCNode<Fr, Avid<SessionId>>>,
     Vec<Arc<FakeNetwork>>,
 ) {
+    let n_eqz = 1;
     let m = (K as u32).ilog2() as usize + 1; // 4 for K=8
-                                             // n_triples: prandbit generation consumes ~12, rand_inv_pair ~4, runtime ~7 → need ≥23
-                                             // n_random_shares: triple gen + prandbit + rand_inv_pair → generous value
-    let n_triples = 30;
+    let n_zero_shares = n_eqz * m; // 4 — consumed by ensure_rand_inv_pairs_for_eqz
+                                   // n_triples: prandbit generation consumes ~12, runtime ~7 → need ≥19
+                                   // (RandInvPair no longer uses triples — uses MulPub + zero shares instead)
+    let n_triples = 19; // PRandBit: 12, eqz_int runtime: 7
     let n_random_shares = 60;
     let n_prandbit = K + m; // 12 — exactly what one eqz_int call needs
     let n_prandint = 4;
@@ -232,8 +235,9 @@ fn make_nodes_with_eqz() -> (
         Duration::from_secs(60),
         0,
         0,
-        1,
+        n_eqz,
         K,
+        n_zero_shares,
         vec![],
     );
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(

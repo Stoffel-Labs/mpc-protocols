@@ -57,6 +57,11 @@ impl<F: FftField> MulPubNode<F> {
             .clone())
     }
 
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        self.batch_recon.clear_entire_store().await;
+        self.store.lock().await.remove(&session_id).is_some()
+    }
+
     pub async fn init<N: Network + Send + Sync + 'static>(
         &mut self,
         session_id: SessionId,

@@ -64,6 +64,7 @@ use crate::{
             InputError, InputMessage,
         },
         mul::{multiplication::Multiply, MulError},
+        mul_pub::MulPubError,
         output::{
             output::{OutputClient, OutputServer},
             OutputError, OutputMessage,
@@ -73,7 +74,7 @@ use crate::{
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
         triple_gen::TripleGenError,
-        zero_share::ZeroShaMessage,
+        zero_share::{zero_share::ZeroShaNode, ZeroShaError, ZeroShaMessage},
     },
 };
 use ark_ff::{FftField, PrimeField};
@@ -167,6 +168,10 @@ pub enum HoneyBadgerError {
     KOrCSError(#[from] KOrCSError),
     #[error("error in RandInvPair: {0:?}")]
     RandInvPairError(#[from] RandInvPairError),
+    #[error("error in MulPub: {0:?}")]
+    MulPubError(#[from] MulPubError),
+    #[error("error in ZeroSha: {0:?}")]
+    ZeroShaError(#[from] ZeroShaError),
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -273,7 +278,8 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub rand_bit: RandBit<F, R>,
     pub prand_bit: PRandBitDNode<F, F>,
     pub premulc: PreMulCOfflineNode<F, R>,
-    pub rand_inv_pair: RandInvPairNode<F, R>,
+    pub rand_inv_pair: RandInvPairNode<F>,
+    pub zero_sha: ZeroShaNode<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -321,6 +327,7 @@ pub struct SubProtocolCounters {
     pub premulc_ltz_counter: SubProtocolCounter,
     pub eqz_counter: SubProtocolCounter,
     pub rand_inv_pair_counter: SubProtocolCounter,
+    pub zero_sha_counter: SubProtocolCounter,
 }
 
 impl SubProtocolCounters {
@@ -341,6 +348,7 @@ impl SubProtocolCounters {
             premulc_ltz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             eqz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             rand_inv_pair_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            zero_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -377,6 +385,8 @@ pub struct HoneyBadgerMPCNodeOpts {
     pub n_eqz: usize,
     /// Bit length of the integers used in EQZ comparisons.
     pub eqz_bit_len: usize,
+    /// Number of zero shares (degree-2t sharings of 0) needed across all subprotocols.
+    pub n_zero_shares: usize,
 }
 
 impl HoneyBadgerMPCNodeOpts {
@@ -396,6 +406,7 @@ impl HoneyBadgerMPCNodeOpts {
         ltz_bit_len: usize,
         n_eqz: usize,
         eqz_bit_len: usize,
+        n_zero_shares: usize,
     ) -> Result<Self, HoneyBadgerError> {
         //No of parties should not exceed 255
         if n_parties > 255 {
@@ -420,6 +431,7 @@ impl HoneyBadgerMPCNodeOpts {
             ltz_bit_len,
             n_eqz,
             eqz_bit_len,
+            n_zero_shares,
         })
     }
     pub fn set_timeout(&mut self, secs: u64) {
@@ -464,6 +476,8 @@ where
         let premulc_node = PreMulCOfflineNode::new(id, params.n_parties, params.threshold)?;
         let eqz_node = EQZNode::new(id, params.n_parties, params.threshold)?;
         let rand_inv_pair_node = RandInvPairNode::new(id, params.n_parties, params.threshold)?;
+        let zero_sha_node =
+            ZeroShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
         Ok(Self {
             id,
@@ -481,6 +495,7 @@ where
                 prand_bit: prand_bit_node,
                 premulc: premulc_node,
                 rand_inv_pair: rand_inv_pair_node,
+                zero_sha: zero_sha_node,
             },
             operations: Operation { mul: mul_node },
             type_ops: TypeOperations {
@@ -747,14 +762,9 @@ where
                         }
                         _ => warn!("unexpected EQZ Rbc round_id"),
                     },
-                    Some(ProtocolType::RandInvPair) => {
-                        self.preprocess
-                            .rand_inv_pair
-                            .mul
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.preprocess.rand_inv_pair.mul.drain_rbc_output().await?;
+                    Some(ProtocolType::ZeroSha) => {
+                        self.preprocess.zero_sha.rbc.process(rbc_msg, net).await?;
+                        self.preprocess.zero_sha.drain_rbc_output().await?;
                     }
                     _ => {
                         warn!(
@@ -972,29 +982,17 @@ where
                             .await?;
                     }
                     Some(ProtocolType::RandInvPair) => {
-                        if batch_msg.session_id.round_id() == 0 {
-                            self.preprocess
-                                .rand_inv_pair
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess
-                                .rand_inv_pair
-                                .drain_batch_recon_output()
-                                .await?;
-                        } else if batch_msg.session_id.round_id() == 1 {
-                            self.preprocess
-                                .rand_inv_pair
-                                .mul
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess
-                                .rand_inv_pair
-                                .mul
-                                .drain_batch_recon_output()
-                                .await?;
-                        }
+                        self.preprocess
+                            .rand_inv_pair
+                            .mul_pub
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.preprocess
+                            .rand_inv_pair
+                            .mul_pub
+                            .drain_batch_recon_output()
+                            .await?;
                     }
                     _ => {
                         warn!(
@@ -1020,8 +1018,19 @@ where
             }
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
-            WrappedMessage::ZeroSha(_) => {
-                warn!("Incorrect message recieved at process function")
+            WrappedMessage::ZeroSha(msg) => {
+                if sender_id != msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        msg.session_id.instance_id(),
+                    ));
+                }
+                self.preprocess
+                    .zero_sha
+                    .process(msg, Arc::clone(&net))
+                    .await?;
             }
         }
 
@@ -1583,13 +1592,12 @@ where
                 (0, 0)
             };
 
-        let (eqz_extra_triples, eqz_extra_shares) =
-            if self.params.n_eqz > 0 && self.params.eqz_bit_len >= 1 {
-                let m = (self.params.eqz_bit_len as u32).ilog2() as usize + 1;
-                (self.params.n_eqz * m, self.params.n_eqz * 2 * m)
-            } else {
-                (0, 0)
-            };
+        let eqz_extra_shares = if self.params.n_eqz > 0 && self.params.eqz_bit_len >= 1 {
+            let m = (self.params.eqz_bit_len as u32).ilog2() as usize + 1;
+            self.params.n_eqz * 2 * m
+        } else {
+            0
+        };
 
         // Get how many triples and random shares are already available
         let (no_of_triples_avail, no_of_random_shares_avail, _, _) = {
@@ -1597,7 +1605,7 @@ where
             store.len()
         };
 
-        let mut no_of_triples = self.params.n_triples + ltz_extra_triples + eqz_extra_triples;
+        let mut no_of_triples = self.params.n_triples + ltz_extra_triples;
         let mut no_of_random_shares =
             self.params.n_random_shares + ltz_extra_shares + eqz_extra_shares;
         // Each triple batch produces (2t + 1) triples at a time
@@ -1711,25 +1719,31 @@ where
             }
         }
         // ------------------------
-        // Step 5. Generate Random bits
+        // Step 5. Generate Zero Shares for Mulpub
+        // ------------------------
+        self.ensure_zero_shares(network.clone(), rng).await?;
+        info!("Zero share generation done");
+
+        // ------------------------
+        // Step 6. Generate Random bits
         // ------------------------
         self.ensure_prandbit_shares(network.clone()).await?;
         info!("PrandBit share generation done");
 
         // ------------------------
-        // Step 6. Generate Random Int
+        // Step 7. Generate Random Int
         // ------------------------
         self.ensure_prandint_shares(network.clone()).await?;
         info!("PrandInt share generation done");
 
         // ------------------------
-        // Step 7. Generate PreMulC offline outputs for LTZ
+        // Step 8. Generate PreMulC offline outputs for LTZ
         // ------------------------
         self.ensure_premulc_for_ltz(network.clone()).await?;
         info!("PreMulC LTZ preprocessing done");
 
         // ------------------------
-        // Step 8. Generate RandInvPairs for EQZ
+        // Step 9. Generate RandInvPairs for EQZ
         // ------------------------
         self.ensure_rand_inv_pairs_for_eqz(network.clone()).await?;
         info!("RandInvPairs EQZ preprocessing done");
@@ -2201,11 +2215,11 @@ where
             .lock()
             .await
             .take_random_shares(missing)?;
-        let triples = self
+        let zero_shares = self
             .preprocessing_material
             .lock()
             .await
-            .take_beaver_triples(missing)?;
+            .take_zero_shares(missing)?;
 
         self.preprocess
             .rand_inv_pair
@@ -2213,7 +2227,7 @@ where
                 RandInvPairPrep {
                     r_shares,
                     r_prime_shares,
-                    triples,
+                    zero_shares,
                 },
                 session,
                 network.clone(),
@@ -2231,11 +2245,74 @@ where
             .lock()
             .await
             .add_rand_inv_pairs_eqz(pairs);
+        self.preprocess.rand_inv_pair.clear_store(session).await;
 
         info!(
             "RandInvPairs EQZ preprocessing done: {} elements generated",
             missing
         );
+        Ok(())
+    }
+    async fn ensure_zero_shares<N, G>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: ark_std::rand::Rng,
+    {
+        let n = self.params.n_zero_shares;
+        if n == 0 {
+            return Ok(());
+        }
+        let have = self.preprocessing_material.lock().await.zero_shares_len();
+        if have >= n {
+            return Ok(());
+        }
+        let missing = n - have;
+        let per_session = self.params.n_parties - 2 * self.params.threshold;
+        let n_sessions = (missing + per_session - 1) / per_session;
+
+        let mut round_id = 0u8;
+        let mut zero_sha_counter = self.counters.zero_sha_counter.get_next().await?;
+
+        if (256 - zero_sha_counter as usize) * 255 < n_sessions {
+            return Err(HoneyBadgerError::LimitError);
+        }
+
+        for _ in 0..n_sessions {
+            let session = SessionId::new(
+                ProtocolType::ZeroSha,
+                SessionId::pack_slot24(zero_sha_counter, 0, round_id),
+                self.params.instance_id,
+            );
+            self.preprocess
+                .zero_sha
+                .init(session, rng, network.clone())
+                .await?;
+
+            let shares = self
+                .preprocess
+                .zero_sha
+                .wait_for_result(session, self.params.timeout)
+                .await?;
+
+            self.preprocessing_material
+                .lock()
+                .await
+                .add_zero_shares(shares);
+            assert!(self.preprocess.zero_sha.clear_store(session).await); // ← missing
+
+            if round_id == 255 {
+                zero_sha_counter = self.counters.zero_sha_counter.get_next().await.unwrap();
+                round_id = 0;
+            } else {
+                round_id += 1;
+            }
+        }
+
+        self.preprocess.zero_sha.rbc.clear_store().await;
         Ok(())
     }
 }

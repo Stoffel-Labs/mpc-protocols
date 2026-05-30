@@ -1,9 +1,12 @@
 pub mod utils;
 
-use crate::utils::comparison_utils::{collect_result_shares, make_mod2_prep, make_prandm_prep, make_premulc_prep, make_triples, share_bits_of, share_value};
+use crate::utils::comparison_utils::{
+    collect_result_shares, make_mod2_prep, make_prandm_prep, make_premulc_prep, make_triples,
+    share_bits_of, share_value,
+};
 use crate::utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 use ark_bls12_381::Fr;
-use ark_ff::{ UniformRand};
+use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::sync::Arc;
 use stoffelmpc_mpc::common::RBC;
@@ -15,8 +18,7 @@ use stoffelmpc_mpc::honeybadger::comparison::mod2m::Mod2mNode;
 use stoffelmpc_mpc::honeybadger::comparison::pre_mulc::{PreMulCOfflineNode, PreMulCOnlineNode};
 use stoffelmpc_mpc::honeybadger::comparison::trunc::TruncNode;
 use stoffelmpc_mpc::honeybadger::{
-    robust_interpolate::robust_interpolate::RobustShare,
-    ProtocolType, SessionId, WrappedMessage,
+    robust_interpolate::robust_interpolate::RobustShare, ProtocolType, SessionId, WrappedMessage,
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use tokio::sync::mpsc::Receiver;

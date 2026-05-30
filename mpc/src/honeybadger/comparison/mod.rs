@@ -1,3 +1,4 @@
+use crate::honeybadger::mul_pub::MulPubError;
 use crate::honeybadger::{
     robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple,
 };
@@ -283,8 +284,8 @@ pub enum EQZError {
 
 #[derive(Debug, Error)]
 pub enum RandInvPairError {
-    #[error("mul error: {0}")]
-    MulError(#[from] MulError),
+    #[error("mul pub error: {0}")]
+    MulPubError(#[from] MulPubError),
     #[error("batch recon error: {0}")]
     BatchReconError(#[from] BatchReconError),
     #[error("share error: {0}")]

@@ -20,6 +20,8 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     premulc_ltz: PreMulCPrep<F>,
     /// Random invertible pairs pre-generated for EQZ comparisons.
     rand_inv_pairs_eqz: Vec<(RobustShare<F>, RobustShare<F>)>,
+    /// Zero shares (degree-2t sharings of 0) for MulPub-based protocols.
+    zero_shares: Vec<RobustShare<F>>,
 }
 
 impl<F> HoneyBadgerMPCNodePreprocMaterial<F>
@@ -39,6 +41,7 @@ where
                 triples: Vec::new(),
             },
             rand_inv_pairs_eqz: Vec::new(),
+            zero_shares: Vec::new(),
         }
     }
 
@@ -155,6 +158,20 @@ where
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
         Ok(self.rand_inv_pairs_eqz.drain(0..n).collect())
+    }
+    pub fn add_zero_shares(&mut self, mut shares: Vec<RobustShare<F>>) {
+        self.zero_shares.append(&mut shares);
+    }
+
+    pub fn zero_shares_len(&self) -> usize {
+        self.zero_shares.len()
+    }
+
+    pub fn take_zero_shares(&mut self, n: usize) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
+        if self.zero_shares.len() < n {
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self.zero_shares.drain(0..n).collect())
     }
 }
 

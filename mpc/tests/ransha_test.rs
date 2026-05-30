@@ -64,6 +64,7 @@ async fn test_reconstruct_handler_incorrect_share() {
         0,
         0,
         0,
+        0,
         vec![],
     );
 

@@ -61,6 +61,7 @@ pub fn create_nodes(
         0,
         0,
         0,
+        0,
     )
     .unwrap();
 

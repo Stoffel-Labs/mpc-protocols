@@ -1,7 +1,7 @@
 pub mod utils;
 
 use crate::utils::comparison_utils::{
-    collect_result_shares, make_kor_cs_prep, make_prandm_prep, make_triples, share_value,
+    collect_result_shares, make_kor_cs_prep, make_prandm_prep, share_value,
 };
 use crate::utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 use ark_bls12_381::Fr;
@@ -27,6 +27,7 @@ fn make_rand_inv_pair_prep(k: usize, n: usize, t: usize) -> Vec<RandInvPairPrep<
     let mut rng = test_rng();
     let mut r_pp: Vec<Vec<RobustShare<Fr>>> = vec![vec![]; n];
     let mut r_prime_pp: Vec<Vec<RobustShare<Fr>>> = vec![vec![]; n];
+    let mut zero_pp: Vec<Vec<RobustShare<Fr>>> = vec![vec![]; n];
     for _ in 0..k {
         let r = loop {
             let v = Fr::rand(&mut rng);
@@ -42,17 +43,18 @@ fn make_rand_inv_pair_prep(k: usize, n: usize, t: usize) -> Vec<RandInvPairPrep<
         };
         let sr = share_value(r, n, t);
         let srp = share_value(rp, n, t);
+        let sz = RobustShare::compute_shares(Fr::from(0u64), n, 2 * t, None, &mut rng).unwrap();
         for p in 0..n {
             r_pp[p].push(sr[p].clone());
             r_prime_pp[p].push(srp[p].clone());
+            zero_pp[p].push(sz[p].clone());
         }
     }
-    let triples = make_triples(n, t, k);
     (0..n)
         .map(|i| RandInvPairPrep {
             r_shares: r_pp[i].clone(),
             r_prime_shares: r_prime_pp[i].clone(),
-            triples: triples[i].clone(),
+            zero_shares: zero_pp[i].clone(),
         })
         .collect()
 }
@@ -64,10 +66,15 @@ fn make_rand_inv_pair_prep(k: usize, n: usize, t: usize) -> Vec<RandInvPairPrep<
 //   BatchRecon round_id=1 → mul.batch_recon  (Multiply internals)
 //   Rbc                   → mul.rbc          (round_id=2 from Multiply)
 
+// ── RandInvPair receiver ───────────────────────────────────────────────────────
+//
+// Session routing:
+//   BatchRecon → mul_pub.batch_recon  (product openings via MulPub)
+
 fn spawn_rand_inv_pair_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<RandInvPairNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<RandInvPairNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -92,39 +99,16 @@ fn spawn_rand_inv_pair_receiver_tasks(
                     }
                 };
                 match wrapped {
-                    WrappedMessage::BatchRecon(msg) => match msg.session_id.round_id() {
-                        0 => {
-                            node.batch_recon
-                                .process(msg, net.clone())
-                                .await
-                                .expect("rand_inv_pair batch_recon failed");
-                            node.drain_batch_recon_output()
-                                .await
-                                .expect("rand_inv_pair drain_batch_recon failed");
-                        }
-                        1 => {
-                            node.mul
-                                .batch_recon
-                                .process(msg, net.clone())
-                                .await
-                                .expect("rand_inv_pair mul batch_recon failed");
-                            node.mul
-                                .drain_batch_recon_output()
-                                .await
-                                .expect("rand_inv_pair mul drain_batch_recon failed");
-                        }
-                        r => warn!("unexpected BatchRecon round_id {r}"),
-                    },
-                    WrappedMessage::Rbc(msg) => {
-                        node.mul
-                            .rbc
+                    WrappedMessage::BatchRecon(msg) => {
+                        node.mul_pub
+                            .batch_recon
                             .process(msg, net.clone())
                             .await
-                            .expect("rand_inv_pair mul rbc failed");
-                        node.mul
-                            .drain_rbc_output()
+                            .expect("rand_inv_pair mul_pub batch_recon failed");
+                        node.mul_pub
+                            .drain_batch_recon_output()
                             .await
-                            .expect("rand_inv_pair mul drain_rbc failed");
+                            .expect("rand_inv_pair mul_pub drain failed");
                     }
                     _ => warn!("unexpected message type"),
                 }
@@ -146,7 +130,7 @@ async fn rand_inv_pair_run(k: usize) {
 
     let prep = make_rand_inv_pair_prep(k, n, t);
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<RandInvPairNode<Fr, Avid<SessionId>>> = (0..n)
+    let nodes: Vec<RandInvPairNode<Fr>> = (0..n)
         .map(|id| RandInvPairNode::new(id, n, t).unwrap())
         .collect();
     let _recv = spawn_rand_inv_pair_receiver_tasks(n, receivers, nodes.clone(), network.clone());
@@ -194,7 +178,7 @@ async fn rand_inv_pair_multiple() {
 // ── KOrCS receiver ─────────────────────────────────────────────────────────────
 //
 // Session routing:
-//   BatchRecon calling_proto KOr1/KOr2 → mul.batch_recon 
+//   BatchRecon calling_proto KOr1/KOr2 → mul.batch_recon
 //   BatchRecon otherwise               → batch_recon       (d_j openings)
 //   Rbc        calling_proto KOr1/KOr2 → mul.rbc
 
