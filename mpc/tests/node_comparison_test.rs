@@ -196,7 +196,7 @@ fn make_nodes() -> (
         K,
         0,
         0,
-        0,
+        pk,
         vec![],
     );
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(

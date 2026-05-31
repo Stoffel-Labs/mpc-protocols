@@ -886,10 +886,15 @@ where
                         if round == 0 {
                             self.preprocess
                                 .premulc
+                                .mul_pub
                                 .batch_recon
                                 .process(batch_msg, net.clone())
                                 .await?;
-                            self.preprocess.premulc.drain_batch_recon_output().await?;
+                            self.preprocess
+                                .premulc
+                                .mul_pub
+                                .drain_batch_recon_output()
+                                .await?;
                         } else if round == 1 {
                             self.preprocess
                                 .premulc
@@ -1581,13 +1586,13 @@ where
         G: Rng + Send,
     {
         // Get how many triples and random shares are already available
-        // Extra demand from LTZ: each comparison needs 2*pk triples and 2*pk random shares
-        // for the PreMulCOffline protocol (pk offline triples + pk online triples, pk r + pk s).
+        // Extra demand from LTZ: v_triples (pk-1) + online_triples (pk) ≈ 2*pk triples,
+        // 2*pk random shares (pk r + pk s).
         let (ltz_extra_triples, ltz_extra_shares) =
             if self.params.n_ltz > 0 && self.params.ltz_bit_len >= 2 {
                 let chunk = self.params.threshold + 1;
                 let pk = ((self.params.ltz_bit_len - 1 + chunk - 1) / chunk) * chunk;
-                (self.params.n_ltz * 3 * pk, self.params.n_ltz * 2 * pk)
+                (self.params.n_ltz * 2 * pk, self.params.n_ltz * 2 * pk)
             } else {
                 (0, 0)
             };
@@ -2115,11 +2120,11 @@ where
             .lock()
             .await
             .take_random_shares(missing)?;
-        let offline_triples = self
+        let u_zero_shares = self
             .preprocessing_material
             .lock()
             .await
-            .take_beaver_triples(missing)?;
+            .take_zero_shares(missing)?;
         let v_triples = self
             .preprocessing_material
             .lock()
@@ -2136,7 +2141,7 @@ where
             .generate_preprocessing(
                 r_shares,
                 s_shares,
-                offline_triples,
+                u_zero_shares,
                 v_triples,
                 session,
                 network.clone(),

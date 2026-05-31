@@ -157,3 +157,14 @@ pub async fn collect_result_shares(mut set: JoinSet<RobustShare<Fr>>) -> Vec<Rob
     }
     shares
 }
+pub fn make_zero_shares(n: usize, t: usize, k: usize) -> Vec<Vec<RobustShare<Fr>>> {
+    let mut rng = test_rng();
+    let mut per_party: Vec<Vec<RobustShare<Fr>>> = vec![vec![]; n];
+    for _ in 0..k {
+        let shares = RobustShare::compute_shares(Fr::ZERO, n, 2 * t, None, &mut rng).unwrap();
+        for p in 0..n {
+            per_party[p].push(shares[p].clone());
+        }
+    }
+    per_party
+}

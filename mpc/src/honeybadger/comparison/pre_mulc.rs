@@ -1,13 +1,16 @@
 //! PreMulC — Protocol 4.2 (Catrina & de Hoogh 2010).
 //!
-//! Session ID scheme (all sub-sessions derive from caller's session):
-//!   PreMulCOff session:    pack_slot24(exec_id, 0, 0)  — preprocessing
-//!   PreMulCOn session:     pack_slot24(exec_id, 0, 0)  — online
-//!   Batch chunks:          pack_slot24(exec_id, chunk_i, 0)  in respective session
-//!   Routing:               batch recon round_id=0 → outer node, round_id=1 → mul sub-node
+//! Offline: u_i = r_i·s_i publicly opened via MulPub; v_i = r_{i+1}·s_i kept
+//!          secret via Multiply (Beaver). Produces ([w_1..w_k], [z_1..z_k]).
+//! Online:  m_i = w_i·a_i computed via Multiply then opened via batch recon.
 //!
-//! k must be a multiple of (t+1).
-//! Caller asserts: session.sub_id() == 0 && session.round_id() == 0.
+//! Session routing:
+//!   PreMulCOff MulPub batch_recon:  round_id = 0
+//!   PreMulCOff Mul (v_i) batch_recon: round_id = 1
+//!   PreMulCOff Mul (v_i) RBC:         round_id = 2
+//!   PreMulCOn batch recon:  round_id = 0
+//!   PreMulCOn mul batch_recon: round_id = 1
+//!   PreMulCOn mul RBC:         round_id = 2
 
 use crate::{
     common::{ProtocolSessionId, RBC},
@@ -15,12 +18,13 @@ use crate::{
         batch_recon::batch_recon::BatchReconNode,
         comparison::{PreMulCError, PreMulCPrep},
         mul::multiplication::Multiply,
+        mul_pub::mul_pub::MulPubNode,
         robust_interpolate::robust_interpolate::RobustShare,
         triple_gen::ShamirBeaverTriple,
-        ProtocolType, SessionId,
+        SessionId,
     },
 };
-use ark_ff::PrimeField;
+use ark_ff::{FftField, PrimeField};
 use ark_serialize::CanonicalDeserialize;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
@@ -28,7 +32,6 @@ use tokio::{
     sync::{mpsc::Receiver, Mutex},
     time::{timeout, Duration},
 };
-use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhaseState {
@@ -39,11 +42,6 @@ pub enum PhaseState {
 #[derive(Debug)]
 pub struct PreMulCPrepStore<F: PrimeField> {
     pub state: PhaseState,
-    pub r: Option<Vec<RobustShare<F>>>,
-    pub s: Option<Vec<RobustShare<F>>>,
-    pub v: Option<Vec<RobustShare<F>>>,
-    pub chunks: usize,
-    pub open: HashMap<u8, Vec<F>>,
     pub output_sender:
         Option<tokio::sync::oneshot::Sender<(Vec<RobustShare<F>>, Vec<RobustShare<F>>)>>,
     pub output_receiver:
@@ -55,11 +53,6 @@ impl<F: PrimeField> PreMulCPrepStore<F> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         Self {
             state: PhaseState::Waiting,
-            r: None,
-            s: None,
-            v: None,
-            chunks: 0,
-            open: HashMap::new(),
             output_sender: Some(tx),
             output_receiver: Some(rx),
         }
@@ -93,31 +86,27 @@ impl<F: PrimeField> PreMulCOnlineStore<F> {
 // ── Offline (preprocessing) node ──────────────────────────────────────────────
 
 /// Protocol 4.2 lines 1–8. Generates ([w_1,…,w_k], [z_1,…,z_k]) from random
-/// shares ([r_i], [s_i]) and Beaver triples.
+/// u_i = r_i·s_i are opened publicly via MulPub.
+/// v_i = r_{i+1}·s_i are kept secret via Multiply (Beaver).
 #[derive(Clone, Debug)]
-pub struct PreMulCOfflineNode<F: PrimeField, R: RBC> {
+pub struct PreMulCOfflineNode<F: PrimeField + FftField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     prep_store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PreMulCPrepStore<F>>>>>>,
+    pub mul_pub: MulPubNode<F>,
     pub mul: Multiply<F, R>,
-    pub batch_recon: BatchReconNode<F>,
-    batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
+impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PreMulCError> {
-        let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
-        let batch_recon = BatchReconNode::new(id, n, t, t, batch_sender)?;
-        let mul = Multiply::new(id, n, t)?;
         Ok(Self {
             id,
             n,
             t,
             prep_store: Arc::new(Mutex::new(HashMap::new())),
-            mul,
-            batch_recon,
-            batch_output: Arc::new(Mutex::new(batch_receiver)),
+            mul_pub: MulPubNode::new(id, n, t)?,
+            mul: Multiply::new(id, n, t)?,
         })
     }
 
@@ -136,7 +125,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
     }
 
     pub async fn clear_store(&self, session: SessionId) -> Result<(), PreMulCError> {
-        self.batch_recon.clear_entire_store().await;
+        self.mul_pub.clear_store(session).await;
         self.mul.clear_store(session).await?;
         let mut pmap = self.prep_store.lock().await;
         pmap.remove(&session)
@@ -167,189 +156,89 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
         }
     }
 
-    pub async fn drain_batch_recon_output(&mut self) -> Result<(), PreMulCError> {
-        loop {
-            let id = {
-                let mut rx = self.batch_output.lock().await;
-                match rx.try_recv() {
-                    Ok(id) => id,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        return Err(PreMulCError::Abort)
-                    }
-                }
-            };
-
-            let output = self.batch_recon.get_store(id).await?;
-            let vals: Vec<F> = CanonicalDeserialize::deserialize_compressed(output.as_slice())?;
-
-            let parent = SessionId::new(
-                id.calling_protocol()
-                    .ok_or(PreMulCError::SessionIdError(id))?,
-                SessionId::pack_slot24(id.exec_id(), 0, 0),
-                id.instance_id(),
-            );
-            let chunk_idx = id.sub_id();
-            if id.calling_protocol() != Some(ProtocolType::PreMulCOff) {
-                warn!("PreMulC: incorrect calling_protocol in {:?}", id);
-            }
-            self.handle_prep_batch(parent, chunk_idx, vals).await?;
-        }
-        Ok(())
-    }
-
     /// Protocol 4.2 lines 1–8. k must be a multiple of (t+1).
     ///
-    /// Drive `drain_batch_recon_output` until `wait_for_preprocessing` resolves
-    /// to get ([w_1,…,w_k], [z_1,…,z_k]).
-    pub async fn generate_preprocessing<N: Network + Send + Sync>(
+    /// Starts MulPub (u_i = r_i·s_i) and Multiply (v_i = r_{i+1}·s_i) before
+    /// blocking on either, so both run in parallel via the outer message loop.
+    pub async fn generate_preprocessing<N: Network + Send + Sync + 'static>(
         &mut self,
         r: Vec<RobustShare<F>>,
         s: Vec<RobustShare<F>>,
-        triples: Vec<ShamirBeaverTriple<F>>,
+        u_zero_shares: Vec<RobustShare<F>>,
         v_triples: Vec<ShamirBeaverTriple<F>>,
         session: SessionId,
         network: Arc<N>,
-        mul_duration: Duration,
+        duration: Duration,
     ) -> Result<(), PreMulCError> {
         let k = r.len();
         assert_eq!(s.len(), k);
+        assert_eq!(u_zero_shares.len(), k);
         assert_eq!(k % (self.t + 1), 0, "k must be a multiple of t+1");
         assert_eq!(
             v_triples.len(),
             k - 1,
             "v_triples must have exactly k-1 elements"
         );
-
-        let calling_proto = session
+        session
             .calling_protocol()
             .ok_or(PreMulCError::SessionIdError(session))?;
 
-        // Combine: first k pairs → u_i = r_i * s_i, next k-1 pairs → v_i = r[i+1] * s[i]
-        let mut x = r.clone();
-        x.extend_from_slice(&r[1..]);
-        let mut y = s.clone();
-        y.extend_from_slice(&s[..k - 1]);
-        let mut all_triples = triples;
-        all_triples.extend(v_triples);
+        self.get_or_create_prep(session).await?;
 
+        // Start both sub-protocols before blocking on either.
+        self.mul_pub
+            .init(
+                session,
+                r.clone(),
+                s.clone(),
+                u_zero_shares,
+                Arc::clone(&network),
+            )
+            .await
+            .map_err(PreMulCError::MulPubError)?;
         self.mul
-            .init(session, x, y, all_triples, Arc::clone(&network))
+            .init(
+                session,
+                r[1..].to_vec(),
+                s[..k - 1].to_vec(),
+                v_triples,
+                Arc::clone(&network),
+            )
             .await?;
-        let all_shares = self.mul.wait_for_result(session, mul_duration).await?;
 
-        let u_shares = all_shares[..k].to_vec();
-        let v_shares = all_shares[k..].to_vec();
+        let u_vals = self
+            .mul_pub
+            .wait_for_result(session, duration)
+            .await
+            .map_err(PreMulCError::MulPubError)?;
+        let v_shares = self.mul.wait_for_result(session, duration).await?;
 
-        {
-            let store = self.get_or_create_prep(session).await?;
-            let mut st = store.lock().await;
-            st.r = Some(r);
-            st.s = Some(s);
-            st.v = Some(v_shares);
-            st.chunks = k / (self.t + 1);
-        }
-
-        for (i, chunk) in u_shares.chunks(self.t + 1).enumerate() {
-            let batch_session = SessionId::new(
-                calling_proto,
-                SessionId::pack_slot24(session.exec_id(), i as u8, 0),
-                session.instance_id(),
-            );
-            self.batch_recon
-                .init_batch_reconstruct(chunk, batch_session, Arc::clone(&network))
-                .await?;
-        }
-        {
-            let store = self.get_or_create_prep(session).await?;
-            let ready = {
-                let s = store.lock().await;
-                s.r.is_some() && s.open.len() >= s.chunks
-            };
-            if ready {
-                self.try_finalize_prep(session, store).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn handle_prep_batch(
-        &mut self,
-        parent: SessionId,
-        chunk_idx: u8,
-        vals: Vec<F>,
-    ) -> Result<(), PreMulCError> {
-        let store = self.get_or_create_prep(parent).await?;
-        {
-            let mut s = store.lock().await;
-            if s.state == PhaseState::Finished {
-                return Ok(());
-            }
-            s.open.insert(chunk_idx, vals);
-        }
-        self.try_finalize_prep(parent, store).await?;
-        Ok(())
-    }
-
-    async fn try_finalize_prep(
-        &self,
-        session: SessionId,
-        store_mutex: Arc<Mutex<PreMulCPrepStore<F>>>,
-    ) -> Result<bool, PreMulCError> {
-        let (r, s_vec, v_vec, open_map, num_chunks) = {
-            let s = store_mutex.lock().await;
-            if s.state == PhaseState::Finished {
-                return Ok(true);
-            }
-            if s.open.len() < s.chunks {
-                return Ok(false);
-            }
-            let Some(r) = s.r.clone() else {
-                return Ok(false);
-            };
-            let Some(sv) = s.s.clone() else {
-                return Ok(false);
-            };
-            let Some(vv) = s.v.clone() else {
-                return Ok(false);
-            };
-            (r, sv, vv, s.open.clone(), s.chunks)
-        };
-
-        // Assemble u_vals from chunks in order.
-        let mut u_vals: Vec<F> = Vec::with_capacity(r.len());
-        for i in 0..num_chunks as u8 {
-            let chunk = open_map.get(&i).ok_or(PreMulCError::Abort)?;
-            u_vals.extend_from_slice(chunk);
-        }
         for u in &u_vals {
             if *u == F::zero() {
                 return Err(PreMulCError::Abort); // repeat with new randomness
             }
         }
 
-        let k = r.len();
-
         // [w_1] = [r_0]; [w_i] = [v_{i-1}] * u_{i-1}^{-1}  — degree-t
         let mut w: Vec<RobustShare<F>> = Vec::with_capacity(k);
         w.push(r[0].clone());
         for i in 1..k {
             let u_inv = u_vals[i - 1].inverse().expect("u != 0");
-            w.push((v_vec[i - 1].clone() * u_inv)?);
+            w.push((v_shares[i - 1].clone() * u_inv)?);
         }
 
         // [z_i] = [s_i] * u_i^{-1}  — degree-t
         let mut z: Vec<RobustShare<F>> = Vec::with_capacity(k);
         for i in 0..k {
             let u_inv = u_vals[i].inverse().expect("u != 0");
-            z.push((s_vec[i].clone() * u_inv)?);
+            z.push((s[i].clone() * u_inv)?);
         }
 
+        let store_mutex = self.get_or_create_prep(session).await?;
         let sender = {
             let mut s = store_mutex.lock().await;
             if s.state == PhaseState::Finished {
-                return Ok(true);
+                return Ok(());
             }
             s.state = PhaseState::Finished;
             s.output_sender
@@ -359,7 +248,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
         sender
             .send((w, z))
             .map_err(|_| PreMulCError::SendError(session))?;
-        Ok(true)
+        Ok(())
     }
 }
 

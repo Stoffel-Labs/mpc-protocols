@@ -816,7 +816,7 @@ async fn preprocessing_e2e() {
     let eqz_bit_len = 8usize;
     let m = (eqz_bit_len as u32).ilog2() as usize + 1; // = 4
     let expected_eqz_pairs = n_eqz * m; // = 4
-    let n_zero_shares = n_eqz * m; // = 4, consumed by RandInvPair
+    let n_zero_shares = n_ltz * pk + n_eqz * m; // 16 (ltz offline MulPub) + 4 (eqz RandInvPair)
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -881,7 +881,7 @@ async fn preprocessing_e2e() {
         let mut store = node.preprocessing_material.lock().await;
 
         let (n_triples, n_shares, n_pb, n_pi) = store.len();
-        assert_eq!(n_triples, 3); // ceil(64/3)*3=66 − 16 (prandbit) − 47 (ltz) = 3
+        assert_eq!(n_triples, 1); // ceil(48/3)*3=48 − 16 (prandbit) − 31 (ltz v_i+online) = 1
         assert_eq!(n_shares, 0); // 56 − 16 (prandbit) − 32 (ltz) − 8 (rand_inv_pair r+r') = 0
         assert_eq!(n_pb, n_prandbit);
         assert_eq!(n_pi, n_prandint);

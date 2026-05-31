@@ -2,7 +2,7 @@ pub mod utils;
 
 use crate::utils::comparison_utils::{
     collect_result_shares, make_mod2_prep, make_prandm_prep, make_premulc_prep, make_triples,
-    share_bits_of, share_value,
+    make_zero_shares, share_bits_of, share_value,
 };
 use crate::utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 use ark_bls12_381::Fr;
@@ -127,11 +127,13 @@ fn spawn_premulcoff_receiver_tasks(
                     WrappedMessage::BatchRecon(msg) => {
                         let round = msg.session_id.round_id();
                         if round == 0 {
-                            node.batch_recon
+                            node.mul_pub
+                                .batch_recon
                                 .process(msg, net.clone())
                                 .await
                                 .expect("batch_recon process failed");
-                            node.drain_batch_recon_output()
+                            node.mul_pub
+                                .drain_batch_recon_output()
                                 .await
                                 .expect("drain_batch_recon_output failed");
                         } else if round == 1 {
@@ -204,7 +206,7 @@ async fn premulc_offline_e2e() {
         }
     }
 
-    let triples = make_triples(n, t, k);
+    let u_zero = make_zero_shares(n, t, k);
     let v_triples = make_triples(n, t, k - 1);
     let (network, receivers, _, _) = test_setup(n, vec![]);
     let nodes: Vec<PreMulCOfflineNode<Fr, Avid<SessionId>>> = (0..n)
@@ -215,15 +217,15 @@ async fn premulc_offline_e2e() {
     let mut init_set = JoinSet::new();
     for i in 0..n {
         let mut node = nodes[i].clone();
-        let (r, s, tri, vtri, net) = (
+        let (r, s, uz, vtri, net) = (
             r_per_party[i].clone(),
             s_per_party[i].clone(),
-            triples[i].clone(),
+            u_zero[i].clone(),
             v_triples[i].clone(),
             network[i].clone(),
         );
         init_set.spawn(async move {
-            node.generate_preprocessing(r, s, tri, vtri, session, net, duration)
+            node.generate_preprocessing(r, s, uz, vtri, session, net, duration)
                 .await
                 .unwrap()
         });

@@ -101,6 +101,8 @@ pub enum PreMulCError {
     EmptyInput,
     #[error("error in batch reconstruction: {0:?}")]
     BatchRecError(#[from] BatchReconError),
+    #[error("mul pub error: {0}")]
+    MulPubError(#[from] MulPubError),
 }
 
 #[derive(Debug, Error)]
