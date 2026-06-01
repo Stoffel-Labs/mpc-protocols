@@ -16,16 +16,18 @@ pub mod ran_dou_sha;
 /// Implementation for the protocol of double share generation.
 pub mod double_share;
 
-/// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
-pub mod triple_gen;
-
+pub mod comparison;
 pub mod fpdiv;
 pub mod fpmul;
 pub mod input;
 pub mod mul;
+pub mod mul_pub;
 pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
+/// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
+pub mod triple_gen;
+pub mod zero_share;
 
 use crate::{
     common::{
@@ -40,6 +42,15 @@ use crate::{
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
+        comparison::{
+            eqz::EQZNode,
+            kor_cs::KOrCSPrep,
+            ltz::LTZNode,
+            pre_mulc::PreMulCOfflineNode,
+            rand_inv_pair::{RandInvPairNode, RandInvPairPrep},
+            EQZError, KOrCLError, KOrCSError, LTZError, Mod2Error, Mod2mError, PRandMPrep,
+            PreMulCError, PreMulCPrep, RandInvPairError,
+        },
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
@@ -53,6 +64,7 @@ use crate::{
             InputError, InputMessage,
         },
         mul::{multiplication::Multiply, MulError},
+        mul_pub::MulPubError,
         output::{
             output::{OutputClient, OutputServer},
             OutputError, OutputMessage,
@@ -62,6 +74,7 @@ use crate::{
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
         triple_gen::TripleGenError,
+        zero_share::{zero_share::ZeroShaNode, ZeroShaError, ZeroShaMessage},
     },
 };
 use ark_ff::{FftField, PrimeField};
@@ -118,6 +131,14 @@ pub enum HoneyBadgerError {
     FPDivConstError(#[from] FPDivConstError),
     #[error("error in Truncation: {0:?}")]
     TruncPrError(#[from] TruncPrError),
+    #[error("error in Less than Zero: {0:?}")]
+    LTZError(#[from] LTZError),
+    #[error("error in PreMulC generation: {0:?}")]
+    PreMulCError(#[from] PreMulCError),
+    #[error("error in Mod2error: {0:?}")]
+    Mod2error(#[from] Mod2Error),
+    #[error("error in Mod2merror: {0:?}")]
+    Mod2merror(#[from] Mod2mError),
     #[error("error in types: {0:?}")]
     TypeError(#[from] TypeError),
     #[error("Already reserved batch")]
@@ -139,6 +160,18 @@ pub enum HoneyBadgerError {
     InvalidPartyId,
     #[error("the protocol cannot be executed any more")]
     LimitError,
+    #[error("error in EQZ: {0:?}")]
+    EQZError(#[from] EQZError),
+    #[error("error in KOrCl: {0:?}")]
+    KOrCLError(#[from] KOrCLError),
+    #[error("error in KOrCS: {0:?}")]
+    KOrCSError(#[from] KOrCSError),
+    #[error("error in RandInvPair: {0:?}")]
+    RandInvPairError(#[from] RandInvPairError),
+    #[error("error in MulPub: {0:?}")]
+    MulPubError(#[from] MulPubError),
+    #[error("error in ZeroSha: {0:?}")]
+    ZeroShaError(#[from] ZeroShaError),
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -230,6 +263,8 @@ pub struct Operation<F: FftField, R: RBC> {
 pub struct TypeOperations<F: PrimeField, R: RBC> {
     pub fpmul: FPMulNode<F, R>,
     pub fpdiv_const: FPDivConstNode<F, R>,
+    pub ltz: LTZNode<F, R>,
+    pub eqz: EQZNode<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -240,8 +275,11 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub dou_sha: DoubleShareNode<F>,
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
-    pub rand_bit: RandBit<F, R>,
+    pub rand_bit: RandBit<F>,
     pub prand_bit: PRandBitDNode<F, F>,
+    pub premulc: PreMulCOfflineNode<F, R>,
+    pub rand_inv_pair: RandInvPairNode<F>,
+    pub zero_sha: ZeroShaNode<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -285,6 +323,11 @@ pub struct SubProtocolCounters {
     pub prand_int_counter: SubProtocolCounter,
     pub fpmul_counter: SubProtocolCounter,
     pub fpdiv_const_counter: SubProtocolCounter,
+    pub ltz_counter: SubProtocolCounter,
+    pub premulc_ltz_counter: SubProtocolCounter,
+    pub eqz_counter: SubProtocolCounter,
+    pub rand_inv_pair_counter: SubProtocolCounter,
+    pub zero_sha_counter: SubProtocolCounter,
 }
 
 impl SubProtocolCounters {
@@ -301,6 +344,11 @@ impl SubProtocolCounters {
             prand_int_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             fpmul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             fpdiv_const_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            ltz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            premulc_ltz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            eqz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            rand_inv_pair_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            zero_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -329,6 +377,16 @@ pub struct HoneyBadgerMPCNodeOpts {
     ///Bit size for fixed point
     pub l: usize,
     pub timeout: Duration,
+    /// Number of LTZ (integer comparison) operations to pre-generate material for.
+    pub n_ltz: usize,
+    /// Bit length of the integers used in LTZ comparisons (e.g. 8, 16, 32, 64).
+    pub ltz_bit_len: usize,
+    /// Number of EQZ (integer equality) operations to pre-generate material for.
+    pub n_eqz: usize,
+    /// Bit length of the integers used in EQZ comparisons.
+    pub eqz_bit_len: usize,
+    /// Number of zero shares (degree-2t sharings of 0) needed across all subprotocols.
+    pub n_zero_shares: usize,
 }
 
 impl HoneyBadgerMPCNodeOpts {
@@ -344,6 +402,11 @@ impl HoneyBadgerMPCNodeOpts {
         l: usize,
         k: usize,
         timeout: Duration,
+        n_ltz: usize,
+        ltz_bit_len: usize,
+        n_eqz: usize,
+        eqz_bit_len: usize,
+        n_zero_shares: usize,
     ) -> Result<Self, HoneyBadgerError> {
         //No of parties should not exceed 255
         if n_parties > 255 {
@@ -364,6 +427,11 @@ impl HoneyBadgerMPCNodeOpts {
             k,
             l,
             timeout,
+            n_ltz,
+            ltz_bit_len,
+            n_eqz,
+            eqz_bit_len,
+            n_zero_shares,
         })
     }
     pub fn set_timeout(&mut self, secs: u64) {
@@ -404,6 +472,13 @@ where
         let fpdiv_const_node = FPDivConstNode::new(id, params.n_parties, params.threshold)?;
         let input = InputServer::new(id, params.n_parties, params.threshold, input_ids)?;
         let output = OutputServer::new(id, params.n_parties)?;
+        let ltz_node = LTZNode::new(id, params.n_parties, params.threshold)?;
+        let premulc_node = PreMulCOfflineNode::new(id, params.n_parties, params.threshold)?;
+        let eqz_node = EQZNode::new(id, params.n_parties, params.threshold)?;
+        let rand_inv_pair_node = RandInvPairNode::new(id, params.n_parties, params.threshold)?;
+        let zero_sha_node =
+            ZeroShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
+
         Ok(Self {
             id,
             preprocessing_material: Arc::new(
@@ -418,11 +493,16 @@ where
                 triple_gen: triple_gen_node,
                 rand_bit: rand_bit_node,
                 prand_bit: prand_bit_node,
+                premulc: premulc_node,
+                rand_inv_pair: rand_inv_pair_node,
+                zero_sha: zero_sha_node,
             },
             operations: Operation { mul: mul_node },
             type_ops: TypeOperations {
                 fpmul: fpmul_node,
                 fpdiv_const: fpdiv_const_node,
+                ltz: ltz_node,
+                eqz: eqz_node,
             },
             output,
             counters: SubProtocolCounters::new(),
@@ -546,19 +626,6 @@ where
                         self.operations.mul.rbc.process(rbc_msg, net).await?;
                         self.operations.mul.drain_rbc_output().await?;
                     }
-                    Some(ProtocolType::RandBit) => {
-                        self.preprocess
-                            .rand_bit
-                            .mult_node
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.preprocess
-                            .rand_bit
-                            .mult_node
-                            .drain_rbc_output()
-                            .await?;
-                    }
                     Some(ProtocolType::FpMul) => {
                         if rbc_msg.session_id.round_id() == 0 {
                             self.type_ops
@@ -590,6 +657,101 @@ where
                             .trunc_node
                             .drain_rbc_output()
                             .await?;
+                    }
+                    Some(ProtocolType::PreMulCOff) => {
+                        self.preprocess
+                            .premulc
+                            .mul
+                            .rbc
+                            .process(rbc_msg, net.clone())
+                            .await?;
+                        self.preprocess.premulc.mul.drain_rbc_output().await?;
+                    }
+                    Some(ProtocolType::LTZ) => match rbc_msg.session_id.round_id() {
+                        0 => {
+                            self.type_ops
+                                .ltz
+                                .trunc
+                                .mod2m
+                                .bit_ltc1
+                                .mod2
+                                .rbc
+                                .process(rbc_msg, net.clone())
+                                .await?;
+                            self.type_ops
+                                .ltz
+                                .trunc
+                                .mod2m
+                                .bit_ltc1
+                                .mod2
+                                .drain_rbc_output()
+                                .await?;
+                        }
+                        1 => {
+                            self.type_ops
+                                .ltz
+                                .trunc
+                                .mod2m
+                                .rbc
+                                .process(rbc_msg, net.clone())
+                                .await?;
+                            self.type_ops.ltz.trunc.mod2m.drain_rbc_output().await?;
+                        }
+                        2 => {
+                            self.type_ops
+                                .ltz
+                                .trunc
+                                .mod2m
+                                .bit_ltc1
+                                .pre_mul_c
+                                .mul
+                                .rbc
+                                .process(rbc_msg, net.clone())
+                                .await?;
+                            self.type_ops
+                                .ltz
+                                .trunc
+                                .mod2m
+                                .bit_ltc1
+                                .pre_mul_c
+                                .mul
+                                .drain_rbc_output()
+                                .await?;
+                        }
+
+                        _ => warn!("unexpected Rbc round_id"),
+                    },
+                    Some(ProtocolType::KOr1) | Some(ProtocolType::KOr2) => {
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?;
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .drain_rbc_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::EQZ) => match rbc_msg.session_id.round_id() {
+                        0 => {
+                            self.type_ops.eqz.rbc.process(rbc_msg, net).await?;
+                            self.type_ops.eqz.drain_rbc_output().await?;
+                        }
+                        1 => {
+                            self.type_ops.eqz.kor_cl.rbc.process(rbc_msg, net).await?;
+                            self.type_ops.eqz.kor_cl.drain_rbc_output().await?;
+                        }
+                        _ => warn!("unexpected EQZ Rbc round_id"),
+                    },
+                    Some(ProtocolType::ZeroSha) => {
+                        self.preprocess.zero_sha.rbc.process(rbc_msg, net).await?;
+                        self.preprocess.zero_sha.drain_rbc_output().await?;
                     }
                     _ => {
                         warn!(
@@ -663,27 +825,19 @@ where
                             .await?
                     }
                     Some(ProtocolType::RandBit) => {
-                        if batch_msg.session_id.round_id() == 0 {
-                            self.preprocess
-                                .rand_bit
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess.rand_bit.drain_batch_recon_output().await?;
-                        } else {
-                            self.preprocess
-                                .rand_bit
-                                .mult_node
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess
-                                .rand_bit
-                                .mult_node
-                                .drain_batch_recon_output()
-                                .await?;
-                        }
+                        self.preprocess
+                            .rand_bit
+                            .mul_pub
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.preprocess
+                            .rand_bit
+                            .mul_pub
+                            .drain_batch_recon_output()
+                            .await?;
                     }
+
                     Some(ProtocolType::PRandBit) => {
                         self.preprocess
                             .prand_bit
@@ -703,6 +857,124 @@ where
                         self.type_ops
                             .fpmul
                             .mult_node
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::PreMulCOff) => {
+                        let round = batch_msg.session_id.round_id();
+                        if round == 0 {
+                            self.preprocess
+                                .premulc
+                                .mul_pub
+                                .batch_recon
+                                .process(batch_msg, net.clone())
+                                .await?;
+                            self.preprocess
+                                .premulc
+                                .mul_pub
+                                .drain_batch_recon_output()
+                                .await?;
+                        } else if round == 1 {
+                            self.preprocess
+                                .premulc
+                                .mul
+                                .batch_recon
+                                .process(batch_msg, net.clone())
+                                .await?;
+                            self.preprocess
+                                .premulc
+                                .mul
+                                .drain_batch_recon_output()
+                                .await?;
+                        } else {
+                            warn!("unexpected round_id {round}");
+                        }
+                    }
+                    Some(ProtocolType::LTZ) => match batch_msg.session_id.round_id() {
+                        0 => {
+                            self.type_ops
+                                .ltz
+                                .trunc
+                                .mod2m
+                                .bit_ltc1
+                                .pre_mul_c
+                                .batch_recon
+                                .process(batch_msg, net.clone())
+                                .await?;
+                            self.type_ops
+                                .ltz
+                                .trunc
+                                .mod2m
+                                .bit_ltc1
+                                .pre_mul_c
+                                .drain_batch_recon_output()
+                                .await?;
+                        }
+                        1 => {
+                            self.type_ops
+                                .ltz
+                                .trunc
+                                .mod2m
+                                .bit_ltc1
+                                .pre_mul_c
+                                .mul
+                                .batch_recon
+                                .process(batch_msg, net.clone())
+                                .await?;
+                            self.type_ops
+                                .ltz
+                                .trunc
+                                .mod2m
+                                .bit_ltc1
+                                .pre_mul_c
+                                .mul
+                                .drain_batch_recon_output()
+                                .await?;
+                        }
+                        _ => warn!("unexpected BatchRecon round_id"),
+                    },
+                    Some(ProtocolType::KOr1) | Some(ProtocolType::KOr2) => {
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::EQZ) => {
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::RandInvPair) => {
+                        self.preprocess
+                            .rand_inv_pair
+                            .mul_pub
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.preprocess
+                            .rand_inv_pair
+                            .mul_pub
                             .drain_batch_recon_output()
                             .await?;
                     }
@@ -730,6 +1002,20 @@ where
             }
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
+            WrappedMessage::ZeroSha(msg) => {
+                if sender_id != msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        msg.session_id.instance_id(),
+                    ));
+                }
+                self.preprocess
+                    .zero_sha
+                    .process(msg, Arc::clone(&net))
+                    .await?;
+            }
         }
 
         Ok(())
@@ -756,7 +1042,9 @@ where
         y: Vec<Self::Sfix>,
     ) -> Result<Vec<Self::Sfix>, Self::Error> {
         if x.len() != y.len() {
-            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+            return Err(HoneyBadgerError::TypeError(
+                TypeError::IncompatibleInputLength,
+            ));
         }
         Ok(x.into_iter()
             .zip(y)
@@ -771,7 +1059,9 @@ where
         y: Vec<Self::Sfix>,
     ) -> Result<Vec<Self::Sfix>, Self::Error> {
         if x.len() != y.len() {
-            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+            return Err(HoneyBadgerError::TypeError(
+                TypeError::IncompatibleInputLength,
+            ));
         }
 
         Ok(x.into_iter()
@@ -915,7 +1205,9 @@ where
         y: Vec<Self::Sint>,
     ) -> Result<Vec<Self::Sint>, Self::Error> {
         if x.len() != y.len() {
-            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+            return Err(HoneyBadgerError::TypeError(
+                TypeError::IncompatibleInputLength,
+            ));
         }
 
         let mut out = Vec::with_capacity(x.len());
@@ -934,7 +1226,9 @@ where
         y: Vec<Self::Sint>,
     ) -> Result<Vec<Self::Sint>, Self::Error> {
         if x.len() != y.len() {
-            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+            return Err(HoneyBadgerError::TypeError(
+                TypeError::IncompatibleInputLength,
+            ));
         }
         let mut out = Vec::with_capacity(x.len());
         for (a, b) in x.into_iter().zip(y.into_iter()) {
@@ -953,7 +1247,9 @@ where
         net: Arc<N>,
     ) -> Result<Vec<Self::Sint>, Self::Error> {
         if x.len() != y.len() {
-            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+            return Err(HoneyBadgerError::TypeError(
+                TypeError::IncompatibleInputLength,
+            ));
         }
 
         let bitlen_x = x
@@ -993,6 +1289,257 @@ where
             .collect();
         Ok(output)
     }
+    /// x<0 Integer comparison (int8/16/32/64)
+    async fn ltz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+
+        let chunk = self.params.threshold + 1;
+        let pk = ((k - 1 + chunk - 1) / chunk) * chunk;
+
+        // Check/run preprocessing
+        let (_, _, no_prandbit, no_prandint) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        let no_premulc = {
+            let store = self.preprocessing_material.lock().await;
+            store.premulc_ltz_len()
+        };
+        if no_prandbit < k || no_prandint < 2 || no_premulc < pk {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        let premulc_prep = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_premulc_ltz(pk)?; // drains exactly pk from the flat pool
+
+        // Take 2 prandint shares: one for prandm_prep, one for mod2_prep.
+        let prandint = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandint_shares(2)?;
+
+        // Take k-1 prandbit shares for Mod2m's r', then 1 for Mod2's r0'.
+        let prandbit_km1 = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandbit_shares(k - 1)?;
+        let prandbit_one = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandbit_shares(1)?;
+
+        // Build PRandMPrep for Mod2m(k, k-1): r'' is prandint, r'_bits are k-1 prandbits.
+        let prandm_bits: Vec<RobustShare<F>> =
+            prandbit_km1.iter().map(|(s, _)| s.clone()).collect();
+        let prandm_prep = PRandMPrep::from_prand_outputs(prandint[0].clone(), prandm_bits)
+            .map_err(LTZError::from)?;
+
+        // Build PRandMPrep for Mod2(k): r'' is prandint, r0' is 1 prandbit.
+        let mod2_bits: Vec<RobustShare<F>> = prandbit_one.iter().map(|(s, _)| s.clone()).collect();
+        let mod2_prep = PRandMPrep::from_prand_outputs(prandint[1].clone(), mod2_bits)
+            .map_err(LTZError::from)?;
+
+        let session = SessionId::new(
+            ProtocolType::LTZ,
+            SessionId::pack_slot24(self.counters.ltz_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        let result_share = self
+            .type_ops
+            .ltz
+            .run(
+                x.share().clone(),
+                k,
+                prandm_prep,
+                premulc_prep,
+                mod2_prep,
+                session,
+                net,
+                self.params.timeout,
+            )
+            .await?;
+
+        Ok(SecretInt::new(result_share, k))
+    }
+    async fn gtz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        let neg_x = (x * ClearInt::new(-F::one(), k))?;
+        self.ltz_int(neg_x, net).await
+    }
+
+    async fn lez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        let neg_x = (x * ClearInt::new(-F::one(), k))?;
+        let ltz = self.ltz_int(neg_x, net).await?;
+        let k2 = ltz.bit_length();
+        let neg_ltz = (ltz * ClearInt::new(-F::one(), k2))?;
+        Ok((neg_ltz + ClearInt::new(F::one(), k2))?)
+    }
+
+    async fn gez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int(x, net).await?;
+        let k = ltz.bit_length();
+        let neg_ltz = (ltz * ClearInt::new(-F::one(), k))?;
+        Ok((neg_ltz + ClearInt::new(F::one(), k))?)
+    }
+
+    async fn lt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.ltz_int((a - b)?, net).await
+    }
+
+    async fn gt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.ltz_int((b - a)?, net).await
+    }
+
+    async fn le_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int((b - a)?, net).await?;
+        let k = ltz.bit_length();
+        Ok(((ltz * ClearInt::new(-F::one(), k))? + ClearInt::new(F::one(), k))?)
+    }
+
+    async fn ge_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int((a - b)?, net).await?;
+        let k = ltz.bit_length();
+        Ok(((ltz * ClearInt::new(-F::one(), k))? + ClearInt::new(F::one(), k))?)
+    }
+    async fn eqz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        if k == 0 {
+            return Err(HoneyBadgerError::EQZError(
+                crate::honeybadger::comparison::EQZError::LengthError,
+            ));
+        }
+        let m = (k as u32).ilog2() as usize + 1;
+
+        let have_rand_inv = {
+            let store = self.preprocessing_material.lock().await;
+            store.rand_inv_pairs_eqz_len()
+        };
+        let (have_triples, _, have_prandbit, have_prandint) = {
+            let store = self.preprocessing_material.lock().await;
+            store.len()
+        };
+        if have_rand_inv < m
+            || have_prandbit < k + m
+            || have_prandint < 2
+            || have_triples < (2 * m).saturating_sub(1)
+        {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        let rand_inv_pairs = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_rand_inv_pairs_eqz(m)?;
+
+        let kor1_triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(m.saturating_sub(1))?;
+        let kor2_triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(m)?;
+
+        let prandints = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandint_shares(2)?;
+
+        let prandbits_k = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandbit_shares(k)?;
+        let prandbits_m = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_prandbit_shares(m)?;
+
+        let eqz_prandm = PRandMPrep::from_prand_outputs(
+            prandints[0].clone(),
+            prandbits_k.iter().map(|(s, _)| s.clone()).collect(),
+        )
+        .map_err(|e| HoneyBadgerError::EQZError(e.into()))?;
+
+        let kor_cl_prandm = PRandMPrep::from_prand_outputs(
+            prandints[1].clone(),
+            prandbits_m.iter().map(|(s, _)| s.clone()).collect(),
+        )
+        .map_err(|e| HoneyBadgerError::EQZError(e.into()))?;
+
+        let kor_cs_prep = KOrCSPrep {
+            rand_inv_pairs,
+            triples_round1: kor1_triples,
+            triples_round2: kor2_triples,
+        };
+
+        let session = SessionId::new(
+            ProtocolType::EQZ,
+            SessionId::pack_slot24(self.counters.eqz_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        let result_share = self
+            .type_ops
+            .eqz
+            .run(
+                x.share().clone(),
+                k,
+                eqz_prandm,
+                kor_cl_prandm,
+                kor_cs_prep,
+                session,
+                net,
+                self.params.timeout,
+            )
+            .await?;
+
+        Ok(SecretInt::new(result_share, k))
+    }
+
+    async fn eq_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.eqz_int((a - b)?, net).await
+    }
 }
 
 #[async_trait]
@@ -1018,14 +1565,33 @@ where
         G: Rng + Send,
     {
         // Get how many triples and random shares are already available
+        // Extra demand from LTZ: v_triples (pk-1) + online_triples (pk) ≈ 2*pk triples,
+        // 2*pk random shares (pk r + pk s).
+        let (ltz_extra_triples, ltz_extra_shares) =
+            if self.params.n_ltz > 0 && self.params.ltz_bit_len >= 2 {
+                let chunk = self.params.threshold + 1;
+                let pk = ((self.params.ltz_bit_len - 1 + chunk - 1) / chunk) * chunk;
+                (self.params.n_ltz * 2 * pk, self.params.n_ltz * 2 * pk)
+            } else {
+                (0, 0)
+            };
+
+        let eqz_extra_shares = if self.params.n_eqz > 0 && self.params.eqz_bit_len >= 1 {
+            let m = (self.params.eqz_bit_len as u32).ilog2() as usize + 1;
+            self.params.n_eqz * 2 * m
+        } else {
+            0
+        };
+
+        // Get how many triples and random shares are already available
         let (no_of_triples_avail, no_of_random_shares_avail, _, _) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
 
-        // Desired total counts from protocol parameters
-        let mut no_of_triples = self.params.n_triples;
-        let mut no_of_random_shares = self.params.n_random_shares;
+        let mut no_of_triples = self.params.n_triples + ltz_extra_triples;
+        let mut no_of_random_shares =
+            self.params.n_random_shares + ltz_extra_shares + eqz_extra_shares;
         // Each triple batch produces (2t + 1) triples at a time
         let group_size = 2 * self.params.threshold + 1;
         let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
@@ -1137,16 +1703,34 @@ where
             }
         }
         // ------------------------
-        // Step 5. Generate Random bits
+        // Step 5. Generate Zero Shares for Mulpub
+        // ------------------------
+        self.ensure_zero_shares(network.clone(), rng).await?;
+        info!("Zero share generation done");
+
+        // ------------------------
+        // Step 6. Generate Random bits
         // ------------------------
         self.ensure_prandbit_shares(network.clone()).await?;
         info!("PrandBit share generation done");
 
         // ------------------------
-        // Step 6. Generate Random Int
+        // Step 7. Generate Random Int
         // ------------------------
         self.ensure_prandint_shares(network.clone()).await?;
         info!("PrandInt share generation done");
+
+        // ------------------------
+        // Step 8. Generate PreMulC offline outputs for LTZ
+        // ------------------------
+        self.ensure_premulc_for_ltz(network.clone()).await?;
+        info!("PreMulC LTZ preprocessing done");
+
+        // ------------------------
+        // Step 9. Generate RandInvPairs for EQZ
+        // ------------------------
+        self.ensure_rand_inv_pairs_for_eqz(network.clone()).await?;
+        info!("RandInvPairs EQZ preprocessing done");
 
         Ok(())
     }
@@ -1353,18 +1937,18 @@ where
             .await
             .take_random_shares(total_randbit_to_generate)?;
 
-        let beaver_triples = self
+        let zero_shares_rb = self
             .preprocessing_material
             .lock()
             .await
-            .take_beaver_triples(total_randbit_to_generate)?;
+            .take_zero_shares(total_randbit_to_generate)?;
 
         // Run Randbit share protocol
         self.preprocess
             .rand_bit
             .init(
                 random_shares_a,
-                beaver_triples,
+                zero_shares_rb,
                 randbit_sessionid,
                 self.params.timeout,
                 network.clone(),
@@ -1473,6 +2057,248 @@ where
         self.preprocess.prand_bit.clear_store(sessionid).await?;
         Ok(())
     }
+    async fn ensure_premulc_for_ltz<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
+        if self.params.n_ltz == 0 || self.params.ltz_bit_len < 2 {
+            return Ok(());
+        }
+
+        let chunk = self.params.threshold + 1;
+        let pk = ((self.params.ltz_bit_len - 1 + chunk - 1) / chunk) * chunk;
+        let needed = self.params.n_ltz * pk;
+
+        let have = {
+            let store = self.preprocessing_material.lock().await;
+            store.premulc_ltz_len()
+        };
+
+        if have >= needed {
+            info!("There are enough PreMulC LTZ elements");
+            return Ok(());
+        }
+
+        // missing is a multiple of pk (and therefore of chunk) since both `needed`
+        // and `have` are multiples of pk.
+        let missing = needed - have;
+
+        let session = SessionId::new(
+            ProtocolType::PreMulCOff,
+            SessionId::pack_slot24(self.counters.premulc_ltz_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        let r_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(missing)?;
+        let s_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(missing)?;
+        let u_zero_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_zero_shares(missing)?;
+        let v_triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(missing - 1)?;
+        let online_triples = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(missing)?;
+
+        self.preprocess
+            .premulc
+            .generate_preprocessing(
+                r_shares,
+                s_shares,
+                u_zero_shares,
+                v_triples,
+                session,
+                network.clone(),
+                self.params.timeout,
+            )
+            .await
+            .map_err(HoneyBadgerError::from)?;
+
+        let (w, z) = self
+            .preprocess
+            .premulc
+            .wait_for_preprocessing(session, self.params.timeout)
+            .await
+            .map_err(HoneyBadgerError::from)?;
+
+        self.preprocess
+            .premulc
+            .clear_store(session)
+            .await
+            .map_err(HoneyBadgerError::from)?;
+
+        self.preprocessing_material
+            .lock()
+            .await
+            .add_premulc_ltz(PreMulCPrep {
+                w,
+                z,
+                triples: online_triples,
+            });
+
+        info!(
+            "PreMulC LTZ preprocessing done: {} elements generated",
+            missing
+        );
+        Ok(())
+    }
+    async fn ensure_rand_inv_pairs_for_eqz<N>(
+        &mut self,
+        network: Arc<N>,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
+        if self.params.n_eqz == 0 || self.params.eqz_bit_len < 1 {
+            return Ok(());
+        }
+
+        let m = (self.params.eqz_bit_len as u32).ilog2() as usize + 1;
+        let needed = self.params.n_eqz * m;
+
+        let have = {
+            let store = self.preprocessing_material.lock().await;
+            store.rand_inv_pairs_eqz_len()
+        };
+
+        if have >= needed {
+            info!("There are enough RandInvPair EQZ elements");
+            return Ok(());
+        }
+
+        let missing = needed - have;
+
+        let session = SessionId::new(
+            ProtocolType::RandInvPair,
+            SessionId::pack_slot24(self.counters.rand_inv_pair_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        let r_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(missing)?;
+        let r_prime_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(missing)?;
+        let zero_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_zero_shares(missing)?;
+
+        self.preprocess
+            .rand_inv_pair
+            .run(
+                RandInvPairPrep {
+                    r_shares,
+                    r_prime_shares,
+                    zero_shares,
+                },
+                session,
+                network.clone(),
+                self.params.timeout,
+            )
+            .await?;
+
+        let pairs = self
+            .preprocess
+            .rand_inv_pair
+            .wait_for_result(session, self.params.timeout)
+            .await?;
+
+        self.preprocessing_material
+            .lock()
+            .await
+            .add_rand_inv_pairs_eqz(pairs);
+        self.preprocess.rand_inv_pair.clear_store(session).await;
+
+        info!(
+            "RandInvPairs EQZ preprocessing done: {} elements generated",
+            missing
+        );
+        Ok(())
+    }
+    async fn ensure_zero_shares<N, G>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: ark_std::rand::Rng,
+    {
+        let n = self.params.n_zero_shares;
+        if n == 0 {
+            return Ok(());
+        }
+        let have = self.preprocessing_material.lock().await.zero_shares_len();
+        if have >= n {
+            return Ok(());
+        }
+        let missing = n - have;
+        let per_session = self.params.n_parties - 2 * self.params.threshold;
+        let n_sessions = (missing + per_session - 1) / per_session;
+
+        let mut round_id = 0u8;
+        let mut zero_sha_counter = self.counters.zero_sha_counter.get_next().await?;
+
+        if (256 - zero_sha_counter as usize) * 255 < n_sessions {
+            return Err(HoneyBadgerError::LimitError);
+        }
+
+        for _ in 0..n_sessions {
+            let session = SessionId::new(
+                ProtocolType::ZeroSha,
+                SessionId::pack_slot24(zero_sha_counter, 0, round_id),
+                self.params.instance_id,
+            );
+            self.preprocess
+                .zero_sha
+                .init(session, rng, network.clone())
+                .await?;
+
+            let shares = self
+                .preprocess
+                .zero_sha
+                .wait_for_result(session, self.params.timeout)
+                .await?;
+
+            self.preprocessing_material
+                .lock()
+                .await
+                .add_zero_shares(shares);
+            assert!(self.preprocess.zero_sha.clear_store(session).await); // ← missing
+
+            if round_id == 255 {
+                zero_sha_counter = self.counters.zero_sha_counter.get_next().await.unwrap();
+                round_id = 0;
+            } else {
+                round_id += 1;
+            }
+        }
+
+        self.preprocess.zero_sha.rbc.clear_store().await;
+        Ok(())
+    }
 }
 
 ///Used for routing messages to respective sub-protocols
@@ -1486,6 +2312,7 @@ pub enum WrappedMessage {
     Dousha(DouShaMessage),
     Output(OutputMessage),
     PRandBitD(PRandBitDMessage),
+    ZeroSha(ZeroShaMessage),
 }
 
 impl WrappedMessage {
@@ -1515,6 +2342,14 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
+    PreMulCOff = 15,
+    LTZ = 16,
+    RandInvPair = 17,
+    KOr1 = 18,
+    KOr2 = 19,
+    EQZ = 20,
+    ZeroSha = 21,
+    MulPub = 22,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -1541,6 +2376,14 @@ impl ProtocolTag for ProtocolType {
             12 => Some(Self::FpMul),
             13 => Some(Self::Trunc),
             14 => Some(Self::FpDivConst),
+            15 => Some(Self::PreMulCOff),
+            16 => Some(Self::LTZ),
+            17 => Some(Self::RandInvPair),
+            18 => Some(Self::KOr1),
+            19 => Some(Self::KOr2),
+            20 => Some(Self::EQZ),
+            21 => Some(Self::ZeroSha),
+            22 => Some(Self::MulPub),
             _ => None,
         }
     }

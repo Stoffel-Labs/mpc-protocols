@@ -70,6 +70,11 @@ async fn randousha_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
     // spawn tasks to process received messages
@@ -152,6 +157,11 @@ async fn ransha_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
     // spawn tasks to process received messages
@@ -224,6 +234,11 @@ async fn test_input_protocol_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         clientid.clone(),
     );
 
@@ -325,6 +340,11 @@ async fn gen_masks_for_input_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         clientid.clone(),
     );
     //Create nodes for InputClient
@@ -495,6 +515,11 @@ async fn mul_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 
@@ -606,6 +631,11 @@ async fn mul_e2e_with_preprocessing() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![clientid[0]],
     );
 
@@ -772,11 +802,21 @@ async fn preprocessing_e2e() {
     let t = 1;
     let l = 8;
     let k = 4;
-    let no_of_triples = 7;
-    let no_of_randomshares = 4;
+    let no_of_triples = 16;
+    let no_of_randomshares = 16;
     let instance_id = 111;
-    let n_prandbit = 4;
-    let n_prandint = 4;
+    let n_ltz = 2usize;
+    let ltz_bit_len = 8usize;
+    let chunk = t + 1;
+    let pk = ((ltz_bit_len - 1 + chunk - 1) / chunk) * chunk; // = 8
+    let expected_ltz_total = n_ltz * pk; // = 16
+    let n_prandbit = n_ltz * ltz_bit_len; // = 16
+    let n_prandint = n_ltz * 2; // = 4
+    let n_eqz = 1usize;
+    let eqz_bit_len = 8usize;
+    let m = (eqz_bit_len as u32).ilog2() as usize + 1; // = 4
+    let expected_eqz_pairs = n_eqz * m; // = 4
+    let n_zero_shares = n_prandbit + n_ltz * pk + n_eqz * m; // 16 (randbit MulPub) + 16 (ltz offline MulPub) + 4 (eqz RandInvPair) = 36
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -794,6 +834,11 @@ async fn preprocessing_e2e() {
         l,
         k,
         Duration::from_secs(30),
+        n_ltz,
+        ltz_bit_len,
+        n_eqz,
+        eqz_bit_len,
+        n_zero_shares,
         vec![],
     );
 
@@ -833,12 +878,50 @@ async fn preprocessing_e2e() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_shares, n_prandbit, n_prandint) =
-            node.preprocessing_material.lock().await.len();
-        assert_eq!(n_triples, 5); //>no_of_triples
-        assert_eq!(n_shares, 0); //>no_of_randomshares
-        assert_eq!(n_prandbit, 4);
-        assert_eq!(n_prandint, 4);
+        let mut store = node.preprocessing_material.lock().await;
+
+        let (n_triples, n_shares, n_pb, n_pi) = store.len();
+        assert_eq!(n_triples, 17); // ceil(48/3)*3=48 − 31 (ltz v_i+online) = 17 (prandbit no longer uses triples)
+        assert_eq!(n_shares, 0); // 56 − 16 (prandbit) − 32 (ltz) − 8 (rand_inv_pair r+r') = 0
+        assert_eq!(n_pb, n_prandbit);
+        assert_eq!(n_pi, n_prandint);
+
+        // Zero shares: fully consumed by ensure_rand_inv_pairs_for_eqz
+        assert_eq!(
+            store.zero_shares_len(),
+            0,
+            "node {pid}: zero shares should be fully consumed after preprocessing"
+        );
+
+        // LTZ: all n_ltz * pk offline entries must be ready
+        assert_eq!(
+            store.premulc_ltz_len(),
+            expected_ltz_total,
+            "node {pid}: expected {expected_ltz_total} premulc_ltz entries"
+        );
+
+        let batch = store.take_premulc_ltz(pk).expect("take_premulc_ltz failed");
+        assert_eq!(batch.w.len(), pk, "node {pid}: w length");
+        assert_eq!(batch.z.len(), pk, "node {pid}: z length");
+        assert_eq!(batch.triples.len(), pk, "node {pid}: triples length");
+
+        assert_eq!(store.premulc_ltz_len(), expected_ltz_total - pk);
+        // EQZ: n_eqz * m rand_inv_pairs must be ready
+        assert_eq!(
+            store.rand_inv_pairs_eqz_len(),
+            expected_eqz_pairs,
+            "node {pid}: expected {expected_eqz_pairs} rand_inv_pairs_eqz"
+        );
+        // Drain and verify structure
+        let pairs = store
+            .take_rand_inv_pairs_eqz(expected_eqz_pairs)
+            .expect("take_rand_inv_pairs_eqz failed");
+        assert_eq!(pairs.len(), expected_eqz_pairs, "node {pid}: pairs len");
+        assert_eq!(
+            store.rand_inv_pairs_eqz_len(),
+            0,
+            "node {pid}: pool empty after drain"
+        );
     }
 }
 
@@ -873,6 +956,11 @@ async fn preprocessing_e2e_big() {
         l,
         k,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 
@@ -939,17 +1027,23 @@ async fn test_rand_bit() {
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
-    // The construction of triples is same as that of mul
-    let (_, per_party_triples) = construct_e2e_input_mul(n_parties, no_of_rand_bits, t);
+    // degree-2t zero shares, one per rand bit
+    let mut zero_shares_per_party: Vec<Vec<RobustShare<Fr>>> = vec![Vec::new(); n_parties];
+    for _ in 0..no_of_rand_bits {
+        let zeros =
+            RobustShare::compute_shares(Fr::ZERO, n_parties, 2 * t, None, &mut rng).unwrap();
+        for p in 0..n_parties {
+            zero_shares_per_party[p].push(zeros[p].clone());
+        }
+    }
 
-    // assumes each party holds shares of some secrets
-    let mut a = Vec::new();
-    let mut shares_a = Vec::new();
+    let mut a_shares_per_party: Vec<Vec<RobustShare<Fr>>> = vec![Vec::new(); n_parties];
     for _ in 0..no_of_rand_bits {
         let a_value = Fr::rand(&mut rng);
-        a.push(a_value);
         let shares = RobustShare::compute_shares(a_value, n_parties, t, None, &mut rng).unwrap();
-        shares_a.push(shares);
+        for p in 0..n_parties {
+            a_shares_per_party[p].push(shares[p].clone());
+        }
     }
 
     //----------------------------------------SETUP NODES----------------------------------------
@@ -965,6 +1059,11 @@ async fn test_rand_bit() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 
@@ -983,29 +1082,14 @@ async fn test_rand_bit() {
         let node = nodes[pid].clone();
         let mut prand_bit_node = node.preprocess.rand_bit;
         let net = network[pid].clone();
-
-        // Prepare the input shares for this party
-        let mut a_value = Vec::new();
-        for i in 0..no_of_rand_bits {
-            a_value.push(shares_a[i][pid].clone());
-        }
-        assert!(a_value.len() == no_of_rand_bits);
-
-        let mult_triple = per_party_triples[pid].clone().clone();
+        let a_value = a_shares_per_party[pid].clone();
+        let zeros = zero_shares_per_party[pid].clone();
 
         let handle = tokio::spawn(async move {
-            {
-                prand_bit_node
-                    .init(
-                        a_value,
-                        mult_triple,
-                        session_id,
-                        Duration::from_secs(30),
-                        net.clone(),
-                    )
-                    .await
-                    .expect("rand bit init failed");
-            }
+            prand_bit_node
+                .init(a_value, zeros, session_id, Duration::from_secs(30), net)
+                .await
+                .expect("rand bit init failed");
         });
         handles.push(handle);
     }
@@ -1115,6 +1199,11 @@ async fn fpmul_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 
@@ -1188,7 +1277,7 @@ async fn fpmul_e2e_with_preprocessing() {
     let k = 16; // total bitlength
     let m = 4; // fractional bits to truncate
     let precision = FixedPointPrecision::new(k, m);
-    let n_triples = 1 + m; // 1 (fpmul) + m(no of random bits)
+    let n_triples = m; //m(no of random bits)
     let n_random_shares = m; // no of random bits
     let n_prandbit = m;
     let n_prandint = 1;
@@ -1233,6 +1322,11 @@ async fn fpmul_e2e_with_preprocessing() {
         bound_l,
         security_k,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        n_prandbit,
         vec![],
     );
 
@@ -1331,6 +1425,11 @@ async fn add_fixed_e2e() {
         8,
         4,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 
@@ -1406,6 +1505,11 @@ async fn sub_fixed_e2e() {
         8,
         4,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 
@@ -1470,6 +1574,11 @@ async fn add_int_e2e() {
         8,
         4,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 
@@ -1534,6 +1643,11 @@ async fn sub_int_e2e() {
         8,
         4,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 
@@ -1596,6 +1710,11 @@ async fn mul_int_e2e_with_preprocessing() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 
@@ -1727,6 +1846,11 @@ async fn fpdiv_const_e2e() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 

@@ -474,6 +474,11 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     l: usize,
     k: usize,
     timeout: Duration,
+    n_ltz: usize,
+    ltz_bit_len: usize,
+    n_eqz: usize,
+    eqz_bit_len: usize,
+    zero_len: usize,
     input_ids: Vec<ClientId>,
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
 where
@@ -492,6 +497,11 @@ where
         l,
         k,
         timeout,
+        n_ltz,
+        ltz_bit_len,
+        n_eqz,
+        eqz_bit_len,
+        zero_len,
     )
     .unwrap();
     (0..n_parties)

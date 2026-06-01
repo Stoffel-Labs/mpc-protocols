@@ -122,6 +122,11 @@ fn ransha_e2e_turmoil() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 
@@ -269,6 +274,11 @@ fn test_input_protocol_e2e_turmoil() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![client_id],
     );
     let barrier = Arc::new(tokio::sync::Barrier::new(n + 1)); // n nodes + client
@@ -499,6 +509,11 @@ fn preprocessing_e2e_turmoil() {
         l,
         k,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        n_prandbit,
         vec![],
     );
 
@@ -554,7 +569,7 @@ fn preprocessing_e2e_turmoil() {
                     if preprocessing_handle.is_finished() {
                         let (n_triples, _, n_pbit, n_pint) =
                             node.preprocessing_material.lock().await.len();
-                        if n_triples == 5 && n_pbit == n_prandbit && n_pint == n_prandint {
+                        if n_triples == 9 && n_pbit == n_prandbit && n_pint == n_prandint {
                             break;
                         }
                     }
@@ -601,7 +616,7 @@ fn preprocessing_e2e_turmoil() {
         match r {
             Err(e) => panic!("node failed: {}", e),
             Ok((n_triples, n_shares, n_pbit, n_pint)) => {
-                assert_eq!(n_triples, 5);
+                assert_eq!(n_triples, 9);
                 assert_eq!(n_shares, 0);
                 assert_eq!(n_pbit, 4);
                 assert_eq!(n_pint, 4);
@@ -646,6 +661,11 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![input_client_id],
     );
 
@@ -1040,6 +1060,11 @@ fn randousha_e2e_turmoil() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 
@@ -1242,6 +1267,11 @@ fn mul_e2e_without_preprocessing_turmoil() {
         0,
         0,
         Duration::from_secs(30),
+        0,
+        0,
+        0,
+        0,
+        0,
         vec![],
     );
 

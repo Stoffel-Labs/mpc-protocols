@@ -413,6 +413,52 @@ where
         y: Vec<Self::Sint>,
         net: Arc<N>,
     ) -> Result<Vec<Self::Sint>, Self::Error>;
+
+    /// x<0 Integer comparison (int8/16/32/64)
+    async fn ltz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
+    /// x > 0
+    async fn gtz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
+    /// x ≤ 0
+    async fn lez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
+    /// x ≥ 0
+    async fn gez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
+    /// a < b
+    async fn lt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error>;
+    /// a > b
+    async fn gt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error>;
+    /// a ≤ b
+    async fn le_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error>;
+    /// a ≥ b
+    async fn ge_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error>;
+    /// a = 0: returns 1 if a = 0, else 0
+    async fn eqz_int(&mut self, a: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
+    /// a = b: returns 1 if a = b, else 0
+    async fn eq_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error>;
 }
 
 /// A protocol identifier that fits into 8 bits.
