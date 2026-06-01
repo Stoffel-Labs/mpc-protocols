@@ -196,7 +196,7 @@ fn make_nodes() -> (
         K,
         0,
         0,
-        pk,
+        2 * pk, // prandbit (pk) + premulc-ltz (n_ltz * pk = pk)
         vec![],
     );
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -214,12 +214,12 @@ fn make_nodes_with_eqz() -> (
 ) {
     let n_eqz = 1;
     let m = (K as u32).ilog2() as usize + 1; // 4 for K=8
-    let n_zero_shares = n_eqz * m; // 4 — consumed by ensure_rand_inv_pairs_for_eqz
-                                   // n_triples: prandbit generation consumes ~12, runtime ~7 → need ≥19
-                                   // (RandInvPair no longer uses triples — uses MulPub + zero shares instead)
-    let n_triples = 19; // PRandBit: 12, eqz_int runtime: 7
+    let n_prandbit = K + m; // 12
+                            // RandBit now uses MulPub (zero shares) instead of Beaver triples.
+                            // eqz runtime still needs ~7 triples.
+    let n_zero_shares = n_prandbit + n_eqz * m; // 12 (randbit MulPub) + 4 (eqz RandInvPair) = 16
+    let n_triples = 7; // eqz_int runtime only; prandbit no longer uses triples
     let n_random_shares = 60;
-    let n_prandbit = K + m; // 12 — exactly what one eqz_int call needs
     let n_prandint = 4;
     let (network, receivers, _, _) = test_setup(N, vec![]);
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(

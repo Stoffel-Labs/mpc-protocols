@@ -816,7 +816,7 @@ async fn preprocessing_e2e() {
     let eqz_bit_len = 8usize;
     let m = (eqz_bit_len as u32).ilog2() as usize + 1; // = 4
     let expected_eqz_pairs = n_eqz * m; // = 4
-    let n_zero_shares = n_ltz * pk + n_eqz * m; // 16 (ltz offline MulPub) + 4 (eqz RandInvPair)
+    let n_zero_shares = n_prandbit + n_ltz * pk + n_eqz * m; // 16 (randbit MulPub) + 16 (ltz offline MulPub) + 4 (eqz RandInvPair) = 36
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -881,7 +881,7 @@ async fn preprocessing_e2e() {
         let mut store = node.preprocessing_material.lock().await;
 
         let (n_triples, n_shares, n_pb, n_pi) = store.len();
-        assert_eq!(n_triples, 1); // ceil(48/3)*3=48 − 16 (prandbit) − 31 (ltz v_i+online) = 1
+        assert_eq!(n_triples, 17); // ceil(48/3)*3=48 − 31 (ltz v_i+online) = 17 (prandbit no longer uses triples)
         assert_eq!(n_shares, 0); // 56 − 16 (prandbit) − 32 (ltz) − 8 (rand_inv_pair r+r') = 0
         assert_eq!(n_pb, n_prandbit);
         assert_eq!(n_pi, n_prandint);
@@ -1027,17 +1027,23 @@ async fn test_rand_bit() {
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
-    // The construction of triples is same as that of mul
-    let (_, per_party_triples) = construct_e2e_input_mul(n_parties, no_of_rand_bits, t);
+    // degree-2t zero shares, one per rand bit
+    let mut zero_shares_per_party: Vec<Vec<RobustShare<Fr>>> = vec![Vec::new(); n_parties];
+    for _ in 0..no_of_rand_bits {
+        let zeros =
+            RobustShare::compute_shares(Fr::ZERO, n_parties, 2 * t, None, &mut rng).unwrap();
+        for p in 0..n_parties {
+            zero_shares_per_party[p].push(zeros[p].clone());
+        }
+    }
 
-    // assumes each party holds shares of some secrets
-    let mut a = Vec::new();
-    let mut shares_a = Vec::new();
+    let mut a_shares_per_party: Vec<Vec<RobustShare<Fr>>> = vec![Vec::new(); n_parties];
     for _ in 0..no_of_rand_bits {
         let a_value = Fr::rand(&mut rng);
-        a.push(a_value);
         let shares = RobustShare::compute_shares(a_value, n_parties, t, None, &mut rng).unwrap();
-        shares_a.push(shares);
+        for p in 0..n_parties {
+            a_shares_per_party[p].push(shares[p].clone());
+        }
     }
 
     //----------------------------------------SETUP NODES----------------------------------------
@@ -1076,29 +1082,14 @@ async fn test_rand_bit() {
         let node = nodes[pid].clone();
         let mut prand_bit_node = node.preprocess.rand_bit;
         let net = network[pid].clone();
-
-        // Prepare the input shares for this party
-        let mut a_value = Vec::new();
-        for i in 0..no_of_rand_bits {
-            a_value.push(shares_a[i][pid].clone());
-        }
-        assert!(a_value.len() == no_of_rand_bits);
-
-        let mult_triple = per_party_triples[pid].clone().clone();
+        let a_value = a_shares_per_party[pid].clone();
+        let zeros = zero_shares_per_party[pid].clone();
 
         let handle = tokio::spawn(async move {
-            {
-                prand_bit_node
-                    .init(
-                        a_value,
-                        mult_triple,
-                        session_id,
-                        Duration::from_secs(30),
-                        net.clone(),
-                    )
-                    .await
-                    .expect("rand bit init failed");
-            }
+            prand_bit_node
+                .init(a_value, zeros, session_id, Duration::from_secs(30), net)
+                .await
+                .expect("rand bit init failed");
         });
         handles.push(handle);
     }
@@ -1286,7 +1277,7 @@ async fn fpmul_e2e_with_preprocessing() {
     let k = 16; // total bitlength
     let m = 4; // fractional bits to truncate
     let precision = FixedPointPrecision::new(k, m);
-    let n_triples = 1 + m; // 1 (fpmul) + m(no of random bits)
+    let n_triples = m; //m(no of random bits)
     let n_random_shares = m; // no of random bits
     let n_prandbit = m;
     let n_prandint = 1;
@@ -1335,7 +1326,7 @@ async fn fpmul_e2e_with_preprocessing() {
         0,
         0,
         0,
-        0,
+        n_prandbit,
         vec![],
     );
 

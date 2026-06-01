@@ -275,7 +275,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub dou_sha: DoubleShareNode<F>,
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
-    pub rand_bit: RandBit<F, R>,
+    pub rand_bit: RandBit<F>,
     pub prand_bit: PRandBitDNode<F, F>,
     pub premulc: PreMulCOfflineNode<F, R>,
     pub rand_inv_pair: RandInvPairNode<F>,
@@ -626,19 +626,6 @@ where
                         self.operations.mul.rbc.process(rbc_msg, net).await?;
                         self.operations.mul.drain_rbc_output().await?;
                     }
-                    Some(ProtocolType::RandBit) => {
-                        self.preprocess
-                            .rand_bit
-                            .mult_node
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.preprocess
-                            .rand_bit
-                            .mult_node
-                            .drain_rbc_output()
-                            .await?;
-                    }
                     Some(ProtocolType::FpMul) => {
                         if rbc_msg.session_id.round_id() == 0 {
                             self.type_ops
@@ -838,27 +825,19 @@ where
                             .await?
                     }
                     Some(ProtocolType::RandBit) => {
-                        if batch_msg.session_id.round_id() == 0 {
-                            self.preprocess
-                                .rand_bit
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess.rand_bit.drain_batch_recon_output().await?;
-                        } else {
-                            self.preprocess
-                                .rand_bit
-                                .mult_node
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess
-                                .rand_bit
-                                .mult_node
-                                .drain_batch_recon_output()
-                                .await?;
-                        }
+                        self.preprocess
+                            .rand_bit
+                            .mul_pub
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.preprocess
+                            .rand_bit
+                            .mul_pub
+                            .drain_batch_recon_output()
+                            .await?;
                     }
+
                     Some(ProtocolType::PRandBit) => {
                         self.preprocess
                             .prand_bit
@@ -1958,18 +1937,18 @@ where
             .await
             .take_random_shares(total_randbit_to_generate)?;
 
-        let beaver_triples = self
+        let zero_shares_rb = self
             .preprocessing_material
             .lock()
             .await
-            .take_beaver_triples(total_randbit_to_generate)?;
+            .take_zero_shares(total_randbit_to_generate)?;
 
         // Run Randbit share protocol
         self.preprocess
             .rand_bit
             .init(
                 random_shares_a,
-                beaver_triples,
+                zero_shares_rb,
                 randbit_sessionid,
                 self.params.timeout,
                 network.clone(),
