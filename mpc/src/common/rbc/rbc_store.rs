@@ -7,6 +7,19 @@ use tokio::sync::Notify;
 
 use crate::common::ProtocolSessionId;
 /// Generic message type used in Reliable Broadcast (RBC) communication.
+///
+/// # Sender authentication
+///
+/// `sender_id` is carried inside the serialized message and is NOT self-authenticating.
+/// Authentication is the responsibility of the caller before passing a `Msg` to any RBC
+/// handler.
+///   1. Rejects any message where the transport-layer sender differs from `msg.sender_id`.
+///   2. For INIT/SEND (dealer) messages, additionally verifies `msg.sender_id == session_id.sub_id()`,
+///      ensuring only the designated broadcaster can open a session.
+///
+/// The RBC implementations (Bracha, AVID) therefore assume `sender_id` is already
+/// authenticated and do not repeat the check internally. Do not call RBC handlers
+/// directly without performing this authentication step first.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Msg<Id: ProtocolSessionId> {
     pub sender_id: usize,         // ID of the sender node
@@ -47,6 +60,18 @@ pub enum GenericMsgType {
     Avid(MsgTypeAvid),
     ABA(MsgTypeAba),
     Acs(MsgTypeAcs),
+}
+impl GenericMsgType {
+    pub fn is_dealer_message(&self) -> bool {
+        match self {
+            GenericMsgType::Bracha(MsgType::Init) => true,
+            GenericMsgType::Bracha(_) => false,
+            GenericMsgType::Avid(MsgTypeAvid::Send) => true,
+            GenericMsgType::Avid(_) => false,
+            GenericMsgType::ABA(_) => false,
+            GenericMsgType::Acs(_) => false,
+        }
+    }
 }
 // Implement Display for GenericMsgType
 impl fmt::Display for GenericMsgType {

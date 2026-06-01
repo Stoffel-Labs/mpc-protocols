@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use ark_ff::FftField;
-use ark_serialize::CanonicalDeserialize;
 use itertools::izip;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::mpsc::Receiver;
@@ -9,6 +8,7 @@ use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 use tracing::info;
 
+use crate::common::utils::deser_bounded_vec;
 use crate::honeybadger::triple_gen::{TripleGenError, TripleGenStorage};
 use crate::honeybadger::{
     double_share::DoubleShamirShare, triple_gen::ShamirBeaverTriple, SessionId,
@@ -284,7 +284,7 @@ where
     ) -> Result<(), TripleGenError> {
         info!("Handling Batch reconstruction results");
         let batch_recon_result: Vec<F> =
-            CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+            deser_bounded_vec(&mut payload.as_slice(), self.n_parties)?;
 
         // SHOULD NEVER HAPPEN, since comes from batch reconstruction
         if session_id.sub_id() != 0 {

@@ -1,15 +1,16 @@
 use crate::{
-    common::{ProtocolSessionId, SecretSharingScheme, RBC},
+    common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
         fpmul::{
             mod_pow_2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore, TruncState,
         },
         robust_interpolate::robust_interpolate::RobustShare,
-        SessionId, WrappedMessage,
+        SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use bincode::Options;
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use tokio::{
@@ -72,8 +73,12 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             };
 
             let output = self.rbc.get_store(id).await?;
-            let mut msg: TruncPrMessage = bincode::deserialize(&output)?;
-            let authenticated_sender = id.round_id() as usize;
+            let mut msg: TruncPrMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
+            let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(
                     "Dropping RBC output: inner sender_id {} does not match session round_id {}",
@@ -81,6 +86,17 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
                 );
                 continue;
             }
+            if msg.session_id.exec_id() != id.exec_id()
+                || msg.session_id.instance_id() != id.instance_id()
+            {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != 0 {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
+
             msg.sender_id = authenticated_sender;
             info!(
                 node_id = self.id,
@@ -96,15 +112,19 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         Ok(())
     }
 
-    pub async fn get_or_create_store(&mut self, session: SessionId) -> Arc<Mutex<TruncPrStore<F>>> {
+    pub async fn get_or_create_store(
+        &mut self,
+        session: SessionId,
+    ) -> Result<Arc<Mutex<TruncPrStore<F>>>, TruncPrError> {
         let mut map = self.store.lock().await;
-
-        // should always hold, since only exec ID changes between different sessions
-        assert!(map.len() <= 256);
-
-        map.entry(session)
+        if map.len() >= 256 && !map.contains_key(&session) {
+            warn!("TruncPr session limit reached");
+            return Err(TruncPrError::LimitError);
+        }
+        Ok(map
+            .entry(session)
             .or_insert((|| Arc::new(Mutex::new(TruncPrStore::empty())))())
-            .clone()
+            .clone())
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> Result<(), TruncPrError> {
@@ -228,7 +248,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             }
         };
 
-        let store = self.get_or_create_store(session).await; // k,m already set in store
+        let store = self.get_or_create_store(session).await?; // k,m already set in store
         let (r_dash, b) = {
             let mut s = store.lock().await;
             s.k = k;
@@ -266,7 +286,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(session.exec_id(), 0, self.id as u8),
+            SessionId::pack_slot24(session.exec_id(), self.id as u8, 0),
             session.instance_id(),
         );
         self.rbc
@@ -294,7 +314,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             return Err(TruncPrError::SessionIdError(msg.session_id));
         }
 
-        let store = self.get_or_create_store(msg.session_id).await;
+        let store = self.get_or_create_store(msg.session_id).await?;
         {
             let mut s = store.lock().await;
 
@@ -304,7 +324,12 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             // deserialize incoming share of (b + r)
             let share_i: RobustShare<F> =
                 CanonicalDeserialize::deserialize_compressed(msg.payload.as_slice())?;
-
+            if share_i.id != msg.sender_id {
+                return Err(ShareError::IdMismatch.into());
+            }
+            if share_i.degree != self.t {
+                return Err(ShareError::DegreeMismatch.into());
+            }
             // dedup
             if s.open_buf.contains_key(&msg.sender_id) {
                 error!(

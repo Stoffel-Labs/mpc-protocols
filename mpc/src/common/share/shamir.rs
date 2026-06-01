@@ -58,8 +58,8 @@ impl<F: FftField> SecretSharingScheme<F> for Shamirshare<F> {
             return Err(ShareError::InsufficientShares);
         }
 
-        // All IDs are non-zero (optional, depending on your protocol)
-        if id_list.iter().any(|&id| id == 0) {
+        // All IDs map to non-zero field elements (guards against id == field modulus for small fields)
+        if id_list.iter().any(|&id| F::from(id as u64) == F::ZERO) {
             return Err(ShareError::InvalidInput);
         }
 
@@ -106,7 +106,10 @@ impl<F: FftField> SecretSharingScheme<F> for Shamirshare<F> {
         if shares.len() < deg + 1 {
             return Err(ShareError::InsufficientShares);
         }
-        if shares.iter().any(|share| share.id == 0) {
+        if shares
+            .iter()
+            .any(|share| F::from(share.id as u64) == F::ZERO)
+        {
             return Err(ShareError::InvalidInput);
         }
         let (x_vals, y_vals): (Vec<F>, Vec<F>) = shares
@@ -115,6 +118,9 @@ impl<F: FftField> SecretSharingScheme<F> for Shamirshare<F> {
             .unzip();
 
         let result_poly = lagrange_interpolate(&x_vals, &y_vals)?;
+        if result_poly.degree() > deg {
+            return Err(ShareError::DegreeMismatch);
+        }
         Ok((result_poly.coeffs.clone(), result_poly[0]))
     }
 }
@@ -226,6 +232,9 @@ impl<F: FftField> SecretSharingScheme<F> for NonRobustShare<F> {
             .unzip();
 
         let result_poly = lagrange_interpolate(&x_vals, &y_vals)?;
+        if result_poly.degree() > deg {
+            return Err(ShareError::DegreeMismatch);
+        }
         Ok((result_poly.coeffs.clone(), result_poly[0]))
     }
 }

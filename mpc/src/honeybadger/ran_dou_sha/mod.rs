@@ -9,12 +9,13 @@ use crate::{
     honeybadger::{
         double_share::DoubleShamirShare, ran_dou_sha::messages::RanDouShaPayload,
         robust_interpolate::InterpolateError, ProtocolType, SessionId, WrappedMessage,
+        MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalSerialize, SerializationError};
-use bincode::ErrorKind;
+use bincode::{ErrorKind, Options};
 use messages::{RanDouShaMessage, ReconstructionMessage};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -206,7 +207,11 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let mut msg: RanDouShaMessage = bincode::deserialize(&output)?;
+            let mut msg: RanDouShaMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(
@@ -215,6 +220,17 @@ where
                 );
                 continue;
             }
+            if msg.session_id.exec_id() != id.exec_id()
+                || msg.session_id.instance_id() != id.instance_id()
+            {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != 0 {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
+
             msg.sender_id = authenticated_sender;
 
             match self.output_handler(msg).await {
@@ -425,7 +441,17 @@ where
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
 
-        let sender_id = msg.sender_id;
+        if store.state == RanDouShaState::Finished {
+            return Ok(());
+        }
+        if store.received_r_shares_degree_t.contains_key(&sender_id) {
+            warn!(
+                session_id = msg.session_id.as_u64(),
+                "Duplicate reconstruction share received from party {:?}, ignoring.", sender_id
+            );
+            return Ok(());
+        }
+
         store
             .received_r_shares_degree_t
             .insert(sender_id, rec_msg.r_share_deg_t.clone());
@@ -441,7 +467,7 @@ where
             // To reconstruct a (2t) degree polynomial, you need 2t+1 distinct shares.
 
             if store.received_r_shares_degree_t.len() >= 2 * self.threshold + 1
-                && store.received_r_shares_degree_2t.len() >= 2 * self.threshold + 1
+                && store.received_r_shares_degree_2t.len() >= self.n_parties
             {
                 let mut shares_t_for_recon: Vec<NonRobustShare<F>> = Vec::new();
                 let mut shares_2t_for_recon: Vec<NonRobustShare<F>> = Vec::new();
@@ -513,6 +539,10 @@ where
             RanDouShaPayload::Reconstruct(_) => return Err(RanDouShaError::Abort),
             RanDouShaPayload::Output(ok) => ok,
         };
+        if msg.sender_id < self.threshold + 1 || msg.sender_id >= self.n_parties {
+            return Err(RanDouShaError::IncorrectID);
+        }
+
         info!("Node {} (session {}) - Starting output_handler for message from sender {}. Status: {}.", self.id, msg.session_id.as_u64(), msg.sender_id, output);
         // abort randousha once received the abort message
         if !output {

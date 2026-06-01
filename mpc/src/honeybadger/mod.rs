@@ -516,6 +516,17 @@ where
                         rbc_msg.session_id.instance_id(),
                     ));
                 }
+                if rbc_msg.msg_type.is_dealer_message() {
+                    let expected_dealer = rbc_msg.session_id.sub_id() as usize;
+                    if rbc_msg.sender_id != expected_dealer {
+                        warn!(
+                            "Rejecting dealer message: sender {} is not expected dealer {} for session {:?}",
+                            rbc_msg.sender_id, expected_dealer, rbc_msg.session_id
+                        );
+                        return Err(HoneyBadgerError::InvalidPartyId);
+                    }
+                }
+
                 match rbc_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Randousha) => {
                         self.preprocess
@@ -551,7 +562,7 @@ where
                             .await?;
                     }
                     Some(ProtocolType::FpMul) => {
-                        if rbc_msg.session_id.sub_id() == 0 {
+                        if rbc_msg.session_id.round_id() == 0 {
                             self.type_ops
                                 .fpmul
                                 .trunc_node
@@ -654,7 +665,7 @@ where
                             .await?
                     }
                     Some(ProtocolType::RandBit) => {
-                        if batch_msg.session_id.sub_id() == 0 {
+                        if batch_msg.session_id.round_id() == 0 {
                             self.preprocess
                                 .rand_bit
                                 .batch_recon

@@ -7,7 +7,7 @@ use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
-use bincode::ErrorKind;
+use bincode::{ErrorKind, Options};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
@@ -20,7 +20,9 @@ use tokio::sync::{
     mpsc::{self, Receiver, Sender},
     Mutex,
 };
-use tracing::info;
+use tracing::{info, warn};
+
+const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
 #[derive(Debug, thiserror::Error)]
 pub enum AvssError {
@@ -225,7 +227,16 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: AvssMessage<Id> = bincode::deserialize(&output)?;
+            let msg: AvssMessage<Id> = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
+
+            if msg.session_id != id {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
 
             match self.process(msg).await {
                 Ok(()) => {}

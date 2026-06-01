@@ -2,9 +2,10 @@ use crate::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use crate::honeybadger::input::InputError;
 use crate::honeybadger::input::InputMessage;
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use crate::honeybadger::{ProtocolType, SessionId, WrappedMessage};
+use crate::honeybadger::{ProtocolType, SessionId, WrappedMessage, MAX_MESSAGE_SIZE};
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
+use bincode::Options;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stoffelnet::network_utils::{ClientId, Network, PartyId};
@@ -146,7 +147,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: InputMessage = bincode::deserialize(&output)?;
+            let msg: InputMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(
