@@ -442,13 +442,11 @@ where
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
-
         if no_triples < x.len() {
-            // There are no triples. We need to create them.
+            //Run preprocessing
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(network.clone(), &mut rng).await?;
         }
-
         // Extract the preprocessing triple.
         let beaver_triples = self
             .preprocessing_material
@@ -796,13 +794,11 @@ where
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
-
         if no_rand_bit < x.precision().f() || no_rand_int == 0 {
             //Run preprocessing
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(net.clone(), &mut rng).await?;
         }
-
         // Extract the preprocessing triple.
         let beaver_triples = self
             .preprocessing_material
@@ -1021,51 +1017,19 @@ where
         N: 'async_trait,
         G: Rng + Send,
     {
-        self.run_triple_gen_phase(network.clone(), rng).await?;
-
-        // ------------------------
-        // Step 5. Generate Random bits
-        // ------------------------
-        self.ensure_prandbit_shares(network.clone()).await?;
-        info!("PrandBit share generation done");
-
-        // ------------------------
-        // Step 6. Generate Random Int
-        // ------------------------
-        self.ensure_prandint_shares(network.clone()).await?;
-        info!("PrandInt share generation done");
-
-        Ok(())
-    }
-}
-impl<F, R> HoneyBadgerMPCNode<F, R>
-where
-    F: PrimeField,
-    R: RBC<Id = SessionId>,
-{
-    pub async fn run_triple_gen_phase<N, G>(
-        &mut self,
-        network: Arc<N>,
-        rng: &mut G,
-    ) -> Result<(), HoneyBadgerError>
-    where
-        N: Network + Send + Sync + 'static,
-        G: Rng + Send,
-    {
         // Get how many triples and random shares are already available
         let (no_of_triples_avail, no_of_random_shares_avail, _, _) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
 
-        info!("There are {no_of_triples_avail} triples and {no_of_random_shares_avail} random shares available before preprocessing");
-
         // Desired total counts from protocol parameters
-        let no_of_triples = self.params.n_triples;
-        let no_of_random_shares = self.params.n_random_shares;
+        let mut no_of_triples = self.params.n_triples;
+        let mut no_of_random_shares = self.params.n_random_shares;
         // Each triple batch produces (2t + 1) triples at a time
         let group_size = 2 * self.params.threshold + 1;
         let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
+            no_of_triples = 0;
             0
         } else {
             ((no_of_triples - no_of_triples_avail + group_size - 1) / group_size) * group_size
@@ -1073,14 +1037,23 @@ where
 
         let total_random_shares_to_generate = if total_triples_to_generate > 0 {
             // Always add 2× per triple group
-            let baseline = no_of_random_shares.saturating_sub(no_of_random_shares_avail);
+            let baseline = if no_of_random_shares_avail < no_of_random_shares {
+                no_of_random_shares - no_of_random_shares_avail
+            } else {
+                no_of_random_shares = 0;
+                0
+            };
             baseline + 2 * total_triples_to_generate
+        } else if no_of_random_shares_avail < no_of_random_shares {
+            no_of_random_shares - no_of_random_shares_avail
         } else {
-            no_of_random_shares.saturating_sub(no_of_random_shares_avail)
+            no_of_random_shares = 0;
+            0
         };
 
-        if total_random_shares_to_generate == 0 && total_triples_to_generate == 0 {
+        if no_of_triples == 0 && no_of_random_shares == 0 {
             info!("There are enough Random shares and Beaver triples");
+            // return Ok(());
         } else {
             let mut triple_counter = self.counters.triple_counter.get_next().await?;
             if (256 - triple_counter as usize) * 255 < total_triples_to_generate / group_size {
@@ -1163,9 +1136,26 @@ where
                 }
             }
         }
+        // ------------------------
+        // Step 5. Generate Random bits
+        // ------------------------
+        self.ensure_prandbit_shares(network.clone()).await?;
+        info!("PrandBit share generation done");
+
+        // ------------------------
+        // Step 6. Generate Random Int
+        // ------------------------
+        self.ensure_prandint_shares(network.clone()).await?;
+        info!("PrandInt share generation done");
+
         Ok(())
     }
-
+}
+impl<F, R> HoneyBadgerMPCNode<F, R>
+where
+    F: PrimeField,
+    R: RBC<Id = SessionId>,
+{
     /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
     async fn ensure_random_shares<G, N>(
         &mut self,
@@ -1318,10 +1308,7 @@ where
         Ok(dou_sha)
     }
 
-    pub async fn ensure_prandbit_shares<N>(
-        &mut self,
-        network: Arc<N>,
-    ) -> Result<(), HoneyBadgerError>
+    async fn ensure_prandbit_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
     {
@@ -1433,10 +1420,7 @@ where
         Ok(())
     }
 
-    pub async fn ensure_prandint_shares<N>(
-        &mut self,
-        network: Arc<N>,
-    ) -> Result<(), HoneyBadgerError>
+    async fn ensure_prandint_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
     {
