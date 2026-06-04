@@ -205,6 +205,9 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     pub output_open: HashMap<u8, Vec<F>>,
     pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<i64>>>, // tset -> {sender -> val}
     pub r_t: HashMap<Vec<usize>, Vec<i64>>,
+    /// Number of T sets such that this party does not belong to.
+    ///
+    /// The party should receive this amount of T set shares r_{T}.
     pub no_of_tsets: Option<usize>,
     pub share_r_q: Option<Vec<RobustShare<F>>>, //smaller field
     pub share_r_p: Option<Vec<RobustShare<G>>>, // PrandInt output

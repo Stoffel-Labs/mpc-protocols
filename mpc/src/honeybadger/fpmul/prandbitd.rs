@@ -442,6 +442,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         Ok(true)
     }
+
     /// Distributed RISS generation
     /// generates shares in multiples of (t+1)
     pub async fn generate_riss<N: Network + Send + Sync>(
@@ -501,7 +502,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 .map(|_| rand::thread_rng().gen_range(0, bound + 1))
                 .collect();
 
-            // send to all players not in T
+            // Send to all players not in T
             for j in 0..self.n {
                 if !tset.contains(&j) {
                     let msg = WrappedMessage::PRandBitD(PRandBitDMessage::new(

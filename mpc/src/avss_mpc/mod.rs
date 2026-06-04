@@ -158,14 +158,18 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
     }
 }
 
-#[derive(Clone, Debug)]
 /// Configuration options for the AvssMPCNode protocol.
+#[derive(Clone, Debug)]
 pub struct AvssMPCNodeOpts<F, G>
 where
     F: FftField,
     G: CurveGroup<ScalarField = F>,
 {
+    /// Private key of the party.
     pub sk_i: F,
+    /// Public key of the rest of the parties.
+    ///
+    /// This public key is computed as `pk_i = g^{sk_i}`.
     pub pk_map: Arc<Vec<G>>,
     /// Number of parties in the protocol.
     pub n_parties: usize,
@@ -173,9 +177,11 @@ where
     pub threshold: usize,
     /// Number of random double sharing pairs that need to be generated.
     pub n_v_random_shares: usize,
+    /// Number of triples
     pub n_triples: usize,
     /// Instance ID
     pub instance_id: u32,
+    /// Timeout to abort the protocol.
     pub timeout: Duration,
 }
 
@@ -195,12 +201,11 @@ where
         instance_id: u32,
         timeout: Duration,
     ) -> Result<Self, AvssMPCError> {
-        //No of parties should not exceed 255
+        // No of parties should not exceed 255
         if n_parties > 255 {
             return Err(AvssMPCError::InvalidPartySize);
         }
-        if !(threshold < (n_parties + 2) / 3) {
-            // ceil(n / 3)
+        if !(threshold < n_parties.div_ceil(3)) {
             return Err(AvssMPCError::InvalidThreshold(threshold, n_parties));
         }
         Ok(Self {
@@ -214,6 +219,7 @@ where
             timeout,
         })
     }
+
     pub fn set_timeout(&mut self, secs: u64) {
         self.timeout = Duration::from_secs(secs)
     }
@@ -239,6 +245,7 @@ where
             triples: Vec::new(),
         }
     }
+
     /// Adds the provided new preprocessing material to the current pool.
     pub fn add(
         &mut self,
@@ -252,11 +259,14 @@ where
             self.triples.append(shares);
         }
     }
+
     /// Returns the number of triples, and the number of random shares
     /// respectively.
     pub fn len(&self) -> (usize, usize) {
         (self.triples.len(), self.v_random_shares.len())
     }
+
+    /// Takes verifiable random shares from the storage.
     pub fn take_v_random_shares(
         &mut self,
         n_shares: usize,
@@ -266,6 +276,8 @@ where
         }
         Ok(self.v_random_shares.drain(0..n_shares).collect())
     }
+
+    /// Takes multiplication triples from the storage.
     pub fn take_triples(
         &mut self,
         n_shares: usize,
@@ -391,6 +403,8 @@ where
             counters: SubProtocolCounters::new(),
         })
     }
+
+    /// Processes an incoming message.
     async fn process(
         &mut self,
         sender_id: PartyId,
@@ -466,6 +480,7 @@ where
         Ok(())
     }
 
+    /// Multiplies two Feldman verifiable Shamir shares.
     async fn mul(
         &mut self,
         x: Vec<FeldmanShamirShare<F, G>>,
@@ -487,6 +502,7 @@ where
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(network.clone(), &mut rng).await?;
         }
+
         // Extract the preprocessing triple.
         let beaver_triples = self
             .preprocessing_material
@@ -510,6 +526,8 @@ where
             .await
             .map_err(AvssMPCError::from)
     }
+
+    /// Generates a random element.
     async fn rand(&mut self, network: Arc<N>) -> Result<FeldmanShamirShare<F, G>, Self::Error> {
         let no_rand = {
             let store = self.preprocessing_material.lock().await;
@@ -710,6 +728,7 @@ where
     }
 }
 
+/// Wrapper for a AVSS message.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum AvssWrappedMessage {
     Rbc(Msg<AvssSessionId>),
@@ -720,11 +739,13 @@ pub enum AvssWrappedMessage {
 }
 
 impl AvssWrappedMessage {
+    /// Wraps an RBC message.
     pub fn rbc_wrap(msg: Msg<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = AvssWrappedMessage::Rbc(msg);
         Ok(bincode::serialize(&wrapped)?)
     }
 
+    /// Wraps an AVSS message.
     pub fn avss_wrap(msg: AvssMessage<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = AvssWrappedMessage::Avss(msg);
         Ok(bincode::serialize(&wrapped)?)
