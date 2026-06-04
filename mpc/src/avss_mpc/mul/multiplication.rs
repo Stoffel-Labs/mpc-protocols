@@ -231,6 +231,12 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
                     msg.sender
                 )));
             }
+            if share.feldmanshare.id == 0 || share.feldmanshare.id > self.n {
+                return Err(MulError::InvalidInput(format!(
+                    "Share id {} out of valid range from sender {}",
+                    share.feldmanshare.id, msg.sender
+                )));
+            }
         }
         storage
             .received_shares

@@ -46,6 +46,7 @@ where
         let avss = AvssNode::new(
             id,
             n_parties,
+            (1..=n_parties).collect(),
             threshold,
             sk_i,
             pk_map,

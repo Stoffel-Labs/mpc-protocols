@@ -151,6 +151,7 @@ where
     Id: ProtocolSessionId,
 {
     pub id: PartyId,
+    pub ids: Vec<usize>,
     pub n_parties: usize,
     pub t: usize,
     pub sk_i: F,
@@ -190,6 +191,7 @@ where
     pub fn new(
         id: PartyId,
         n_parties: usize,
+        ids: Vec<usize>,
         t: usize,
         sk_i: F,
         pk_map: Arc<Vec<G>>,
@@ -197,11 +199,24 @@ where
         rbc_wrapper: RbcWrapFn<Id>,
         avss_wrapper: AvssWrapFn<Id>,
     ) -> Result<Self, AvssError> {
+        if ids.len() != n_parties {
+            return Err(AvssError::InvalidInput(
+                "ids length must equal n_parties".into(),
+            ));
+        }
+        if ids.iter().any(|&id| id == 0) {
+            return Err(AvssError::InvalidInput("ids must not contain 0".into()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if !ids.iter().all(|id| seen.insert(id)) {
+            return Err(AvssError::InvalidInput("ids must be unique".into()));
+        }
         let (rbc_sender, rbc_receiver) = mpsc::channel(200);
         let rbc = R::new(id, n_parties, t, t + 1, rbc_sender, rbc_wrapper)?;
         Ok(Self {
             id,
             n_parties,
+            ids,
             t,
             sk_i,
             pk_map,
@@ -262,11 +277,16 @@ where
         info!("Receiving init for avss from {0:?}", self.id);
         // Generate the random polynomial of degree `degree` with `secret` as constant term
 
-        let ids: Vec<usize> = (1..=self.n_parties).collect();
         let shares: Vec<Vec<FeldmanShamirShare<F, G>>> = secrets
             .into_iter()
             .map(|secret| {
-                FeldmanShamirShare::compute_shares(secret, self.n_parties, self.t, Some(&ids), rng)
+                FeldmanShamirShare::compute_shares(
+                    secret,
+                    self.n_parties,
+                    self.t,
+                    Some(&self.ids),
+                    rng,
+                )
             })
             .collect::<Result<Vec<_>, ShareError>>()?;
 
@@ -374,6 +394,9 @@ where
             let pt = decrypt(key.clone(), ct)?;
             let shamirshare: Shamirshare<F> =
                 CanonicalDeserialize::deserialize_compressed(&pt[..])?;
+            if shamirshare.id != self.ids[self.id] {
+                return Err(AvssError::InvalidShare);
+            }
 
             let share = FeldmanShamirShare {
                 feldmanshare: shamirshare,

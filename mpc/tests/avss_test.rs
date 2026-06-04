@@ -54,6 +54,7 @@ async fn test_avss_end_to_end() {
             AvssNode::new(
                 i,
                 n,
+                (1..=n).collect(),
                 t,
                 sks[i],
                 pk_map.clone(),
