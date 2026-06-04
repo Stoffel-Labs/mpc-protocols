@@ -61,6 +61,7 @@ fn avss_e2e() {
             AvssNode::new(
                 i,
                 n_parties,
+                (1..=n_parties).collect::<Vec<usize>>(),
                 t,
                 sks[i],
                 pk_map.clone(),
