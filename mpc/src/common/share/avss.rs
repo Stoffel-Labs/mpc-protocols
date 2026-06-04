@@ -397,6 +397,9 @@ where
             if shamirshare.id != self.ids[self.id] {
                 return Err(AvssError::InvalidShare);
             }
+            if shamirshare.degree != self.t {
+                return Err(AvssError::InvalidShare);
+            }
 
             let share = FeldmanShamirShare {
                 feldmanshare: shamirshare,
