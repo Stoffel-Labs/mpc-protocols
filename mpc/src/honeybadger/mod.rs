@@ -1367,14 +1367,6 @@ where
 
         let mut randbit_output: Vec<ShamirShare<F, 1, Robust>> = Vec::new();
 
-        //Prandbit share generation
-        info!("PRandbit share generation");
-        let prandbit_sessionid = SessionId::new(
-            ProtocolType::PRandBit,
-            SessionId::pack_slot24(self.counters.prand_bit_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
-
         let random_shares_a = self
             .preprocessing_material
             .lock()
@@ -1387,7 +1379,7 @@ where
             .await
             .take_beaver_triples(total_randbit_to_generate)?;
 
-        let max_randbit_batch = 64 * (self.params.threshold + 1);
+        let max_randbit_batch = 32 * (self.params.threshold + 1);
         for (random_share_chunk, triple_chunk) in random_shares_a
             .chunks(max_randbit_batch)
             .zip(beaver_triples.chunks(max_randbit_batch))
@@ -1426,34 +1418,45 @@ where
         //Prandbit share generation
         info!("PRandbit share generation");
 
-        // Run PRandBit protocol
-        self.preprocess
-            .prand_bit
-            .generate_riss(
-                prandbit_sessionid,
-                randbit_output,
-                self.params.l,
-                self.params.k,
-                total_randbit_to_generate,
-                network,
-            )
-            .await?;
+        let mut prandbit_output = Vec::with_capacity(total_randbit_to_generate);
+        let max_prandbit_batch = 32 * (self.params.threshold + 1);
+        for randbit_chunk in randbit_output.chunks(max_prandbit_batch) {
+            let prandbit_sessionid = SessionId::new(
+                ProtocolType::PRandBit,
+                SessionId::pack_slot24(self.counters.prand_bit_counter.get_next().await?, 0, 0),
+                self.params.instance_id,
+            );
 
-        // Collect its output
-        let output = self
-            .preprocess
-            .prand_bit
-            .wait_for_bit_result(prandbit_sessionid, self.params.timeout)
-            .await?;
+            // Run PRandBit protocol
+            self.preprocess
+                .prand_bit
+                .generate_riss(
+                    prandbit_sessionid,
+                    randbit_chunk.to_vec(),
+                    self.params.l,
+                    self.params.k,
+                    randbit_chunk.len(),
+                    network.clone(),
+                )
+                .await?;
+
+            // Collect its output
+            let output = self
+                .preprocess
+                .prand_bit
+                .wait_for_bit_result(prandbit_sessionid, self.params.timeout)
+                .await?;
+            prandbit_output.extend(output);
+
+            self.preprocess
+                .prand_bit
+                .clear_store(prandbit_sessionid)
+                .await?;
+        }
         self.preprocessing_material
             .lock()
             .await
-            .add(None, None, Some(output), None);
-
-        self.preprocess
-            .prand_bit
-            .clear_store(prandbit_sessionid)
-            .await?;
+            .add(None, None, Some(prandbit_output), None);
         Ok(())
     }
 
@@ -1475,41 +1478,55 @@ where
         // How many more do we need?
         let missing = self.params.n_prandint.saturating_sub(no_shares);
 
-        //Prandbit share generation
+        //Prandint share generation
         info!("PRandInt share generation");
-        let sessionid = SessionId::new(
-            ProtocolType::PRandInt,
-            SessionId::pack_slot24(self.counters.prand_int_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
 
-        // Run PRandBit protocol
-        self.preprocess
-            .prand_bit
-            .generate_riss(
-                sessionid,
-                vec![],
-                self.params.l,
-                self.params.k,
-                missing,
-                network,
-            )
-            .await?;
+        let max_prandint_batch = 32 * (self.params.threshold + 1);
+        let mut prandint_output = Vec::with_capacity(missing);
+        for batch_size in chunk_sizes(missing, max_prandint_batch) {
+            let sessionid = SessionId::new(
+                ProtocolType::PRandInt,
+                SessionId::pack_slot24(self.counters.prand_int_counter.get_next().await?, 0, 0),
+                self.params.instance_id,
+            );
 
-        // Collect its output
-        let output = self
-            .preprocess
-            .prand_bit
-            .wait_for_int_result(sessionid, self.params.timeout)
-            .await?;
+            // Run PRandInt protocol
+            self.preprocess
+                .prand_bit
+                .generate_riss(
+                    sessionid,
+                    vec![],
+                    self.params.l,
+                    self.params.k,
+                    batch_size,
+                    network.clone(),
+                )
+                .await?;
+
+            // Collect its output
+            let output = self
+                .preprocess
+                .prand_bit
+                .wait_for_int_result(sessionid, self.params.timeout)
+                .await?;
+            prandint_output.extend(output);
+
+            // Clear store
+            self.preprocess.prand_bit.clear_store(sessionid).await?;
+        }
         self.preprocessing_material
             .lock()
             .await
-            .add(None, None, None, Some(output));
-        // Clear store
-        self.preprocess.prand_bit.clear_store(sessionid).await?;
+            .add(None, None, None, Some(prandint_output));
         Ok(())
     }
+}
+
+fn chunk_sizes(total: usize, max_chunk_size: usize) -> impl Iterator<Item = usize> {
+    let max_chunk_size = max_chunk_size.max(1);
+    (0..total)
+        .step_by(max_chunk_size)
+        .map(move |start| (total - start).min(max_chunk_size))
 }
 
 ///Used for routing messages to respective sub-protocols

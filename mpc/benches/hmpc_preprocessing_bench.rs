@@ -20,7 +20,7 @@ async fn run_preprocessing(
     let (network, receivers) = test_setup(n_parties);
     let nodes = create_nodes(n_parties, t, n_triples, n_shares, n_prandbit, n_prandint, 1);
 
-    spawn_receivers(receivers, nodes.clone(), network.clone());
+    let receiver_handles = spawn_receivers(receivers, nodes.clone(), network.clone());
 
     let handles: Vec<_> = (0..n_parties)
         .map(|pid| {
@@ -35,7 +35,13 @@ async fn run_preprocessing(
         })
         .collect();
 
-    futures::future::join_all(handles).await;
+    for result in futures::future::join_all(handles).await {
+        result.expect("preprocessing task panicked");
+    }
+
+    for handle in receiver_handles {
+        handle.abort();
+    }
 }
 
 fn bench_preprocessing(c: &mut Criterion) {

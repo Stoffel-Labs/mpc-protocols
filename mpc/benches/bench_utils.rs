@@ -12,9 +12,12 @@ use stoffelmpc_network::fake_network::{
     FakeInnerNetwork, FakeNetwork, FakeNetworkConfig, SenderId,
 };
 use tokio::sync::mpsc::{self, Receiver};
+use tokio::task::JoinHandle;
+
+const BENCH_CHANNEL_BUFFER: usize = 262_144;
 
 pub fn test_setup(n: usize) -> (Vec<Arc<FakeNetwork>>, Vec<Vec<Receiver<Vec<u8>>>>) {
-    let config = FakeNetworkConfig::new(500);
+    let config = FakeNetworkConfig::new(BENCH_CHANNEL_BUFFER);
     let (inner, receivers, _) = FakeInnerNetwork::new(n, None, config);
     let network = (0..n)
         .map(|id| Arc::new(FakeNetwork::new(id, inner.clone())))
@@ -24,17 +27,18 @@ pub fn test_setup(n: usize) -> (Vec<Arc<FakeNetwork>>, Vec<Vec<Receiver<Vec<u8>>
 
 pub fn fan_in_inboxes(
     inboxes: Vec<(SenderId, Receiver<Vec<u8>>)>,
-) -> Receiver<(SenderId, Vec<u8>)> {
-    let (tx, rx) = mpsc::channel(300);
+) -> (Receiver<(SenderId, Vec<u8>)>, Vec<JoinHandle<()>>) {
+    let (tx, rx) = mpsc::channel(BENCH_CHANNEL_BUFFER);
+    let mut handles = Vec::with_capacity(inboxes.len());
     for (sender, mut rx_i) in inboxes {
         let tx_i = tx.clone();
-        tokio::spawn(async move {
+        handles.push(tokio::spawn(async move {
             while let Some(msg) = rx_i.recv().await {
                 let _ = tx_i.send((sender, msg)).await;
             }
-        });
+        }));
     }
-    rx
+    (rx, handles)
 }
 
 pub fn create_nodes(
@@ -76,7 +80,8 @@ pub fn spawn_receivers(
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
     nodes: Vec<HoneyBadgerMPCNode<Fr, Avid<SessionId>>>,
     network: Vec<Arc<FakeNetwork>>,
-) {
+) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::new();
     for i in 0..nodes.len() {
         let inbox_row = receivers.remove(0);
         let mut node = nodes[i].clone();
@@ -86,14 +91,16 @@ pub fn spawn_receivers(
             .enumerate()
             .map(|(j, r)| (SenderId::Node(j), r))
             .collect();
-        let mut merged = fan_in_inboxes(labeled);
-        tokio::spawn(async move {
+        let (mut merged, mut fan_in_handles) = fan_in_inboxes(labeled);
+        handles.append(&mut fan_in_handles);
+        handles.push(tokio::spawn(async move {
             while let Some((sender, raw)) = merged.recv().await {
                 let id = match sender {
                     SenderId::Node(i) | SenderId::Client(i) => i,
                 };
                 let _ = node.process(id, raw, net.clone()).await;
             }
-        });
+        }));
     }
+    handles
 }
