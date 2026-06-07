@@ -1387,7 +1387,7 @@ where
             .await
             .take_beaver_triples(total_randbit_to_generate)?;
 
-        let max_randbit_batch = 128 * (self.params.threshold + 1);
+        let max_randbit_batch = 64 * (self.params.threshold + 1);
         for (random_share_chunk, triple_chunk) in random_shares_a
             .chunks(max_randbit_batch)
             .zip(beaver_triples.chunks(max_randbit_batch))
