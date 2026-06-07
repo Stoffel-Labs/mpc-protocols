@@ -1248,9 +1248,11 @@ where
     {
         let mut pair = Vec::new();
 
-        // How many batches do we need to cover?
-        let batch = self.params.threshold + 1;
-        let run = (needed + batch - 1) / batch; // ceil(missing / batch)
+        // Each batched column produces (t + 1) double shares.
+        let output_per_column = self.params.threshold + 1;
+        let columns_needed = (needed + output_per_column - 1) / output_per_column;
+        let max_columns_per_run = 2048usize;
+        let run = (columns_needed + max_columns_per_run - 1) / max_columns_per_run;
         let mut round_id = 0u8;
         let mut ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await?;
 
@@ -1258,7 +1260,9 @@ where
             return Err(HoneyBadgerError::LimitError);
         }
 
-        for _ in 0..run {
+        for i in 0..run {
+            let columns_remaining = columns_needed - i * max_columns_per_run;
+            let batch_size = columns_remaining.min(max_columns_per_run);
             let sessionid = SessionId::new(
                 ProtocolType::Randousha,
                 SessionId::pack_slot24(ran_dou_sha_counter, 0, round_id),
@@ -1266,18 +1270,30 @@ where
             );
 
             let double_shares = self
-                .ensure_double_shares(sessionid, network.clone(), rng)
+                .ensure_double_shares_batch(sessionid, batch_size, network.clone(), rng)
                 .await?;
 
-            let (shares_deg_t, shares_deg_2t) = double_shares
-                .into_iter()
-                .map(|d| (d.degree_t, d.degree_2t))
-                .unzip();
+            let mut shares_deg_t_by_batch = Vec::with_capacity(batch_size);
+            let mut shares_deg_2t_by_batch = Vec::with_capacity(batch_size);
+            for double_share_batch in double_shares.chunks_exact(self.params.n_parties) {
+                let (shares_deg_t, shares_deg_2t) = double_share_batch
+                    .iter()
+                    .cloned()
+                    .map(|d| (d.degree_t, d.degree_2t))
+                    .unzip();
+                shares_deg_t_by_batch.push(shares_deg_t);
+                shares_deg_2t_by_batch.push(shares_deg_2t);
+            }
 
             // Run RanDouSha
             self.preprocess
                 .ran_dou_sha
-                .init(shares_deg_t, shares_deg_2t, sessionid, network.clone())
+                .init_batch(
+                    shares_deg_t_by_batch,
+                    shares_deg_2t_by_batch,
+                    sessionid,
+                    network.clone(),
+                )
                 .await?;
 
             let output = self
@@ -1303,10 +1319,10 @@ where
         Ok(pair)
     }
 
-    /// Ensure we have double shares available.
-    async fn ensure_double_shares<G, N>(
+    async fn ensure_double_shares_batch<G, N>(
         &mut self,
         sessionid: SessionId,
+        batch_size: usize,
         network: Arc<N>,
         rng: &mut G,
     ) -> Result<Vec<DoubleShamirShare<F>>, HoneyBadgerError>
@@ -1316,7 +1332,7 @@ where
     {
         self.preprocess
             .dou_sha
-            .init(sessionid, rng, network.clone())
+            .init_batch(sessionid, batch_size, rng, network.clone())
             .await?;
 
         let dou_sha = self

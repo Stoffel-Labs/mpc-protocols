@@ -4,7 +4,7 @@ use crate::{
         ProtocolSessionId, SecretSharingScheme,
     },
     honeybadger::{
-        double_share::{DouShaError, DouShaMessage, DouShaStorage},
+        double_share::{DouShaError, DouShaMessage, DouShaPayload, DouShaStorage},
         SessionId, WrappedMessage,
     },
 };
@@ -141,20 +141,54 @@ where
         N: Network,
         R: Rng,
     {
+        self.init_batch(session_id, 1, rng, network).await
+    }
+
+    pub async fn init_batch<N, R>(
+        &mut self,
+        session_id: SessionId,
+        batch_size: usize,
+        rng: &mut R,
+        network: Arc<N>,
+    ) -> Result<(), DouShaError>
+    where
+        N: Network,
+        R: Rng,
+    {
         info!("Receiving init for faulty double share from {0:?}", self.id);
+        let batch_size = batch_size.max(1);
 
-        let secret = F::rand(rng);
+        let mut shares_by_recipient = vec![Vec::with_capacity(batch_size); self.n_parties];
+        for _ in 0..batch_size {
+            let secret = F::rand(rng);
 
-        let shares_deg_t =
-            NonRobustShare::compute_shares(secret, self.n_parties, self.threshold, None, rng)?;
-        let shares_deg_2t =
-            NonRobustShare::compute_shares(secret, self.n_parties, 2 * self.threshold, None, rng)?;
+            let shares_deg_t =
+                NonRobustShare::compute_shares(secret, self.n_parties, self.threshold, None, rng)?;
+            let shares_deg_2t = NonRobustShare::compute_shares(
+                secret,
+                self.n_parties,
+                2 * self.threshold,
+                None,
+                rng,
+            )?;
 
-        for (recipient_id, (share_t, share_2t)) in izip!(shares_deg_t, shares_deg_2t).enumerate() {
+            for (recipient_id, (share_t, share_2t)) in
+                izip!(shares_deg_t, shares_deg_2t).enumerate()
+            {
+                shares_by_recipient[recipient_id].push(DoubleShamirShare::new(share_t, share_2t));
+            }
+        }
+
+        for (recipient_id, double_shares) in shares_by_recipient.into_iter().enumerate() {
             // Create and serialize the payload.
-            let double_share = DoubleShamirShare::new(share_t, share_2t);
             let mut payload = Vec::new();
-            double_share.serialize_compressed(&mut payload)?;
+            let payload = if batch_size == 1 {
+                double_shares[0].serialize_compressed(&mut payload)?;
+                DouShaPayload::Share(payload)
+            } else {
+                double_shares.serialize_compressed(&mut payload)?;
+                DouShaPayload::Shares(payload)
+            };
 
             // Create and serialize the generic message.
             let generic_message =
@@ -171,6 +205,7 @@ where
         // Update the state of the protocol to Initialized.
         let storage_access = self.get_or_create_store(session_id).await?;
         let mut storage = storage_access.lock().await;
+        storage.batch_size = batch_size;
         storage.state = ProtocolState::Initialized;
         Ok(())
     }
@@ -179,20 +214,35 @@ where
         &mut self,
         recv_message: DouShaMessage,
     ) -> Result<(), DouShaError> {
-        let double_share: DoubleShamirShare<F> =
-            CanonicalDeserialize::deserialize_compressed(recv_message.payload.as_slice())?;
-        if double_share.degree_t.id != self.id || double_share.degree_2t.id != self.id {
-            return Err(ShareError::IdMismatch.into());
-        }
-        if double_share.degree_t.degree != self.threshold {
-            return Err(ShareError::DegreeMismatch.into());
-        }
-        if double_share.degree_2t.degree != 2 * self.threshold {
-            return Err(ShareError::DegreeMismatch.into());
+        let double_shares: Vec<DoubleShamirShare<F>> = match recv_message.payload {
+            DouShaPayload::Share(payload) => {
+                vec![CanonicalDeserialize::deserialize_compressed(
+                    payload.as_slice(),
+                )?]
+            }
+            DouShaPayload::Shares(payload) => {
+                CanonicalDeserialize::deserialize_compressed(payload.as_slice())?
+            }
+        };
+        for double_share in &double_shares {
+            if double_share.degree_t.id != self.id || double_share.degree_2t.id != self.id {
+                return Err(ShareError::IdMismatch.into());
+            }
+            if double_share.degree_t.degree != self.threshold {
+                return Err(ShareError::DegreeMismatch.into());
+            }
+            if double_share.degree_2t.degree != 2 * self.threshold {
+                return Err(ShareError::DegreeMismatch.into());
+            }
         }
 
         let binding = self.get_or_create_store(recv_message.session_id).await?;
         let mut dousha_storage = binding.lock().await;
+        if dousha_storage.share.is_empty() {
+            dousha_storage.batch_size = double_shares.len();
+        } else if dousha_storage.batch_size != double_shares.len() {
+            return Err(DouShaError::ShareError(ShareError::DegreeMismatch));
+        }
 
         if dousha_storage.state == ProtocolState::Finished {
             return Ok(());
@@ -213,7 +263,7 @@ where
 
         dousha_storage
             .share
-            .insert(recv_message.sender_id, double_share);
+            .insert(recv_message.sender_id, double_shares);
         info!(
             session_id = recv_message.session_id.as_u64(),
             "party {:?} received double shares from {:?}", self.id, recv_message.sender_id,
@@ -227,11 +277,13 @@ where
             .iter()
             .all(|&received| received)
         {
-            let output: Vec<DoubleShamirShare<F>> = dousha_storage
-                .share
-                .iter()
-                .map(|(_, v)| v.clone())
-                .collect();
+            let mut output =
+                Vec::with_capacity(dousha_storage.batch_size * dousha_storage.share.len());
+            for batch_index in 0..dousha_storage.batch_size {
+                for shares in dousha_storage.share.values() {
+                    output.push(shares[batch_index].clone());
+                }
+            }
             dousha_storage.protocol_output = output.clone();
             dousha_storage.state = ProtocolState::Finished;
 
