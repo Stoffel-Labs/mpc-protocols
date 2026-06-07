@@ -1102,49 +1102,60 @@ where
                 .await
                 .take_random_shares(total_triples_to_generate)?;
 
-            //Outputs 2t+1 triples at a time
-            let a_chunks = random_shares_a.chunks_exact(group_size);
-            let b_chunks = random_shares_b.chunks_exact(group_size);
-            let r_chunks = ran_dou_sha_pair[..total_triples_to_generate].chunks_exact(group_size);
             let mut round_id = 0u8;
+            let mut group_index = 0;
+            let total_groups = total_triples_to_generate / group_size;
 
-            for ((a, b), r) in a_chunks.zip(b_chunks).zip(r_chunks) {
-                let sessionid = SessionId::new(
-                    ProtocolType::Triple,
-                    SessionId::pack_slot24(triple_counter, 0, round_id),
-                    self.params.instance_id,
-                );
-                self.preprocess
-                    .triple_gen
-                    .init(
-                        a.to_vec(),
-                        b.to_vec(),
-                        r.to_vec(),
-                        sessionid,
-                        network.clone(),
-                    )
-                    .await?;
+            while group_index < total_groups {
+                let batch_groups = (total_groups - group_index).min(64);
+                let mut session_ids = Vec::with_capacity(batch_groups);
+
+                for offset in 0..batch_groups {
+                    let share_start = (group_index + offset) * group_size;
+                    let share_end = share_start + group_size;
+
+                    let sessionid = SessionId::new(
+                        ProtocolType::Triple,
+                        SessionId::pack_slot24(triple_counter, 0, round_id),
+                        self.params.instance_id,
+                    );
+                    self.preprocess
+                        .triple_gen
+                        .init(
+                            random_shares_a[share_start..share_end].to_vec(),
+                            random_shares_b[share_start..share_end].to_vec(),
+                            ran_dou_sha_pair[share_start..share_end].to_vec(),
+                            sessionid,
+                            network.clone(),
+                        )
+                        .await?;
+                    session_ids.push(sessionid);
+
+                    if round_id == 255 {
+                        triple_counter = self.counters.triple_counter.get_next().await?;
+                        round_id = 0;
+                    } else {
+                        round_id += 1;
+                    }
+                }
 
                 // ------------------------
                 // Step 4. Collect triples
                 // ------------------------
-                let triples = self
-                    .preprocess
-                    .triple_gen
-                    .wait_for_result(sessionid, self.params.timeout)
-                    .await?;
-                self.preprocessing_material
-                    .lock()
-                    .await
-                    .add(Some(triples), None, None, None);
-                assert!(self.preprocess.triple_gen.clear_store(sessionid).await);
-
-                if round_id == 255 {
-                    triple_counter = self.counters.triple_counter.get_next().await.unwrap();
-                    round_id = 0;
-                } else {
-                    round_id += 1;
+                for sessionid in session_ids {
+                    let triples = self
+                        .preprocess
+                        .triple_gen
+                        .wait_for_result(sessionid, self.params.timeout)
+                        .await?;
+                    self.preprocessing_material
+                        .lock()
+                        .await
+                        .add(Some(triples), None, None, None);
+                    assert!(self.preprocess.triple_gen.clear_store(sessionid).await);
                 }
+
+                group_index += batch_groups;
             }
         }
         // ------------------------

@@ -87,6 +87,7 @@ where
             .clone())
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        self.batch_recon_node.clear_store(session_id).await;
         let mut store = self.storage.lock().await;
         store.remove(&session_id).is_some()
     }
