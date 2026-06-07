@@ -238,7 +238,7 @@ where
         // Multiply opens two BatchRecon sessions per (t + 1)-sized chunk using an 8-bit sub_id.
         // Keep RandBit batches below both the child session limit and the point where a single
         // multiplication round overwhelms the local network executor.
-        if a.len() / (self.threshold + 1) > 32 {
+        if a.len() / (self.threshold + 1) > 64 {
             return Err(RandBitError::ShareLimitError(a.len()));
         }
 

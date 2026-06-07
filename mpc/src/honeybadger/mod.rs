@@ -1390,7 +1390,7 @@ where
             .await
             .take_beaver_triples(total_randbit_to_generate)?;
 
-        let max_randbit_batch = 32 * (self.params.threshold + 1);
+        let max_randbit_batch = 64 * (self.params.threshold + 1);
         for (random_share_chunk, triple_chunk) in random_shares_a
             .chunks(max_randbit_batch)
             .zip(beaver_triples.chunks(max_randbit_batch))
@@ -1430,7 +1430,7 @@ where
         info!("PRandbit share generation");
 
         let mut prandbit_output = Vec::with_capacity(total_randbit_to_generate);
-        let max_prandbit_batch = 32 * (self.params.threshold + 1);
+        let max_prandbit_batch = 64 * (self.params.threshold + 1);
         for randbit_chunk in randbit_output.chunks(max_prandbit_batch) {
             let prandbit_sessionid = SessionId::new(
                 ProtocolType::PRandBit,
@@ -1492,7 +1492,7 @@ where
         //Prandint share generation
         info!("PRandInt share generation");
 
-        let max_prandint_batch = 32 * (self.params.threshold + 1);
+        let max_prandint_batch = 64 * (self.params.threshold + 1);
         let mut prandint_output = Vec::with_capacity(missing);
         for batch_size in chunk_sizes(missing, max_prandint_batch) {
             let sessionid = SessionId::new(
