@@ -1286,7 +1286,12 @@ where
                 .wait_for_result(sessionid, self.params.timeout)
                 .await?;
             pair.extend(output);
-            assert!(self.preprocess.ran_dou_sha.clear_store(sessionid).await);
+            assert!(
+                self.preprocess
+                    .ran_dou_sha
+                    .clear_completed_session(sessionid)
+                    .await
+            );
 
             if round_id == 255 {
                 ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await.unwrap();
@@ -1295,7 +1300,6 @@ where
                 round_id += 1;
             }
         }
-        self.preprocess.ran_dou_sha.rbc.clear_store().await;
         Ok(pair)
     }
 
