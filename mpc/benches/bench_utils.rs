@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use ark_bls12_381::Fr;
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use stoffelmpc_mpc::common::{rbc::rbc::Avid, MPCProtocol};
@@ -50,6 +51,12 @@ pub fn create_nodes(
     n_prandint: usize,
     instance_id: u32,
 ) -> Vec<HoneyBadgerMPCNode<Fr, Avid<SessionId>>> {
+    let timeout = env::var("HMPC_BENCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|secs| secs.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(60));
+
     let opts = HoneyBadgerMPCNodeOpts::new(
         n_parties,
         t,
@@ -60,7 +67,7 @@ pub fn create_nodes(
         n_prandint,
         8,
         4,
-        Duration::from_secs(60),
+        timeout,
     )
     .unwrap();
 

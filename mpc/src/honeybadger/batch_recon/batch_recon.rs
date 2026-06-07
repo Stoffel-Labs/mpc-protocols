@@ -10,7 +10,10 @@ use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
 use futures::lock::Mutex;
 use std::sync::Arc;
-use std::{collections::HashMap, marker::PhantomData};
+use std::{
+    collections::{HashMap, HashSet},
+    marker::PhantomData,
+};
 use stoffelnet::network_utils::Network;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
@@ -39,6 +42,7 @@ pub struct BatchReconNode<F: FftField> {
     pub t: usize,
     pub degree: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BatchReconStore<F>>>>>>, // Number of malicious parties
+    cleared_sessions: Arc<Mutex<HashSet<SessionId>>>,
     pub output_sender: Sender<SessionId>,
 }
 
@@ -58,17 +62,21 @@ impl<F: FftField> BatchReconNode<F> {
             t,
             degree,
             store,
+            cleared_sessions: Arc::new(Mutex::new(HashSet::new())),
             output_sender,
         })
     }
 
     pub async fn clear_entire_store(&self) {
         let mut store = self.store.lock().await;
+        let mut cleared = self.cleared_sessions.lock().await;
+        cleared.extend(store.keys().copied());
         store.clear();
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.store.lock().await;
+        self.cleared_sessions.lock().await.insert(session_id);
         store.remove(&session_id).is_some()
     }
 
@@ -287,6 +295,10 @@ impl<F: FftField> BatchReconNode<F> {
         &self,
         session_id: SessionId,
     ) -> Result<Option<Arc<Mutex<BatchReconStore<F>>>>, BatchReconError> {
+        if self.cleared_sessions.lock().await.contains(&session_id) {
+            return Ok(None);
+        }
+
         // Step 1: get or create store with limit check
         let store_lock = {
             let mut storage = self.store.lock().await;
