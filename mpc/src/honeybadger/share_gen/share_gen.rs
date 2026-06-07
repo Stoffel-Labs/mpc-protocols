@@ -134,6 +134,24 @@ where
         let mut store = self.store.lock().await;
         store.remove(&session_id).is_some()
     }
+
+    pub async fn clear_completed_session(&self, session_id: SessionId) -> bool {
+        for verifier_id in 0..2 * self.threshold {
+            let rbc_session_id = SessionId::new(
+                ProtocolType::Ransha,
+                SessionId::pack_slot24(
+                    session_id.exec_id(),
+                    verifier_id as u8,
+                    session_id.round_id(),
+                ),
+                session_id.instance_id(),
+            );
+            self.rbc.clear_session(rbc_session_id).await;
+        }
+
+        self.clear_store(session_id).await
+    }
+
     pub async fn wait_for_result(
         &self,
         session_id: SessionId,
@@ -172,11 +190,15 @@ where
             if store.received_ok_msg.len() < 2 * self.threshold {
                 return Ok(false);
             }
-            if store.computed_r_shares.len() < self.n_parties {
+            if store.computed_r_shares.len() < store.batch_size * self.n_parties {
                 return Ok(false);
             }
 
-            let output = store.computed_r_shares[2 * self.threshold..].to_vec();
+            let mut output =
+                Vec::with_capacity(store.batch_size * (self.n_parties - 2 * self.threshold));
+            for shares in store.computed_r_shares.chunks_exact(self.n_parties) {
+                output.extend_from_slice(&shares[2 * self.threshold..]);
+            }
             store.state = RanShaState::Finished;
             store.protocol_output = output.clone();
 
@@ -202,26 +224,57 @@ where
         N: Network,
         G: Rng,
     {
+        self.init_batch(session_id, 1, rng, network).await
+    }
+
+    pub async fn init_batch<N, G>(
+        &mut self,
+        session_id: SessionId,
+        batch_size: usize,
+        rng: &mut G,
+        network: Arc<N>,
+    ) -> Result<(), RanShaError>
+    where
+        N: Network,
+        G: Rng,
+    {
         info!("Receiving init for share from {0:?}", self.id);
 
         assert_eq!(session_id.sub_id(), 0);
+        let batch_size = batch_size.max(1);
 
-        let secret = F::rand(rng);
+        let mut shares_by_recipient = vec![Vec::with_capacity(batch_size); self.n_parties];
+        for _ in 0..batch_size {
+            let secret = F::rand(rng);
+            let shares_deg_t =
+                RobustShare::compute_shares(secret, self.n_parties, self.threshold, None, rng)?;
+            for (recipient_id, share_t) in shares_deg_t.into_iter().enumerate() {
+                shares_by_recipient[recipient_id].push(share_t);
+            }
+        }
 
-        let shares_deg_t =
-            RobustShare::compute_shares(secret, self.n_parties, self.threshold, None, rng)?;
-
-        for (recipient_id, share_t) in shares_deg_t.into_iter().enumerate() {
+        for (recipient_id, shares_t) in shares_by_recipient.into_iter().enumerate() {
             // Create and serialize the payload.
-            let mut payload = Vec::new();
-            share_t.serialize_compressed(&mut payload)?;
+            let payload = if batch_size == 1 {
+                let mut payload = Vec::new();
+                shares_t[0].serialize_compressed(&mut payload)?;
+                RanShaPayload::Share(payload)
+            } else {
+                let mut payloads = Vec::with_capacity(batch_size);
+                for share_t in shares_t {
+                    let mut payload = Vec::new();
+                    share_t.serialize_compressed(&mut payload)?;
+                    payloads.push(payload);
+                }
+                RanShaPayload::Shares(payloads)
+            };
 
             // Create and serialize the generic message.
             let generic_message = WrappedMessage::RanSha(RanShaMessage::new(
                 self.id,
                 RanShaMessageType::ShareMessage,
                 session_id,
-                RanShaPayload::Share(payload),
+                payload,
             ));
             let bytes_generic_msg = bincode::serialize(&generic_message)?;
 
@@ -232,6 +285,7 @@ where
         // Update the state of the protocol to Initialized.
         let storage_access = self.get_or_create_store(session_id).await?;
         let mut storage = storage_access.lock().await;
+        storage.batch_size = batch_size;
         storage.state = RanShaState::Initialized;
         Ok(())
     }
@@ -248,24 +302,34 @@ where
             return Err(RanShaError::SessionIdError(msg.session_id));
         }
 
-        let payload = match msg.payload {
-            RanShaPayload::Share(s) => s,
+        let payloads = match msg.payload {
+            RanShaPayload::Share(s) => vec![s],
+            RanShaPayload::Shares(s) => s,
             _ => return Err(RanShaError::Abort),
         };
         if msg.sender_id >= self.n_parties {
             return Err(RanShaError::InvalidPartyId);
         }
 
-        let share: ShamirShare<F, 1, Robust> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-        if share.id != self.id {
-            return Err(ShareError::IdMismatch.into());
-        }
-        if share.degree != self.threshold {
-            return Err(ShareError::DegreeMismatch.into());
+        let mut shares = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            let share: ShamirShare<F, 1, Robust> =
+                ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+            if share.id != self.id {
+                return Err(ShareError::IdMismatch.into());
+            }
+            if share.degree != self.threshold {
+                return Err(ShareError::DegreeMismatch.into());
+            }
+            shares.push(share);
         }
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut ransha_storage = binding.lock().await;
+        if ransha_storage.initial_shares.is_empty() {
+            ransha_storage.batch_size = shares.len();
+        } else if ransha_storage.batch_size != shares.len() {
+            return Err(RanShaError::Abort);
+        }
 
         if ransha_storage.state == RanShaState::FinishedInitialSharing
             || ransha_storage.state == RanShaState::Finished
@@ -281,7 +345,7 @@ where
             return Ok(());
         }
 
-        ransha_storage.initial_shares.insert(msg.sender_id, share);
+        ransha_storage.initial_shares.insert(msg.sender_id, shares);
         info!(
             session_id = msg.session_id.as_u64(),
             "party {:?} received shares from {:?}", self.id, msg.sender_id,
@@ -296,7 +360,8 @@ where
             .all(|&received| received)
         {
             ransha_storage.state = RanShaState::FinishedInitialSharing;
-            let mut shares_deg_t: Vec<(usize, ShamirShare<F, 1, Robust>)> = ransha_storage
+            let batch_size = ransha_storage.batch_size;
+            let mut shares_deg_t: Vec<(usize, Vec<ShamirShare<F, 1, Robust>>)> = ransha_storage
                 .initial_shares
                 .iter()
                 .map(|(sid, s)| (*sid, s.clone()))
@@ -305,10 +370,13 @@ where
             // sort by sender_id
             shares_deg_t.sort_by_key(|(sid, _)| *sid);
 
-            // drop the ids, keep only shares
-            let shares_deg_t: Vec<ShamirShare<F, 1, Robust>> =
-                shares_deg_t.into_iter().map(|(_, s)| s).collect();
-            self.init_ransha(shares_deg_t, msg.session_id, network)
+            let mut shares_by_batch = vec![Vec::with_capacity(self.n_parties); batch_size];
+            for (_, sender_shares) in shares_deg_t {
+                for (batch_index, share) in sender_shares.into_iter().enumerate() {
+                    shares_by_batch[batch_index].push(share);
+                }
+            }
+            self.init_ransha_batch(shares_by_batch, msg.session_id, network)
                 .await?
         }
 
@@ -324,16 +392,33 @@ where
     where
         N: Network,
     {
+        self.init_ransha_batch(vec![shares_deg_t], session_id, network)
+            .await
+    }
+
+    async fn init_ransha_batch<N>(
+        &mut self,
+        shares_by_batch: Vec<Vec<RobustShare<F>>>,
+        session_id: SessionId,
+        network: Arc<N>,
+    ) -> Result<(), RanShaError>
+    where
+        N: Network,
+    {
         info!(
             "party {:?} received shares for Random sharing generation",
             self.id
         );
 
         let vandermonde_matrix = make_vandermonde(self.n_parties, self.n_parties - 1)?;
-        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &shares_deg_t)?;
+        let mut r_deg_t = Vec::with_capacity(shares_by_batch.len() * self.n_parties);
+        for shares_deg_t in shares_by_batch {
+            r_deg_t.extend(apply_vandermonde(&vandermonde_matrix, &shares_deg_t)?);
+        }
 
         let bind_store = self.get_or_create_store(session_id).await?;
         let mut store = bind_store.lock().await;
+        store.batch_size = r_deg_t.len() / self.n_parties;
         store.computed_r_shares = r_deg_t.clone();
         drop(store);
         if self.try_finalize(session_id).await? {
@@ -341,15 +426,28 @@ where
         }
 
         for i in 0..2 * self.threshold {
-            let share_deg_t = r_deg_t[i].clone();
-
-            let mut bytes_rec_message = Vec::new();
-            share_deg_t.serialize_compressed(&mut bytes_rec_message)?;
+            let shares: Vec<_> = r_deg_t
+                .chunks_exact(self.n_parties)
+                .map(|batch_shares| batch_shares[i].clone())
+                .collect();
+            let payload = if shares.len() == 1 {
+                let mut bytes_rec_message = Vec::new();
+                shares[0].serialize_compressed(&mut bytes_rec_message)?;
+                RanShaPayload::Reconstruct(bytes_rec_message)
+            } else {
+                let mut bytes_rec_messages = Vec::with_capacity(shares.len());
+                for share in shares {
+                    let mut bytes_rec_message = Vec::new();
+                    share.serialize_compressed(&mut bytes_rec_message)?;
+                    bytes_rec_messages.push(bytes_rec_message);
+                }
+                RanShaPayload::ReconstructShares(bytes_rec_messages)
+            };
             let message = WrappedMessage::RanSha(RanShaMessage::new(
                 self.id,
                 RanShaMessageType::ReconstructMessage,
                 session_id,
-                RanShaPayload::Reconstruct(bytes_rec_message),
+                payload,
             ));
             let bytes = bincode::serialize(&message)?;
             network.send(i, &bytes).await?;
@@ -366,8 +464,9 @@ where
         N: Network + Send + Sync,
     {
         info!("party {:?} at reconstruction handler", self.id);
-        let payload = match msg.payload {
-            RanShaPayload::Reconstruct(s) => s,
+        let payloads = match msg.payload {
+            RanShaPayload::Reconstruct(s) => vec![s],
+            RanShaPayload::ReconstructShares(s) => s,
             _ => return Err(RanShaError::Abort),
         };
 
@@ -375,35 +474,58 @@ where
             return Err(RanShaError::SessionIdError(msg.session_id));
         }
 
-        let share: ShamirShare<F, 1, Robust> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-        if share.degree != self.threshold {
-            return Err(RanShaError::ShareError(ShareError::DegreeMismatch));
-        }
-        if share.id != msg.sender_id {
-            return Err(RanShaError::ShareError(ShareError::IdMismatch));
+        let mut shares = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            let share: ShamirShare<F, 1, Robust> =
+                ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+            if share.degree != self.threshold {
+                return Err(RanShaError::ShareError(ShareError::DegreeMismatch));
+            }
+            if share.id != msg.sender_id {
+                return Err(RanShaError::ShareError(ShareError::IdMismatch));
+            }
+            shares.push(share);
         }
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
         if store.state == RanShaState::Finished {
             return Ok(());
         }
+        if store.received_r_shares.is_empty() {
+            store.batch_size = shares.len();
+        } else if store.batch_size != shares.len() {
+            return Err(RanShaError::Abort);
+        }
         store.state = RanShaState::Reconstruction;
-        store.received_r_shares.insert(msg.sender_id, share.clone());
+        store.received_r_shares.insert(msg.sender_id, shares);
 
         if self.id < 2 * self.threshold && store.received_r_shares.len() >= 2 * self.threshold + 1 {
-            let shares: Vec<ShamirShare<F, 1, Robust>> =
-                store.received_r_shares.values().cloned().collect();
+            let batch_size = store.batch_size;
+            let mut shares_by_batch =
+                vec![Vec::with_capacity(store.received_r_shares.len()); batch_size];
+            for sender_shares in store.received_r_shares.values() {
+                for (batch_index, share) in sender_shares.iter().cloned().enumerate() {
+                    shares_by_batch[batch_index].push(share);
+                }
+            }
 
             drop(store);
 
-            let ok: bool;
-            match RobustShare::recover_secret(&shares, self.n_parties, self.threshold) {
-                Ok(r) => {
-                    let poly = DensePolynomial::from_coefficients_slice(&r.0);
-                    ok = poly.degree() == self.threshold;
+            let mut ok = true;
+            for shares in shares_by_batch {
+                match RobustShare::recover_secret(&shares, self.n_parties, self.threshold) {
+                    Ok(r) => {
+                        let poly = DensePolynomial::from_coefficients_slice(&r.0);
+                        if poly.degree() != self.threshold {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
                 }
-                Err(_) => ok = false,
             }
 
             let result = RanShaMessage::new(

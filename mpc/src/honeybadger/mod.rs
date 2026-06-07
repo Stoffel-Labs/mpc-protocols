@@ -1179,8 +1179,10 @@ where
         G: Rng + Send,
     {
         // Outputs in batches of (n-2t)
-        let batch = self.params.n_parties - 2 * self.params.threshold;
-        let run = (needed + batch - 1) / batch; // ceil(missing / batch)
+        let output_per_column = self.params.n_parties - 2 * self.params.threshold;
+        let columns_needed = (needed + output_per_column - 1) / output_per_column;
+        let max_columns_per_run = 2048usize;
+        let run = (columns_needed + max_columns_per_run - 1) / max_columns_per_run;
         let mut round_id = 0u8;
         let mut ran_sha_counter = self.counters.ran_sha_counter.get_next().await?;
 
@@ -1190,6 +1192,8 @@ where
 
         for i in 0..run {
             info!("Random share generation run {}", i);
+            let columns_remaining = columns_needed - i * max_columns_per_run;
+            let batch_size = columns_remaining.min(max_columns_per_run);
 
             let sessionid = SessionId::new(
                 ProtocolType::Ransha,
@@ -1200,7 +1204,7 @@ where
             // Run ShareGen protocol
             self.preprocess
                 .share_gen
-                .init(sessionid, rng, network.clone())
+                .init_batch(sessionid, batch_size, rng, network.clone())
                 .await?;
 
             // Collect its output
@@ -1214,7 +1218,12 @@ where
                 .lock()
                 .await
                 .add(None, Some(output), None, None);
-            assert!(self.preprocess.share_gen.clear_store(sessionid).await);
+            assert!(
+                self.preprocess
+                    .share_gen
+                    .clear_completed_session(sessionid)
+                    .await
+            );
 
             if round_id == 255 {
                 ran_sha_counter = self.counters.ran_sha_counter.get_next().await.unwrap();
@@ -1223,9 +1232,6 @@ where
                 round_id += 1;
             }
         }
-
-        // Clear RBC store
-        self.preprocess.share_gen.rbc.clear_store().await;
         Ok(())
     }
 
