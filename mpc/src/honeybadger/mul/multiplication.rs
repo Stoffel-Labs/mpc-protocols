@@ -4,7 +4,7 @@ use crate::{
         SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
-        batch_recon::batch_recon::BatchReconNode,
+        batch_recon::{batch_recon::BatchReconNode, BatchReconError},
         mul::{
             concat_sorted, InterpolateError, MulError, MultMessage, MultProtocolState, MultStorage,
             ReconstructionMessage,
@@ -19,7 +19,7 @@ use ark_serialize::CanonicalSerialize;
 use bincode::Options;
 use itertools::izip;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::{Mul, Sub},
     sync::Arc,
 };
@@ -144,6 +144,7 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub n: usize,
     pub t: usize,
     pub mult_storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<MultStorage<F>>>>>>,
+    cleared_sessions: Arc<Mutex<HashSet<SessionId>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
     pub rbc: R,
@@ -168,6 +169,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             n,
             t: threshold,
             mult_storage: Arc::new(Mutex::new(HashMap::new())),
+            cleared_sessions: Arc::new(Mutex::new(HashSet::new())),
             batch_recon,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
             rbc,
@@ -250,7 +252,19 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                     }
                 }
             };
-            let output = self.batch_recon.get_store(id).await?;
+            let output = match self.batch_recon.get_store(id).await {
+                Ok(output) => output,
+                Err(BatchReconError::InvalidInput(message))
+                    if message == "Session ID does not exist" =>
+                {
+                    warn!(
+                        "Dropping BatchRecon output for cleared Mul session: {:?}",
+                        id
+                    );
+                    continue;
+                }
+                Err(error) => return Err(MulError::from(error)),
+            };
             match self.open_mult_handler(self.id, id, output).await {
                 Ok(()) => {}
                 Err(e) => {
@@ -261,6 +275,8 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         Ok(())
     }
     pub async fn clear_store(&self, session_id: SessionId) -> Result<(), MulError> {
+        self.cleared_sessions.lock().await.insert(session_id);
+
         let no_of_batch = {
             let store = self.mult_storage.lock().await;
             match store.get(&session_id) {
@@ -298,10 +314,13 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         let mut store = self.mult_storage.lock().await;
-        store
+        let removed = store
             .remove(&session_id)
             .map(|_| ())
-            .ok_or(MulError::ClearStoreError(session_id))
+            .ok_or(MulError::ClearStoreError(session_id));
+        drop(store);
+
+        removed
     }
 
     // 1. Take storage lock
@@ -516,6 +535,14 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             sid.instance_id(),
         );
 
+        if self.cleared_sessions.lock().await.contains(&session_id) {
+            warn!(
+                "Dropping late Mul output for cleared session: {:?}",
+                session_id
+            );
+            return Ok(());
+        }
+
         // 1.
         let storage_bind = self.get_or_create_mult_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
@@ -631,6 +658,30 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         session_id: SessionId,
     ) -> Result<Arc<Mutex<MultStorage<F>>>, MulError> {
         let mut storage = self.mult_storage.lock().await;
+
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            let entries: Vec<_> = storage
+                .iter()
+                .map(|(session_id, storage)| (*session_id, storage.clone()))
+                .collect();
+            drop(storage);
+
+            let mut finished_sessions = Vec::new();
+            for (session_id, storage) in entries {
+                let storage = storage.lock().await;
+                if storage.protocol_state == MultProtocolState::Finished
+                    && storage.output_receiver.is_none()
+                {
+                    finished_sessions.push(session_id);
+                }
+            }
+
+            storage = self.mult_storage.lock().await;
+            for session_id in finished_sessions {
+                storage.remove(&session_id);
+                self.cleared_sessions.lock().await.insert(session_id);
+            }
+        }
 
         if storage.len() >= 256 && !storage.contains_key(&session_id) {
             warn!("Mul session limit reached");
