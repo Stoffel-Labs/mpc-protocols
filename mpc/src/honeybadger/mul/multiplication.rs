@@ -254,8 +254,42 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         Ok(())
     }
     pub async fn clear_store(&self, session_id: SessionId) -> Result<(), MulError> {
-        self.batch_recon.clear_entire_store().await;
-        self.rbc.clear_store().await;
+        let no_of_batch = {
+            let store = self.mult_storage.lock().await;
+            match store.get(&session_id) {
+                Some(storage) => {
+                    let storage = storage.lock().await;
+                    storage.no_of_mul.unwrap_or(0) / (self.t + 1)
+                }
+                None => return Err(MulError::ClearStoreError(session_id)),
+            }
+        };
+
+        for i in 0..no_of_batch {
+            let session_id1 = SessionId::new(
+                session_id.calling_protocol().unwrap(),
+                SessionId::pack_slot24(session_id.exec_id(), (2 * i) as u8, 1),
+                session_id.instance_id(),
+            );
+            self.batch_recon.clear_store(session_id1).await;
+
+            let session_id2 = SessionId::new(
+                session_id.calling_protocol().unwrap(),
+                SessionId::pack_slot24(session_id.exec_id(), (2 * i + 1) as u8, 1),
+                session_id.instance_id(),
+            );
+            self.batch_recon.clear_store(session_id2).await;
+        }
+
+        for party_id in 0..self.n {
+            let rbc_session_id = SessionId::new(
+                session_id.calling_protocol().unwrap(),
+                SessionId::pack_slot24(session_id.exec_id(), party_id as u8, 2),
+                session_id.instance_id(),
+            );
+            self.rbc.clear_session(rbc_session_id).await;
+        }
+
         let mut store = self.mult_storage.lock().await;
         store
             .remove(&session_id)

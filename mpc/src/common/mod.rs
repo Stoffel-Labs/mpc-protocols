@@ -269,6 +269,9 @@ pub trait RBC: Send + Sync {
     /// Returns the unique identifier of the current party.
     fn id(&self) -> usize;
     async fn clear_store(&self);
+    async fn clear_session(&self, _session_id: Self::Id) {
+        self.clear_store().await;
+    }
     async fn get_store(&self, session_id: Self::Id) -> Result<Vec<u8>, RbcError>;
     /// Required for initiating the broadcast
     async fn init<N: Network + Send + Sync>(

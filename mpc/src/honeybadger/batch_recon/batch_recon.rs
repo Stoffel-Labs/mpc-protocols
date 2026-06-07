@@ -67,6 +67,11 @@ impl<F: FftField> BatchReconNode<F> {
         store.clear();
     }
 
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        let mut store = self.store.lock().await;
+        store.remove(&session_id).is_some()
+    }
+
     pub async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, BatchReconError> {
         let store = self.store.lock().await;
 

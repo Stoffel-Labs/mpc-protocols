@@ -466,11 +466,22 @@ where
             .init(session_id, x, y, beaver_triples, network)
             .await?;
 
-        self.operations
+        let result = self
+            .operations
             .mul
             .wait_for_result(session_id, self.params.timeout)
             .await
-            .map_err(HoneyBadgerError::from)
+            .map_err(HoneyBadgerError::from)?;
+
+        if let Err(error) = self.operations.mul.clear_store(session_id).await {
+            warn!(
+                ?session_id,
+                ?error,
+                "failed to clear completed multiplication protocol state"
+            );
+        }
+
+        Ok(result)
     }
 
     async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
