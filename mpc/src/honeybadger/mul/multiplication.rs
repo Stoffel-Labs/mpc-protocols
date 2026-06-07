@@ -1,7 +1,7 @@
 use crate::{
     common::{
-        share::ShareError, utils::deser_bounded_vec, ProtocolSessionId, SecretSharingScheme,
-        ShamirShare, RBC,
+        rbc::RbcError, share::ShareError, utils::deser_bounded_vec, ProtocolSessionId,
+        SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
@@ -187,7 +187,14 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 }
             };
 
-            let output = self.rbc.get_store(id).await?;
+            let output = match self.rbc.get_store(id).await {
+                Ok(output) => output,
+                Err(RbcError::Internal(message)) if message == "Session ID does not exist" => {
+                    warn!("Dropping RBC output for cleared Mul session: {:?}", id);
+                    continue;
+                }
+                Err(error) => return Err(MulError::from(error)),
+            };
             let msg: MultMessage = bincode::DefaultOptions::new()
                 .with_fixint_encoding()
                 .allow_trailing_bytes()
