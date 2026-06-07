@@ -1351,15 +1351,6 @@ where
 
         let mut randbit_output: Vec<ShamirShare<F, 1, Robust>> = Vec::new();
 
-        // Randbit share generation
-        info!("Randbit share generation run");
-
-        let randbit_sessionid = SessionId::new(
-            ProtocolType::RandBit,
-            SessionId::pack_slot24(self.counters.rand_bit_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
-
         //Prandbit share generation
         info!("PRandbit share generation");
         let prandbit_sessionid = SessionId::new(
@@ -1380,32 +1371,41 @@ where
             .await
             .take_beaver_triples(total_randbit_to_generate)?;
 
-        // Run Randbit share protocol
-        self.preprocess
-            .rand_bit
-            .init(
-                random_shares_a,
-                beaver_triples,
-                randbit_sessionid,
-                self.params.timeout,
-                network.clone(),
-            )
-            .await?;
+        let max_randbit_batch = 128 * (self.params.threshold + 1);
+        for (random_share_chunk, triple_chunk) in random_shares_a
+            .chunks(max_randbit_batch)
+            .zip(beaver_triples.chunks(max_randbit_batch))
+        {
+            info!("Randbit share generation run");
+            let randbit_sessionid = SessionId::new(
+                ProtocolType::RandBit,
+                SessionId::pack_slot24(self.counters.rand_bit_counter.get_next().await?, 0, 0),
+                self.params.instance_id,
+            );
 
-        // Collect its output
-        let output = self
-            .preprocess
-            .rand_bit
-            .wait_for_result(randbit_sessionid, self.params.timeout)
-            .await?;
-        randbit_output.extend(output);
+            self.preprocess
+                .rand_bit
+                .init(
+                    random_share_chunk.to_vec(),
+                    triple_chunk.to_vec(),
+                    randbit_sessionid,
+                    self.params.timeout,
+                    network.clone(),
+                )
+                .await?;
 
-        // Clear stores
+            let output = self
+                .preprocess
+                .rand_bit
+                .wait_for_result(randbit_sessionid, self.params.timeout)
+                .await?;
+            randbit_output.extend(output);
 
-        self.preprocess
-            .rand_bit
-            .clear_store(randbit_sessionid)
-            .await?;
+            self.preprocess
+                .rand_bit
+                .clear_store(randbit_sessionid)
+                .await?;
+        }
 
         //Prandbit share generation
         info!("PRandbit share generation");

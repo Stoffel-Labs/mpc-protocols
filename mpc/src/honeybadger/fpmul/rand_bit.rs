@@ -235,7 +235,9 @@ where
             return Err(RandBitError::Incompatible);
         }
 
-        if a.len() / (self.threshold + 1) > 256 {
+        // Multiply opens two BatchRecon sessions per (t + 1)-sized chunk using an 8-bit sub_id.
+        // Keep RandBit batches below the point where those child session IDs would collide.
+        if a.len() / (self.threshold + 1) > 128 {
             return Err(RandBitError::ShareLimitError(a.len()));
         }
 
