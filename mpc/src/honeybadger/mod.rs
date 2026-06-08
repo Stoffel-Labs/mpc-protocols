@@ -110,6 +110,14 @@ fn triple_batch_groups_limit() -> usize {
         .unwrap_or(4096)
 }
 
+fn ran_dou_sha_batch_columns_limit() -> usize {
+    std::env::var("HMPC_RANDOUSHA_BATCH_COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1536)
+}
+
 #[derive(Error, Debug)]
 pub enum HoneyBadgerError {
     #[error("network error: {0:?}")]
@@ -1294,7 +1302,7 @@ where
         // Each batched column produces (t + 1) double shares.
         let output_per_column = self.params.threshold + 1;
         let columns_needed = (needed + output_per_column - 1) / output_per_column;
-        let max_columns_per_run = 2048usize;
+        let max_columns_per_run = ran_dou_sha_batch_columns_limit();
         let run = (columns_needed + max_columns_per_run - 1) / max_columns_per_run;
         let mut round_id = 0u8;
         let mut ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await?;
