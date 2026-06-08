@@ -9,6 +9,22 @@ use std::env;
 use std::time::Duration;
 use stoffelmpc_mpc::common::PreprocessingMPCProtocol;
 
+fn env_usize(name: &str, default: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
 async fn run_preprocessing(
     n_parties: usize,
     t: usize,
@@ -76,8 +92,11 @@ fn bench_preprocessing(c: &mut Criterion) {
     }
 
     let mut group = c.benchmark_group("preprocessing");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(60));
+    group.sample_size(env_usize("HMPC_BENCH_SAMPLE_SIZE", 10));
+    group.measurement_time(Duration::from_secs(env_u64(
+        "HMPC_BENCH_MEASUREMENT_SECS",
+        60,
+    )));
 
     for &(n, t, triples, shares, n_prandbit, n_prandint) in &params {
         group.bench_with_input(

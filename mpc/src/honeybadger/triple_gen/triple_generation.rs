@@ -278,15 +278,77 @@ where
         Ok(())
     }
 
+    /// Initializes triple generation for multiple consecutive triple groups in one network
+    /// session. Inputs are flattened as chunks of `2t + 1`; each chunk produces that many Beaver
+    /// triples using the same algebra as `init`.
+    pub async fn init_batch<N: Network>(
+        &mut self,
+        random_shares_a: Vec<RobustShare<F>>,
+        random_shares_b: Vec<RobustShare<F>>,
+        randousha_pairs: Vec<DoubleShamirShare<F>>,
+        session_id: SessionId,
+        network: Arc<N>,
+    ) -> Result<(), TripleGenError> {
+        let group_size = 2 * self.threshold + 1;
+
+        info!(
+            num_randousha = randousha_pairs.len(),
+            num_random_a = random_shares_a.len(),
+            num_random_b = random_shares_b.len(),
+            groups = randousha_pairs.len() / group_size,
+            "Initializing batched TripleGen protocol"
+        );
+
+        assert_eq!(session_id.sub_id(), 0);
+
+        if randousha_pairs.is_empty()
+            || randousha_pairs.len() % group_size != 0
+            || random_shares_a.len() != randousha_pairs.len()
+            || random_shares_b.len() != randousha_pairs.len()
+        {
+            return Err(TripleGenError::NotEnoughPreprocessing);
+        }
+
+        let mut sub_shares_deg_2t = Vec::with_capacity(randousha_pairs.len());
+        for (share_a, share_b, ran_dou_sha) in
+            izip!(&random_shares_a, &random_shares_b, &randousha_pairs)
+        {
+            let mult_share_deg_2t = share_a.share_mul(share_b)?;
+            let sub_share_deg_2t =
+                (mult_share_deg_2t - RobustShare::from(ran_dou_sha.degree_2t.clone()))?;
+            sub_shares_deg_2t.push(sub_share_deg_2t);
+        }
+
+        {
+            let storage_bind = self.get_or_create_store(session_id).await?;
+            let mut storage = storage_bind.lock().await;
+            storage.protocol_state = ProtocolState::Initialized;
+            storage.randousha_pairs = randousha_pairs;
+            storage.random_shares_a_input = random_shares_a;
+            storage.random_shares_b_input = random_shares_b;
+        }
+
+        let storage_bind = self.get_or_create_store(session_id).await?;
+
+        if self
+            .try_finalize_triple_gen(session_id, storage_bind.clone())
+            .await?
+        {
+            return Ok(());
+        }
+
+        self.batch_recon_node
+            .init_batch_reconstruct_many(&sub_shares_deg_2t, session_id, Arc::clone(&network))
+            .await?;
+        Ok(())
+    }
+
     pub async fn batch_recon_finish_handler(
         &mut self,
         session_id: SessionId,
         payload: Vec<u8>,
     ) -> Result<(), TripleGenError> {
         info!("Handling Batch reconstruction results");
-        let batch_recon_result: Vec<F> =
-            deser_bounded_vec(&mut payload.as_slice(), self.n_parties)?;
-
         // SHOULD NEVER HAPPEN, since comes from batch reconstruction
         if session_id.sub_id() != 0 {
             return Err(TripleGenError::SessionIdError(session_id));
@@ -294,6 +356,11 @@ where
 
         // SHOULD ALSO NEVER FAIL, since comes from batch reconstruction
         let storage_bind = self.get_or_create_store(session_id).await?;
+        let expected_len = {
+            let storage = storage_bind.lock().await;
+            storage.randousha_pairs.len()
+        };
+        let batch_recon_result: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), expected_len)?;
         {
             let mut storage = storage_bind.lock().await;
 

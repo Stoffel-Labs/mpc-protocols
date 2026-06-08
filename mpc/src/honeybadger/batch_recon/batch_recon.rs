@@ -7,7 +7,7 @@ use crate::{
     honeybadger::{robust_interpolate::robust_interpolate::RobustShare, WrappedMessage},
 };
 use ark_ff::FftField;
-use ark_serialize::CanonicalSerialize;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use futures::lock::Mutex;
 use std::sync::Arc;
 use std::{
@@ -129,6 +129,54 @@ impl<F: FftField> BatchReconNode<F> {
             //Wrap the msg in global enum
             let wrapped = WrappedMessage::BatchRecon(msg);
             //Send share y_j to each Party j
+            let encoded_msg =
+                bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
+
+            let _ = net.send(j, &encoded_msg).await?;
+        }
+        Ok(())
+    }
+
+    /// Initiates multiple independent batch reconstructions under one protocol session.
+    ///
+    /// `shares` is interpreted as consecutive chunks of `degree + 1` secrets. Each chunk uses the
+    /// same Vandermonde transform as `init_batch_reconstruct`, but all evaluations for a recipient
+    /// are sent in a single message and all reveals are broadcast in a single message.
+    pub async fn init_batch_reconstruct_many<N: Network>(
+        &self,
+        shares: &[RobustShare<F>],
+        session_id: SessionId,
+        net: Arc<N>,
+    ) -> Result<(), BatchReconError> {
+        let batch_width = self.degree + 1;
+        if shares.is_empty() || shares.len() % batch_width != 0 {
+            return Err(BatchReconError::InvalidInput(
+                "batched shares must be a non-empty multiple of degree + 1".to_string(),
+            ));
+        }
+
+        let vandermonde = make_vandermonde::<F>(self.n, self.degree)?;
+        let mut y_shares_by_recipient = vec![Vec::new(); self.n];
+
+        for chunk in shares.chunks_exact(batch_width) {
+            let y_shares = apply_vandermonde(&vandermonde, chunk)?;
+            for (recipient, y_j_share) in y_shares.into_iter().enumerate() {
+                y_shares_by_recipient[recipient].push(y_j_share.share[0]);
+            }
+        }
+
+        info!(
+            id = self.id,
+            groups = shares.len() / batch_width,
+            "initialized batched batch reconstruction with Vandermonde transform"
+        );
+
+        for (j, values) in y_shares_by_recipient.into_iter().enumerate() {
+            let mut payload = Vec::new();
+            values.serialize_compressed(&mut payload)?;
+            let msg =
+                BatchReconMsg::new(self.id, session_id, BatchReconMsgType::EvalBatch, payload);
+            let wrapped = WrappedMessage::BatchRecon(msg);
             let encoded_msg =
                 bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
 
@@ -277,6 +325,151 @@ impl<F: FftField> BatchReconNode<F> {
                             return Err(BatchReconError::InterpolateError(e));
                         }
                     }
+                }
+                Ok(())
+            }
+            BatchReconMsgType::EvalBatch => {
+                debug!(
+                    self_id = self.id,
+                    from = msg.sender_id,
+                    "Received EvalBatch message"
+                );
+                let sender_id = msg.sender_id;
+                let values = Vec::<F>::deserialize_compressed(msg.payload.as_slice())
+                    .map_err(BatchReconError::ArkDeserialization)?;
+
+                if values.is_empty() {
+                    return Err(BatchReconError::InvalidInput(
+                        "empty EvalBatch payload".to_string(),
+                    ));
+                }
+
+                let session_store = match self.get_or_create_store(msg.session_id).await? {
+                    Some(s) => s,
+                    None => return Ok(()),
+                };
+                let mut store = session_store.lock().await;
+
+                if let Some((_, existing)) = store.batch_evals_received.first() {
+                    if existing.len() != values.len() {
+                        return Err(BatchReconError::InvalidInput(
+                            "inconsistent EvalBatch width".to_string(),
+                        ));
+                    }
+                }
+
+                if !store
+                    .batch_evals_received
+                    .iter()
+                    .any(|(id, _)| *id == sender_id)
+                {
+                    store.batch_evals_received.push((sender_id, values));
+                }
+
+                if store.batch_evals_received.len() >= self.degree + self.t + 1
+                    && store.y_j_batch.is_none()
+                {
+                    let batch_len = store.batch_evals_received[0].1.len();
+                    let evals_by_sender = store.batch_evals_received.clone();
+                    let mut y_j_values = Vec::with_capacity(batch_len);
+
+                    for idx in 0..batch_len {
+                        let shares: Vec<_> = evals_by_sender
+                            .iter()
+                            .map(|(sender_id, vals)| {
+                                RobustShare::new(vals[idx], *sender_id, self.degree)
+                            })
+                            .collect();
+                        let (_, value) = RobustShare::recover_secret(&shares, self.n, self.t)?;
+                        y_j_values.push(value);
+                    }
+
+                    store.y_j_batch = Some(y_j_values.clone());
+                    drop(store);
+
+                    let mut payload = Vec::new();
+                    y_j_values.serialize_compressed(&mut payload)?;
+                    let new_msg = BatchReconMsg::new(
+                        self.id,
+                        msg.session_id,
+                        BatchReconMsgType::RevealBatch,
+                        payload,
+                    );
+
+                    let wrapped = WrappedMessage::BatchRecon(new_msg);
+                    let encoded = bincode::serialize(&wrapped)
+                        .map_err(BatchReconError::SerializationError)?;
+                    let _ = net.broadcast(&encoded).await?;
+                }
+                Ok(())
+            }
+            BatchReconMsgType::RevealBatch => {
+                debug!(
+                    self_id = self.id,
+                    from = msg.sender_id,
+                    "Received RevealBatch message"
+                );
+                let sender_id = msg.sender_id;
+                let values = Vec::<F>::deserialize_compressed(msg.payload.as_slice())
+                    .map_err(BatchReconError::ArkDeserialization)?;
+
+                if values.is_empty() {
+                    return Err(BatchReconError::InvalidInput(
+                        "empty RevealBatch payload".to_string(),
+                    ));
+                }
+
+                let session_store = match self.get_or_create_store(msg.session_id).await? {
+                    Some(s) => s,
+                    None => return Ok(()),
+                };
+                let mut store = session_store.lock().await;
+
+                if let Some((_, existing)) = store.batch_reveals_received.first() {
+                    if existing.len() != values.len() {
+                        return Err(BatchReconError::InvalidInput(
+                            "inconsistent RevealBatch width".to_string(),
+                        ));
+                    }
+                }
+
+                if !store
+                    .batch_reveals_received
+                    .iter()
+                    .any(|(id, _)| *id == sender_id)
+                {
+                    store.batch_reveals_received.push((sender_id, values));
+                }
+
+                if store.batch_reveals_received.len() >= self.degree + self.t + 1
+                    && store.secrets.is_none()
+                {
+                    let batch_len = store.batch_reveals_received[0].1.len();
+                    let reveals_by_sender = store.batch_reveals_received.clone();
+                    let mut result = Vec::with_capacity(batch_len * (self.degree + 1));
+
+                    for idx in 0..batch_len {
+                        let shares: Vec<_> = reveals_by_sender
+                            .iter()
+                            .map(|(sender_id, vals)| {
+                                RobustShare::new(vals[idx], *sender_id, self.degree)
+                            })
+                            .collect();
+                        let (mut poly, _) = RobustShare::recover_secret(&shares, self.n, self.t)?;
+                        poly.resize(self.degree + 1, F::zero());
+                        result.extend(poly);
+                    }
+
+                    let mut bytes_message = Vec::new();
+                    result.serialize_compressed(&mut bytes_message)?;
+
+                    store.secrets = Some(bytes_message);
+                    drop(store);
+
+                    self.output_sender
+                        .send(msg.session_id)
+                        .await
+                        .map_err(|_| BatchReconError::SendError)?;
                 }
                 Ok(())
             }

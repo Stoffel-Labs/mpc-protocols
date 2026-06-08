@@ -73,7 +73,7 @@ use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
 use serde::{Deserialize, Serialize};
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Instant};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
 use thiserror::Error;
 use tokio::{sync::Mutex, time::Duration};
@@ -83,6 +83,32 @@ use triple_gen::triple_generation::TripleGenNode;
 /// Maximum number of bytes accepted from a single network message before deserialization.
 /// Rejects payloads that would cause multi-gigabyte allocations via a crafted length prefix.
 const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+
+fn preprocessing_trace_enabled() -> bool {
+    std::env::var("HMPC_PREPROCESSING_TRACE")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn trace_preprocessing_phase(party_id: PartyId, phase: &str, items: usize, started: Instant) {
+    if preprocessing_trace_enabled() {
+        eprintln!(
+            "[hmpc preprocessing] party={} phase={} items={} elapsed_ms={}",
+            party_id,
+            phase,
+            items,
+            started.elapsed().as_millis()
+        );
+    }
+}
+
+fn triple_batch_groups_limit() -> usize {
+    std::env::var("HMPC_TRIPLE_BATCH_GROUPS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(4096)
+}
 
 #[derive(Error, Debug)]
 pub enum HoneyBadgerError {
@@ -1074,16 +1100,25 @@ where
             // ------------------------
             // Step 1. Ensure random shares
             // ------------------------
+            let phase_start = Instant::now();
             self.ensure_random_shares(network.clone(), rng, total_random_shares_to_generate)
                 .await?;
+            trace_preprocessing_phase(
+                self.id,
+                "random_shares",
+                total_random_shares_to_generate,
+                phase_start,
+            );
             info!("Random share generation done");
 
             // ------------------------
             // Step 2. Ensure RanDouSha pair
             // ------------------------
+            let phase_start = Instant::now();
             let ran_dou_sha_pair = self
                 .ensure_ran_dou_sha_pair(network.clone(), rng, total_triples_to_generate)
                 .await?;
+            trace_preprocessing_phase(self.id, "randousha", total_triples_to_generate, phase_start);
             info!("Randousha pair generation done");
 
             // ------------------------
@@ -1105,69 +1140,66 @@ where
             let mut round_id = 0u8;
             let mut group_index = 0;
             let total_groups = total_triples_to_generate / group_size;
+            let phase_start = Instant::now();
+            let max_batch_groups = triple_batch_groups_limit();
 
             while group_index < total_groups {
-                let batch_groups = (total_groups - group_index).min(64);
-                let mut session_ids = Vec::with_capacity(batch_groups);
+                let batch_groups = (total_groups - group_index).min(max_batch_groups);
+                let share_start = group_index * group_size;
+                let share_end = share_start + batch_groups * group_size;
 
-                for offset in 0..batch_groups {
-                    let share_start = (group_index + offset) * group_size;
-                    let share_end = share_start + group_size;
+                let sessionid = SessionId::new(
+                    ProtocolType::Triple,
+                    SessionId::pack_slot24(triple_counter, 0, round_id),
+                    self.params.instance_id,
+                );
+                self.preprocess
+                    .triple_gen
+                    .init_batch(
+                        random_shares_a[share_start..share_end].to_vec(),
+                        random_shares_b[share_start..share_end].to_vec(),
+                        ran_dou_sha_pair[share_start..share_end].to_vec(),
+                        sessionid,
+                        network.clone(),
+                    )
+                    .await?;
 
-                    let sessionid = SessionId::new(
-                        ProtocolType::Triple,
-                        SessionId::pack_slot24(triple_counter, 0, round_id),
-                        self.params.instance_id,
-                    );
-                    self.preprocess
-                        .triple_gen
-                        .init(
-                            random_shares_a[share_start..share_end].to_vec(),
-                            random_shares_b[share_start..share_end].to_vec(),
-                            ran_dou_sha_pair[share_start..share_end].to_vec(),
-                            sessionid,
-                            network.clone(),
-                        )
-                        .await?;
-                    session_ids.push(sessionid);
+                let triples = self
+                    .preprocess
+                    .triple_gen
+                    .wait_for_result(sessionid, self.params.timeout)
+                    .await?;
+                self.preprocessing_material
+                    .lock()
+                    .await
+                    .add(Some(triples), None, None, None);
+                assert!(self.preprocess.triple_gen.clear_store(sessionid).await);
 
-                    if round_id == 255 {
-                        triple_counter = self.counters.triple_counter.get_next().await?;
-                        round_id = 0;
-                    } else {
-                        round_id += 1;
-                    }
-                }
-
-                // ------------------------
-                // Step 4. Collect triples
-                // ------------------------
-                for sessionid in session_ids {
-                    let triples = self
-                        .preprocess
-                        .triple_gen
-                        .wait_for_result(sessionid, self.params.timeout)
-                        .await?;
-                    self.preprocessing_material
-                        .lock()
-                        .await
-                        .add(Some(triples), None, None, None);
-                    assert!(self.preprocess.triple_gen.clear_store(sessionid).await);
+                if round_id == 255 {
+                    triple_counter = self.counters.triple_counter.get_next().await?;
+                    round_id = 0;
+                } else {
+                    round_id += 1;
                 }
 
                 group_index += batch_groups;
             }
+            trace_preprocessing_phase(self.id, "triples", total_triples_to_generate, phase_start);
         }
         // ------------------------
         // Step 5. Generate Random bits
         // ------------------------
+        let phase_start = Instant::now();
         self.ensure_prandbit_shares(network.clone()).await?;
+        trace_preprocessing_phase(self.id, "prandbit", self.params.n_prandbit, phase_start);
         info!("PrandBit share generation done");
 
         // ------------------------
         // Step 6. Generate Random Int
         // ------------------------
+        let phase_start = Instant::now();
         self.ensure_prandint_shares(network.clone()).await?;
+        trace_preprocessing_phase(self.id, "prandint", self.params.n_prandint, phase_start);
         info!("PrandInt share generation done");
 
         Ok(())
