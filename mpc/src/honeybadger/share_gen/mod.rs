@@ -110,9 +110,11 @@ pub enum RanShaMessageType {
 pub enum RanShaPayload {
     Share(Vec<u8>),
     Shares(Vec<Vec<u8>>),
+    SharesBatch(Vec<u8>),
     /// Contains the share of r sent during reconstruction.
     Reconstruct(Vec<u8>),
     ReconstructShares(Vec<Vec<u8>>),
+    ReconstructSharesBatch(Vec<u8>),
     /// Output message confirming reconstruction success or failure.
     Output(bool),
 }

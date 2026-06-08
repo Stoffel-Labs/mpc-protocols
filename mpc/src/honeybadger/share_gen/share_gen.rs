@@ -1,6 +1,6 @@
 use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
-use ark_serialize::CanonicalSerialize;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use bincode::Options;
 use std::{collections::HashMap, sync::Arc};
@@ -260,13 +260,9 @@ where
                 shares_t[0].serialize_compressed(&mut payload)?;
                 RanShaPayload::Share(payload)
             } else {
-                let mut payloads = Vec::with_capacity(batch_size);
-                for share_t in shares_t {
-                    let mut payload = Vec::new();
-                    share_t.serialize_compressed(&mut payload)?;
-                    payloads.push(payload);
-                }
-                RanShaPayload::Shares(payloads)
+                let mut payload = Vec::new();
+                shares_t.serialize_compressed(&mut payload)?;
+                RanShaPayload::SharesBatch(payload)
             };
 
             // Create and serialize the generic message.
@@ -302,26 +298,37 @@ where
             return Err(RanShaError::SessionIdError(msg.session_id));
         }
 
-        let payloads = match msg.payload {
-            RanShaPayload::Share(s) => vec![s],
-            RanShaPayload::Shares(s) => s,
-            _ => return Err(RanShaError::Abort),
-        };
         if msg.sender_id >= self.n_parties {
             return Err(RanShaError::InvalidPartyId);
         }
 
-        let mut shares = Vec::with_capacity(payloads.len());
-        for payload in payloads {
-            let share: ShamirShare<F, 1, Robust> =
-                ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+        let shares: Vec<ShamirShare<F, 1, Robust>> = match msg.payload {
+            RanShaPayload::Share(payload) => {
+                vec![CanonicalDeserialize::deserialize_compressed(
+                    payload.as_slice(),
+                )?]
+            }
+            RanShaPayload::Shares(payloads) => {
+                let mut shares = Vec::with_capacity(payloads.len());
+                for payload in payloads {
+                    shares.push(CanonicalDeserialize::deserialize_compressed(
+                        payload.as_slice(),
+                    )?);
+                }
+                shares
+            }
+            RanShaPayload::SharesBatch(payload) => {
+                CanonicalDeserialize::deserialize_compressed(payload.as_slice())?
+            }
+            _ => return Err(RanShaError::Abort),
+        };
+        for share in &shares {
             if share.id != self.id {
                 return Err(ShareError::IdMismatch.into());
             }
             if share.degree != self.threshold {
                 return Err(ShareError::DegreeMismatch.into());
             }
-            shares.push(share);
         }
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut ransha_storage = binding.lock().await;
@@ -435,13 +442,9 @@ where
                 shares[0].serialize_compressed(&mut bytes_rec_message)?;
                 RanShaPayload::Reconstruct(bytes_rec_message)
             } else {
-                let mut bytes_rec_messages = Vec::with_capacity(shares.len());
-                for share in shares {
-                    let mut bytes_rec_message = Vec::new();
-                    share.serialize_compressed(&mut bytes_rec_message)?;
-                    bytes_rec_messages.push(bytes_rec_message);
-                }
-                RanShaPayload::ReconstructShares(bytes_rec_messages)
+                let mut bytes_rec_messages = Vec::new();
+                shares.serialize_compressed(&mut bytes_rec_messages)?;
+                RanShaPayload::ReconstructSharesBatch(bytes_rec_messages)
             };
             let message = WrappedMessage::RanSha(RanShaMessage::new(
                 self.id,
@@ -464,27 +467,37 @@ where
         N: Network + Send + Sync,
     {
         info!("party {:?} at reconstruction handler", self.id);
-        let payloads = match msg.payload {
-            RanShaPayload::Reconstruct(s) => vec![s],
-            RanShaPayload::ReconstructShares(s) => s,
-            _ => return Err(RanShaError::Abort),
-        };
-
         if msg.session_id.sub_id() != 0 {
             return Err(RanShaError::SessionIdError(msg.session_id));
         }
 
-        let mut shares = Vec::with_capacity(payloads.len());
-        for payload in payloads {
-            let share: ShamirShare<F, 1, Robust> =
-                ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+        let shares: Vec<ShamirShare<F, 1, Robust>> = match msg.payload {
+            RanShaPayload::Reconstruct(payload) => {
+                vec![CanonicalDeserialize::deserialize_compressed(
+                    payload.as_slice(),
+                )?]
+            }
+            RanShaPayload::ReconstructShares(payloads) => {
+                let mut shares = Vec::with_capacity(payloads.len());
+                for payload in payloads {
+                    shares.push(CanonicalDeserialize::deserialize_compressed(
+                        payload.as_slice(),
+                    )?);
+                }
+                shares
+            }
+            RanShaPayload::ReconstructSharesBatch(payload) => {
+                CanonicalDeserialize::deserialize_compressed(payload.as_slice())?
+            }
+            _ => return Err(RanShaError::Abort),
+        };
+        for share in &shares {
             if share.degree != self.threshold {
                 return Err(RanShaError::ShareError(ShareError::DegreeMismatch));
             }
             if share.id != msg.sender_id {
                 return Err(RanShaError::ShareError(ShareError::IdMismatch));
             }
-            shares.push(share);
         }
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
