@@ -186,32 +186,36 @@ fn bench_mul(c: &mut Criterion) {
 
     let params: &[(usize, usize, usize)] = &[(5, 1, 1), (5, 1, 10), (10, 3, 1), (10, 3, 10)];
 
-    let mut group = c.benchmark_group("mul");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(60));
+    if std::env::var_os("HMPC_MUL_STRESS_ONLY").is_none() {
+        let mut group = c.benchmark_group("mul");
+        group.sample_size(10);
+        group.measurement_time(Duration::from_secs(60));
 
-    for &(n, t, m) in params {
-        group.bench_with_input(
-            BenchmarkId::new("protocol", format!("n{n}_t{t}_m{m}")),
-            &(n, t, m),
-            |b, &(n, t, m)| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let (nodes, network, x, y) = setup_mul(n, t, m).await;
-                        let start = std::time::Instant::now();
-                        run_mul(nodes, network, x, y).await;
-                        total += start.elapsed();
-                    }
-                    total
-                })
-            },
-        );
+        for &(n, t, m) in params {
+            group.bench_with_input(
+                BenchmarkId::new("protocol", format!("n{n}_t{t}_m{m}")),
+                &(n, t, m),
+                |b, &(n, t, m)| {
+                    b.to_async(&rt).iter_custom(|iters| async move {
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            let (nodes, network, x, y) = setup_mul(n, t, m).await;
+                            let start = std::time::Instant::now();
+                            run_mul(nodes, network, x, y).await;
+                            total += start.elapsed();
+                        }
+                        total
+                    })
+                },
+            );
+        }
+
+        group.finish();
     }
 
-    group.finish();
-
-    if std::env::var_os("HMPC_MUL_STRESS").is_some() {
+    if std::env::var_os("HMPC_MUL_STRESS").is_some()
+        || std::env::var_os("HMPC_MUL_STRESS_ONLY").is_some()
+    {
         let mut stress = c.benchmark_group("mul_stress");
         stress.sample_size(10);
         stress.measurement_time(Duration::from_secs(30));

@@ -493,6 +493,9 @@ where
     ) -> Result<Vec<RobustShare<F>>, Self::Error> {
         // Both lists must have the same length.
         assert_eq!(x.len(), y.len());
+        if x.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let (no_triples, _, _, _) = {
             let store = self.preprocessing_material.lock().await;
@@ -503,39 +506,54 @@ where
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(network.clone(), &mut rng).await?;
         }
-        // Extract the preprocessing triple.
-        let beaver_triples = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_beaver_triples(x.len())?;
+        let max_pairs_per_session = max_mul_pairs_per_session(self.params.threshold);
+        let mut result = Vec::with_capacity(x.len());
+        for (x_chunk, y_chunk) in x
+            .chunks(max_pairs_per_session)
+            .zip(y.chunks(max_pairs_per_session))
+        {
+            // Extract preprocessing triples for this protocol session.
+            let beaver_triples = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_beaver_triples(x_chunk.len())?;
 
-        let mul_exec_id: u16 = self.counters.mul_counter.get_next().await?;
-        let session_id = SessionId::new(
-            ProtocolType::Mul,
-            SessionId::pack_mul_parent_slot24(mul_exec_id),
-            self.params.instance_id,
-        );
-
-        // Call the mul function
-        self.operations
-            .mul
-            .init(session_id, x, y, beaver_triples, network)
-            .await?;
-
-        let result = self
-            .operations
-            .mul
-            .wait_for_result(session_id, self.params.timeout)
-            .await
-            .map_err(HoneyBadgerError::from)?;
-
-        if let Err(error) = self.operations.mul.clear_store(session_id).await {
-            warn!(
-                ?session_id,
-                ?error,
-                "failed to clear completed multiplication protocol state"
+            let mul_exec_id: u16 = self.counters.mul_counter.get_next().await?;
+            let session_id = SessionId::new(
+                ProtocolType::Mul,
+                SessionId::pack_mul_parent_slot24(mul_exec_id),
+                self.params.instance_id,
             );
+
+            // Call the mul function.
+            self.operations
+                .mul
+                .init(
+                    session_id,
+                    x_chunk.to_vec(),
+                    y_chunk.to_vec(),
+                    beaver_triples,
+                    network.clone(),
+                )
+                .await?;
+
+            let mut chunk_result = self
+                .operations
+                .mul
+                .wait_for_result(session_id, self.params.timeout)
+                .await
+                .map_err(HoneyBadgerError::from)?;
+
+            if let Err(error) = self.operations.mul.clear_store(session_id).await {
+                warn!(
+                    ?session_id,
+                    ?error,
+                    "failed to clear completed multiplication protocol state"
+                );
+            }
+
+            result.append(&mut chunk_result);
         }
 
         Ok(result)
@@ -1608,6 +1626,12 @@ fn chunk_sizes(total: usize, max_chunk_size: usize) -> impl Iterator<Item = usiz
         .map(move |start| (total - start).min(max_chunk_size))
 }
 
+fn max_mul_pairs_per_session(threshold: usize) -> usize {
+    // Mul child sessions encode batch-reconstruction children in a 6-bit child id.
+    // Each batch-reconstruction chunk uses two child ids: one for a - x and one for b - y.
+    32 * threshold.saturating_add(1)
+}
+
 ///Used for routing messages to respective sub-protocols
 #[derive(Serialize, Deserialize, Debug)]
 pub enum WrappedMessage {
@@ -2028,5 +2052,12 @@ mod tests {
         assert_eq!(wrapped.mul_child_parent_exec_id(), 256);
         assert_eq!(wrapped.mul_child_sub_id(), 1);
         assert_eq!(wrapped.mul_child_round_id(), 1);
+    }
+
+    #[test]
+    fn test_max_mul_pairs_per_session_tracks_child_session_space() {
+        assert_eq!(max_mul_pairs_per_session(0), 32);
+        assert_eq!(max_mul_pairs_per_session(1), 64);
+        assert_eq!(max_mul_pairs_per_session(3), 128);
     }
 }
