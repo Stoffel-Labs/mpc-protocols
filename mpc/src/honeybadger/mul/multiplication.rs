@@ -197,7 +197,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
         SessionId::new(
             child_session_id.calling_protocol().unwrap(),
-            SessionId::pack_slot24(child_session_id.exec_id(), 0, 0),
+            SessionId::pack_mul_parent_slot24(child_session_id.mul_child_parent_exec_id()),
             child_session_id.instance_id(),
         )
     }
@@ -227,29 +227,21 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 .allow_trailing_bytes()
                 .with_limit(MAX_MESSAGE_SIZE)
                 .deserialize(&output)?;
-            let authenticated_sender = id.sub_id() as usize;
+            let authenticated_sender = id.mul_child_sub_id() as usize;
             if msg.sender != authenticated_sender {
                 warn!(
                     "Dropping 
                 RBC output: inner sender {} does not match session's designated sender {}",
-                    msg.sender,
-                    id.sub_id()
+                    msg.sender, authenticated_sender
                 );
                 continue;
             }
-            if msg.session_id.exec_id() != id.exec_id()
-                || msg.session_id.instance_id() != id.instance_id()
-            {
+            if msg.session_id != id {
                 warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
                 continue;
             }
-            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != id.sub_id()
-            {
-                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
-                continue;
-            }
 
-            if id.round_id() != 2 {
+            if id.mul_child_round_id() != 2 {
                 warn!("Dropping RBC output: unexpected round_id for Mul RBC message");
                 continue;
             }
@@ -316,7 +308,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         for i in 0..no_of_batch {
             let session_id1 = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot24(session_id.exec_id(), (2 * i) as u8, 1),
+                SessionId::pack_mul_child_slot24(session_id.mul_parent_exec_id(), (2 * i) as u8, 1),
                 session_id.instance_id(),
             );
             self.batch_recon.clear_store(session_id1).await;
@@ -324,7 +316,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
             let session_id2 = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot24(session_id.exec_id(), (2 * i + 1) as u8, 1),
+                SessionId::pack_mul_child_slot24(
+                    session_id.mul_parent_exec_id(),
+                    (2 * i + 1) as u8,
+                    1,
+                ),
                 session_id.instance_id(),
             );
             self.batch_recon.clear_store(session_id2).await;
@@ -334,7 +330,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         for party_id in 0..self.n {
             let rbc_session_id = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot24(session_id.exec_id(), party_id as u8, 2),
+                SessionId::pack_mul_child_slot24(
+                    session_id.mul_parent_exec_id(),
+                    party_id as u8,
+                    2,
+                ),
                 session_id.instance_id(),
             );
             self.rbc.clear_session(rbc_session_id).await;
@@ -482,7 +482,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             if !have_batch_recon1[i] {
                 let session_id1 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
-                    SessionId::pack_slot24(session_id.exec_id(), (2 * i) as u8, 1),
+                    SessionId::pack_mul_child_slot24(
+                        session_id.mul_parent_exec_id(),
+                        (2 * i) as u8,
+                        1,
+                    ),
                     session_id.instance_id(),
                 );
                 self.register_child_session(session_id1, session_id).await;
@@ -495,7 +499,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             if !have_batch_recon2[i] {
                 let session_id2 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
-                    SessionId::pack_slot24(session_id.exec_id(), (2 * i + 1) as u8, 1),
+                    SessionId::pack_mul_child_slot24(
+                        session_id.mul_parent_exec_id(),
+                        (2 * i + 1) as u8,
+                        1,
+                    ),
                     session_id.instance_id(),
                 );
                 self.register_child_session(session_id2, session_id).await;
@@ -516,7 +524,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
             let sessionid = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot24(session_id.exec_id(), self.id as u8, 2),
+                SessionId::pack_mul_child_slot24(session_id.mul_parent_exec_id(), self.id as u8, 2),
                 session_id.instance_id(),
             );
             self.register_child_session(sessionid, session_id).await;
@@ -578,9 +586,9 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         // 2.
-        if sid.round_id() == 1 {
+        if sid.mul_child_round_id() == 1 {
             let open: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), self.n)?;
-            let dealer_id = sid.sub_id();
+            let dealer_id = sid.mul_child_sub_id();
             let (target_map, label) = if dealer_id % 2 == 0 {
                 (&mut storage.output_open_mult1, "a-x")
             } else {
@@ -603,7 +611,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             );
 
             target_map.insert(dealer_id, open);
-        } else if sid.round_id() == 2 {
+        } else if sid.mul_child_round_id() == 2 {
             info!(
                 self_id = self.id,
                 "Received shares for reconstruction using RBC for session_id: {:?}", session_id
@@ -1197,12 +1205,16 @@ pub mod tests {
         {
             let session_id_a = SessionId::new(
                 ProtocolType::Mul,
-                SessionId::pack_slot24(session_id.exec_id(), (2 * i) as u8, 1),
+                SessionId::pack_mul_child_slot24(session_id.mul_parent_exec_id(), (2 * i) as u8, 1),
                 session_id.instance_id(),
             );
             let session_id_b = SessionId::new(
                 ProtocolType::Mul,
-                SessionId::pack_slot24(session_id.exec_id(), (2 * i + 1) as u8, 1),
+                SessionId::pack_mul_child_slot24(
+                    session_id.mul_parent_exec_id(),
+                    (2 * i + 1) as u8,
+                    1,
+                ),
                 session_id.instance_id(),
             );
 
@@ -1251,7 +1263,11 @@ pub mod tests {
 
                 let shared_session_id = SessionId::new(
                     ProtocolType::Mul,
-                    SessionId::pack_slot24(session_id.exec_id(), mul_node.id as u8, 2),
+                    SessionId::pack_mul_child_slot24(
+                        session_id.mul_parent_exec_id(),
+                        mul_node.id as u8,
+                        2,
+                    ),
                     session_id.instance_id(),
                 );
 

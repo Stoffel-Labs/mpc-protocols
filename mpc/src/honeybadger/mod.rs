@@ -583,7 +583,12 @@ where
                     ));
                 }
                 if rbc_msg.msg_type.is_dealer_message() {
-                    let expected_dealer = rbc_msg.session_id.sub_id() as usize;
+                    let expected_dealer =
+                        if rbc_msg.session_id.calling_protocol() == Some(ProtocolType::Mul) {
+                            rbc_msg.session_id.mul_child_sub_id() as usize
+                        } else {
+                            rbc_msg.session_id.sub_id() as usize
+                        };
                     if rbc_msg.sender_id != expected_dealer {
                         warn!(
                             "Rejecting dealer message: sender {} is not expected dealer {} for session {:?}",
@@ -1862,6 +1867,44 @@ impl SessionId {
     pub fn pack_mul_parent_slot24(exec_id: u16) -> u32 {
         Self::pack_slot24((exec_id & 0x00FF) as u8, (exec_id >> 8) as u8, 0)
     }
+
+    #[inline]
+    pub fn mul_parent_exec_id(self) -> u16 {
+        ((self.sub_id() as u16) << 8) | self.exec_id() as u16
+    }
+
+    #[inline]
+    pub fn pack_mul_child_slot24(parent_exec_id: u16, child_sub_id: u8, round_id: u8) -> u32 {
+        assert!(
+            child_sub_id < 32,
+            "Mul child sub_id exceeds 5-bit session space"
+        );
+        assert!(
+            round_id < 4,
+            "Mul child round_id exceeds 2-bit session space"
+        );
+        ((parent_exec_id as u32) << 7) | ((child_sub_id as u32) << 2) | round_id as u32
+    }
+
+    #[inline]
+    fn slot24(self) -> u32 {
+        ((self.0 >> 32) & 0x00FF_FFFF) as u32
+    }
+
+    #[inline]
+    pub fn mul_child_parent_exec_id(self) -> u16 {
+        (self.slot24() >> 7) as u16
+    }
+
+    #[inline]
+    pub fn mul_child_sub_id(self) -> u8 {
+        ((self.slot24() >> 2) & 0x1F) as u8
+    }
+
+    #[inline]
+    pub fn mul_child_round_id(self) -> u8 {
+        (self.slot24() & 0x03) as u8
+    }
 }
 
 #[cfg(test)]
@@ -1964,5 +2007,26 @@ mod tests {
         assert_ne!(first.sub_id(), wrapped.sub_id());
         assert_eq!(first.instance_id(), instance_id);
         assert_eq!(wrapped.instance_id(), instance_id);
+    }
+
+    #[test]
+    fn test_extended_mul_child_session_ids_are_unique_across_u8_exec_wrap() {
+        let instance_id = 0x00AA_55AA;
+        let first = SessionId::new(
+            ProtocolType::Mul,
+            SessionId::pack_mul_child_slot24(0, 1, 1),
+            instance_id,
+        );
+        let wrapped = SessionId::new(
+            ProtocolType::Mul,
+            SessionId::pack_mul_child_slot24(256, 1, 1),
+            instance_id,
+        );
+
+        assert_ne!(first, wrapped);
+        assert_eq!(first.mul_child_parent_exec_id(), 0);
+        assert_eq!(wrapped.mul_child_parent_exec_id(), 256);
+        assert_eq!(wrapped.mul_child_sub_id(), 1);
+        assert_eq!(wrapped.mul_child_round_id(), 1);
     }
 }
