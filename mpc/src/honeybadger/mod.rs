@@ -1876,14 +1876,14 @@ impl SessionId {
     #[inline]
     pub fn pack_mul_child_slot24(parent_exec_id: u16, child_sub_id: u8, round_id: u8) -> u32 {
         assert!(
-            child_sub_id < 32,
-            "Mul child sub_id exceeds 5-bit session space"
+            child_sub_id < 64,
+            "Mul child sub_id exceeds 6-bit session space"
         );
         assert!(
             round_id < 4,
             "Mul child round_id exceeds 2-bit session space"
         );
-        ((parent_exec_id as u32) << 7) | ((child_sub_id as u32) << 2) | round_id as u32
+        ((parent_exec_id as u32) << 8) | ((child_sub_id as u32) << 2) | round_id as u32
     }
 
     #[inline]
@@ -1893,12 +1893,12 @@ impl SessionId {
 
     #[inline]
     pub fn mul_child_parent_exec_id(self) -> u16 {
-        (self.slot24() >> 7) as u16
+        (self.slot24() >> 8) as u16
     }
 
     #[inline]
     pub fn mul_child_sub_id(self) -> u8 {
-        ((self.slot24() >> 2) & 0x1F) as u8
+        ((self.slot24() >> 2) & 0x3F) as u8
     }
 
     #[inline]
