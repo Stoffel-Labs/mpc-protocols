@@ -281,6 +281,9 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
 #[derive(Clone, Debug)]
 pub struct SubProtocolCounter(Arc<Mutex<Option<u8>>>);
 
+#[derive(Clone, Debug)]
+pub struct WideSubProtocolCounter(Arc<Mutex<Option<u16>>>);
+
 trait GetNext<T> {
     async fn get_next(&self) -> Result<T, HoneyBadgerError>;
 }
@@ -304,6 +307,25 @@ impl GetNext<u8> for SubProtocolCounter {
     }
 }
 
+impl GetNext<u16> for WideSubProtocolCounter {
+    async fn get_next(&self) -> Result<u16, HoneyBadgerError> {
+        let mut counter = self.0.lock().await;
+
+        match &mut *counter {
+            None => Err(HoneyBadgerError::LimitError),
+            Some(value) => {
+                let current = *value;
+                if *value == u16::MAX {
+                    *counter = None;
+                } else {
+                    *value += 1;
+                }
+                Ok(current)
+            }
+        }
+    }
+}
+
 /// Per sub-protocol there is a counter to increment the exec ID within the
 /// session ID and distinguish different executions of the same sub-protocol.
 #[derive(Clone, Debug)]
@@ -313,7 +335,7 @@ pub struct SubProtocolCounters {
     pub triple_counter: SubProtocolCounter,
     pub batch_recon_counter: SubProtocolCounter,
     pub dou_sha_counter: SubProtocolCounter,
-    pub mul_counter: SubProtocolCounter,
+    pub mul_counter: WideSubProtocolCounter,
     pub rand_bit_counter: SubProtocolCounter,
     pub prand_bit_counter: SubProtocolCounter,
     pub prand_int_counter: SubProtocolCounter,
@@ -329,7 +351,7 @@ impl SubProtocolCounters {
             triple_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             batch_recon_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             dou_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            mul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            mul_counter: WideSubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             rand_bit_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             prand_bit_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             prand_int_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
@@ -488,10 +510,11 @@ where
             .await
             .take_beaver_triples(x.len())?;
 
+        let mul_exec_id: u16 = self.counters.mul_counter.get_next().await?;
         let session_id = SessionId::new(
             ProtocolType::Mul,
-            SessionId::pack_slot24(self.counters.mul_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
+            SessionId::pack_slot24((mul_exec_id & 0x00FF) as u8, 0, 0),
+            SessionId::extended_mul_instance_id(self.params.instance_id, mul_exec_id),
         );
 
         // Call the mul function
@@ -1834,6 +1857,11 @@ impl SessionId {
     pub fn pack_slot24(exec_id: u8, sub_id: u8, round_id: u8) -> u32 {
         ((exec_id as u32) << 16) | ((sub_id as u32) << 8) | round_id as u32
     }
+
+    #[inline]
+    pub fn extended_mul_instance_id(base_instance_id: u32, exec_id: u16) -> u32 {
+        base_instance_id ^ (((exec_id as u32) & 0xFF00) << 16)
+    }
 }
 
 #[cfg(test)]
@@ -1906,5 +1934,34 @@ mod tests {
         // Second call should return error (None)
         let err = counter.get_next().await;
         assert!(matches!(err, Err(HoneyBadgerError::LimitError)));
+    }
+
+    #[tokio::test]
+    async fn test_wide_subprotocol_counter_crosses_u8_boundary() {
+        let counter = WideSubProtocolCounter(Arc::new(Mutex::new(Some(254))));
+
+        assert_eq!(counter.get_next().await.unwrap(), 254);
+        assert_eq!(counter.get_next().await.unwrap(), 255);
+        assert_eq!(counter.get_next().await.unwrap(), 256);
+    }
+
+    #[test]
+    fn test_extended_mul_session_ids_are_unique_across_u8_exec_wrap() {
+        let base_instance_id = 0x00AA_55AA;
+        let first = SessionId::new(
+            ProtocolType::Mul,
+            SessionId::pack_slot24(0, 0, 0),
+            SessionId::extended_mul_instance_id(base_instance_id, 0),
+        );
+        let wrapped = SessionId::new(
+            ProtocolType::Mul,
+            SessionId::pack_slot24(0, 0, 0),
+            SessionId::extended_mul_instance_id(base_instance_id, 256),
+        );
+
+        assert_ne!(first, wrapped);
+        assert_eq!(first.exec_id(), wrapped.exec_id());
+        assert_eq!(first.instance_id(), base_instance_id);
+        assert_ne!(wrapped.instance_id(), base_instance_id);
     }
 }
