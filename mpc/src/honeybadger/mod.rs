@@ -1476,7 +1476,7 @@ where
             .await
             .take_beaver_triples(total_randbit_to_generate)?;
 
-        let max_randbit_batch = 64 * (self.params.threshold + 1);
+        let max_randbit_batch = max_mul_pairs_per_session(self.params.threshold);
         for (random_share_chunk, triple_chunk) in random_shares_a
             .chunks(max_randbit_batch)
             .zip(beaver_triples.chunks(max_randbit_batch))
@@ -2058,6 +2058,7 @@ mod tests {
     fn test_max_mul_pairs_per_session_tracks_child_session_space() {
         assert_eq!(max_mul_pairs_per_session(0), 32);
         assert_eq!(max_mul_pairs_per_session(1), 64);
+        assert_eq!(max_mul_pairs_per_session(2), 96);
         assert_eq!(max_mul_pairs_per_session(3), 128);
     }
 }
