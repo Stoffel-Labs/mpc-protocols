@@ -145,6 +145,7 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub t: usize,
     pub mult_storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<MultStorage<F>>>>>>,
     cleared_sessions: Arc<Mutex<HashSet<SessionId>>>,
+    child_sessions: Arc<Mutex<HashMap<SessionId, SessionId>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
     pub rbc: R,
@@ -170,11 +171,35 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             t: threshold,
             mult_storage: Arc::new(Mutex::new(HashMap::new())),
             cleared_sessions: Arc::new(Mutex::new(HashSet::new())),
+            child_sessions: Arc::new(Mutex::new(HashMap::new())),
             batch_recon,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
+    }
+
+    async fn register_child_session(
+        &self,
+        child_session_id: SessionId,
+        parent_session_id: SessionId,
+    ) {
+        self.child_sessions
+            .lock()
+            .await
+            .insert(child_session_id, parent_session_id);
+    }
+
+    async fn parent_session_for_child(&self, child_session_id: SessionId) -> SessionId {
+        if let Some(parent_session_id) = self.child_sessions.lock().await.get(&child_session_id) {
+            return *parent_session_id;
+        }
+
+        SessionId::new(
+            child_session_id.calling_protocol().unwrap(),
+            SessionId::pack_slot24(child_session_id.exec_id(), 0, 0),
+            child_session_id.instance_id(),
+        )
     }
     pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {
         loop {
@@ -295,6 +320,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 session_id.instance_id(),
             );
             self.batch_recon.clear_store(session_id1).await;
+            self.child_sessions.lock().await.remove(&session_id1);
 
             let session_id2 = SessionId::new(
                 session_id.calling_protocol().unwrap(),
@@ -302,6 +328,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 session_id.instance_id(),
             );
             self.batch_recon.clear_store(session_id2).await;
+            self.child_sessions.lock().await.remove(&session_id2);
         }
 
         for party_id in 0..self.n {
@@ -311,6 +338,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 session_id.instance_id(),
             );
             self.rbc.clear_session(rbc_session_id).await;
+            self.child_sessions.lock().await.remove(&rbc_session_id);
         }
 
         let mut store = self.mult_storage.lock().await;
@@ -362,7 +390,6 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         assert!(session_id.calling_protocol().is_some());
-        assert_eq!(session_id.sub_id(), 0);
         assert_eq!(session_id.round_id(), 0);
 
         let no_of_mul = x.len();
@@ -458,6 +485,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                     SessionId::pack_slot24(session_id.exec_id(), (2 * i) as u8, 1),
                     session_id.instance_id(),
                 );
+                self.register_child_session(session_id1, session_id).await;
                 // Execute batch reconstruction for a-x values
                 self.batch_recon
                     .init_batch_reconstruct(chunk_a, session_id1, Arc::clone(&network))
@@ -470,6 +498,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                     SessionId::pack_slot24(session_id.exec_id(), (2 * i + 1) as u8, 1),
                     session_id.instance_id(),
                 );
+                self.register_child_session(session_id2, session_id).await;
                 // Execute batch reconstruction for b-y values
                 self.batch_recon
                     .init_batch_reconstruct(chunk_b, session_id2, Arc::clone(&network))
@@ -490,6 +519,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 SessionId::pack_slot24(session_id.exec_id(), self.id as u8, 2),
                 session_id.instance_id(),
             );
+            self.register_child_session(sessionid, session_id).await;
 
             let wrapped = MultMessage::new(self.id, sessionid, bytes_rec_message);
             let bytes_wrapped = bincode::serialize(&wrapped)?;
@@ -519,21 +549,17 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         sid: SessionId,
         payload: Vec<u8>,
     ) -> Result<(), MulError> {
-        let calling_proto = match sid.calling_protocol() {
-            Some(proto) => proto,
+        match sid.calling_protocol() {
+            Some(_) => {}
             None => {
                 return Err(MulError::InvalidInput(format!(
                     "Unknown calling protocol in session ID {:?}",
                     sid
                 )));
             }
-        };
+        }
 
-        let session_id = SessionId::new(
-            calling_proto,
-            SessionId::pack_slot24(sid.exec_id(), 0, 0),
-            sid.instance_id(),
-        );
+        let session_id = self.parent_session_for_child(sid).await;
 
         if self.cleared_sessions.lock().await.contains(&session_id) {
             warn!(

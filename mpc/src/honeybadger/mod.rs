@@ -513,8 +513,8 @@ where
         let mul_exec_id: u16 = self.counters.mul_counter.get_next().await?;
         let session_id = SessionId::new(
             ProtocolType::Mul,
-            SessionId::pack_slot24((mul_exec_id & 0x00FF) as u8, 0, 0),
-            SessionId::extended_mul_instance_id(self.params.instance_id, mul_exec_id),
+            SessionId::pack_mul_parent_slot24(mul_exec_id),
+            self.params.instance_id,
         );
 
         // Call the mul function
@@ -1859,8 +1859,8 @@ impl SessionId {
     }
 
     #[inline]
-    pub fn extended_mul_instance_id(base_instance_id: u32, exec_id: u16) -> u32 {
-        base_instance_id ^ (((exec_id as u32) & 0xFF00) << 16)
+    pub fn pack_mul_parent_slot24(exec_id: u16) -> u32 {
+        Self::pack_slot24((exec_id & 0x00FF) as u8, (exec_id >> 8) as u8, 0)
     }
 }
 
@@ -1947,21 +1947,22 @@ mod tests {
 
     #[test]
     fn test_extended_mul_session_ids_are_unique_across_u8_exec_wrap() {
-        let base_instance_id = 0x00AA_55AA;
+        let instance_id = 0x00AA_55AA;
         let first = SessionId::new(
             ProtocolType::Mul,
-            SessionId::pack_slot24(0, 0, 0),
-            SessionId::extended_mul_instance_id(base_instance_id, 0),
+            SessionId::pack_mul_parent_slot24(0),
+            instance_id,
         );
         let wrapped = SessionId::new(
             ProtocolType::Mul,
-            SessionId::pack_slot24(0, 0, 0),
-            SessionId::extended_mul_instance_id(base_instance_id, 256),
+            SessionId::pack_mul_parent_slot24(256),
+            instance_id,
         );
 
         assert_ne!(first, wrapped);
         assert_eq!(first.exec_id(), wrapped.exec_id());
-        assert_eq!(first.instance_id(), base_instance_id);
-        assert_ne!(wrapped.instance_id(), base_instance_id);
+        assert_ne!(first.sub_id(), wrapped.sub_id());
+        assert_eq!(first.instance_id(), instance_id);
+        assert_eq!(wrapped.instance_id(), instance_id);
     }
 }
