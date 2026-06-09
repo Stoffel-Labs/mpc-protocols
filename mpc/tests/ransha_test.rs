@@ -142,7 +142,7 @@ async fn test_reconstruct_handler_incorrect_share() {
     let binding = ransha_node
         .preprocess
         .share_gen
-        .get_or_create_store(session_id)
+        .get_or_create_store(session_id, ransha_node.id)
         .await
         .unwrap();
     let store = binding.lock().await;
@@ -176,7 +176,7 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
-    let node_store = ransha_node.get_or_create_store(session_id).await.unwrap();
+    let node_store = ransha_node.get_or_create_store(session_id, ransha_node.id).await.unwrap();
 
     // first 2t-1 message should return error
     for i in 0..(2 * threshold - 1) {

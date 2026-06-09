@@ -43,35 +43,15 @@ where
     /// Threshold for the corrupted parties.
     pub threshold: usize,
     /// Storage of the party.
-    pub storage: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<DouShaStorage<F>>>>>>,
+    pub storage: Arc<Mutex<BTreeMap<SessionId, (usize, Arc<Mutex<DouShaStorage<F>>>)>>>,
 }
+
+pub static MAX_DOUSHA_SESSIONS: usize = 256;
 
 impl<F> DoubleShareNode<F>
 where
     F: FftField,
 {
-    pub async fn pop_finished_protocol_result(&self) -> Option<Vec<DoubleShamirShare<F>>> {
-        let mut storage = self.storage.lock().await;
-        let mut finished_sid = None;
-        let mut output = Vec::new();
-        for (sid, storage_mutex) in storage.iter() {
-            let storage_bind = storage_mutex.lock().await;
-            if storage_bind.state == ProtocolState::Finished {
-                finished_sid = Some(*sid);
-                output = storage_bind.protocol_output.clone();
-                break;
-            }
-        }
-        match finished_sid {
-            Some(sid) => {
-                // Remove the entry from the storage
-                storage.remove(&sid);
-                Some(output)
-            }
-            None => None,
-        }
-    }
-
     pub async fn process(&mut self, message: DouShaMessage) -> Result<(), DouShaError> {
         self.receive_double_shares_handler(message).await?;
         Ok(())
@@ -92,11 +72,16 @@ where
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<DouShaStorage<F>>>, DouShaError> {
         let mut storage = self.storage.lock().await;
         Ok(storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))))
+            .or_insert((
+                initiator_id,
+                Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))),
+            ))
+            .1
             .clone())
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
@@ -116,7 +101,7 @@ where
         let output_receiver = {
             let storage = self.storage.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some(value) => value,
+                Some((_, arc)) => arc,
                 None => return Err(DouShaError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -205,7 +190,7 @@ where
         }
 
         // Update the state of the protocol to Initialized.
-        let storage_access = self.get_or_create_store(session_id).await?;
+        let storage_access = self.get_or_create_store(session_id, self.id).await?;
         let mut storage = storage_access.lock().await;
         storage.batch_size = batch_size;
         storage.state = ProtocolState::Initialized;
@@ -238,7 +223,9 @@ where
             }
         }
 
-        let binding = self.get_or_create_store(recv_message.session_id).await?;
+        let binding = self
+            .get_or_create_store(recv_message.session_id, recv_message.sender_id)
+            .await?;
         let mut dousha_storage = binding.lock().await;
         if dousha_storage.share.is_empty() {
             dousha_storage.batch_size = double_shares.len();

@@ -30,7 +30,7 @@ pub struct RanShaNode<F: FftField, R: RBC> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanShaStore<F>>>>>>,
+    pub store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<RanShaStore<F>>>)>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
 }
@@ -116,12 +116,17 @@ where
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<RanShaStore<F>>>, RanShaError> {
         let mut storage = self.store.lock().await;
 
         Ok(storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(RanShaStore::empty(self.n_parties))))
+            .or_insert((
+                initiator_id,
+                Arc::new(Mutex::new(RanShaStore::empty(self.n_parties))),
+            ))
+            .1
             .clone())
     }
 
@@ -142,7 +147,7 @@ where
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some(value) => value,
+                Some((_, arc)) => arc,
                 None => return Err(RanShaError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -162,7 +167,7 @@ where
     async fn try_finalize(&mut self, session_id: SessionId) -> Result<bool, RanShaError> {
         // phase 1: decide + extract under lock
         let output = {
-            let store_bind = self.get_or_create_store(session_id).await?;
+            let store_bind = self.get_or_create_store(session_id, self.id).await?;
             let mut store = store_bind.lock().await;
 
             if store.state == RanShaState::Finished {
@@ -261,7 +266,7 @@ where
         }
 
         // Update the state of the protocol to Initialized.
-        let storage_access = self.get_or_create_store(session_id).await?;
+        let storage_access = self.get_or_create_store(session_id, self.id).await?;
         let mut storage = storage_access.lock().await;
         storage.batch_size = batch_size;
         storage.state = RanShaState::Initialized;
@@ -303,7 +308,9 @@ where
                 return Err(ShareError::DegreeMismatch.into());
             }
         }
-        let binding = self.get_or_create_store(msg.session_id).await?;
+        let binding = self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await?;
         let mut ransha_storage = binding.lock().await;
         if ransha_storage.initial_shares.is_empty() {
             ransha_storage.batch_size = shares.len();
@@ -396,7 +403,7 @@ where
             r_deg_t.extend(apply_vandermonde(&vandermonde_matrix, &shares_deg_t)?);
         }
 
-        let bind_store = self.get_or_create_store(session_id).await?;
+        let bind_store = self.get_or_create_store(session_id, self.id).await?;
         let mut store = bind_store.lock().await;
         store.batch_size = r_deg_t.len() / self.n_parties;
         store.computed_r_shares = r_deg_t.clone();
@@ -463,7 +470,9 @@ where
                 return Err(RanShaError::ShareError(ShareError::IdMismatch));
             }
         }
-        let binding = self.get_or_create_store(msg.session_id).await?;
+        let binding = self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await?;
         let mut store = binding.lock().await;
         if store.state == RanShaState::Finished {
             return Ok(());
@@ -553,7 +562,9 @@ where
             return Err(RanShaError::InvalidPartyId);
         }
 
-        let binding = self.get_or_create_store(msg.session_id).await?;
+        let binding = self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await?;
         let mut store = binding.lock().await;
 
         if !store.received_ok_msg.contains(&msg.sender_id) {

@@ -85,7 +85,8 @@ async fn test_init_reconstruct_flow() {
 
         // check all stores should be empty except for the sender's store
         let mut node = randousha_nodes.get(i).unwrap().clone();
-        let store_bind = node.get_or_create_store(session_id).await.unwrap();
+        let node_id = node.id;
+        let store_bind = node.get_or_create_store(session_id, node_id).await.unwrap();
         let store = store_bind.lock().await;
         if i != sender_id {
             assert!(store.computed_r_shares_degree_t.len() == 0);
@@ -133,6 +134,7 @@ async fn test_reconstruct_handler() {
 
     // receiver randousha node
     let mut randousha_node = randousha_nodes.get(receiver_id).unwrap().clone();
+    let randousha_node_id = randousha_node.id;
 
     // receiver nodes received 2t+1 ReconstructionMessage
     for i in 0..2 * threshold + 1 {
@@ -192,7 +194,7 @@ async fn test_reconstruct_handler() {
 
     // check the store
     let binding = randousha_node
-        .get_or_create_store(session_id)
+        .get_or_create_store(session_id, randousha_node_id)
         .await
         .unwrap();
     let store = binding.lock().await;
@@ -236,6 +238,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
 
     // receiver randousha node
     let mut randousha_node = randousha_nodes.get(receiver_id).unwrap().clone();
+    let randousha_node_id = randousha_node.id;
 
     // Send 2t+1 reconstruction messages to the receiver node
     for i in 0..n_parties {
@@ -303,7 +306,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
 
     // check the store
     let binding = randousha_node
-        .get_or_create_store(session_id)
+        .get_or_create_store(session_id, randousha_node_id)
         .await
         .unwrap();
     let store = binding.lock().await;
@@ -342,8 +345,9 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
+    let randousha_node_id = randousha_node.id;
     let node_store = randousha_node
-        .get_or_create_store(session_id)
+        .get_or_create_store(session_id, randousha_node_id)
         .await
         .unwrap();
 
@@ -383,7 +387,7 @@ async fn test_output_handler() {
         .expect("output handler should not fail");
     {
         let storage_mutex = randousha_node
-            .get_or_create_store(session_id)
+            .get_or_create_store(session_id, randousha_node_id)
             .await
             .unwrap();
         let storage = storage_mutex.lock().await;
@@ -441,11 +445,14 @@ async fn randousha_e2e() {
 
     for nodes in &randousha_nodes {
         let mut node_locked = nodes.lock().await;
-        let store = node_locked.get_or_create_store(session_id).await.unwrap();
+        let id = node_locked.id;
+        let store = node_locked
+            .get_or_create_store(session_id, id)
+            .await
+            .unwrap();
         let store_locked = store.lock().await;
         assert!(store_locked.state == RanDouShaState::Finished);
         let double_shares = store_locked.protocol_output.clone();
-        let id = node_locked.id;
         assert_eq!(double_shares.len(), threshold + 1);
         let _ = double_shares.iter().map(|double_share| {
             assert_eq!(double_share.degree_t.degree, threshold);

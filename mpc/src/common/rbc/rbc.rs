@@ -36,7 +36,7 @@ pub struct Bracha<Id: ProtocolSessionId + 'static> {
     pub n: usize, // Total number of parties in the network
     pub t: usize, // Number of allowed malicious parties
     pub k: usize, //threshold (Not really used in Bracha)
-    pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
+    pub store: Arc<Mutex<HashMap<Id, (usize, Arc<Mutex<BrachaStore>>)>>>, // Stores the session state
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
 }
@@ -77,11 +77,11 @@ where
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let store = self.store.lock().await;
 
-        let output_store = store
+        let (_, arc) = store
             .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
-        let store_lock = output_store.lock().await;
+        let store_lock = arc.lock().await;
 
         if !store_lock.ended {
             return Err(RbcError::Internal("Rbc has not terminated".to_string()));
@@ -184,7 +184,7 @@ where
         );
 
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
             Some(s) => s,
             None => {
                 debug!(
@@ -236,7 +236,7 @@ where
         let mut broadcast_ready: Option<Msg<Id>> = None;
         let mut broadcast_echo: Option<Msg<Id>> = None;
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
             Some(s) => s,
             None => {
                 debug!(
@@ -332,7 +332,7 @@ where
         let mut send_output: Option<Vec<u8>> = None;
 
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
             Some(s) => s,
             None => {
                 debug!(
@@ -428,12 +428,17 @@ where
 
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: Id) -> Option<Arc<Mutex<BrachaStore>>> {
+    async fn get_or_create_store(
+        &self,
+        session_id: Id,
+        sender_id: usize,
+    ) -> Option<Arc<Mutex<BrachaStore>>> {
         let store_lock = {
             let mut store = self.store.lock().await;
             store
                 .entry(session_id)
-                .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
+                .or_insert_with(|| (sender_id, Arc::new(Mutex::new(BrachaStore::default()))))
+                .1
                 .clone()
         };
 
@@ -524,7 +529,7 @@ pub struct Avid<Id: ProtocolSessionId> {
     pub n: usize,                                              //Network size
     pub t: usize,                                              //No. of malicious parties
     pub k: usize,                                              //Threshold
-    pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
+    pub store: Arc<Mutex<HashMap<Id, (usize, Arc<Mutex<AvidStore>>)>>>, // Sessionid => store
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
 }
@@ -575,11 +580,11 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let store = self.store.lock().await;
 
-        let output_store = store
+        let (_, arc) = store
             .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
-        let store_lock = output_store.lock().await;
+        let store_lock = arc.lock().await;
 
         if !store_lock.ended {
             return Err(RbcError::Internal("Rbc has not terminated".to_string()));
@@ -695,7 +700,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
             Some(s) => s,
             None => {
                 debug!(
@@ -775,7 +780,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
             Some(s) => s,
             None => {
                 debug!(
@@ -876,7 +881,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         let mut send_output: Option<Vec<u8>> = None;
 
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
             Some(s) => s,
             None => {
                 debug!(
@@ -1079,12 +1084,17 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         self.broadcast(ready_msg, net).await?;
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: Id) -> Option<Arc<Mutex<AvidStore>>> {
+    async fn get_or_create_store(
+        &self,
+        session_id: Id,
+        sender_id: usize,
+    ) -> Option<Arc<Mutex<AvidStore>>> {
         let store_lock = {
             let mut store = self.store.lock().await;
             store
                 .entry(session_id)
-                .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
+                .or_insert_with(|| (sender_id, Arc::new(Mutex::new(AvidStore::default()))))
+                .1
                 .clone()
         };
         {

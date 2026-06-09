@@ -135,7 +135,7 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     /// Threshold of corrupted parties.
     pub threshold: usize,
     /// Storage of the node.
-    pub store: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
+    pub store: Arc<Mutex<BTreeMap<SessionId, (usize, Arc<Mutex<RanDouShaStore<F>>>)>>>,
     ///Avid instance for RBC
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
@@ -184,12 +184,14 @@ where
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<RanDouShaStore<F>>>, RanDouShaError> {
         let mut storage = self.store.lock().await;
 
         Ok(storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(RanDouShaStore::empty())))
+            .or_insert((initiator_id, Arc::new(Mutex::new(RanDouShaStore::empty()))))
+            .1
             .clone())
     }
 
@@ -251,7 +253,7 @@ where
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some(value) => value,
+                Some((_, arc)) => arc,
                 None => return Err(RanDouShaError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -386,7 +388,7 @@ where
         }
 
         // Save the shares of r of degree t and 2t into the storage.
-        let bind_store = self.get_or_create_store(session_id).await?;
+        let bind_store = self.get_or_create_store(session_id, self.id).await?;
         let mut store = bind_store.lock().await;
         store.batch_size = r_deg_t.len() / self.n_parties;
         store.computed_r_shares_degree_t = r_deg_t.clone();
@@ -487,7 +489,7 @@ where
                 return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
             }
         }
-        let binding = self.get_or_create_store(msg.session_id).await?;
+        let binding = self.get_or_create_store(msg.session_id, sender_id).await?;
         let mut store = binding.lock().await;
         if store.received_r_shares_degree_t.is_empty() {
             store.batch_size = rec_messages.len();
@@ -637,7 +639,9 @@ where
         if !output {
             return Err(RanDouShaError::Abort);
         }
-        let binding = self.get_or_create_store(msg.session_id).await?;
+        let binding = self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await?;
         let mut store = binding.lock().await;
 
         // push to received_ok_msg if sender doesn't exist

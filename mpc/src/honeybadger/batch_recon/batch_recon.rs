@@ -41,7 +41,7 @@ pub struct BatchReconNode<F: FftField> {
     pub n: usize,  // Total number of nodes/shares
     pub t: usize,
     pub degree: usize,
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BatchReconStore<F>>>>>>, // Number of malicious parties
+    pub store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<BatchReconStore<F>>>)>>>, // Number of malicious parties
     pub output_sender: Sender<SessionId>,
 }
 
@@ -82,11 +82,11 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, BatchReconError> {
         let store = self.store.lock().await;
 
-        let output_store = store.get(&session_id).ok_or_else(|| {
+        let (_, output_arc) = store.get(&session_id).ok_or_else(|| {
             BatchReconError::InvalidInput("Session ID does not exist".to_string())
         })?;
 
-        let store_lock = output_store.lock().await;
+        let store_lock = output_arc.lock().await;
 
         if store_lock.secrets.is_none() {
             return Err(BatchReconError::InvalidInput(
@@ -205,7 +205,9 @@ impl<F: FftField> BatchReconNode<F> {
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
                 // Lock the session store to update the session state.
-                let Some(session_store) = self.get_or_create_store(msg.session_id).await? else {
+                let Some(session_store) =
+                    self.get_or_create_store(msg.session_id, sender_id).await?
+                else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
                 // Lock the session-specific store to access or update the session state.
@@ -276,7 +278,9 @@ impl<F: FftField> BatchReconNode<F> {
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
                 // Lock the session store to update the session state.
-                let Some(session_store) = self.get_or_create_store(msg.session_id).await? else {
+                let Some(session_store) =
+                    self.get_or_create_store(msg.session_id, sender_id).await?
+                else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
                 // Lock the session-specific store to access or update the session state.
@@ -341,7 +345,9 @@ impl<F: FftField> BatchReconNode<F> {
                     ));
                 }
 
-                let Some(session_store) = self.get_or_create_store(msg.session_id).await? else {
+                let Some(session_store) =
+                    self.get_or_create_store(msg.session_id, sender_id).await?
+                else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
                 let mut store = session_store.lock().await;
@@ -419,7 +425,9 @@ impl<F: FftField> BatchReconNode<F> {
                     ));
                 }
 
-                let Some(session_store) = self.get_or_create_store(msg.session_id).await? else {
+                let Some(session_store) =
+                    self.get_or_create_store(msg.session_id, sender_id).await?
+                else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
                 let mut store = session_store.lock().await;
@@ -485,13 +493,15 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn get_or_create_store(
         &self,
         session_id: SessionId,
+        sender_id: usize,
     ) -> Result<Option<Arc<Mutex<BatchReconStore<F>>>>, BatchReconError> {
         let store_lock = {
             let mut storage = self.store.lock().await;
 
             storage
                 .entry(session_id)
-                .or_insert_with(|| Arc::new(Mutex::new(BatchReconStore::empty())))
+                .or_insert_with(|| (sender_id, Arc::new(Mutex::new(BatchReconStore::empty()))))
+                .1
                 .clone()
         };
 

@@ -49,7 +49,8 @@ async fn test_triple_gen_e2e() {
     for p in 0..n_parties {
         let node = nodes[p].lock().await;
         let storage = node.storage.lock().await;
-        let triple_data = storage.get(&session_id).unwrap().lock().await;
+        let (_, triple_store) = storage.get(&session_id).unwrap();
+        let triple_data = triple_store.lock().await;
         assert!(matches!(
             triple_data.protocol_state,
             ProtocolState::Finished
