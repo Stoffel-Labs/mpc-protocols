@@ -32,10 +32,10 @@ use tracing::{debug, error, info, warn};
 /// 4. Party on recieving 2t+1 (READY, m) output m and terminate
 #[derive(Clone)]
 pub struct Bracha<Id: ProtocolSessionId + 'static> {
-    pub id: usize,                                               // The ID of the initiator
-    pub n: usize, // Total number of parties in the network
-    pub t: usize, // Number of allowed malicious parties
-    pub k: usize, //threshold (Not really used in Bracha)
+    pub id: usize, // The ID of the initiator
+    pub n: usize,  // Total number of parties in the network
+    pub t: usize,  // Number of allowed malicious parties
+    pub k: usize,  //threshold (Not really used in Bracha)
     pub store: Arc<Mutex<HashMap<Id, (usize, Arc<Mutex<BrachaStore>>)>>>, // Stores the session state
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
@@ -184,7 +184,10 @@ where
         );
 
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -236,7 +239,10 @@ where
         let mut broadcast_ready: Option<Msg<Id>> = None;
         let mut broadcast_echo: Option<Msg<Id>> = None;
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -332,7 +338,10 @@ where
         let mut send_output: Option<Vec<u8>> = None;
 
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -525,10 +534,10 @@ where
 
 #[derive(Clone)]
 pub struct Avid<Id: ProtocolSessionId> {
-    pub id: usize,                                             //Initiators ID
-    pub n: usize,                                              //Network size
-    pub t: usize,                                              //No. of malicious parties
-    pub k: usize,                                              //Threshold
+    pub id: usize,                                                      //Initiators ID
+    pub n: usize,                                                       //Network size
+    pub t: usize,                                                       //No. of malicious parties
+    pub k: usize,                                                       //Threshold
     pub store: Arc<Mutex<HashMap<Id, (usize, Arc<Mutex<AvidStore>>)>>>, // Sessionid => store
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
@@ -700,7 +709,10 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -780,7 +792,10 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -817,7 +832,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             ) {
                 Ok(true) => {
                     //Store fingerprint and shard
-                    store.insert_shard(root.to_vec(), msg.sender_id, msg.payload.clone());
+                    store.insert_shard(root.to_vec(), msg.sender_id, msg.payload.clone())?;
                     store.insert_fingerprint(root.to_vec(), msg.sender_id, proof_bytes.to_vec());
                     //Increment echo count
                     store.increment_echo(root);
@@ -881,7 +896,10 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         let mut send_output: Option<Vec<u8>> = None;
 
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id, msg.sender_id).await {
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -918,7 +936,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             ) {
                 Ok(true) => {
                     //Store fingerprint and shard
-                    store.insert_shard(root.to_vec(), msg.sender_id, msg.payload.clone());
+                    store.insert_shard(root.to_vec(), msg.sender_id, msg.payload.clone())?;
                     store.insert_fingerprint(
                         msg.metadata[0..32].to_vec(),
                         msg.sender_id,

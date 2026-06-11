@@ -6,6 +6,8 @@ use bincode::ErrorKind;
 use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 
+pub const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024; // 10 MiB, matches network layer limit
+
 #[derive(Error, Debug)]
 pub enum ShardError {
     #[error("Invalid shard configuration: {0}")]

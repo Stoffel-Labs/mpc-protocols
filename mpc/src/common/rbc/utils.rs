@@ -4,8 +4,6 @@ use rs_merkle::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024; // 10 MiB, matches network layer limit
-
 /// Encodes a given payload using Reed-Solomon erasure coding
 pub fn encode_rs(
     payload: Vec<u8>,
@@ -67,8 +65,21 @@ pub fn decode_rs(
 
     // Create a list of shard slots (None = missing)
     let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
+
+    // Reject oversized shards before reconstruction to prevent memory/CPU exhaustion.
+    // Derived from encode_rs: shard_size = ceil((MAX_PAYLOAD_SIZE + 8) / data_shards).
+    let max_shard_size = (MAX_PAYLOAD_SIZE + 8 + data_shards - 1) / data_shards;
+
     // Fill known shard positions
     for (&idx, shard) in &shards_map {
+        if shard.len() > max_shard_size {
+            return Err(ShardError::Config(format!(
+                "Shard {} exceeds maximum allowed size ({} > {})",
+                idx,
+                shard.len(),
+                max_shard_size
+            )));
+        }
         if idx < total_shards {
             shards[idx] = Some(shard.clone());
         } else {
