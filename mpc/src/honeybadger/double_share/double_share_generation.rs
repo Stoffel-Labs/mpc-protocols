@@ -1,6 +1,7 @@
 use crate::{
     common::{
         share::{shamir::NonRobustShare, ShareError},
+        utils::deser_bounded_vec,
         ProtocolSessionId, SecretSharingScheme,
     },
     honeybadger::{
@@ -221,7 +222,7 @@ where
                 )?]
             }
             DouShaPayload::Shares(payload) => {
-                CanonicalDeserialize::deserialize_compressed(payload.as_slice())?
+                deser_bounded_vec(&mut payload.as_slice(), payload.len())?
             }
         };
         for double_share in &double_shares {

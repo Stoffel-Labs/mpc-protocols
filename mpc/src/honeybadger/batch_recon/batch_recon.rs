@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde},
+        utils::deser_bounded_vec,
         SecretSharingScheme,
     },
     honeybadger::{robust_interpolate::robust_interpolate::RobustShare, WrappedMessage},
@@ -335,7 +336,7 @@ impl<F: FftField> BatchReconNode<F> {
                     "Received EvalBatch message"
                 );
                 let sender_id = msg.sender_id;
-                let values = Vec::<F>::deserialize_compressed(msg.payload.as_slice())
+                let values = deser_bounded_vec(&mut msg.payload.as_slice(), msg.payload.len())
                     .map_err(BatchReconError::ArkDeserialization)?;
 
                 if values.is_empty() {

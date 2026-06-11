@@ -351,29 +351,18 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         removed
     }
 
-    // 1. Take storage lock
-    // 2. Find chunks for batch reconstruction that have not been opened yet
-    // 3. Set inputs x and y, Beaver triples, number of multiplications, and disable RBC if not
-    //    needed
-    // 4. Reconstruct from RBC-sent shares if enough have been received and needed
-    // 5. Perform the multiplication and return if all openings are available
-    // 6. Otherwise, compute all local (a - x)- and (b - y)-shares
-    // 7. Release the storage lock
-    // 8. Initiate batch reconstruction for all chunks that have not been opened yet
-    // 9. Initiate RBC if needed
-    //
-    // `init` mainly serves to set the inputs and Beaver triples for multiplication and to
-    // initiate the opening of the a-x,b-y values. However, due to the asynchronous nature of the
-    // protocols and the malicious security, some or even all openings could already have been
-    // received without any contribution by one node. Therefore, `init` does not initiate the
-    // opening for all values, but only for the missing ones. Since `init` could even be called
-    // after all openings have been received, it needs to be able to perform the final multiplication
-    // itself.
-    //
-    // The lock is released before initiating batch reconstruction or RBC to avoid unforeseen delays
-    // or other synchronicity issues. While this enables a possible race condition where batches or
-    // the RBC broadcast are received right after releasing the lock and therefore batch
-    // reconstruction or RBC are initiated unnecessarily, this does no harm.
+    /// Starts or completes a multiplication session.
+    ///
+    /// This method is deliberately re-entrant. Network outputs for child BatchRecon or RBC sessions
+    /// may arrive before the local caller invokes `init`, so the method first records the caller's
+    /// inputs and triples, then checks whether enough openings are already buffered to finish the
+    /// multiplication immediately. If not, it computes this party's `(a - x)` and `(b - y)` shares
+    /// only for the missing chunks and starts the child protocols for those chunks.
+    ///
+    /// Child protocol initiation happens after the multiplication storage lock is released. That
+    /// avoids holding the lock while performing network work; the tradeoff is that another task may
+    /// finish a child opening in the gap, causing a harmless duplicate child initiation that is
+    /// filtered by the normal duplicate checks.
     pub async fn init<N: Network + Send + Sync>(
         &mut self,
         session_id: SessionId,

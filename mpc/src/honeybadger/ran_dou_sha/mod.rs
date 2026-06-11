@@ -178,19 +178,6 @@ where
     }
 
     pub async fn clear_completed_session(&self, session_id: SessionId) -> bool {
-        for verifier_id in self.threshold + 1..self.n_parties {
-            let rbc_session_id = SessionId::new(
-                ProtocolType::Randousha,
-                SessionId::pack_slot24(
-                    session_id.exec_id(),
-                    verifier_id as u8,
-                    session_id.round_id(),
-                ),
-                session_id.instance_id(),
-            );
-            self.rbc.clear_session(rbc_session_id).await;
-        }
-
         self.clear_store(session_id).await
     }
 

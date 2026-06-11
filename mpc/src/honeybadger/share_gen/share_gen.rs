@@ -13,6 +13,7 @@ use crate::honeybadger::MAX_MESSAGE_SIZE;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde, ShareError},
+        utils::deser_bounded_vec,
         ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
@@ -136,19 +137,6 @@ where
     }
 
     pub async fn clear_completed_session(&self, session_id: SessionId) -> bool {
-        for verifier_id in 0..2 * self.threshold {
-            let rbc_session_id = SessionId::new(
-                ProtocolType::Ransha,
-                SessionId::pack_slot24(
-                    session_id.exec_id(),
-                    verifier_id as u8,
-                    session_id.round_id(),
-                ),
-                session_id.instance_id(),
-            );
-            self.rbc.clear_session(rbc_session_id).await;
-        }
-
         self.clear_store(session_id).await
     }
 
@@ -308,17 +296,8 @@ where
                     payload.as_slice(),
                 )?]
             }
-            RanShaPayload::Shares(payloads) => {
-                let mut shares = Vec::with_capacity(payloads.len());
-                for payload in payloads {
-                    shares.push(CanonicalDeserialize::deserialize_compressed(
-                        payload.as_slice(),
-                    )?);
-                }
-                shares
-            }
             RanShaPayload::SharesBatch(payload) => {
-                CanonicalDeserialize::deserialize_compressed(payload.as_slice())?
+                deser_bounded_vec(&mut payload.as_slice(), payload.len())?
             }
             _ => return Err(RanShaError::Abort),
         };
@@ -477,17 +456,8 @@ where
                     payload.as_slice(),
                 )?]
             }
-            RanShaPayload::ReconstructShares(payloads) => {
-                let mut shares = Vec::with_capacity(payloads.len());
-                for payload in payloads {
-                    shares.push(CanonicalDeserialize::deserialize_compressed(
-                        payload.as_slice(),
-                    )?);
-                }
-                shares
-            }
             RanShaPayload::ReconstructSharesBatch(payload) => {
-                CanonicalDeserialize::deserialize_compressed(payload.as_slice())?
+                deser_bounded_vec(&mut payload.as_slice(), payload.len())?
             }
             _ => return Err(RanShaError::Abort),
         };
