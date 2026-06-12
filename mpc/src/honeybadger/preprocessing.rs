@@ -106,7 +106,7 @@ where
 
     /// Returns the number of random double share pairs, and the number of random shares
     /// respectively.
-    pub fn len(&self) -> PreprocMaterialLength {
+    pub fn length(&self) -> PreprocMaterialLength {
         PreprocMaterialLength {
             beaver_triples: self.beaver_triples.len(),
             beaver_triples_small_field: self.beaver_triples_small_field.len(),
@@ -549,7 +549,7 @@ mod test {
         );
 
         assert_eq!(
-            cache.len(),
+            cache.length(),
             PreprocMaterialLength {
                 beaver_triples: 2,
                 beaver_triples_small_field: 0,
@@ -564,7 +564,7 @@ mod test {
         let triples = cache.take_beaver_triples(1).unwrap();
         assert_eq!(triples.len(), 1);
         assert_eq!(
-            cache.len(),
+            cache.length(),
             PreprocMaterialLength {
                 beaver_triples: 1,
                 beaver_triples_small_field: 0,
@@ -608,7 +608,7 @@ mod test {
                 .unwrap();
 
         // Verify cache drained
-        assert_eq!(cache.len(), PreprocMaterialLength::zero());
+        assert_eq!(cache.length(), PreprocMaterialLength::zero());
         assert_eq!(batches.len(), 2);
 
         // Load one batch back into cache
@@ -616,12 +616,12 @@ mod test {
 
         // Ensure materials restored
         assert!(
-            cache.len().beaver_triples
-                + cache.len().random_shr
-                + cache.len().beaver_triples_small_field
-                + cache.len().random_shr_small_field
-                + cache.len().prandbit
-                + cache.len().prandint
+            cache.length().beaver_triples
+                + cache.length().random_shr
+                + cache.length().beaver_triples_small_field
+                + cache.length().random_shr_small_field
+                + cache.length().prandbit
+                + cache.length().prandint
                 > 0
         );
     }
@@ -737,9 +737,9 @@ mod test {
         // 4. Reload one batch back to cache
         batches[0].load_into_cache(&mut cache).await.unwrap();
         assert!(
-            cache.len().beaver_triples
-                + cache.len().random_shr
-                + cache.len().random_shr_small_field
+            cache.length().beaver_triples
+                + cache.length().random_shr
+                + cache.length().random_shr_small_field
                 > 0
         );
 

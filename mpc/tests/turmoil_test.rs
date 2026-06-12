@@ -503,7 +503,7 @@ fn preprocessing_e2e_turmoil(
 
                     // Only check counts once preprocessing has fully finished
                     if preprocessing_handle.is_finished() {
-                        let length_preproc = node.preprocessing_material.lock().await.len();
+                        let length_preproc = node.preprocessing_material.lock().await.length();
                         if length_preproc.beaver_triples == 9
                             && length_preproc.prandbit == n_prandbit
                             && length_preproc.prandint == n_prandint
@@ -516,7 +516,7 @@ fn preprocessing_e2e_turmoil(
                 }
 
                 // collect final counts
-                let length_preproc = node.preprocessing_material.lock().await.len();
+                let length_preproc = node.preprocessing_material.lock().await.length();
 
                 let _ = tx.send(Ok((
                     length_preproc.beaver_triples,
@@ -857,7 +857,7 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
 
                     tokio::task::yield_now().await;
 
-                    let preproc_length = node.preprocessing_material.lock().await.len();
+                    let preproc_length = node.preprocessing_material.lock().await.length();
                     if preproc_length.beaver_triples >= 3 {
                         break;
                     }

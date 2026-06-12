@@ -480,7 +480,7 @@ where
 
         let no_triples = {
             let store = self.preprocessing_material.lock().await;
-            store.len().beaver_triples
+            store.length().beaver_triples
         };
         if no_triples < x.len() {
             //Run preprocessing
@@ -516,7 +516,7 @@ where
     async fn rand(&mut self, network: Arc<N>) -> Result<RobustShare<F>, Self::Error> {
         let no_rand = {
             let store = self.preprocessing_material.lock().await;
-            store.len().random_shr
+            store.length().random_shr
         };
         if no_rand == 0 {
             //Run preprocessing
@@ -905,7 +905,7 @@ where
         }
         let (no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;
-            (store.len().prandbit, store.len().prandint)
+            (store.length().prandbit, store.length().prandint)
         };
         if no_rand_bit < x.precision().f() || no_rand_int == 0 {
             // Run preprocessing
@@ -972,7 +972,7 @@ where
         // 2. Check preprocessing inventory --------------------------------
         let (no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;
-            (store.len().prandint, store.len().prandint)
+            (store.length().prandint, store.length().prandint)
         };
 
         // Need f random bits and 1 random integer for truncation
@@ -1138,7 +1138,7 @@ where
         // Get how many triples and random shares are already available
         let (no_of_triples_avail, no_of_random_shares_avail) = {
             let store = self.preprocessing_material.lock().await;
-            (store.len().beaver_triples, store.len().random_shr)
+            (store.length().beaver_triples, store.length().random_shr)
         };
 
         // Desired total counts from protocol parameters
@@ -1385,7 +1385,7 @@ where
         // Take existing number of small field triples.
         let current_triples = {
             let guard = self.preprocessing_material.lock().await;
-            guard.len().beaver_triples_small_field
+            guard.length().beaver_triples_small_field
         };
 
         let missing_triples = needed.saturating_sub(current_triples);
@@ -1492,7 +1492,7 @@ where
 
         let n_small_field_triples = {
             let guard = self.preprocessing_material.lock().await;
-            guard.len().beaver_triples_small_field
+            guard.length().beaver_triples_small_field
         };
         info!("The number of missing small field triples was {missing_triples}");
         info!("Triples in the small field generated per run: {triples_per_run}");
@@ -1807,7 +1807,7 @@ where
         // How many shares are already present?
         let n_shares = {
             let store = self.preprocessing_material.lock().await;
-            store.len().prandbit
+            store.length().prandbit
         };
 
         if n_shares >= self.params.n_prandbit {
@@ -1929,7 +1929,7 @@ where
         // How many shares are already present?
         let no_shares = {
             let store = self.preprocessing_material.lock().await;
-            store.len().prandint
+            store.length().prandint
         };
 
         if no_shares >= self.params.n_prandint {

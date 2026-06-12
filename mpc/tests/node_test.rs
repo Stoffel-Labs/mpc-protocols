@@ -833,7 +833,7 @@ async fn preprocessing_e2e() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let length_preproc = node.preprocessing_material.lock().await.len();
+        let length_preproc = node.preprocessing_material.lock().await.length();
         // The number of generated triples should be the closest multiple of 2t + 1 greater than the required
         // number of triples.
         assert_eq!(length_preproc.beaver_triples, 9);
@@ -913,7 +913,7 @@ async fn preprocessing_e2e_big() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let preproc_length = node.preprocessing_material.lock().await.len();
+        let preproc_length = node.preprocessing_material.lock().await.length();
         info!(
             "{}: {} {}",
             pid, preproc_length.beaver_triples, preproc_length.random_shr
