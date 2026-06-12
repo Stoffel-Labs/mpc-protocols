@@ -247,10 +247,8 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                         return Ok(true);
                     }
                 }
-                ProtocolType::PRandBit => {
-                    if store.state == PrandState::BitFinished {
-                        return Ok(true);
-                    }
+                ProtocolType::PRandBit if store.state == PrandState::BitFinished => {
+                    return Ok(true);
                 }
                 _ => {}
             }
