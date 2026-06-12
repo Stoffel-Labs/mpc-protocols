@@ -1,5 +1,3 @@
-use std::{collections::HashMap, sync::Arc};
-
 use crate::{
     common::math::goldilocks::GoldilocksField,
     honeybadger::{

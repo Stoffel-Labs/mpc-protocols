@@ -17,7 +17,6 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
 use ark_std::rand::{Rng, SeedableRng};
 use itertools::Itertools;
 use num_bigint::BigUint;
-use std::ops::Add;
 use std::{collections::HashMap, sync::Arc, vec};
 use stoffelnet::network_utils::Network;
 use tokio::{
