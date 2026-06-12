@@ -420,7 +420,7 @@ where
             let sessionid = SessionId::new(
                 msg.session_id
                     .calling_protocol()
-                    .expect("Session ID should not be None"),
+                    .ok_or(RanShaError::NoCallingProtocol)?,
                 SessionId::pack_slot24(
                     msg.session_id.exec_id(),
                     self.id as u8,

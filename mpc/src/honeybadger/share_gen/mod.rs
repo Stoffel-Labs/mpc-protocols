@@ -53,6 +53,8 @@ pub enum RanShaError {
     ResultAlreadyReceived(SessionId),
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(SessionId),
+    #[error("no calling protocol in the session ID")]
+    NoCallingProtocol,
 }
 
 #[derive(Debug)]

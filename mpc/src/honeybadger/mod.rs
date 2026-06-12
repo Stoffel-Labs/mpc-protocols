@@ -1402,9 +1402,8 @@ where
 
         // Ensure and take random shares in the small field.
         // We need 2 * n_triples random shares.
-        let required_random_shares = 2 * n_triples_full_chunks;
-        self.ensure_random_shares_small_field(network.clone(), rng, required_random_shares)
-            .await?;
+        //
+        // SAFETY: This random shares were already computed before calling this function.
         let random_shares_a = self
             .preprocessing_material
             .lock()
@@ -1836,8 +1835,27 @@ where
             self.params.instance_id,
         );
 
-        self.ensure_random_shares_small_field(network.clone(), rng, total_randbit_to_generate)
-            .await?;
+        // Compute the number of random shares necessary to compute the small field triples: we
+        // need `total_randbit_to_generate` triples. To generate n triples we need 2 * n random
+        // shares in the small field.
+        let current_triples = {
+            let guard = self.preprocessing_material.lock().await;
+            guard.length().beaver_triples_small_field
+        };
+        let missing_triples = total_randbit_to_generate.saturating_sub(current_triples);
+        let triples_per_run = 2 * self.params.threshold + 1;
+        let n_iterations = missing_triples.div_ceil(triples_per_run);
+        let n_triples_full_chunks = n_iterations * triples_per_run;
+        let random_shares_for_triples = 2 * n_triples_full_chunks;
+
+        // Compute the random shares needed for both the preprocessing alone and the Beaver triples
+        // in the small field.
+        self.ensure_random_shares_small_field(
+            network.clone(),
+            rng,
+            total_randbit_to_generate + random_shares_for_triples,
+        )
+        .await?;
 
         let random_shares_a = self
             .preprocessing_material
