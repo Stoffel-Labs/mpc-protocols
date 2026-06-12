@@ -17,6 +17,8 @@ tracing.workspace = true
 once_cell = "1.21.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 turmoil.workspace = true
+# Referenced only to enforce the workspace pin on transitive `time` (see root Cargo.toml).
+time.workspace = true
 
 [dev-dependencies]
 ark-bls12-381.workspace = true
