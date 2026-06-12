@@ -421,10 +421,10 @@ pub trait ProtocolTag:
     Copy + Clone + Eq + Ord + std::hash::Hash + Send + Sync + fmt::Debug
 {
     /// Encode the protocol into an 8-bit tag
-    fn to_u16(self) -> u16;
+    fn to_u8(self) -> u8;
 
     /// Decode the protocol from an 8-bit tag
-    fn from_u16(v: u16) -> Option<Self>;
+    fn from_u8(v: u8) -> Option<Self>;
 }
 
 /// Fixed-layout session identifier.

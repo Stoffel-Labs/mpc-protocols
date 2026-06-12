@@ -2025,12 +2025,12 @@ pub enum ProtocolType {
 
 impl ProtocolTag for ProtocolType {
     #[inline]
-    fn to_u16(self) -> u16 {
-        self as u16
+    fn to_u8(self) -> u8 {
+        self as u8
     }
 
     #[inline]
-    fn from_u16(v: u16) -> Option<Self> {
+    fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::None),
             1 => Some(Self::Randousha),
@@ -2188,7 +2188,7 @@ impl ProtocolSessionId for SessionId {
     type Protocol = ProtocolType;
 
     fn new(protocol: ProtocolType, slot24: u32, instance_id: u32) -> Self {
-        let value = ((protocol as u64 & 0xFFFF) << 56)
+        let value = ((protocol as u64 & 0xFF) << 56)
             | ((slot24 as u64 & 0xFF_FFFF) << 32)
             | (instance_id as u64);
 
@@ -2196,8 +2196,8 @@ impl ProtocolSessionId for SessionId {
     }
     //First 8 bits
     fn calling_protocol(self) -> Option<ProtocolType> {
-        let val = ((self.0 >> 56) & 0xFFFF) as u16;
-        ProtocolType::from_u16(val)
+        let val = ((self.0 >> 56) & 0xFF) as u8;
+        ProtocolType::from_u8(val)
     }
 
     fn slot24(self) -> u32 {
@@ -2249,7 +2249,7 @@ mod tests {
 
     #[test]
     fn test_session_id_debug_format() {
-        let caller = ProtocolType::from_u16(5u16).unwrap();
+        let caller = ProtocolType::from_u8(5u8).unwrap();
         let exec_id = 42u8;
         let sub_id = 7u8;
         let round_id = 3u8;

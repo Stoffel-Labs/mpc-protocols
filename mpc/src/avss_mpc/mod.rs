@@ -766,12 +766,12 @@ pub enum ProtocolType {
 
 impl ProtocolTag for ProtocolType {
     #[inline]
-    fn to_u16(self) -> u16 {
-        self as u16
+    fn to_u8(self) -> u8 {
+        self as u8
     }
 
     #[inline]
-    fn from_u16(v: u16) -> Option<Self> {
+    fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::None),
             1 => Some(Self::Rbc),
@@ -806,7 +806,7 @@ impl ProtocolSessionId for AvssSessionId {
     type Protocol = ProtocolType;
 
     fn new(protocol: ProtocolType, slot24: u32, instance_id: u32) -> Self {
-        let value = ((protocol as u64 & 0xFFFF) << 56)
+        let value = ((protocol as u64 & 0xFF) << 56)
             | ((slot24 as u64 & 0xFF_FFFF) << 32)
             | (instance_id as u64);
 
@@ -814,8 +814,8 @@ impl ProtocolSessionId for AvssSessionId {
     }
 
     fn calling_protocol(self) -> Option<ProtocolType> {
-        let val = ((self.0 >> 56) & 0xFFFF) as u16;
-        ProtocolType::from_u16(val)
+        let val = ((self.0 >> 56) & 0xFF) as u8;
+        ProtocolType::from_u8(val)
     }
 
     fn slot24(self) -> u32 {
@@ -835,7 +835,6 @@ impl ProtocolSessionId for AvssSessionId {
         AvssSessionId(id)
     }
 }
-
 impl AvssSessionId {
     //Second 8 bits
     pub fn exec_id(self) -> u8 {

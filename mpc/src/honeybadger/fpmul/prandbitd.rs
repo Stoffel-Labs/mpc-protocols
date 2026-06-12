@@ -502,7 +502,14 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         // Step 2: P_i samples randomness and sends
         // Random integer range: [0, 2^(l+k)]
-        let bound = BigUint::ZERO.add(2 as u32).pow((k + l) as u32);
+        // First we need to check that k + l + (2 bits for b) fit into both moduli.
+        const B_MARGIN: usize = 2;
+        let max_bits = k + l + B_MARGIN;
+        let max_field_cap = F::MODULUS_BIT_SIZE.min(G::MODULUS_BIT_SIZE);
+        if max_bits as u32 >= max_field_cap {
+            return Err(PRandError::SurpassedFieldCapacity);
+        }
+        let bound = BigUint::from(2 as u32).pow((k + l) as u32);
         let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
         for tset in tsets {
             let r_t_i: Vec<BigUint> = (0..batch_size)
@@ -670,6 +677,8 @@ fn gen_big_uint_range<R>(rng: &mut R, bound: &BigUint) -> BigUint
 where
     R: Rng,
 {
+    // To generate the random element including `bound`.
+    let bound = bound + BigUint::from(1 as usize);
     let n_bytes = bound.to_bytes_le().len();
     let n_bits = bound.bits();
     let excess_bits = (8 - n_bits % 8) % 8;
@@ -678,7 +687,7 @@ where
     loop {
         let bytes: Vec<u8> = (0..n_bytes).map(|_| rng.gen()).collect();
         let candidate = BigUint::from_bytes_le(&bytes) >> excess_bits;
-        if candidate < *bound {
+        if candidate < bound {
             return candidate;
         }
     }

@@ -115,6 +115,9 @@ where
 //--------------------------------------------Prandbitd--------------------------------------------
 #[derive(Debug, Error)]
 pub enum PRandError {
+    /// The parameters for the precision are too big
+    #[error("the parameters for k and l surpassed the field capacity")]
+    SurpassedFieldCapacity,
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),

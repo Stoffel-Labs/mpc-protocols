@@ -33,6 +33,9 @@ use tracing::{info, warn};
 /// Error that occurs during the execution of the Random Double Share Error.
 #[derive(Debug, Error)]
 pub enum RanDouShaError {
+    /// There's no calling protocol
+    #[error("there is no calling protocol")]
+    NoCallingProtocol,
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
@@ -511,7 +514,7 @@ where
                 let sessionid = SessionId::new(
                     msg.session_id
                         .calling_protocol()
-                        .expect("Calling protocol can not be None"),
+                        .ok_or(RanDouShaError::NoCallingProtocol)?,
                     SessionId::pack_slot24(
                         msg.session_id.exec_id(),
                         self.id as u8,
