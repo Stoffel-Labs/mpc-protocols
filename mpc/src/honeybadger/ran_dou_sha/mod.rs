@@ -8,8 +8,7 @@ use crate::{
     },
     honeybadger::{
         double_share::DoubleShamirShare, ran_dou_sha::messages::RanDouShaPayload,
-        robust_interpolate::InterpolateError, ProtocolType, SessionId, WrappedMessage,
-        MAX_MESSAGE_SIZE,
+        robust_interpolate::InterpolateError, SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::FftField;

@@ -18,7 +18,7 @@ use tokio::{
     sync::Mutex,
     time::{timeout, Duration},
 };
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use super::DoubleShamirShare;
 
