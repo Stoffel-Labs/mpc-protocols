@@ -1,5 +1,5 @@
 use crate::{
-    common::{share::ShareError, ProtocolSessionId},
+    common::{share::ShareError, utils::deser_bounded_vec, ProtocolSessionId},
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         fpmul::{
@@ -17,6 +17,7 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
 use ark_std::rand::{Rng, SeedableRng};
 use itertools::Itertools;
 use num_bigint::BigUint;
+use num_traits::ConstZero;
 use std::ops::Add;
 use std::{collections::HashMap, sync::Arc, vec};
 use stoffelnet::network_utils::Network;
@@ -24,7 +25,7 @@ use tokio::{
     sync::{mpsc::Receiver, Mutex},
     time::{timeout, Duration},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 /// Represents the shares stored by a player.
 ///
@@ -239,7 +240,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     {
         // Phase 0: Terminal fast-path
         {
-            let binding = self.get_or_create_store(session_id).await;
+            let binding = self.get_or_create_store(session_id).await?;
             let store = binding.lock().await;
 
             match calling_proto {
@@ -259,7 +260,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         // Phase 1: Check readiness + decide what must be done
         let (batch_size, r_t_map, share_b_q, need_compute, need_open_start) = {
-            let binding = self.get_or_create_store(session_id).await;
+            let binding = self.get_or_create_store(session_id).await?;
             let store = binding.lock().await;
 
             let Some(batch_size) = store.batch_size else {
@@ -271,6 +272,16 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
             if store.r_t.len() != total_tsets {
                 return Ok(false);
+            }
+            // validate stored r_t lengths before indexing
+            for r_t in store.r_t.values() {
+                if r_t.len() != batch_size {
+                    return Err(PRandError::InvalidMessage(format!(
+                        "stored r_t has length {} but batch_size is {}",
+                        r_t.len(),
+                        batch_size
+                    )));
+                }
             }
 
             let need_compute =
@@ -345,7 +356,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // ============================================================
         // Phase 3: Commit derived shares + PRandInt finish
         // ============================================================
-        let binding = self.get_or_create_store(session_id).await;
+        let binding = self.get_or_create_store(session_id).await?;
 
         let (int_sender, int_out) = {
             let mut store = binding.lock().await;
@@ -423,7 +434,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 for (i, chunk) in share_rplusb.chunks(self.t + 1).enumerate() {
                     let session_id_batch = SessionId::new(
                         calling_proto,
-                        SessionId::pack_slot24(session_id.exec_id(), 0, i as u8),
+                        SessionId::pack_slot24(session_id.exec_id(), i as u8, 0),
                         session_id.instance_id(),
                     );
                     self.batch_recon
@@ -437,6 +448,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         Ok(true)
     }
+
     /// Distributed RISS generation
     /// generates shares in multiples of (t+1)
     pub async fn generate_riss<N: Network + Send + Sync>(
@@ -462,7 +474,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // Step 1: compute all maximal unqualified sets
         let tsets: Vec<Vec<usize>> = (0..self.n).combinations(self.t).collect();
 
-        let binding = self.get_or_create_store(session_id).await;
+        let binding = self.get_or_create_store(session_id).await?;
         let mut store = binding.lock().await;
         let my_tsets: Vec<Vec<usize>> = tsets
             .clone()
@@ -498,7 +510,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 .map(|_| gen_big_uint_range(&mut rng, &bound))
                 .collect();
 
-            // send to all players not in T
+            // Send to all players not in T
             for j in 0..self.n {
                 if !tset.contains(&j) {
                     let msg = WrappedMessage::PRandBitD(PRandBitDMessage::new(
@@ -530,8 +542,27 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             }
         };
 
-        let binding = self.get_or_create_store(msg.session_id).await;
+        let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
+
+        if msg.tset.contains(&self.id) {
+            return Err(PRandError::InvalidMessage(format!(
+                "node {} received message for tset that contains itself: {:?}",
+                self.id, msg.tset
+            )));
+        }
+
+        let maybe_batch_size = store.batch_size;
+
+        if let Some(batch_size) = maybe_batch_size {
+            if msg.r_t.len() != batch_size {
+                return Err(PRandError::InvalidMessage(format!(
+                    "r_t length {} does not match batch_size {}",
+                    msg.r_t.len(),
+                    batch_size
+                )));
+            }
+        }
 
         // Get or create entry for this tset
         let tset_entry = store
@@ -551,18 +582,25 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         tset_entry.insert(msg.sender_id, msg.r_t);
 
         // Check if we have all expected contributors
-        if tset_entry.len() == self.n {
-            // Compute r_T = sum of contributions
-            let r_t_sum = tset_entry.values().fold(
-                vec![BigUint::ZERO; tset_entry.values().next().unwrap().len()],
-                |mut acc, v| {
-                    for (a, x) in acc.iter_mut().zip(v) {
-                        *a += x;
-                    }
-                    acc
-                },
-            );
-            store.r_t.insert(msg.tset.clone(), r_t_sum);
+        let r_t_sum = if tset_entry.len() == self.n {
+            let batch_size = maybe_batch_size
+                .ok_or_else(|| PRandError::NotSet("batch_size not set when folding r_t".into()))?;
+            Some(
+                tset_entry
+                    .values()
+                    .fold(vec![BigUint::ZERO; batch_size], |mut acc, v| {
+                        for (a, x) in acc.iter_mut().zip(v) {
+                            *a += x;
+                        }
+                        acc
+                    }),
+            )
+        } else {
+            None
+        };
+
+        if let Some(sum) = r_t_sum {
+            store.r_t.insert(msg.tset.clone(), sum);
         }
         drop(store);
         self.try_advance_from_riss(msg.session_id, calling_proto, network.clone())
@@ -590,23 +628,22 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             sid.instance_id(),
         );
 
-        let binding = self.get_or_create_store(session_id).await;
+        let binding = self.get_or_create_store(session_id).await?;
         let mut store = binding.lock().await;
         if store.state == PrandState::BitFinished {
             return Ok(());
         }
 
         // deserialize the field element from the payload
-        let share_i_list: Vec<F> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-        let round_id = sid.round_id();
-        if store.output_open.contains_key(&round_id) {
+        let share_i_list: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), self.n)?;
+        let dealer_id = sid.sub_id();
+        if store.output_open.contains_key(&dealer_id) {
             return Err(PRandError::Duplicate(format!(
-                "PRandBit: Already received for {}",
-                round_id
+                "Already received for {}",
+                dealer_id
             )));
         }
-        store.output_open.insert(round_id, share_i_list);
+        store.output_open.insert(dealer_id, share_i_list);
         drop(store);
         self.try_finalize_bit(session_id, binding.clone()).await?;
         return Ok(());
@@ -615,15 +652,17 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
-    ) -> Arc<Mutex<PRandBitDStore<F, G>>> {
+    ) -> Result<Arc<Mutex<PRandBitDStore<F, G>>>, PRandError> {
         let mut storage = self.store.lock().await;
 
-        // should never happen, since only exec ID changes for different runs
-        assert!(storage.len() <= 256);
-        storage
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            warn!("PRandBitD session limit reached");
+            return Err(PRandError::LimitError);
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(PRandBitDStore::empty())))
-            .clone()
+            .clone())
     }
 }
 

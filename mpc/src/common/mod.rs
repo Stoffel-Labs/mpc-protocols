@@ -13,6 +13,7 @@ pub mod acss;
 
 pub mod math;
 pub mod types;
+pub mod utils;
 
 use crate::common::{
     rbc::{rbc_store::Msg, RbcError},

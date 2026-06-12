@@ -1,5 +1,8 @@
 use crate::{
-    common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC},
+    common::{
+        share::ShareError, utils::deser_bounded_vec, ProtocolSessionId, SecretSharingScheme,
+        ShamirShare, RBC,
+    },
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         mul::{
@@ -8,11 +11,12 @@ use crate::{
         },
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         triple_gen::ShamirBeaverTriple,
-        SessionId, WrappedMessage,
+        SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::FftField;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::CanonicalSerialize;
+use bincode::Options;
 use itertools::izip;
 use std::{
     collections::HashMap,
@@ -118,6 +122,12 @@ fn reconstruct_rbc<F: FftField>(
         }
     }
     for i in 0..share_len {
+        let required = t + 1;
+        if a_shares[i].len() < required || b_shares[i].len() < required {
+            return Err(InterpolateError::InvalidInput(
+                "Insufficient valid shares for reconstruction".to_string(),
+            ));
+        }
         let a = RobustShare::recover_secret(&a_shares[i], n, t)?;
         let b = RobustShare::recover_secret(&b_shares[i], n, t)?;
 
@@ -179,10 +189,39 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: MultMessage = bincode::deserialize(&output)?;
+            let msg: MultMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
+            let authenticated_sender = id.sub_id() as usize;
+            if msg.sender != authenticated_sender {
+                warn!(
+                    "Dropping 
+                RBC output: inner sender {} does not match session's designated sender {}",
+                    msg.sender,
+                    id.sub_id()
+                );
+                continue;
+            }
+            if msg.session_id.exec_id() != id.exec_id()
+                || msg.session_id.instance_id() != id.instance_id()
+            {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != id.sub_id()
+            {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
 
+            if id.round_id() != 2 {
+                warn!("Dropping RBC output: unexpected round_id for Mul RBC message");
+                continue;
+            }
             match self
-                .open_mult_handler(msg.sender, msg.session_id, msg.payload)
+                .open_mult_handler(authenticated_sender, msg.session_id, msg.payload)
                 .await
             {
                 Ok(()) => {}
@@ -273,7 +312,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         let share_len = x.len() % (self.t + 1);
 
         // 1.
-        let storage_bind = self.get_or_create_mult_storage(session_id).await;
+        let storage_bind = self.get_or_create_mult_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
 
         // 2.
@@ -316,14 +355,12 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         {
             let shares_mult = finalize_mul(&storage)?;
 
-            // never None because checked at the beginning
-            let taken_output_sender = storage.output_sender.take().unwrap();
-
-            taken_output_sender
-                .send(shares_mult)
-                .map_err(|_| MulError::SendError(session_id))?;
             storage.protocol_state = MultProtocolState::Finished;
-
+            if let Some(sender) = storage.output_sender.take() {
+                sender
+                    .send(shares_mult)
+                    .map_err(|_| MulError::SendError(session_id))?;
+            }
             info!("Multiplication completed at node {}", self.id);
 
             return Ok(());
@@ -360,7 +397,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             if !have_batch_recon1[i] {
                 let session_id1 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
-                    SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i) as u8),
+                    SessionId::pack_slot24(session_id.exec_id(), (2 * i) as u8, 1),
                     session_id.instance_id(),
                 );
                 // Execute batch reconstruction for a-x values
@@ -372,7 +409,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             if !have_batch_recon2[i] {
                 let session_id2 = SessionId::new(
                     session_id.calling_protocol().unwrap(),
-                    SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i + 1) as u8),
+                    SessionId::pack_slot24(session_id.exec_id(), (2 * i + 1) as u8, 1),
                     session_id.instance_id(),
                 );
                 // Execute batch reconstruction for b-y values
@@ -392,7 +429,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
 
             let sessionid = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot24(session_id.exec_id(), 2, self.id as u8),
+                SessionId::pack_slot24(session_id.exec_id(), self.id as u8, 2),
                 session_id.instance_id(),
             );
 
@@ -441,7 +478,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         );
 
         // 1.
-        let storage_bind = self.get_or_create_mult_storage(session_id).await;
+        let storage_bind = self.get_or_create_mult_storage(session_id).await?;
         let mut storage = storage_bind.lock().await;
 
         if storage.protocol_state == MultProtocolState::Finished {
@@ -449,19 +486,19 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         // 2.
-        if sid.sub_id() == 1 {
-            let open: Vec<F> = CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-            let round_id = sid.round_id();
-            let (target_map, label) = if round_id % 2 == 0 {
+        if sid.round_id() == 1 {
+            let open: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), self.n)?;
+            let dealer_id = sid.sub_id();
+            let (target_map, label) = if dealer_id % 2 == 0 {
                 (&mut storage.output_open_mult1, "a-x")
             } else {
                 (&mut storage.output_open_mult2, "b-y")
             };
 
-            if target_map.contains_key(&round_id) {
+            if target_map.contains_key(&dealer_id) {
                 return Err(MulError::Duplicate(format!(
                     "Received duplicate of round {}",
-                    round_id
+                    dealer_id
                 )));
             }
 
@@ -470,11 +507,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 "Received opened {} values for session_id: {:?} and round {:?}",
                 label,
                 session_id,
-                round_id
+                dealer_id
             );
 
-            target_map.insert(round_id, open);
-        } else if sid.sub_id() == 2 {
+            target_map.insert(dealer_id, open);
+        } else if sid.round_id() == 2 {
             info!(
                 self_id = self.id,
                 "Received shares for reconstruction using RBC for session_id: {:?}", session_id
@@ -485,9 +522,28 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 ));
             }
 
-            let open_message: ReconstructionMessage<F> =
-                CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-
+            let mut r = payload.as_slice();
+            let a_sub_x = deser_bounded_vec::<RobustShare<F>>(&mut r, self.n)?;
+            let b_sub_y = deser_bounded_vec::<RobustShare<F>>(&mut r, self.n)?;
+            let open_message = ReconstructionMessage { a_sub_x, b_sub_y };
+            for share in open_message
+                .a_sub_x
+                .iter()
+                .chain(open_message.b_sub_y.iter())
+            {
+                if share.id != sender {
+                    return Err(MulError::InvalidInput(format!(
+                        "Invalid share id from sender {}",
+                        sender
+                    )));
+                }
+                if share.degree != self.t {
+                    return Err(MulError::InvalidInput(format!(
+                        "Invalid share degree from sender {}",
+                        sender
+                    )));
+                }
+            }
             storage
                 .received_shares
                 .insert(sender, (open_message.a_sub_x, open_message.b_sub_y));
@@ -522,14 +578,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         // 6.
         let shares_mult = finalize_mul(&storage)?;
 
-        // never None because checked at the beginning
-        let taken_output_sender = storage.output_sender.take().unwrap();
-
-        taken_output_sender
-            .send(shares_mult)
-            .map_err(|_| MulError::SendError(session_id))?;
         storage.protocol_state = MultProtocolState::Finished;
-
+        if let Some(sender) = storage.output_sender.take() {
+            let _ = sender.send(shares_mult);
+        }
         info!("Multiplication completed at node {}", self.id);
 
         Ok(())
@@ -538,16 +590,17 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     pub async fn get_or_create_mult_storage(
         &self,
         session_id: SessionId,
-    ) -> Arc<Mutex<MultStorage<F>>> {
+    ) -> Result<Arc<Mutex<MultStorage<F>>>, MulError> {
         let mut storage = self.mult_storage.lock().await;
 
-        // should never occur, since only exec ID changes for different runs
-        assert!(storage.len() <= 256);
-
-        storage
+        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+            warn!("Mul session limit reached");
+            return Err(MulError::LimitError);
+        }
+        Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(MultStorage::empty())))
-            .clone()
+            .clone())
     }
 
     pub async fn wait_for_result(
@@ -825,7 +878,10 @@ pub mod tests {
         let start = Instant::now();
 
         loop {
-            let storage_bind = nodes[node_id].get_or_create_mult_storage(session_id).await;
+            let storage_bind = nodes[node_id]
+                .get_or_create_mult_storage(session_id)
+                .await
+                .unwrap();
             let storage = storage_bind.lock().await;
 
             let has_mult1_keys =
@@ -861,7 +917,10 @@ pub mod tests {
             .await
             .is_ok());
 
-        let storage_bind = nodes[node_id].get_or_create_mult_storage(session_id).await;
+        let storage_bind = nodes[node_id]
+            .get_or_create_mult_storage(session_id)
+            .await
+            .unwrap();
         let storage = storage_bind.lock().await;
 
         // openings via RBC should be there now
@@ -992,7 +1051,10 @@ pub mod tests {
         // 4. Create node
         let mul_node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n_parties, t).unwrap();
 
-        let storage_bind = mul_node.get_or_create_mult_storage(session_id).await;
+        let storage_bind = mul_node
+            .get_or_create_mult_storage(session_id)
+            .await
+            .unwrap();
         let mut storage = storage_bind.lock().await;
         storage.inputs = (
             x_inputs_per_node[node_id].clone(),
@@ -1019,12 +1081,12 @@ pub mod tests {
         {
             let session_id_a = SessionId::new(
                 ProtocolType::Mul,
-                SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i) as u8),
+                SessionId::pack_slot24(session_id.exec_id(), (2 * i) as u8, 1),
                 session_id.instance_id(),
             );
             let session_id_b = SessionId::new(
                 ProtocolType::Mul,
-                SessionId::pack_slot24(session_id.exec_id(), 1, (2 * i + 1) as u8),
+                SessionId::pack_slot24(session_id.exec_id(), (2 * i + 1) as u8, 1),
                 session_id.instance_id(),
             );
 
@@ -1073,7 +1135,7 @@ pub mod tests {
 
                 let shared_session_id = SessionId::new(
                     ProtocolType::Mul,
-                    SessionId::pack_slot24(session_id.exec_id(), 2, mul_node.id as u8),
+                    SessionId::pack_slot24(session_id.exec_id(), mul_node.id as u8, 2),
                     session_id.instance_id(),
                 );
 

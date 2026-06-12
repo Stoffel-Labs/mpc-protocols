@@ -18,6 +18,8 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+const MAX_RBC_SESSIONS: usize = 1024;
+
 ///--------------------------Bracha RBC--------------------------
 ///
 /// Protocol works as follows(m is the message to broadcast) :
@@ -262,7 +264,7 @@ where
             store.increment_echo(&msg.payload); // Increment the count for the corresponding payload.
             let count = store.get_echo_count(&msg.payload);
             // If the threshold for receiving echoes is met, broadcast the READY message.
-            if count >= 2 * self.t + 1 {
+            if count >= (self.n + self.t + 2) / 2 {
                 if !store.ready {
                     store.mark_ready(); // Mark the session as ready.
                     broadcast_ready = Some(Msg::new(
@@ -425,23 +427,28 @@ where
         Ok(())
     }
     async fn get_or_create_store(&self, session_id: Id) -> Option<Arc<Mutex<BrachaStore>>> {
-        // Step 1: get or create store
         let store_lock = {
             let mut store = self.store.lock().await;
+            if store.len() >= MAX_RBC_SESSIONS && !store.contains_key(&session_id) {
+                warn!(
+                    id = self.id,
+                    session_id = session_id.as_u64(),
+                    "Bracha session limit reached, dropping message"
+                );
+                return None;
+            }
             store
                 .entry(session_id)
                 .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
                 .clone()
         };
 
-        // Step 2: check if already ended
         {
             let store_guard = store_lock.lock().await;
             if store_guard.ended {
                 return None;
             }
-        } // lock dropped here
-
+        }
         Some(store_lock)
     }
 }
@@ -1077,6 +1084,14 @@ impl<Id: ProtocolSessionId> Avid<Id> {
     async fn get_or_create_store(&self, session_id: Id) -> Option<Arc<Mutex<AvidStore>>> {
         let store_lock = {
             let mut store = self.store.lock().await;
+            if store.len() >= MAX_RBC_SESSIONS && !store.contains_key(&session_id) {
+                warn!(
+                    id = self.id,
+                    session_id = session_id.as_u64(),
+                    "Avid session limit reached, dropping message"
+                );
+                return None;
+            }
             store
                 .entry(session_id)
                 .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))

@@ -1,13 +1,13 @@
 use crate::common::{
     rbc::RbcError,
-    share::{feldman::FeldmanShamirShare, ShareError},
+    share::{feldman::FeldmanShamirShare, shamir::Shamirshare, ShareError},
     ProtocolSessionId, RbcWrapFn, SecretSharingScheme, RBC,
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
-use bincode::ErrorKind;
+use bincode::{ErrorKind, Options};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
@@ -20,7 +20,9 @@ use tokio::sync::{
     mpsc::{self, Receiver, Sender},
     Mutex,
 };
-use tracing::info;
+use tracing::{info, warn};
+
+const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
 #[derive(Debug, thiserror::Error)]
 pub enum AvssError {
@@ -54,9 +56,9 @@ pub enum AvssError {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvssMessage<Id: ProtocolSessionId> {
-    pub sender_id: PartyId,
     pub session_id: Id,
     pub dealer_pk: Vec<u8>,
+    pub public_commitments: Vec<Vec<Vec<u8>>>,
     pub encrypted_shares: Vec<Vec<Vec<u8>>>,
 }
 
@@ -65,15 +67,15 @@ where
     Id: ProtocolSessionId,
 {
     pub fn new(
-        sender: PartyId,
         session_id: Id,
         dealer_pk: Vec<u8>,
+        public_commitments: Vec<Vec<Vec<u8>>>,
         encrypted_shares: Vec<Vec<Vec<u8>>>,
     ) -> Self {
         Self {
-            sender_id: sender,
             session_id,
             dealer_pk,
+            public_commitments,
             encrypted_shares,
         }
     }
@@ -225,7 +227,16 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: AvssMessage<Id> = bincode::deserialize(&output)?;
+            let msg: AvssMessage<Id> = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
+
+            if msg.session_id != id {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
 
             match self.process(msg).await {
                 Ok(()) => {}
@@ -236,6 +247,7 @@ where
         }
         Ok(())
     }
+
     pub async fn init<Rnd, N>(
         &mut self,
         secrets: Vec<F>,
@@ -276,22 +288,33 @@ where
                 kdf_from_point(&ss)
             })
             .collect();
+        let mut public_commitments: Vec<Vec<Vec<u8>>> = Vec::with_capacity(shares.len());
         let mut pt = Vec::new();
-        for x in shares {
+        for x in &shares {
             assert_eq!(x.len(), self.n_parties);
+            // commitments are identical across all parties for the same polynomial
+            let commitment_bytes = x[0]
+                .commitments
+                .iter()
+                .map(|c| {
+                    let mut b = Vec::new();
+                    c.serialize_compressed(&mut b).map(|_| b)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            public_commitments.push(commitment_bytes);
 
             for (i, share) in x.iter().enumerate() {
                 pt.clear();
-                share.serialize_compressed(&mut pt)?;
+                share.feldmanshare.serialize_compressed(&mut pt)?; // scalar only
                 encrypted[i].push(encrypt(keys[i].clone(), &pt, rng)?);
             }
         }
 
         //Broadcast to servers
         let msg = AvssMessage {
-            sender_id: self.id,
             session_id: session_id,
             dealer_pk: pk_d_bytes,
+            public_commitments,
             encrypted_shares: encrypted,
         };
 
@@ -332,11 +355,30 @@ where
         let ss = pk_d.mul(self.sk_i);
         let key = kdf_from_point(&ss);
 
+        let all_commitments: Vec<Vec<G>> = msg
+            .public_commitments
+            .iter()
+            .map(|cs| {
+                cs.iter()
+                    .map(|b| G::deserialize_compressed(&b[..]))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if cts.len() != all_commitments.len() {
+            return Err(AvssError::InvalidShareLength);
+        }
+
         let mut shares = Vec::with_capacity(cts.len());
-        for ct in cts {
+        for (ct, commitments) in cts.iter().zip(all_commitments.iter()) {
             let pt = decrypt(key.clone(), ct)?;
-            let share: FeldmanShamirShare<F, G> =
+            let shamirshare: Shamirshare<F> =
                 CanonicalDeserialize::deserialize_compressed(&pt[..])?;
+
+            let share = FeldmanShamirShare {
+                feldmanshare: shamirshare,
+                commitments: commitments.clone(),
+            };
 
             if !verify_feldman(share.clone()) {
                 return Err(AvssError::InvalidShare);
@@ -349,6 +391,7 @@ where
             let mut map = self.shares.lock().await;
             map.insert(msg.session_id, Some(shares));
         };
+
         self.output_sender
             .send(msg.session_id)
             .await

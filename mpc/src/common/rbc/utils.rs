@@ -4,6 +4,8 @@ use rs_merkle::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024; // 10 MiB, matches network layer limit
+
 /// Encodes a given payload using Reed-Solomon erasure coding
 pub fn encode_rs(
     payload: Vec<u8>,
@@ -77,12 +79,21 @@ pub fn decode_rs(
     r.reconstruct(&mut shards)
         .map_err(|e| ShardError::Failed(e.to_string()))?;
 
-    // Ensure all shards are present and unwrap them
-    let result: Result<Vec<Vec<u8>>, _> = shards
+    // Unwrap all shards — reconstruct guarantees all slots are filled
+    let full_shards: Vec<Vec<u8>> = shards
         .into_iter()
         .map(|opt| opt.ok_or(ShardError::Incomplete))
-        .collect();
-    result
+        .collect::<Result<_, _>>()?;
+    if !r
+        .verify(&full_shards)
+        .map_err(|e| ShardError::Failed(e.to_string()))?
+    {
+        return Err(ShardError::Failed(
+            "Reed-Solomon verification failed: shards are not a valid codeword".into(),
+        ));
+    }
+
+    Ok(full_shards)
 }
 /// Reconstructs the original payload from decoded data shards
 pub fn reconstruct_payload(
@@ -91,6 +102,16 @@ pub fn reconstruct_payload(
 ) -> Result<Vec<u8>, ShardError> {
     if decoded_shards.len() < data_shards {
         return Err(ShardError::Incomplete);
+    }
+    let total_len: usize = decoded_shards
+        .iter()
+        .take(data_shards)
+        .map(|s| s.len())
+        .sum();
+    if total_len > MAX_PAYLOAD_SIZE {
+        return Err(ShardError::Config(
+            "Reconstructed payload exceeds maximum size".to_string(),
+        ));
     }
     // Concatenate only the data shards to form the original message
     let mut payload = decoded_shards

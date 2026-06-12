@@ -1,11 +1,15 @@
 mod utils;
 
-use crate::utils::test_utils::{
-    construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
-    generate_independent_shares, setup_tracing,
+use crate::utils::{
+    test_utils::{
+        construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
+        generate_independent_shares, setup_tracing,
+    },
+    turmoil::{add_driver, collect_results, turmoil_setup},
 };
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
+use ark_serialize::CanonicalDeserialize;
 use ark_std::{
     rand::{rngs::StdRng, SeedableRng},
     test_rng,
@@ -14,10 +18,14 @@ use chacha20poly1305::aead::OsRng;
 use std::sync::Arc;
 use stoffelmpc_mpc::{
     common::{
-        rbc::rbc::Avid, MPCProtocol, PreprocessingMPCProtocol, ProtocolSessionId,
-        SecretSharingScheme, ShamirShare,
+        rbc::rbc::Avid,
+        types::fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
+        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ProtocolSessionId, SecretSharingScheme,
+        ShamirShare,
     },
     honeybadger::{
+        batch_recon::{batch_recon::BatchReconNode, BatchReconError},
+        fpmul::f256::Gf256,
         input::input::{InputClient, InputType},
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -27,74 +35,18 @@ use stoffelmpc_mpc::{
 };
 use stoffelmpc_network::{
     // bad_fake_network::setup_tracing,
-    fake_network::{FakeNetworkConfig, SenderId},
-    turmoil_network::{TurmoilInnerNetwork, TurmoilNetwork},
+    fake_network::SenderId,
+    turmoil_network::TurmoilNetwork,
 };
 use stoffelnet::network_utils::{ClientId, NetworkError};
+use tokio::sync::Barrier;
 use tokio::time::{sleep, timeout, Duration};
 use tracing::{error, info, warn};
-use turmoil::{Builder, Sim};
 
-pub fn turmoil_setup(
-    n_nodes: usize,
-    client_ids: Vec<ClientId>,
-    latency: Option<(u64, u64)>,
-) -> (turmoil::Sim<'static>, TurmoilInnerNetwork) {
-    let sim = if let Some((min, max)) = latency {
-        Builder::new()
-            .min_message_latency(Duration::from_millis(min))
-            .max_message_latency(Duration::from_millis(max))
-            .simulation_duration(Duration::from_secs(300))
-            .build()
-    } else {
-        Builder::new()
-            .simulation_duration(Duration::from_secs(120))
-            .build()
-    };
-
-    let inner = TurmoilInnerNetwork::new(
-        n_nodes,
-        if client_ids.is_empty() {
-            None
-        } else {
-            Some(client_ids)
-        },
-        FakeNetworkConfig::new(100),
-        7000,
-        8000,
-    );
-
-    (sim, inner)
-}
-
-// --- sim setup ---
-
-fn add_driver(sim: &mut Sim, secs: u64) {
-    sim.client("driver", async move {
-        sleep(Duration::from_secs(secs)).await;
-        Ok::<(), Box<dyn std::error::Error>>(())
-    });
-}
-
-// --- result collection ---
-
-fn collect_results(
-    mut sim: Sim,
-    rx_done: std::sync::mpsc::Receiver<Result<(), String>>,
-    expected: usize,
-) {
-    sim.run().unwrap();
-    let results: Vec<_> = std::iter::from_fn(|| rx_done.try_recv().ok()).collect();
-    assert_eq!(
-        results.len(),
-        expected,
-        "not all nodes reported: got {}/{}",
-        results.len(),
-        expected
-    );
-    for r in results {
-        assert!(r.is_ok(), "node failed: {}", r.unwrap_err());
-    }
+#[derive(Clone)]
+struct DelayedStart {
+    delayed_nodes: Vec<usize>,
+    time: Duration,
 }
 
 #[test]
@@ -464,8 +416,10 @@ fn test_input_protocol_e2e_turmoil() {
     }
 }
 
-#[test]
-fn preprocessing_e2e_turmoil() {
+fn preprocessing_e2e_turmoil(
+    node_delay: Option<Vec<(usize, Duration)>>,
+    node_freeze_start: Option<DelayedStart>,
+) {
     setup_tracing();
 
     let n_parties = 4;
@@ -579,8 +533,34 @@ fn preprocessing_e2e_turmoil() {
     drop(tx);
     drop(done_tx);
 
+    if let Some(delayed_start) = &node_freeze_start {
+        for delayed_node in &delayed_start.delayed_nodes {
+            for other_id in 0..n_parties {
+                if *delayed_node != other_id {
+                    sim.hold(format!("node{}", delayed_node), format!("node{}", other_id));
+                }
+            }
+        }
+    }
+
     let mut done_rx = done_rx;
     sim.client("driver", async move {
+        if let Some(delayed_start) = node_freeze_start {
+            tokio::time::sleep(delayed_start.time).await;
+
+            // Now, the nodes connect again
+            for freezed_node in delayed_start.delayed_nodes {
+                for other_id in 0..n_parties {
+                    if freezed_node != other_id {
+                        turmoil::release(
+                            format!("node{}", freezed_node),
+                            format!("node{}", other_id),
+                        );
+                    }
+                }
+            }
+        }
+
         let mut count = 0;
         while count < n_parties {
             match done_rx.recv().await {
@@ -591,7 +571,21 @@ fn preprocessing_e2e_turmoil() {
         Ok::<(), Box<dyn std::error::Error>>(())
     });
 
-    sim.run().expect("Execution must finish");
+    if let Some(delayed_nodes) = node_delay {
+        for (slow_node, delay) in delayed_nodes {
+            for other_id in 0..n_parties {
+                if slow_node != other_id {
+                    sim.set_link_latency(
+                        format!("node{}", slow_node),
+                        format!("node{}", other_id),
+                        delay,
+                    );
+                }
+            }
+        }
+    }
+
+    sim.run().unwrap();
 
     let results: Vec<_> = std::iter::from_fn(|| rx_done.try_recv().ok()).collect();
     assert_eq!(
@@ -613,6 +607,28 @@ fn preprocessing_e2e_turmoil() {
             }
         }
     }
+}
+
+#[test]
+fn preprocessing_e2e_with_delay() {
+    let slow_nodes = Some(vec![(0, Duration::from_secs(3))]);
+    preprocessing_e2e_turmoil(slow_nodes, None);
+}
+
+#[test]
+fn preprocessing_e2e_without_delay() {
+    preprocessing_e2e_turmoil(None, None);
+}
+
+#[test]
+fn preprocessing_e2e_with_freeze_start() {
+    preprocessing_e2e_turmoil(
+        None,
+        Some(DelayedStart {
+            delayed_nodes: vec![0],
+            time: Duration::from_secs(3),
+        }),
+    );
 }
 
 #[test]
@@ -1419,4 +1435,983 @@ fn mul_e2e_without_preprocessing_turmoil() {
         let expected = x_values[i] * y_values[i];
         assert_eq!(z_rec, expected, "multiplication mismatch at index {}", i);
     }
+}
+
+fn fpmul_e2e_with_preprocessing(
+    node_delay: Option<Vec<(usize, Duration)>>,
+    node_freeze_start: Option<DelayedStart>,
+) {
+    setup_tracing();
+
+    let n_parties = 4;
+    let t = 1;
+    let k = 16; // total bitlength
+    let m = 4; // fractional bits to truncate
+    let mut rng = test_rng();
+    let n_triples = 1 + m; // 1 (fpmul) + m(no of random bits)
+    let n_random_shares = m; // no of random bits
+    let n_prandbit = m;
+    let n_prandint = 1;
+    let bound_l = 8;
+    let security_k = 4;
+    let precision = FixedPointPrecision::new(k, m);
+
+    // Setup of the network.
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
+    let (tx_out, rx_out) = std::sync::mpsc::channel();
+    let (tx_client, mut rx_client) = tokio::sync::broadcast::channel(n_parties);
+
+    // Prepare inputs for multiplication
+    let mut a_fix = Vec::new();
+    let mut b_fix = Vec::new();
+
+    // x = 5.5 * 2^4=88, y = 3.25 * 2^4=52
+    // x * y = 17.875 * 2^8 = 4576
+    // 17.875 * 2^8 / 2^4 = 4576 / 2^4
+    // 17.875 * 2^4 = 286
+    let x = RobustShare::compute_shares(Fr::from(88), n_parties, t, None, &mut rng).unwrap();
+    let y = RobustShare::compute_shares(Fr::from(52), n_parties, t, None, &mut rng).unwrap();
+    for i in 0..n_parties {
+        a_fix.push(SecretFixedPoint::new_with_precision(
+            x[i].clone(),
+            precision,
+        ));
+        b_fix.push(SecretFixedPoint::new_with_precision(
+            y[i].clone(),
+            precision,
+        ));
+    }
+
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+        n_parties,
+        t,
+        n_triples,
+        n_random_shares,
+        111,
+        n_prandbit,
+        n_prandint,
+        bound_l,
+        security_k,
+        Duration::from_secs(300),
+        vec![],
+    );
+
+    let barrier_net = Arc::new(Barrier::new(n_parties));
+
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        let inner = inner.clone();
+        let a = a_fix[pid].clone();
+        let b = b_fix[pid].clone();
+        let barrier = barrier_net.clone();
+        let tx_out = tx_out.clone();
+        let tx_client = tx_client.clone();
+        sim.host(format!("node{}", pid), move || {
+            let mut node = node.clone();
+            let inner = inner.clone();
+            let a = a.clone();
+            let b = b.clone();
+            let barrier = barrier.clone();
+            let tx_out = tx_out.clone();
+            let tx_client = tx_client.clone();
+
+            async move {
+                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(pid), inner).await;
+                let net_arc = Arc::new(network);
+                barrier.wait().await;
+
+                let mul_handle = tokio::spawn({
+                    let a = a.clone();
+                    let b = b.clone();
+                    let mut node = node.clone();
+                    let net_arc = net_arc.clone();
+                    async move { node.mul_fixed(a, b, net_arc.clone()).await }
+                });
+
+                // Simulation of the process function.
+                loop {
+                    match rx.recv().await {
+                        Some((sender, msg)) => {
+                            let sender_id = match sender {
+                                SenderId::Node(i) => i,
+                                SenderId::Client(i) => i,
+                            };
+                            if let Err(e) = node.process(sender_id, msg, net_arc.clone()).await {
+                                error!("node {} process error: {:?}", pid, e);
+                            }
+                        }
+                        None => break,
+                    }
+
+                    tokio::task::yield_now().await;
+
+                    if mul_handle.is_finished() {
+                        break;
+                    }
+                }
+
+                let mul_share = match mul_handle.await {
+                    Ok(Ok(shares)) => shares,
+                    Ok(Err(e)) => {
+                        let _ = tx_out.send(Err(format!("node {} mul error: {:?}", pid, e)));
+                        let _ = tx_client.send(());
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        let _ = tx_out.send(Err(format!("node {} join error: {:?}", pid, e)));
+                        let _ = tx_client.send(());
+                        return Ok(());
+                    }
+                };
+
+                if mul_share.value().degree != t {
+                    let _ = tx_out.send(Err(format!(
+                        "node {} share degree {} != {}",
+                        pid,
+                        mul_share.value().degree,
+                        t
+                    )));
+                    let _ = tx_client.send(());
+                    return Ok(());
+                }
+                if mul_share.value().id != pid {
+                    let _ = tx_out.send(Err(format!("node {} share id mismatch", pid)));
+                    let _ = tx_client.send(());
+                    return Ok(());
+                }
+
+                let _ = tx_out.send(Ok((pid, mul_share)));
+                let _ = tx_client.send(());
+
+                Ok(())
+            }
+        });
+    }
+
+    drop(tx_out);
+    drop(tx_client);
+
+    if let Some(delayed_start) = &node_freeze_start {
+        for freezed_node in &delayed_start.delayed_nodes {
+            for other_id in 0..n_parties {
+                if *freezed_node != other_id {
+                    sim.hold(format!("node{}", freezed_node), format!("node{}", other_id));
+                }
+            }
+        }
+    }
+
+    sim.client("driver", async move {
+        if let Some(delayed_start) = node_freeze_start {
+            tokio::time::sleep(delayed_start.time).await;
+
+            // Now, the nodes connect again
+            for freezed_node in delayed_start.delayed_nodes {
+                for other_id in 0..n_parties {
+                    if freezed_node != other_id {
+                        turmoil::release(
+                            format!("node{}", freezed_node),
+                            format!("node{}", other_id),
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut count = 0;
+        while count < n_parties {
+            match rx_client.recv().await {
+                Ok(()) => count += 1,
+                Err(_) => break,
+            }
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    });
+
+    if let Some(slow_nodes) = node_delay {
+        for (slow_node_id, delay) in slow_nodes {
+            for other_id in 0..n_parties {
+                if slow_node_id != other_id {
+                    sim.set_link_latency(
+                        format!("node{}", slow_node_id),
+                        format!("node{}", other_id),
+                        delay,
+                    );
+                }
+            }
+        }
+    }
+
+    sim.run().unwrap();
+
+    let shares_result: Result<Vec<_>, _> = std::iter::from_fn(|| rx_out.try_recv().ok()).collect();
+    let shares: Vec<_> = shares_result
+        .unwrap()
+        .into_iter()
+        .map(|(_, share)| share.value().clone())
+        .collect();
+    let (_, rec) = RobustShare::recover_secret(&shares, n_parties, t).expect("interpolate failed");
+    assert_eq!(rec, Fr::from(286));
+}
+
+#[test]
+fn fpmul_e2e_with_preprocessing_node_delayed() {
+    let slow_node = 0;
+    let delay = Duration::from_secs(5);
+    fpmul_e2e_with_preprocessing(Some(vec![(slow_node, delay)]), None);
+}
+
+#[test]
+fn fpmul_e2e_with_preprocessing_freezing_start() {
+    fpmul_e2e_with_preprocessing(
+        None,
+        Some(DelayedStart {
+            delayed_nodes: vec![0],
+            time: Duration::from_secs(3),
+        }),
+    );
+}
+
+#[test]
+fn fpmul_e2e_with_preprocessing_without_delay() {
+    fpmul_e2e_with_preprocessing(None, None);
+}
+
+fn fpdiv_const_e2e(
+    node_delay: Option<Vec<(usize, Duration)>>,
+    node_freeze_start: Option<DelayedStart>,
+) {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+    let mut rng = test_rng();
+
+    // Prepare inputs for division
+    let k = 16; // total bitlength
+    let m = 4; // fractional bits
+    let precision = FixedPointPrecision::new(k, m);
+
+    let mut a_fix = Vec::new();
+    let mut denom_fix = Vec::new();
+
+    // x = 5.5 -> 5.5 * 2^4 = 88
+    // d = 2.0 -> 2.0 * 2^4 = 32
+    // x/d = 2.75 -> scaled = 2.75 * 2^4 = 44
+
+    let x_shares = RobustShare::compute_shares(Fr::from(88), n_parties, t, None, &mut rng).unwrap();
+
+    // denom is *public*, but each party needs ClearFixedPoint
+    let denom_clear = ClearFixedPoint::new_with_precision(Fr::from(32u64), precision);
+
+    for i in 0..n_parties {
+        a_fix.push(SecretFixedPoint::new_with_precision(
+            x_shares[i].clone(),
+            precision,
+        ));
+        denom_fix.push(denom_clear.clone());
+    }
+
+    for i in 0..n_parties {
+        a_fix.push(SecretFixedPoint::new_with_precision(
+            x_shares[i].clone(),
+            precision,
+        ));
+        denom_fix.push(denom_clear.clone());
+    }
+
+    // ----------------------------------------PREPROCESSING INPUTS----------------------------------------
+    // PRandInt
+    let r_int = RobustShare::compute_shares(Fr::from(3u64), n_parties, t, None, &mut rng).unwrap();
+
+    // PRandBits: m bits
+    let mut r_bits = vec![Vec::new(); n_parties];
+    for j in 0..m {
+        let bit_shares =
+            RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
+                .unwrap();
+        for (i, share) in bit_shares.iter().enumerate() {
+            r_bits[i].push((share.clone(), Gf256::one()));
+        }
+    }
+
+    // --------------------------------------- NETWORK SETUP ---------------------------------------------
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
+    let (tx_out, rx_out) = std::sync::mpsc::channel();
+    let (tx_client, mut rx_client) = tokio::sync::broadcast::channel(n_parties);
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        222,
+        0,
+        0,
+        0,
+        0,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    //----------------------------------------LOAD PREPROCESSING----------------------------------------
+
+    let barrier_net = Arc::new(Barrier::new(n_parties));
+
+    for pid in 0..n_parties {
+        let node = nodes[pid].clone();
+        let inner = inner.clone();
+        let a = a_fix[pid].clone();
+        let denom_fix = denom_fix[pid].clone();
+        let barrier = barrier_net.clone();
+        let tx_out = tx_out.clone();
+        let tx_client = tx_client.clone();
+        let r_bits = r_bits[pid].clone();
+        let r_int = r_int[pid].clone();
+        sim.host(format!("node{}", pid), move || {
+            let mut node = node.clone();
+            let inner = inner.clone();
+            let a = a.clone();
+            let denom_fix = denom_fix.clone();
+            let barrier = barrier.clone();
+            let tx_out = tx_out.clone();
+            let tx_client = tx_client.clone();
+            let r_bits = r_bits.clone();
+            let r_int = r_int.clone();
+
+            async move {
+                node.preprocessing_material.lock().await.add(
+                    None, // No Beaver triple needed
+                    None,
+                    None,
+                    None,
+                    Some(r_bits),      // PRandBit[]
+                    Some(vec![r_int]), // PRandInt[]
+                );
+                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(pid), inner).await;
+                let net_arc = Arc::new(network);
+                barrier.wait().await;
+
+                let mul_handle = tokio::spawn({
+                    let a = a.clone();
+                    let denom_fix = denom_fix.clone();
+                    let mut node = node.clone();
+                    let net_arc = net_arc.clone();
+                    async move {
+                        node.div_with_const_fixed(a, denom_fix, net_arc.clone())
+                            .await
+                    }
+                });
+
+                // Simulation of the process function.
+                loop {
+                    match rx.recv().await {
+                        Some((sender, msg)) => {
+                            let sender_id = match sender {
+                                SenderId::Node(i) => i,
+                                SenderId::Client(i) => i,
+                            };
+                            if let Err(e) = node.process(sender_id, msg, net_arc.clone()).await {
+                                error!("node {} process error: {:?}", pid, e);
+                            }
+                        }
+                        None => break,
+                    }
+
+                    tokio::task::yield_now().await;
+
+                    if mul_handle.is_finished() {
+                        break;
+                    }
+                }
+
+                let mul_share = match mul_handle.await {
+                    Ok(Ok(shares)) => shares,
+                    Ok(Err(e)) => {
+                        let _ = tx_out.send(Err(format!("node {} mul error: {:?}", pid, e)));
+                        let _ = tx_client.send(());
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        let _ = tx_out.send(Err(format!("node {} join error: {:?}", pid, e)));
+                        let _ = tx_client.send(());
+                        return Ok(());
+                    }
+                };
+
+                if mul_share.value().degree != t {
+                    let _ = tx_out.send(Err(format!(
+                        "node {} share degree {} != {}",
+                        pid,
+                        mul_share.value().degree,
+                        t
+                    )));
+                    let _ = tx_client.send(());
+                    return Ok(());
+                }
+                if mul_share.value().id != pid {
+                    let _ = tx_out.send(Err(format!("node {} share id mismatch", pid)));
+                    let _ = tx_client.send(());
+                    return Ok(());
+                }
+
+                let _ = tx_out.send(Ok((pid, mul_share)));
+                let _ = tx_client.send(());
+
+                Ok(())
+            }
+        });
+    }
+
+    drop(tx_out);
+    drop(tx_client);
+
+    if let Some(delayed_start) = &node_freeze_start {
+        for freezed_node in &delayed_start.delayed_nodes {
+            for other_id in 0..n_parties {
+                if *freezed_node != other_id {
+                    sim.hold(format!("node{}", freezed_node), format!("node{}", other_id));
+                }
+            }
+        }
+    }
+
+    sim.client("driver", async move {
+        if let Some(delayed_start) = node_freeze_start {
+            tokio::time::sleep(delayed_start.time).await;
+
+            // Now, the nodes connect again
+            for freezed_node in delayed_start.delayed_nodes {
+                for other_id in 0..n_parties {
+                    if freezed_node != other_id {
+                        turmoil::release(
+                            format!("node{}", freezed_node),
+                            format!("node{}", other_id),
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut count = 0;
+        while count < n_parties {
+            match rx_client.recv().await {
+                Ok(()) => count += 1,
+                Err(_) => break,
+            }
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    });
+
+    if let Some(slow_nodes) = node_delay {
+        for (slow_node_id, delay) in slow_nodes {
+            for other_id in 0..n_parties {
+                if slow_node_id != other_id {
+                    sim.set_link_latency(
+                        format!("node{}", slow_node_id),
+                        format!("node{}", other_id),
+                        delay,
+                    );
+                }
+            }
+        }
+    }
+
+    sim.run().unwrap();
+
+    let shares_result: Result<Vec<_>, _> = std::iter::from_fn(|| rx_out.try_recv().ok()).collect();
+    let shares: Vec<_> = shares_result
+        .unwrap()
+        .into_iter()
+        .map(|(_, share)| share.value().clone())
+        .collect();
+
+    let (_, rec) = RobustShare::recover_secret(&shares, n_parties, t).expect("interpolate failed");
+
+    // 2.75 * 2^4 = 44
+    assert_eq!(rec, Fr::from(44u64));
+}
+
+#[test]
+fn fpdiv_const_e2e_delayed() {
+    let slow_node = 0;
+    let delay = Duration::from_secs(5);
+    fpdiv_const_e2e(Some(vec![(slow_node, delay)]), None);
+
+    let slow_node = 0;
+    let delay = Duration::from_secs(7);
+    fpdiv_const_e2e(Some(vec![(slow_node, delay)]), None);
+
+    let slow_node = 0;
+    let delay = Duration::from_secs(1);
+    fpdiv_const_e2e(Some(vec![(slow_node, delay)]), None);
+}
+
+#[test]
+fn fpdiv_const_e2e_without_delay() {
+    fpdiv_const_e2e(None, None);
+}
+
+#[test]
+fn fpdiv_const_e2e_freeze_start() {
+    fpdiv_const_e2e(
+        None,
+        Some(DelayedStart {
+            delayed_nodes: vec![0],
+            time: Duration::from_secs(3),
+        }),
+    );
+    fpdiv_const_e2e(
+        None,
+        Some(DelayedStart {
+            delayed_nodes: vec![0],
+            time: Duration::from_secs(5),
+        }),
+    );
+    fpdiv_const_e2e(
+        None,
+        Some(DelayedStart {
+            delayed_nodes: vec![0],
+            time: Duration::from_secs(7),
+        }),
+    );
+}
+
+fn ransha_e2e_turmoil_with_hold(
+    n_parties: usize,
+    t: usize,
+    hold_nodes: Vec<usize>,
+    hold_time: Duration,
+) {
+    setup_tracing();
+
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
+
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(), String>>();
+    let (tx_partition, mut rx_partition) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_finished, mut rx_finished) = tokio::sync::mpsc::unbounded_channel();
+
+    for id in 0..n_parties {
+        let inner = inner.clone();
+        let node = nodes[id].clone();
+        let tx = tx.clone();
+        let tx_partition = tx_partition.clone();
+        let tx_finished = tx_finished.clone();
+
+        sim.host(format!("node{}", id), move || {
+            let inner = inner.clone();
+            let mut node = node.clone();
+            let tx = tx.clone();
+            let tx_partition = tx_partition.clone();
+            let tx_finished = tx_finished.clone();
+
+            async move {
+                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
+                sleep(Duration::from_millis(50)).await;
+
+                let network_arc = Arc::new(network);
+                let mut rng = StdRng::from_rng(OsRng).unwrap();
+                let node_id = node.preprocess.share_gen.id;
+
+                match node
+                    .preprocess
+                    .share_gen
+                    .init(session_id, &mut rng, network_arc.clone())
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(RanShaError::NetworkError(NetworkError::SendError)) => {}
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("node {} init error: {:?}", node_id, e)));
+                        return Ok(());
+                    }
+                }
+
+                // Send the signal that the node 0 can be partitioned. I can stop the party here
+                // given that we finished the initialization process.
+                tx_partition
+                    .send(())
+                    .expect("the signal to partition node 0 should be sent correctly");
+
+                let mut msg_count = 0usize;
+                let result = timeout(Duration::from_secs(30), async {
+                    loop {
+                        match rx.recv().await {
+                            Some((sender, msg)) => {
+                                msg_count += 1;
+                                let sender_id = match sender {
+                                    SenderId::Node(i) => i,
+                                    SenderId::Client(i) => i,
+                                };
+                                node.process(sender_id, msg, network_arc.clone())
+                                    .await
+                                    .unwrap();
+                            }
+                            None => break,
+                        }
+
+                        let store = node
+                            .preprocess
+                            .share_gen
+                            .get_or_create_store(session_id)
+                            .await
+                            .unwrap();
+                        if store.lock().await.state == RanShaState::Finished {
+                            break;
+                        }
+                    }
+                })
+                .await;
+
+                if result.is_err() {
+                    let _ = tx.send(Err(format!(
+                        "node {} timed out after {} msgs",
+                        node_id, msg_count
+                    )));
+                    return Ok(());
+                }
+
+                let store = node
+                    .preprocess
+                    .share_gen
+                    .get_or_create_store(session_id)
+                    .await
+                    .unwrap();
+                let store = store.lock().await;
+
+                for s_t in store.computed_r_shares.iter() {
+                    if s_t.degree != t {
+                        let _ = tx.send(Err(format!(
+                            "node {} share degree {} != {}",
+                            node_id, s_t.degree, t
+                        )));
+                        return Ok(());
+                    }
+                    if s_t.id != node.id {
+                        let _ = tx.send(Err(format!("node {} share id mismatch", node_id)));
+                        return Ok(());
+                    }
+                }
+
+                if store.computed_r_shares.len() != n_parties {
+                    let _ = tx.send(Err(format!(
+                        "node {} expected {} shares, got {}",
+                        node_id,
+                        n_parties,
+                        store.computed_r_shares.len()
+                    )));
+                    return Ok(());
+                }
+
+                let _ = tx.send(Ok(()));
+                tx_finished
+                    .send(())
+                    .expect("signal that the protocol finished should be sent");
+                Ok(())
+            }
+        });
+    }
+
+    drop(tx);
+
+    let other_nodes: Vec<_> = (0..n_parties)
+        .filter(|node| !hold_nodes.contains(node))
+        .collect();
+
+    sim.client("driver", async move {
+        let mut counter = 0;
+        while let Some(()) = rx_partition.recv().await {
+            counter += 1;
+            if counter == n_parties {
+                for id in &hold_nodes {
+                    for other_id in &other_nodes {
+                        turmoil::hold(format!("node{}", id), format!("node{}", other_id));
+                    }
+                }
+                break;
+            }
+        }
+
+        // This instruct the driver to wait for some time.
+        tokio::time::sleep(hold_time).await;
+
+        for id in &hold_nodes {
+            for other_id in &other_nodes {
+                turmoil::release(format!("node{}", id), format!("node{}", other_id));
+            }
+        }
+
+        // This allows that all the parties finishes. Hence the sim.run() will not suddenly finish.
+        for _ in 0..n_parties {
+            rx_finished.recv().await.unwrap();
+        }
+
+        Ok(())
+    });
+
+    drop(tx_partition);
+    drop(tx_finished);
+    collect_results(sim, rx_done, n_parties);
+}
+
+#[test]
+fn ransha_e2e_turmoil_with_hold_one_partition() {
+    let n_parties = 4;
+    let t = 1;
+    let hold_time = Duration::from_secs(1);
+
+    let hold_nodes = vec![0];
+
+    ransha_e2e_turmoil_with_hold(n_parties, t, hold_nodes, hold_time);
+}
+
+#[test]
+fn ransha_e2e_turmoil_with_hold_minority_partition() {
+    let n_parties = 10;
+    let t = 3;
+    let hold_time = Duration::from_secs(1);
+
+    let hold_nodes = vec![0, 1];
+
+    ransha_e2e_turmoil_with_hold(n_parties, t, hold_nodes, hold_time);
+}
+
+#[test]
+fn ransha_e2e_turmoil_with_hold_minority_partition_2_secs() {
+    let n_parties = 10;
+    let t = 3;
+    let hold_time = Duration::from_secs(2);
+
+    let hold_nodes = vec![0, 1];
+
+    ransha_e2e_turmoil_with_hold(n_parties, t, hold_nodes, hold_time);
+}
+
+#[test]
+fn ransha_e2e_turmoil_with_hold_minority_partition_3_secs() {
+    let n_parties = 10;
+    let t = 3;
+    let hold_time = Duration::from_secs(3);
+
+    let hold_nodes = vec![0, 1];
+
+    ransha_e2e_turmoil_with_hold(n_parties, t, hold_nodes, hold_time);
+}
+
+fn batch_reconstruction_with_partition(hold_nodes: Vec<usize>, n_parties: usize, t: usize) {
+    setup_tracing();
+    assert!(hold_nodes.len() <= t);
+
+    let session_id = SessionId::new(
+        ProtocolType::BatchRecon,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
+
+    let mut _batch_recon_receivers = Vec::new();
+
+    let nodes = (0..n_parties)
+        .map(|id| {
+            let (tx, rx) = tokio::sync::mpsc::channel(1024);
+            _batch_recon_receivers.push(rx);
+            BatchReconNode::new(id, n_parties, t, t, tx).unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    let (tx_done, rx_done) = std::sync::mpsc::channel::<Result<(), String>>();
+    let (tx_partition, mut rx_partition) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_finished, mut rx_finished) = tokio::sync::mpsc::unbounded_channel();
+
+    // Prepare the input.
+    let mut rng = test_rng();
+    let secrets = (0..t + 1).map(|_| Fr::rand(&mut rng)).collect::<Vec<_>>();
+    let all_shares = generate_independent_shares(&secrets, t, n_parties);
+
+    for id in 0..n_parties {
+        let inner = inner.clone();
+        let node = nodes[id].clone();
+        let tx_done = tx_done.clone();
+        let tx_partition = tx_partition.clone();
+        let tx_finished = tx_finished.clone();
+        let shares = all_shares[id].clone();
+        let secrets = secrets.clone();
+
+        sim.host(format!("node{}", id), move || {
+            let inner = inner.clone();
+            let mut node = node.clone();
+            let tx_done = tx_done.clone();
+            let tx_partition = tx_partition.clone();
+            let tx_finished = tx_finished.clone();
+            let shares = shares.clone();
+            let secrets = secrets.clone();
+
+            async move {
+                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
+                sleep(Duration::from_millis(50)).await;
+
+                let network_arc = Arc::new(network);
+                let node_id = node.id;
+
+                match node
+                    .init_batch_reconstruct(&shares, session_id, network_arc.clone())
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(BatchReconError::NetworkError(NetworkError::SendError)) => {}
+                    Err(e) => {
+                        let _ = tx_done.send(Err(format!("node {} init error: {:?}", node_id, e)));
+                        return Ok(());
+                    }
+                }
+
+                let mut msg_count = 0usize;
+                let result = timeout(Duration::from_secs(30), async {
+                    let mut signaled = false;
+                    loop {
+                        match rx.recv().await {
+                            Some((sender, raw_msg)) => {
+                                msg_count += 1;
+                                let wrapped: WrappedMessage =
+                                    bincode::deserialize(&raw_msg).unwrap();
+                                match wrapped {
+                                    WrappedMessage::BatchRecon(msg) => {
+                                        node.process(msg, network_arc.clone()).await.unwrap();
+                                    }
+                                    _ => error!(from = ?sender, id = id, "unknown message type"),
+                                }
+
+                                // If the y_j were received and in place, send a signal to interrupt
+                                // the node.
+                                {
+                                    let store_retrieval =
+                                        node.get_or_create_store(session_id).await.unwrap();
+                                    match store_retrieval {
+                                        Some(store) => {
+                                            // The protocol has not finished yet.
+                                            if store.lock().await.y_j.is_some() && !signaled {
+                                                tx_partition.send(()).unwrap();
+                                                signaled = true;
+                                            }
+                                        }
+                                        None => {
+                                            // The protocol already finished here. However, it is
+                                            // possible that the party did not store the y_j.
+                                            // Case: Consider a n = 10 and t = 1, then, 2t + 1 = 3.
+                                            // Hence the first three nodes may compute all the Evals
+                                            // and only send the Reveals to the other nodes.
+                                            // For this last node y_j = None. Also, the protocol
+                                            // is finished, and this is correct.
+                                            if !signaled {
+                                                tx_partition.send(()).unwrap();
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                })
+                .await;
+
+                if result.is_err() {
+                    let _ = tx_done.send(Err(format!(
+                        "node {} timed out after {} msgs",
+                        node_id, msg_count
+                    )));
+                    return Ok(());
+                }
+
+                // Check that the recovered secrets match with the originals.
+                let revealed_secrets = node.get_store(session_id).await.unwrap();
+                let revealed_secrets_field: Vec<Fr> =
+                    CanonicalDeserialize::deserialize_compressed(revealed_secrets.as_slice())
+                        .unwrap();
+                assert_eq!(revealed_secrets_field, secrets);
+
+                tx_done
+                    .send(Ok(()))
+                    .expect("signal that the protocol finished correctly should be sent");
+                tx_finished
+                    .send(())
+                    .expect("signal that the protocol finished should be sent");
+                Ok(())
+            }
+        });
+    }
+
+    drop(tx_done);
+
+    let other_nodes: Vec<_> = (0..n_parties)
+        .filter(|node| !hold_nodes.contains(node))
+        .collect();
+
+    let hold_nodes_client = hold_nodes.clone();
+    sim.client("driver", async move {
+        // Wait for all the nodes to get y_i.
+        let mut counter = 0;
+        while let Some(()) = rx_partition.recv().await {
+            counter += 1;
+            if counter == n_parties {
+                for id in &hold_nodes_client {
+                    for other_id in &other_nodes {
+                        turmoil::hold(format!("node{}", id), format!("node{}", other_id));
+                    }
+                }
+                break;
+            }
+        }
+
+        // This allows that all the parties finishes. Hence the sim.run() will not suddenly finish.
+        for _ in 0..n_parties - hold_nodes_client.len() {
+            rx_finished.recv().await.unwrap();
+        }
+
+        Ok(())
+    });
+
+    drop(tx_partition);
+    drop(tx_finished);
+    collect_results(sim, rx_done, n_parties - hold_nodes.len());
+}
+
+#[test]
+fn batch_reconstruction_with_partition_n_7_t_2() {
+    let n_parties = 7;
+    let t = 2;
+    let hold_nodes = vec![0, 1];
+    batch_reconstruction_with_partition(hold_nodes, n_parties, t);
+}
+
+#[test]
+fn batch_reconstruction_with_partition_n_7_t_1() {
+    let n_parties = 7;
+    let t = 1;
+    let hold_nodes = vec![0];
+    batch_reconstruction_with_partition(hold_nodes, n_parties, t);
+}
+
+#[test]
+fn batch_reconstruction_with_partition_n_7_t_2_one_hold() {
+    let n_parties = 7;
+    let t = 2;
+    let hold_nodes = vec![0];
+    batch_reconstruction_with_partition(hold_nodes, n_parties, t);
 }

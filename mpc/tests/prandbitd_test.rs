@@ -78,7 +78,7 @@ async fn prandbitd_correctness_e2e() {
     let mut evaluation_points = Vec::new();
     let binary_domain = Gf256Domain::new(num_parties).unwrap();
     for node in &mut nodes {
-        let store = node.get_or_create_store(session_id.clone()).await;
+        let store = node.get_or_create_store(session_id.clone()).await.unwrap();
         let node_id = node.id;
         let store_guard = store.lock().await;
 

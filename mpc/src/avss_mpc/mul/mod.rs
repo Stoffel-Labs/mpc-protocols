@@ -49,6 +49,8 @@ pub enum MulError {
     Abort,
     #[error("Session id {0:?} does not exist in store")]
     ClearStoreError(AvssSessionId),
+    #[error("Store Limit")]
+    LimitError,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +77,8 @@ where
     pub output_sender: Option<Sender<Vec<FeldmanShamirShare<F, G>>>>,
     pub output_receiver: Option<Receiver<Vec<FeldmanShamirShare<F, G>>>>,
     pub protocol_state: MultProtocolState,
+    pub expected_commitments_a_sub_x: Option<Vec<Vec<G>>>,
+    pub expected_commitments_b_sub_y: Option<Vec<Vec<G>>>,
 }
 
 impl<F, G> MultStorage<F, G>
@@ -94,6 +98,8 @@ where
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
             protocol_state: MultProtocolState::NotInitialized,
+            expected_commitments_a_sub_x: None,
+            expected_commitments_b_sub_y: None,
         }
     }
 }
