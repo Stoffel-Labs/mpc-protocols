@@ -9,7 +9,7 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
-stoffelnet =  { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-networking.git", branch = "feature/robust-identity-based-on-cert" }
+stoffelnet =  { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-networking.git", branch = "main" }
 ark-ff = { version = "0.5.0", features = [ "asm" ] }
 ark-poly = "0.5.0"
 tokio = { version = "1.46.1", features = ["full"] }
