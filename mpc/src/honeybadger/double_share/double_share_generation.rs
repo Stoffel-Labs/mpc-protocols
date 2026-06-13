@@ -2,7 +2,7 @@ use crate::{
     common::{
         share::{shamir::NonRobustShare, ShareError},
         utils::deser_bounded_vec,
-        ProtocolSessionId, SecretSharingScheme,
+        BoundedClearedSet, ProtocolSessionId, SecretSharingScheme, PREPROC_CLEARED_CAP,
     },
     honeybadger::{
         double_share::{DouShaError, DouShaMessage, DouShaPayload, DouShaStorage},
@@ -19,7 +19,7 @@ use tokio::{
     sync::Mutex,
     time::{timeout, Duration},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::DoubleShamirShare;
 
@@ -44,6 +44,9 @@ where
     pub threshold: usize,
     /// Storage of the party.
     pub storage: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<DouShaStorage<F>>>>>>,
+    /// Recently-cleared session ids; rejects late-message resurrection (and id
+    /// reuse after the exec-id counter wraps). See [`BoundedClearedSet`].
+    recently_cleared: Arc<Mutex<BoundedClearedSet<SessionId>>>,
 }
 
 impl<F> DoubleShareNode<F>
@@ -66,6 +69,8 @@ where
             Some(sid) => {
                 // Remove the entry from the storage
                 storage.remove(&sid);
+                drop(storage);
+                self.recently_cleared.lock().await.record(sid);
                 Some(output)
             }
             None => None,
@@ -73,8 +78,15 @@ where
     }
 
     pub async fn process(&mut self, message: DouShaMessage) -> Result<(), DouShaError> {
-        self.receive_double_shares_handler(message).await?;
-        Ok(())
+        // A late message for an already-cleared session is benign; swallow it
+        // instead of aborting the node.
+        match self.receive_double_shares_handler(message).await {
+            Err(DouShaError::AlreadyCleared) => {
+                debug!("ignoring late message for already-cleared dousha session");
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     /// Creates a new node for the faulty double share protocol.
@@ -84,6 +96,7 @@ where
             n_parties,
             threshold,
             storage: Arc::new(Mutex::new(BTreeMap::new())),
+            recently_cleared: Arc::new(Mutex::new(BoundedClearedSet::new(PREPROC_CLEARED_CAP))),
         }
     }
 
@@ -94,9 +107,23 @@ where
         session_id: SessionId,
     ) -> Result<Arc<Mutex<DouShaStorage<F>>>, DouShaError> {
         let mut storage = self.storage.lock().await;
+        // Don't resurrect an already-cleared session from a late message.
+        if !storage.contains_key(&session_id)
+            && self.recently_cleared.lock().await.contains(&session_id)
+        {
+            return Err(DouShaError::AlreadyCleared);
+        }
+        // At capacity: evict the oldest (min-id) session to admit the new one
+        // rather than aborting the node. The recently_cleared guard above
+        // already blocks resurrection, so this is a defensive overflow backstop.
+        // We do NOT record the evicted id as cleared: it may still be live, so it
+        // must stay re-creatable. Recording it would let a flooding peer
+        // permanently block honest low-id sessions.
         if storage.len() >= 256 && !storage.contains_key(&session_id) {
-            warn!("DouSha session limit reached");
-            return Err(DouShaError::LimitError);
+            if let Some(oldest) = storage.keys().min().copied() {
+                storage.remove(&oldest);
+                warn!(evicted = ?oldest, "DouSha session store full; evicted oldest session");
+            }
         }
         Ok(storage
             .entry(session_id)
@@ -104,8 +131,12 @@ where
             .clone())
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
-        let mut store = self.storage.lock().await;
-        store.remove(&session_id).is_some()
+        let removed = {
+            let mut store = self.storage.lock().await;
+            store.remove(&session_id).is_some()
+        };
+        self.recently_cleared.lock().await.record(session_id);
+        removed
     }
     pub async fn wait_for_result(
         &self,

@@ -55,6 +55,8 @@ pub enum DouShaError {
     Timeout(SessionId),
     #[error("Store Limit")]
     LimitError,
+    #[error("message for an already-cleared session; ignore it")]
+    AlreadyCleared,
 }
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]

@@ -53,14 +53,17 @@ where
                     }
                     WrappedMessage::Rbc(msg) => match msg.session_id.calling_protocol() {
                         Some(ProtocolType::FpMul) => {
-                            if msg.session_id.round_id() == 2 {
-                                node.mult_node.rbc.process(msg, net.clone()).await.unwrap();
-                                node.mult_node.drain_rbc_output().await.unwrap();
-                            } else if msg.session_id.round_id() == 0 {
+                            // Mirror the production router (honeybadger/mod.rs): trunc-node RBC
+                            // sessions are packed with round_id() == 0; everything else is a
+                            // mult-node child session. The mult Beaver remainder is broadcast as
+                            // `pack_mul_child_slot24(parent_exec, party_id, 2)`, so its decoded
+                            // round_id() is (party_id << 2) | 2 (2, 6, 10, ...), NOT a constant 2.
+                            if msg.session_id.round_id() == 0 {
                                 node.trunc_node.rbc.process(msg, net.clone()).await.unwrap();
                                 node.trunc_node.drain_rbc_output().await.unwrap();
                             } else {
-                                panic!("Unexpected sub-id in RBC message: {:?}", msg.session_id);
+                                node.mult_node.rbc.process(msg, net.clone()).await.unwrap();
+                                node.mult_node.drain_rbc_output().await.unwrap();
                             }
                         }
                         Some(other) => panic!("Unexpected protocol in RBC message: {:?}", other),

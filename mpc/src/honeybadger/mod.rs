@@ -296,11 +296,15 @@ impl GetNext<u8> for SubProtocolCounter {
             None => Err(HoneyBadgerError::LimitError),
             Some(value) => {
                 let current = *value;
-                if *value == 255 {
-                    *counter = None;
-                } else {
-                    *value += 1;
-                }
+                // Wrap rather than exhaust. The exec-id only needs to be unique
+                // among the session ids still tracked by the sub-protocol's store
+                // (live sessions + its bounded recently-cleared set). Those stores
+                // reject re-creation of recently-cleared ids, so a reused id 256
+                // executions later cannot collide with a lingering session. Without
+                // wrapping, a long computation (deep circuits drive many
+                // preprocessing regenerations) would exhaust the u8 and fail with
+                // LimitError. See `common::BoundedClearedSet`.
+                *value = value.wrapping_add(1);
                 Ok(current)
             }
         }
@@ -315,11 +319,10 @@ impl GetNext<u16> for WideSubProtocolCounter {
             None => Err(HoneyBadgerError::LimitError),
             Some(value) => {
                 let current = *value;
-                if *value == u16::MAX {
-                    *counter = None;
-                } else {
-                    *value += 1;
-                }
+                // Wrap rather than exhaust (see `GetNext<u8>`); 65536 executions is
+                // far more than the live + recently-cleared window, so reuse cannot
+                // collide.
+                *value = value.wrapping_add(1);
                 Ok(current)
             }
         }
@@ -601,12 +604,29 @@ where
                     ));
                 }
                 if rbc_msg.msg_type.is_dealer_message() {
-                    let expected_dealer =
-                        if rbc_msg.session_id.calling_protocol() == Some(ProtocolType::Mul) {
-                            rbc_msg.session_id.mul_child_sub_id() as usize
-                        } else {
-                            rbc_msg.session_id.sub_id() as usize
-                        };
+                    // The expected dealer id is encoded differently depending on
+                    // which sub-protocol's RBC produced the message, so this MUST
+                    // mirror the routing below. Multiply child sessions (the Beaver
+                    // remainder open) pack the dealer into the 6-bit mul-child
+                    // sub-id via `pack_mul_child_slot24(parent_exec, dealer, 2)`,
+                    // whereas trunc/ransha/randousha/input RBC use
+                    // `pack_slot24(exec, dealer, 0)` with the dealer in `sub_id`.
+                    // `Mul` and `RandBit` route entirely to a mult node, and
+                    // `FpMul` routes to its mult node only when `round_id != 0`
+                    // (round_id 0 is its trunc node). Using `sub_id` for an
+                    // FpMul mult-remainder session read the high byte (0) instead
+                    // of the child id, so every non-zero dealer's remainder SEND
+                    // was wrongly rejected and the multiplication deadlocked.
+                    let is_mul_child = matches!(
+                        rbc_msg.session_id.calling_protocol(),
+                        Some(ProtocolType::Mul) | Some(ProtocolType::RandBit)
+                    ) || (rbc_msg.session_id.calling_protocol() == Some(ProtocolType::FpMul)
+                        && rbc_msg.session_id.round_id() != 0);
+                    let expected_dealer = if is_mul_child {
+                        rbc_msg.session_id.mul_child_sub_id() as usize
+                    } else {
+                        rbc_msg.session_id.sub_id() as usize
+                    };
                     if rbc_msg.sender_id != expected_dealer {
                         warn!(
                             "Rejecting dealer message: sender {} is not expected dealer {} for session {:?}",
@@ -1147,7 +1167,10 @@ where
             // return Ok(());
         } else {
             let mut triple_counter = self.counters.triple_counter.get_next().await?;
-            if (256 - triple_counter as usize) * 255 < total_triples_to_generate / group_size {
+            // The exec-id counter wraps (recycles) across calls, so only guard
+            // against a single call needing more than the whole exec*round
+            // session-id space (impossible for realistic inputs).
+            if 256 * 255 < total_triples_to_generate / group_size {
                 return Err(HoneyBadgerError::LimitError);
             }
 
@@ -1283,7 +1306,9 @@ where
         let mut round_id = 0u8;
         let mut ran_sha_counter = self.counters.ran_sha_counter.get_next().await?;
 
-        if (256 - ran_sha_counter as usize) * 255 < run {
+        // Counter wraps across calls; only reject a single call exceeding the
+        // whole exec*round session-id space.
+        if 256 * 255 < run {
             return Err(HoneyBadgerError::LimitError);
         }
 
@@ -1353,7 +1378,9 @@ where
         let mut round_id = 0u8;
         let mut ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await?;
 
-        if (256 - ran_dou_sha_counter as usize) * 255 < run {
+        // Counter wraps across calls; only reject a single call exceeding the
+        // whole exec*round session-id space.
+        if 256 * 255 < run {
             return Err(HoneyBadgerError::LimitError);
         }
 
@@ -1992,15 +2019,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subprotocol_counter_limit_error() {
+    async fn test_subprotocol_counter_wraps_past_u8_max() {
         let counter = SubProtocolCounter(Arc::new(Mutex::new(Some(255))));
         // First call should return 255
         let val = counter.get_next().await;
         assert_eq!(val.unwrap(), 255);
 
-        // Second call should return error (None)
-        let err = counter.get_next().await;
-        assert!(matches!(err, Err(HoneyBadgerError::LimitError)));
+        // The counter wraps rather than exhausting: the next value is 0, not an
+        // error. Reuse safety is provided by the sub-protocol stores' bounded
+        // recently-cleared sets, so a u8 exec-id reused 256 executions later
+        // cannot collide with a lingering session. See `common::BoundedClearedSet`.
+        let wrapped = counter.get_next().await;
+        assert_eq!(wrapped.unwrap(), 0);
+        let after = counter.get_next().await;
+        assert_eq!(after.unwrap(), 1);
     }
 
     #[tokio::test]

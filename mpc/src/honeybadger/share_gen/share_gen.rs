@@ -7,8 +7,9 @@ use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
+use crate::common::{BoundedClearedSet, PREPROC_CLEARED_CAP};
 use crate::honeybadger::MAX_MESSAGE_SIZE;
 use crate::{
     common::{
@@ -31,6 +32,9 @@ pub struct RanShaNode<F: FftField, R: RBC> {
     pub n_parties: usize,
     pub threshold: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RanShaStore<F>>>>>>,
+    /// Recently-cleared session ids; rejects late-message resurrection (and id
+    /// reuse after the exec-id counter wraps). See [`BoundedClearedSet`].
+    recently_cleared: Arc<Mutex<BoundedClearedSet<SessionId>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
 }
@@ -62,6 +66,7 @@ where
             n_parties,
             threshold,
             store: Arc::new(Mutex::new(HashMap::new())),
+            recently_cleared: Arc::new(Mutex::new(BoundedClearedSet::new(PREPROC_CLEARED_CAP))),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
@@ -108,6 +113,10 @@ where
             msg.sender_id = authenticated_sender;
             match self.output_handler(msg).await {
                 Ok(()) => {}
+                // Late message for an already-cleared session: skip, don't abort.
+                Err(RanShaError::AlreadyCleared) => {
+                    debug!("ignoring late RBC output for already-cleared ransha session");
+                }
                 Err(e) => {
                     return Err(e);
                 }
@@ -121,6 +130,15 @@ where
     ) -> Result<Arc<Mutex<RanShaStore<F>>>, RanShaError> {
         let mut storage = self.store.lock().await;
 
+        // Don't resurrect an already-cleared session from a late message.
+        // This must be a *silent* skip — a late straggler is normal, not a fatal
+        // error — so it gets its own variant that `process` maps to Ok(()).
+        if !storage.contains_key(&session_id)
+            && self.recently_cleared.lock().await.contains(&session_id)
+        {
+            return Err(RanShaError::AlreadyCleared);
+        }
+
         if storage.len() == MAX_SHARE_GEN_SESSIONS {
             return Err(RanShaError::LimitError);
         }
@@ -132,8 +150,25 @@ where
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
-        let mut store = self.store.lock().await;
-        store.remove(&session_id).is_some()
+        // Clear the per-dealer AVID broadcast sessions used by this RanSha
+        // session. They are keyed by (exec_id, dealer_id, round_id); if left in
+        // the RBC store they linger forever (RanSha never cleared them) and, once
+        // the exec-id counter wraps, the reused id collides with the old `ended`
+        // session and the new broadcast deadlocks.
+        for p in 0..self.n_parties {
+            let avid_id = SessionId::new(
+                ProtocolType::Ransha,
+                SessionId::pack_slot24(session_id.exec_id(), p as u8, session_id.round_id()),
+                session_id.instance_id(),
+            );
+            self.rbc.clear_session(avid_id).await;
+        }
+        let removed = {
+            let mut store = self.store.lock().await;
+            store.remove(&session_id).is_some()
+        };
+        self.recently_cleared.lock().await.record(session_id);
+        removed
     }
 
     pub async fn clear_completed_session(&self, session_id: SessionId) -> bool {
@@ -568,16 +603,23 @@ where
     where
         N: Network + Send + Sync,
     {
-        match msg.msg_type {
+        let result = match msg.msg_type {
             RanShaMessageType::ShareMessage => {
-                self.receive_shares_handler(msg, network).await?;
-                Ok(())
+                self.receive_shares_handler(msg, network).await
             }
             RanShaMessageType::OutputMessage => Ok(()),
             RanShaMessageType::ReconstructMessage => {
-                self.reconstruction_handler(msg, network).await?;
+                self.reconstruction_handler(msg, network).await
+            }
+        };
+        // A late message for an already-cleared session is benign; swallow it
+        // instead of aborting the node.
+        match result {
+            Err(RanShaError::AlreadyCleared) => {
+                debug!("ignoring late message for already-cleared ransha session");
                 Ok(())
             }
+            other => other,
         }
     }
 }

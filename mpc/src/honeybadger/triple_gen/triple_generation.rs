@@ -9,6 +9,7 @@ use tokio::time::{timeout, Duration};
 use tracing::info;
 
 use crate::common::utils::deser_bounded_vec;
+use crate::common::{BoundedClearedSet, PREPROC_CLEARED_CAP};
 use crate::honeybadger::triple_gen::{TripleGenError, TripleGenStorage};
 use crate::honeybadger::{
     double_share::DoubleShamirShare, triple_gen::ShamirBeaverTriple, SessionId,
@@ -43,6 +44,10 @@ where
     pub threshold: usize,
     /// Internal storage of the node.
     pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<TripleGenStorage<F>>>>>>,
+    /// Recently-cleared session ids, to reject late messages that would otherwise
+    /// resurrect a completed session (and, once the exec-id counter wraps, collide
+    /// with a reused id). See [`BoundedClearedSet`].
+    recently_cleared: Arc<Mutex<BoundedClearedSet<SessionId>>>,
     /// Batch reconstruction node used in the triple generation
     pub batch_recon_node: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
@@ -64,6 +69,7 @@ where
             n_parties,
             threshold,
             storage: Arc::new(Mutex::new(HashMap::new())),
+            recently_cleared: Arc::new(Mutex::new(BoundedClearedSet::new(PREPROC_CLEARED_CAP))),
             batch_recon_node,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
         })
@@ -77,6 +83,13 @@ where
     ) -> Result<Arc<Mutex<TripleGenStorage<F>>>, TripleGenError> {
         let mut storage = self.storage.lock().await;
 
+        // Don't resurrect an already-cleared session from a late message.
+        if !storage.contains_key(&session_id)
+            && self.recently_cleared.lock().await.contains(&session_id)
+        {
+            return Err(TripleGenError::LimitError);
+        }
+
         if storage.len() == MAX_TRIPLE_GEN_SESSIONS {
             return Err(TripleGenError::LimitError);
         }
@@ -88,8 +101,12 @@ where
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         self.batch_recon_node.clear_store(session_id).await;
-        let mut store = self.storage.lock().await;
-        store.remove(&session_id).is_some()
+        let removed = {
+            let mut store = self.storage.lock().await;
+            store.remove(&session_id).is_some()
+        };
+        self.recently_cleared.lock().await.record(session_id);
+        removed
     }
 
     pub async fn drain_batch_recon_output(&mut self) -> Result<(), TripleGenError> {

@@ -47,6 +47,8 @@ pub enum RanShaError {
     SessionIdError(SessionId),
     #[error("limit reached")]
     LimitError,
+    #[error("message for an already-cleared session; ignore it")]
+    AlreadyCleared,
     #[error("no such session ID exists: {0:?}")]
     NoSuchSessionId(SessionId),
     #[error("result already received: {0:?}")]

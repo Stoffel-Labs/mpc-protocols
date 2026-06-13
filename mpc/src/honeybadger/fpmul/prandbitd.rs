@@ -647,9 +647,14 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     ) -> Result<Arc<Mutex<PRandBitDStore<F, G>>>, PRandError> {
         let mut storage = self.store.lock().await;
 
+        // At capacity: evict the oldest (min-id) session to admit the new one
+        // rather than aborting the node. Keeps the store bounded against
+        // late-message resurrection instead of fatally failing.
         if storage.len() >= 256 && !storage.contains_key(&session_id) {
-            warn!("PRandBitD session limit reached");
-            return Err(PRandError::LimitError);
+            if let Some(oldest) = storage.keys().min().copied() {
+                storage.remove(&oldest);
+                warn!(evicted = ?oldest, "PRandBitD session store full; evicted oldest session");
+            }
         }
         Ok(storage
             .entry(session_id)

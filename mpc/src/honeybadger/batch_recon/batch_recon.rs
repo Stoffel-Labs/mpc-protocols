@@ -3,7 +3,7 @@ use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde},
         utils::deser_bounded_vec,
-        SecretSharingScheme,
+        BoundedClearedSet, SecretSharingScheme, PREPROC_CLEARED_CAP,
     },
     honeybadger::{robust_interpolate::robust_interpolate::RobustShare, WrappedMessage},
 };
@@ -11,10 +11,7 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use futures::lock::Mutex;
 use std::sync::Arc;
-use std::{
-    collections::{HashMap, HashSet},
-    marker::PhantomData,
-};
+use std::{collections::HashMap, marker::PhantomData};
 use stoffelnet::network_utils::Network;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
@@ -43,7 +40,7 @@ pub struct BatchReconNode<F: FftField> {
     pub t: usize,
     pub degree: usize,
     pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<BatchReconStore<F>>>>>>, // Number of malicious parties
-    cleared_sessions: Arc<Mutex<HashSet<SessionId>>>,
+    cleared_sessions: Arc<Mutex<BoundedClearedSet<SessionId>>>,
     pub output_sender: Sender<SessionId>,
 }
 
@@ -63,7 +60,7 @@ impl<F: FftField> BatchReconNode<F> {
             t,
             degree,
             store,
-            cleared_sessions: Arc::new(Mutex::new(HashSet::new())),
+            cleared_sessions: Arc::new(Mutex::new(BoundedClearedSet::new(PREPROC_CLEARED_CAP))),
             output_sender,
         })
     }
@@ -71,13 +68,15 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn clear_entire_store(&self) {
         let mut store = self.store.lock().await;
         let mut cleared = self.cleared_sessions.lock().await;
-        cleared.extend(store.keys().copied());
+        for sid in store.keys().copied() {
+            cleared.record(sid);
+        }
         store.clear();
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.store.lock().await;
-        self.cleared_sessions.lock().await.insert(session_id);
+        self.cleared_sessions.lock().await.record(session_id);
         store.remove(&session_id).is_some()
     }
 
@@ -113,6 +112,9 @@ impl<F: FftField> BatchReconNode<F> {
                 "too little shares to start batch reconstruct".to_string(),
             ));
         }
+        // Legitimately (re)starting this session: forget any stale cleared marker
+        // so a counter-wrapped reuse of this slot is allowed to run.
+        self.cleared_sessions.lock().await.remove(&session_id);
         let vandermonde = make_vandermonde::<F>(self.n, self.degree)?;
         let y_shares = apply_vandermonde(&vandermonde, &shares[..(self.degree + 1)])?;
 
@@ -156,6 +158,9 @@ impl<F: FftField> BatchReconNode<F> {
             ));
         }
 
+        // Legitimately (re)starting this session: forget any stale cleared marker
+        // so a counter-wrapped reuse of this slot is allowed to run.
+        self.cleared_sessions.lock().await.remove(&session_id);
         let vandermonde = make_vandermonde::<F>(self.n, self.degree)?;
         let mut y_shares_by_recipient = vec![Vec::new(); self.n];
 
@@ -493,14 +498,32 @@ impl<F: FftField> BatchReconNode<F> {
             return Ok(None);
         }
 
-        // Step 1: get or create store with limit check
+        // Step 1: get or create store with capacity backstop.
         let store_lock = {
             let mut storage = self.store.lock().await;
 
             if storage.len() >= MAX_BATCH_RECON_SESSIONS && !storage.contains_key(&session_id) {
-                return Err(BatchReconError::InvalidInput(
-                    "Session limit reached".into(),
-                ));
+                // At capacity: evict the oldest session to admit the new one
+                // rather than aborting the node (a fatal error here kills the
+                // whole party). With resurrection rejected by the cleared-set
+                // above the store normally holds only the live working set, so
+                // this is a defensive backstop against late-message storms.
+                // Session ids grow with protocol progress, so the minimum id is
+                // the most stale session. We deliberately do NOT record the
+                // evicted id as cleared: eviction is a forced drop of a possibly
+                // still-live session (not a completion), so it must remain
+                // re-creatable when its real messages arrive. Recording it would
+                // let a flooding peer (whose own session ids sort high, so the
+                // min-id eviction targets honest low-id sessions) permanently
+                // block those honest sessions. Matches the AVID RBC backstop.
+                if let Some(oldest) = storage.keys().min().copied() {
+                    storage.remove(&oldest);
+                    warn!(
+                        evicted = ?oldest,
+                        session_id = ?session_id,
+                        "BatchRecon session store full; evicted oldest session to admit a new one"
+                    );
+                }
             }
 
             storage

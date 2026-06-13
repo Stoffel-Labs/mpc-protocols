@@ -2406,3 +2406,159 @@ fn batch_reconstruction_with_partition_n_7_t_2_one_hold() {
     let hold_nodes = vec![0];
     batch_reconstruction_with_partition(hold_nodes, n_parties, t);
 }
+
+/// Adversarial (Byzantine) batch reconstruction under turmoil network stress.
+///
+/// Up to `t` parties are actively malicious: they broadcast *corrupted* shares
+/// (each value offset by a fixed non-zero amount) instead of their real ones.
+/// Combined with variable network latency, every honest party must still recover
+/// the exact original secrets via the robust (Reed-Solomon) decoder, which
+/// corrects up to `t` errors when `n >= 3t + 1`.
+fn batch_reconstruction_with_byzantine(byzantine_nodes: Vec<usize>, n_parties: usize, t: usize) {
+    setup_tracing();
+    assert!(byzantine_nodes.len() <= t, "at most t parties may be Byzantine");
+    assert!(
+        n_parties >= 3 * t + 1,
+        "robust error correction of t faults needs n >= 3t + 1"
+    );
+
+    let session_id = SessionId::new(
+        ProtocolType::BatchRecon,
+        SessionId::pack_slot24(123, 0, 0),
+        111,
+    );
+    // Variable latency stresses the network on top of the Byzantine faults.
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
+
+    let mut _batch_recon_receivers = Vec::new();
+    let nodes = (0..n_parties)
+        .map(|id| {
+            let (tx, rx) = tokio::sync::mpsc::channel(1024);
+            _batch_recon_receivers.push(rx);
+            BatchReconNode::new(id, n_parties, t, t, tx).unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    let (tx_done, rx_done) = std::sync::mpsc::channel::<Result<(), String>>();
+    let (tx_finished, mut rx_finished) = tokio::sync::mpsc::unbounded_channel();
+
+    let mut rng = test_rng();
+    let secrets = (0..t + 1).map(|_| Fr::rand(&mut rng)).collect::<Vec<_>>();
+    let all_shares = generate_independent_shares(&secrets, t, n_parties);
+
+    for id in 0..n_parties {
+        let inner = inner.clone();
+        let node = nodes[id].clone();
+        let tx_done = tx_done.clone();
+        let tx_finished = tx_finished.clone();
+        let is_byzantine = byzantine_nodes.contains(&id);
+        // Byzantine parties corrupt every share value; honest parties send theirs as-is.
+        let shares: Vec<RobustShare<Fr>> = if is_byzantine {
+            all_shares[id]
+                .iter()
+                .map(|s| RobustShare::new(s.share[0] + Fr::from(7u64), s.id, s.degree))
+                .collect()
+        } else {
+            all_shares[id].clone()
+        };
+        let secrets = secrets.clone();
+
+        sim.host(format!("node{}", id), move || {
+            let inner = inner.clone();
+            let mut node = node.clone();
+            let tx_done = tx_done.clone();
+            let tx_finished = tx_finished.clone();
+            let shares = shares.clone();
+            let secrets = secrets.clone();
+
+            async move {
+                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
+                sleep(Duration::from_millis(50)).await;
+                let network_arc = Arc::new(network);
+                let node_id = node.id;
+
+                match node
+                    .init_batch_reconstruct(&shares, session_id, network_arc.clone())
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(BatchReconError::NetworkError(NetworkError::SendError)) => {}
+                    Err(e) => {
+                        let _ = tx_done.send(Err(format!("node {} init error: {:?}", node_id, e)));
+                        return Ok(());
+                    }
+                }
+
+                let result = timeout(Duration::from_secs(30), async {
+                    loop {
+                        match rx.recv().await {
+                            Some((_, raw_msg)) => {
+                                let wrapped: WrappedMessage =
+                                    bincode::deserialize(&raw_msg).unwrap();
+                                if let WrappedMessage::BatchRecon(msg) = wrapped {
+                                    // A malicious peer's corrupt evals must not crash an
+                                    // honest node; the robust decoder absorbs them.
+                                    if let Err(e) = node.process(msg, network_arc.clone()).await {
+                                        error!(id = id, "process error (tolerated): {:?}", e);
+                                    }
+                                }
+                                if let Ok(bytes) = node.get_store(session_id).await {
+                                    let revealed: Vec<Fr> =
+                                        CanonicalDeserialize::deserialize_compressed(
+                                            bytes.as_slice(),
+                                        )
+                                        .unwrap();
+                                    break revealed;
+                                }
+                            }
+                            None => break Vec::new(),
+                        }
+                    }
+                })
+                .await;
+
+                match result {
+                    Ok(revealed) => {
+                        // Honest parties MUST recover the exact original secrets despite
+                        // up to t Byzantine corrupt-share broadcasts.
+                        if !is_byzantine && revealed != secrets {
+                            let _ = tx_done.send(Err(format!(
+                                "honest node {} recovered wrong secrets: {:?} != {:?}",
+                                node_id, revealed, secrets
+                            )));
+                            return Ok(());
+                        }
+                        let _ = tx_done.send(Ok(()));
+                        let _ = tx_finished.send(());
+                    }
+                    Err(_) => {
+                        let _ = tx_done.send(Err(format!("node {} timed out", node_id)));
+                    }
+                }
+                Ok(())
+            }
+        });
+    }
+
+    drop(tx_done);
+
+    sim.client("driver", async move {
+        for _ in 0..n_parties {
+            rx_finished.recv().await.unwrap();
+        }
+        Ok(())
+    });
+    drop(tx_finished);
+
+    collect_results(sim, rx_done, n_parties);
+}
+
+#[test]
+fn batch_reconstruction_byzantine_n_7_t_2() {
+    batch_reconstruction_with_byzantine(vec![0, 1], 7, 2);
+}
+
+#[test]
+fn batch_reconstruction_byzantine_n_4_t_1() {
+    batch_reconstruction_with_byzantine(vec![0], 4, 1);
+}

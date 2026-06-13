@@ -117,9 +117,14 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         session: SessionId,
     ) -> Result<Arc<Mutex<TruncPrStore<F>>>, TruncPrError> {
         let mut map = self.store.lock().await;
+        // At capacity: evict the oldest (min-id) session to admit the new one
+        // rather than aborting the node. Keeps the store bounded against
+        // late-message resurrection instead of fatally failing.
         if map.len() >= 256 && !map.contains_key(&session) {
-            warn!("TruncPr session limit reached");
-            return Err(TruncPrError::LimitError);
+            if let Some(oldest) = map.keys().min().copied() {
+                map.remove(&oldest);
+                warn!(evicted = ?oldest, "TruncPr session store full; evicted oldest session");
+            }
         }
         Ok(map
             .entry(session)
@@ -128,7 +133,22 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> Result<(), TruncPrError> {
-        self.rbc.clear_store().await;
+        // Clear only THIS session's per-dealer RBC broadcast sessions (keyed
+        // `(exec_id, dealer_id, 0)`; see `open` above), via the reuse-safe
+        // per-session clear that records them as cleared. The old no-arg
+        // `rbc.clear_store()` wiped the ENTIRE AVID store, killing in-flight
+        // sessions of other/concurrent truncations ("Session ID does not exist")
+        // and corrupting their opened values.
+        if let Some(calling_proto) = session_id.calling_protocol() {
+            for p in 0..self.n {
+                let rbc_id = SessionId::new(
+                    calling_proto,
+                    SessionId::pack_slot24(session_id.exec_id(), p as u8, 0),
+                    session_id.instance_id(),
+                );
+                self.rbc.clear_session(rbc_id).await;
+            }
+        }
         let mut store = self.store.lock().await;
         store
             .remove(&session_id)

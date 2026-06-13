@@ -26,7 +26,7 @@ use ark_std::rand::Rng;
 use async_trait::async_trait;
 use std::fmt;
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     marker::PhantomData,
     ops::{Add, Mul, Sub},
     sync::Arc,
@@ -435,6 +435,83 @@ pub trait ProtocolTag:
 ///   8 bits     24 bits   32 bits
 ///
 /// Interpretation of `slot24` is protocol-defined.
+/// Bounded FIFO set of recently-cleared session ids, shared by the sub-protocol
+/// session stores.
+///
+/// A session is removed from its store once the protocol is done with it. Without
+/// a guard, a late message from a slower peer would re-insert the id as a fresh,
+/// never-cleared "zombie" session; those leak until the store's hard cap, and —
+/// once the per-protocol exec-id counter WRAPS — a reused id could collide with a
+/// lingering zombie and corrupt state. Tracking the last `cap` cleared ids lets a
+/// store reject such re-creations.
+///
+/// `cap` must sit between two bounds for safety:
+/// - **above** the late-message window (how many sessions behind a straggler can
+///   be), so genuine late messages are still rejected; and
+/// - **below** the id-reuse period (how many sessions occur before the wrapping
+///   counter reuses an id), so a legitimately-new session that happens to reuse a
+///   long-evicted id is NOT wrongly rejected.
+/// Preprocessing sub-protocols (short-lived, tightly synchronized, small reuse
+/// period) use a small cap; the multiplication store (u16 exec-id, ~65536 reuse
+/// period) uses a larger one.
+/// Cleared-set cap for short-lived, tightly-synchronized preprocessing
+/// sub-protocols (triple_gen, share_gen, ran_dou_sha, double_share, batch_recon).
+/// Their exec-id reuse period can be as small as ~256 sessions, so the cap stays
+/// well below that while comfortably exceeding the (small) preprocessing skew.
+pub const PREPROC_CLEARED_CAP: usize = 128;
+
+/// Cleared-set cap for the multiplication store, whose parent exec-id is a u16
+/// (reuse period ~65536), so a larger cap absorbs more inter-party skew while
+/// remaining far below the reuse period.
+pub const MUL_CLEARED_CAP: usize = 1024;
+
+#[derive(Debug)]
+pub struct BoundedClearedSet<Id> {
+    order: VecDeque<Id>,
+    set: HashSet<Id>,
+    cap: usize,
+}
+
+impl<Id: ProtocolSessionId> BoundedClearedSet<Id> {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            order: VecDeque::new(),
+            set: HashSet::new(),
+            cap: cap.max(1),
+        }
+    }
+
+    /// Record `id` as recently cleared, evicting the oldest entry past `cap`.
+    pub fn record(&mut self, id: Id) {
+        if self.set.insert(id) {
+            self.order.push_back(id);
+            while self.order.len() > self.cap {
+                if let Some(old) = self.order.pop_front() {
+                    self.set.remove(&old);
+                }
+            }
+        }
+    }
+
+    pub fn contains(&self, id: &Id) -> bool {
+        self.set.contains(id)
+    }
+
+    /// Forget that `id` was cleared. Called when a session id is legitimately
+    /// re-initialised (e.g. after a counter wrap reuses the slot): the new
+    /// session must be allowed to run, so the stale "cleared" marker is dropped.
+    /// This decouples the cleared-set capacity from the id reuse period — the
+    /// cap then only needs to exceed the late-message skew, because genuine
+    /// reuse self-heals here rather than waiting for FIFO eviction.
+    pub fn remove(&mut self, id: &Id) {
+        if self.set.remove(id) {
+            if let Some(pos) = self.order.iter().position(|x| x == id) {
+                self.order.remove(pos);
+            }
+        }
+    }
+}
+
 pub trait ProtocolSessionId:
     Copy + Clone + Eq + Ord + std::hash::Hash + Send + Sync + fmt::Debug
 {

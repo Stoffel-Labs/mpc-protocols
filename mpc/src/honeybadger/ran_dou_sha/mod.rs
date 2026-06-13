@@ -29,7 +29,7 @@ use tokio::sync::{
 use tokio::time::{timeout, Duration};
 
 use stoffelnet::network_utils::{Network, NetworkError, PartyId};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Error that occurs during the execution of the Random Double Share Error.
 #[derive(Debug, Error)]
@@ -62,6 +62,8 @@ pub enum RanDouShaError {
     SessionIdError(SessionId),
     #[error("limit reached")]
     LimitError,
+    #[error("message for an already-cleared session; ignore it")]
+    AlreadyCleared,
     #[error("no such session ID exists: {0:?}")]
     NoSuchSessionId(SessionId),
     #[error("result already received: {0:?}")]
@@ -136,6 +138,9 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     pub threshold: usize,
     /// Storage of the node.
     pub store: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
+    /// Recently-cleared session ids; rejects late-message resurrection (and id
+    /// reuse after the exec-id counter wraps). See `common::BoundedClearedSet`.
+    recently_cleared: Arc<Mutex<crate::common::BoundedClearedSet<SessionId>>>,
     ///Avid instance for RBC
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
@@ -168,13 +173,31 @@ where
             n_parties,
             threshold,
             store: Arc::new(Mutex::new(BTreeMap::new())),
+            recently_cleared: Arc::new(Mutex::new(crate::common::BoundedClearedSet::new(
+                crate::common::PREPROC_CLEARED_CAP,
+            ))),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
-        let mut store = self.store.lock().await;
-        store.remove(&session_id).is_some()
+        // Clear the per-dealer AVID broadcast sessions (keyed by
+        // (exec_id, dealer_id, round_id)); otherwise they linger and collide with
+        // a reused id once the exec-id counter wraps.
+        for p in 0..self.n_parties {
+            let avid_id = SessionId::new(
+                ProtocolType::Randousha,
+                SessionId::pack_slot24(session_id.exec_id(), p as u8, session_id.round_id()),
+                session_id.instance_id(),
+            );
+            self.rbc.clear_session(avid_id).await;
+        }
+        let removed = {
+            let mut store = self.store.lock().await;
+            store.remove(&session_id).is_some()
+        };
+        self.recently_cleared.lock().await.record(session_id);
+        removed
     }
 
     pub async fn clear_completed_session(&self, session_id: SessionId) -> bool {
@@ -188,6 +211,14 @@ where
         session_id: SessionId,
     ) -> Result<Arc<Mutex<RanDouShaStore<F>>>, RanDouShaError> {
         let mut storage = self.store.lock().await;
+
+        // Don't resurrect an already-cleared session from a late message.
+        // Silent skip (own variant mapped to Ok by `process`), not a fatal error.
+        if !storage.contains_key(&session_id)
+            && self.recently_cleared.lock().await.contains(&session_id)
+        {
+            return Err(RanDouShaError::AlreadyCleared);
+        }
 
         if storage.len() == MAX_RAN_DOU_SHA_SESSIONS {
             return Err(RanDouShaError::LimitError);
@@ -241,6 +272,10 @@ where
 
             match self.output_handler(msg).await {
                 Ok(()) => {}
+                // Late message for an already-cleared session: skip, don't abort.
+                Err(RanDouShaError::AlreadyCleared) => {
+                    debug!("ignoring late RBC output for already-cleared randousha session");
+                }
                 Err(e) => {
                     return Err(e);
                 }
@@ -658,7 +693,15 @@ where
     where
         N: Network + Send + Sync,
     {
-        self.reconstruction_handler(msg, network).await
+        // A late message for an already-cleared session is benign; swallow it
+        // instead of aborting the node.
+        match self.reconstruction_handler(msg, network).await {
+            Err(RanDouShaError::AlreadyCleared) => {
+                debug!("ignoring late message for already-cleared randousha session");
+                Ok(())
+            }
+            other => other,
+        }
     }
 }
 

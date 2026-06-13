@@ -1,7 +1,7 @@
 use crate::{
     common::{
-        rbc::RbcError, share::ShareError, utils::deser_bounded_vec, ProtocolSessionId,
-        SecretSharingScheme, ShamirShare, RBC,
+        rbc::RbcError, share::ShareError, utils::deser_bounded_vec, BoundedClearedSet,
+        ProtocolSessionId, SecretSharingScheme, ShamirShare, MUL_CLEARED_CAP, RBC,
     },
     honeybadger::{
         batch_recon::{batch_recon::BatchReconNode, BatchReconError},
@@ -19,7 +19,7 @@ use ark_serialize::CanonicalSerialize;
 use bincode::Options;
 use itertools::izip;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     ops::{Mul, Sub},
     sync::Arc,
 };
@@ -30,6 +30,16 @@ use tokio::sync::{
 };
 use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn};
+
+/// Maximum number of concurrent in-progress multiplication sessions kept in
+/// `mult_storage`. This bounds memory (a DoS backstop). It must comfortably
+/// exceed the inter-party skew of a long pipelined computation — a party that
+/// temporarily runs behind buffers its peers' future-mul messages, one session
+/// each, until it catches up. Completed sessions are removed promptly
+/// (`clear_store`) and GC'd on demand, so the live set is the skew window, not
+/// the total mul count (measured well under 100 for AES-128, so 8192 is ample
+/// headroom while staying a meaningful DoS bound).
+const MAX_MUL_SESSIONS: usize = 8192;
 
 /// Secret multiplication is explained in Section 2.2 of the paper.
 /// Assume that we want to multiply two t-shares x and y. We take a Beaver triple
@@ -144,7 +154,7 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub n: usize,
     pub t: usize,
     pub mult_storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<MultStorage<F>>>>>>,
-    cleared_sessions: Arc<Mutex<HashSet<SessionId>>>,
+    cleared_sessions: Arc<Mutex<BoundedClearedSet<SessionId>>>,
     child_sessions: Arc<Mutex<HashMap<SessionId, SessionId>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
@@ -170,7 +180,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             n,
             t: threshold,
             mult_storage: Arc::new(Mutex::new(HashMap::new())),
-            cleared_sessions: Arc::new(Mutex::new(HashSet::new())),
+            cleared_sessions: Arc::new(Mutex::new(BoundedClearedSet::new(MUL_CLEARED_CAP))),
             child_sessions: Arc::new(Mutex::new(HashMap::new())),
             batch_recon,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
@@ -292,7 +302,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         Ok(())
     }
     pub async fn clear_store(&self, session_id: SessionId) -> Result<(), MulError> {
-        self.cleared_sessions.lock().await.insert(session_id);
+        self.cleared_sessions.lock().await.record(session_id);
 
         let no_of_batch = {
             let store = self.mult_storage.lock().await;
@@ -456,7 +466,16 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         let (a_full, remaining_a) = a_sub_x.split_at(split_at);
         let (b_full, remaining_b) = b_sub_y.split_at(split_at);
 
-        let need_rbc = storage.openings.is_none();
+        // Broadcast this party's remainder shares whenever a remainder exists,
+        // NOT only when we still lack `openings`. Each party is the RBC dealer
+        // for its own `(a-x, b-y)` remainder shares, and peers need 2t+1 of them
+        // to reconstruct. Gating on `openings.is_none()` let a party that had
+        // already reconstructed the remainder locally (because >= 2t+1 peer
+        // shares arrived before its own `init`) skip its own broadcast; once
+        // enough parties skipped, slower peers could never reach 2t+1 and the
+        // multiplication deadlocked. `remaining_*` is empty when share_len == 0,
+        // so this stays a no-op for exact multiples of (t+1).
+        let need_rbc = share_len > 0;
 
         // 7.
         drop(storage);
@@ -682,7 +701,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     ) -> Result<Arc<Mutex<MultStorage<F>>>, MulError> {
         let mut storage = self.mult_storage.lock().await;
 
-        if storage.len() >= 256 && !storage.contains_key(&session_id) {
+        if storage.len() >= MAX_MUL_SESSIONS && !storage.contains_key(&session_id) {
             let entries: Vec<_> = storage
                 .iter()
                 .map(|(session_id, storage)| (*session_id, storage.clone()))
@@ -702,13 +721,21 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             storage = self.mult_storage.lock().await;
             for session_id in finished_sessions {
                 storage.remove(&session_id);
-                self.cleared_sessions.lock().await.insert(session_id);
+                self.cleared_sessions.lock().await.record(session_id);
             }
         }
 
-        if storage.len() >= 256 && !storage.contains_key(&session_id) {
-            warn!("Mul session limit reached");
-            return Err(MulError::LimitError);
+        // If GC of finished sessions did not free space, evict the oldest
+        // (min-id) session to admit the new one rather than aborting the node.
+        // Defensive backstop against late-message resurrection storms. We do NOT
+        // record the evicted id as cleared: it may still be live (eviction is a
+        // forced drop, not a completion), so it must stay re-creatable. Recording
+        // it would let a flooding peer permanently block honest low-id sessions.
+        if storage.len() >= MAX_MUL_SESSIONS && !storage.contains_key(&session_id) {
+            if let Some(oldest) = storage.keys().min().copied() {
+                storage.remove(&oldest);
+                warn!(evicted = ?oldest, "Mul session store full; evicted oldest session");
+            }
         }
         Ok(storage
             .entry(session_id)

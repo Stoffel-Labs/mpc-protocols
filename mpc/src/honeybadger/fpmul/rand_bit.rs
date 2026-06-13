@@ -91,11 +91,14 @@ where
     ) -> Result<Arc<Mutex<RandBitStorage<F>>>, RandBitError> {
         let mut storage = self.storage.lock().await;
 
-        // only exec ID changes between different runs
+        // At capacity: evict the oldest (min-id) session to admit the new one
+        // rather than aborting the node. A late straggler message can otherwise
+        // resurrect an already-cleared session id and leak a store entry; this
+        // defensive backstop keeps the store bounded instead of fatally failing.
         if storage.len() >= 256 && !storage.contains_key(&session_id) {
-            return Err(RandBitError::LimitError(
-                "Maximum number of concurrent sessions (256) exceeded".to_string(),
-            ));
+            if let Some(oldest) = storage.keys().min().copied() {
+                storage.remove(&oldest);
+            }
         }
         Ok(storage
             .entry(session_id)
@@ -334,10 +337,10 @@ mod tests {
     use ark_bls12_381::Fr;
 
     #[tokio::test]
-    async fn test_randbit_storage_limit() {
+    async fn test_randbit_storage_evicts_oldest_when_full() {
         let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
 
-        // Fill up storage to the limit (256 sessions)
+        // Fill up storage to the limit (256 sessions: exec ids 0..=255).
         for i in 0u8..=255 {
             let session_id = SessionId::new(
                 crate::honeybadger::ProtocolType::RandBit,
@@ -346,17 +349,29 @@ mod tests {
             );
             let _ = node.get_or_create_storage(session_id).await;
         }
+        assert_eq!(node.storage.lock().await.len(), 256);
 
-        // The 257th session should fail
-        let session_id = SessionId::new(
+        // A 257th distinct session is admitted (not rejected) by evicting the
+        // oldest (min-id) entry rather than aborting the node — a late-message
+        // resurrection storm must never fatally fail a party.
+        let new_session = SessionId::new(
             crate::honeybadger::ProtocolType::RandBit,
             SessionId::pack_slot24(0, 1, 0),
             111,
         );
-        let result = node.get_or_create_storage(session_id).await;
-        assert!(
-            matches!(result, Err(RandBitError::LimitError(_))),
-            "Should error on exceeding storage limit"
+        let result = node.get_or_create_storage(new_session).await;
+        assert!(result.is_ok(), "new session must be admitted via eviction");
+
+        let storage = node.storage.lock().await;
+        // Store stays bounded at the cap and the new session is present...
+        assert_eq!(storage.len(), 256);
+        assert!(storage.contains_key(&new_session));
+        // ...while the oldest entry (exec_id 0, the min id) was evicted.
+        let evicted = SessionId::new(
+            crate::honeybadger::ProtocolType::RandBit,
+            SessionId::pack_slot24(0, 0, 0),
+            111,
         );
+        assert!(!storage.contains_key(&evicted));
     }
 }

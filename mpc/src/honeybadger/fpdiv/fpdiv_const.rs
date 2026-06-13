@@ -95,6 +95,13 @@ where
             .trunc_node
             .wait_for_result(session_id, duration)
             .await?;
+
+        // Clear the TruncPr session so its store/RBC state does not linger. The
+        // fpdiv_const exec-id counter is a u8 that wraps after 256 ops; without
+        // this, division #256 reuses exec_id 0 and collides with division #0's
+        // stale store entry (its output_receiver already consumed) →
+        // TruncPrError::ResultAlreadyReceived. fpmul already does this.
+        self.trunc_node.clear_store(session_id).await?;
         Ok(SecretFixedPoint::new(output))
     }
 }

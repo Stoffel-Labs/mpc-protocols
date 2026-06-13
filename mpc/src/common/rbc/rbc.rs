@@ -4,7 +4,10 @@ use super::{rbc_store::*, utils::*, RbcError};
 use crate::common::{ProtocolSessionId, RbcWrapFn, RBC};
 use async_trait::async_trait;
 use bincode;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 use stoffelnet::network_utils::Network;
 use threshold_crypto::{
     serde_impl::SerdeSecret, PublicKeySet, SecretKeySet, SecretKeyShare, SignatureShare,
@@ -19,6 +22,48 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 const MAX_RBC_SESSIONS: usize = 1024;
+
+/// Bounded FIFO set of recently-cleared session ids.
+///
+/// A reliable-broadcast session is removed from the store once the caller is done
+/// with it (`clear_session`). Without this guard, a late ECHO/READY from a slower
+/// peer would `or_insert_with` the id straight back into the store as a fresh,
+/// never-cleared "zombie" session. Those zombies accumulate until the store hits
+/// `MAX_RBC_SESSIONS`, after which messages for genuinely new sessions are dropped
+/// and the protocol deadlocks. Tracking the last `cap` cleared ids lets us reject
+/// such resurrections so the store only ever holds the live working set. The set
+/// is bounded, so a message arriving absurdly late (older than `cap` clears ago)
+/// can still create a zombie — harmless, since no peer sends messages that late.
+struct ClearedSessions<Id> {
+    order: VecDeque<Id>,
+    set: HashSet<Id>,
+    cap: usize,
+}
+
+impl<Id: ProtocolSessionId> ClearedSessions<Id> {
+    fn new(cap: usize) -> Self {
+        Self {
+            order: VecDeque::new(),
+            set: HashSet::new(),
+            cap,
+        }
+    }
+
+    fn record(&mut self, id: Id) {
+        if self.set.insert(id) {
+            self.order.push_back(id);
+            while self.order.len() > self.cap {
+                if let Some(old) = self.order.pop_front() {
+                    self.set.remove(&old);
+                }
+            }
+        }
+    }
+
+    fn contains(&self, id: &Id) -> bool {
+        self.set.contains(id)
+    }
+}
 
 ///--------------------------Bracha RBC--------------------------
 ///
@@ -537,6 +582,9 @@ pub struct Avid<Id: ProtocolSessionId> {
     pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
+    /// Recently-cleared session ids, to reject late messages that would otherwise
+    /// resurrect a completed session and leak store entries. See [`ClearedSessions`].
+    recently_cleared: Arc<Mutex<ClearedSessions<Id>>>,
 }
 #[async_trait]
 impl<Id: ProtocolSessionId> RBC for Avid<Id> {
@@ -569,6 +617,15 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
             store: Arc::new(Mutex::new(HashMap::new())),
             output_sender,
             wrapper,
+            // The recently-cleared window must stay BELOW the session-id reuse
+            // period of every protocol that uses this AVID instance. Preprocessing
+            // sub-protocols (share_gen, ran_dou_sha, triple_gen) drive AVID with
+            // u8-exec-id sessions that recycle after as few as ~256 sessions once
+            // the counter wraps, so cap it at the preprocessing bound rather than
+            // the (much larger) store cap.
+            recently_cleared: Arc::new(Mutex::new(ClearedSessions::new(
+                crate::common::PREPROC_CLEARED_CAP,
+            ))),
         })
     }
     fn id(&self) -> usize {
@@ -579,8 +636,13 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         store.clear();
     }
     async fn clear_session(&self, session_id: Id) {
-        let mut store = self.store.lock().await;
-        store.remove(&session_id);
+        {
+            let mut store = self.store.lock().await;
+            store.remove(&session_id);
+        }
+        // Remember this id so a late ECHO/READY can't resurrect the session and
+        // leak a store entry (see [`ClearedSessions`]).
+        self.recently_cleared.lock().await.record(session_id);
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let store = self.store.lock().await;
@@ -1090,15 +1152,35 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         Ok(())
     }
     async fn get_or_create_store(&self, session_id: Id) -> Option<Arc<Mutex<AvidStore>>> {
+        // Reject late messages for an already-completed session. Without this a
+        // straggler's late ECHO/READY would re-create the session and leak a
+        // store entry, eventually filling the store and dropping new sessions.
+        if self.recently_cleared.lock().await.contains(&session_id) {
+            debug!(
+                id = self.id,
+                session_id = session_id.as_u64(),
+                "Ignoring message for already-cleared AVID session"
+            );
+            return None;
+        }
         let store_lock = {
             let mut store = self.store.lock().await;
             if store.len() >= MAX_RBC_SESSIONS && !store.contains_key(&session_id) {
-                warn!(
-                    id = self.id,
-                    session_id = session_id.as_u64(),
-                    "Avid session limit reached, dropping message"
-                );
-                return None;
+                // At capacity: evict the oldest session to admit the new one
+                // rather than dropping its messages (which deadlocks the new
+                // RBC). With resurrection rejected above the store normally holds
+                // only the small live working set, so this is a defensive
+                // backstop. Session ids are monotonic with protocol progress, so
+                // the minimum id is the most stale session.
+                if let Some(oldest) = store.keys().min().copied() {
+                    store.remove(&oldest);
+                    warn!(
+                        id = self.id,
+                        evicted = oldest.as_u64(),
+                        session_id = session_id.as_u64(),
+                        "Avid session store full; evicted oldest session to admit a new one"
+                    );
+                }
             }
             store
                 .entry(session_id)
