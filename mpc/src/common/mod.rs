@@ -454,10 +454,15 @@ pub trait ProtocolTag:
 /// Preprocessing sub-protocols (short-lived, tightly synchronized, small reuse
 /// period) use a small cap; the multiplication store (u16 exec-id, ~65536 reuse
 /// period) uses a larger one.
-/// Cleared-set cap for short-lived, tightly-synchronized preprocessing
-/// sub-protocols (triple_gen, share_gen, ran_dou_sha, double_share, batch_recon).
-/// Their exec-id reuse period can be as small as ~256 sessions, so the cap stays
-/// well below that while comfortably exceeding the (small) preprocessing skew.
+/// Cleared-set cap for the preprocessing sub-protocols (triple_gen, share_gen,
+/// ran_dou_sha, double_share, batch_recon, prand_bit/prand_int, fpmul/fpdiv→trunc).
+/// The cap must satisfy `skew < cap < reuse_period`. It is held at 128 because
+/// `rand_bit` (used while generating prandbits) still has a u8 exec counter
+/// (reuse ~256), so the cap must stay below 256. Most other preprocessing
+/// counters are now u16 (reuse ~65536; see `pack_wide_slot24`); once `rand_bit`
+/// is widened too this can be raised well above the inter-party skew that a deep
+/// computation accumulates (a small cap strands stragglers in e.g. ~1000+
+/// truncation fixed-point loops — see the extreme-scale fixed-point deadlock).
 pub const PREPROC_CLEARED_CAP: usize = 128;
 
 /// Cleared-set cap for the multiplication store, whose parent exec-id is a u16
