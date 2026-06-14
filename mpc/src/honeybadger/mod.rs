@@ -333,33 +333,52 @@ impl GetNext<u16> for WideSubProtocolCounter {
 /// session ID and distinguish different executions of the same sub-protocol.
 #[derive(Clone, Debug)]
 pub struct SubProtocolCounters {
-    pub ran_dou_sha_counter: SubProtocolCounter,
-    pub ran_sha_counter: SubProtocolCounter,
-    pub triple_counter: SubProtocolCounter,
+    // Wide (u16) exec counters. A deep computation drives hundreds of
+    // preprocessing regenerations; these counters are embedded directly in the
+    // session ids handed to batch reconstruction / per-dealer AVID broadcasts. A
+    // u8 counter wraps after 256 and reuses a session id whose batch shape may
+    // differ from the prior epoch's, which strands the protocol (batch_recon
+    // "inconsistent width", or an AVID session a straggler still needs being
+    // reused). A u16 period (65536) is far beyond any in-flight /
+    // recently-cleared window, so reuse cannot collide. See `pack_wide_slot24`.
+    pub ran_dou_sha_counter: WideSubProtocolCounter,
+    pub ran_sha_counter: WideSubProtocolCounter,
+    pub triple_counter: WideSubProtocolCounter,
     pub batch_recon_counter: SubProtocolCounter,
     pub dou_sha_counter: SubProtocolCounter,
     pub mul_counter: WideSubProtocolCounter,
     pub rand_bit_counter: SubProtocolCounter,
-    pub prand_bit_counter: SubProtocolCounter,
-    pub prand_int_counter: SubProtocolCounter,
-    pub fpmul_counter: SubProtocolCounter,
-    pub fpdiv_const_counter: SubProtocolCounter,
+    // Wide (u16): a long fixed-point/bit workload regenerates these many times;
+    // packed exec(low)+round(high), sub=0 (free for PRandBit/PRandInt routing),
+    // with prandbitd propagating round to its batch children (see
+    // `pack_wide_slot24`).
+    pub prand_bit_counter: WideSubProtocolCounter,
+    pub prand_int_counter: WideSubProtocolCounter,
+    // Wide (u16) exec counters for the fixed-point ops. Each fpmul/fpdiv call
+    // advances its counter once; a long fixed-point loop wraps a u8 counter after
+    // 256 calls, reusing a session id whose per-dealer Trunc RBC children then
+    // collide with a prior call's still-in-flight messages ("Session ID does not
+    // exist") and deadlock. The high byte rides in round_id (free for these
+    // protocols) and Trunc propagates it to its children (see `pack_wide_slot24`
+    // and `truncpr`).
+    pub fpmul_counter: WideSubProtocolCounter,
+    pub fpdiv_const_counter: WideSubProtocolCounter,
 }
 
 impl SubProtocolCounters {
     pub fn new() -> Self {
         Self {
-            ran_dou_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            ran_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            triple_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            ran_dou_sha_counter: WideSubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            ran_sha_counter: WideSubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            triple_counter: WideSubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             batch_recon_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             dou_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             mul_counter: WideSubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             rand_bit_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            prand_bit_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            prand_int_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            fpmul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            fpdiv_const_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            prand_bit_counter: WideSubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            prand_int_counter: WideSubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            fpmul_counter: WideSubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            fpdiv_const_counter: WideSubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -929,7 +948,7 @@ where
 
         let session_id = SessionId::new(
             ProtocolType::FpMul,
-            SessionId::pack_slot24(self.counters.fpmul_counter.get_next().await?, 0, 0),
+            SessionId::pack_wide_slot24(self.counters.fpmul_counter.get_next().await?),
             self.params.instance_id,
         );
         let r_bits = r_bits_vec.iter().map(|(a, _)| a.clone()).collect();
@@ -999,7 +1018,7 @@ where
         // 4. Prepare SessionId --------------------------------------------
         let session_id = SessionId::new(
             ProtocolType::FpDivConst,
-            SessionId::pack_slot24(self.counters.fpdiv_const_counter.get_next().await?, 0, 0),
+            SessionId::pack_wide_slot24(self.counters.fpdiv_const_counter.get_next().await?),
             self.params.instance_id,
         );
 
@@ -1166,11 +1185,10 @@ where
             info!("There are enough Random shares and Beaver triples");
             // return Ok(());
         } else {
-            let mut triple_counter = self.counters.triple_counter.get_next().await?;
-            // The exec-id counter wraps (recycles) across calls, so only guard
-            // against a single call needing more than the whole exec*round
-            // session-id space (impossible for realistic inputs).
-            if 256 * 255 < total_triples_to_generate / group_size {
+            // The exec-id counter wraps (recycles) across calls; with a u16 period
+            // one call could only exhaust the session space by needing more than
+            // 65536 batches at once (impossible for realistic inputs).
+            if 65536 < total_triples_to_generate / group_size {
                 return Err(HoneyBadgerError::LimitError);
             }
 
@@ -1214,7 +1232,6 @@ where
                 .await
                 .take_random_shares(total_triples_to_generate)?;
 
-            let mut round_id = 0u8;
             let mut group_index = 0;
             let total_groups = total_triples_to_generate / group_size;
             let phase_start = Instant::now();
@@ -1225,9 +1242,13 @@ where
                 let share_start = group_index * group_size;
                 let share_end = share_start + batch_groups * group_size;
 
+                // Fresh exec id per batch from the wide (u16) counter, so a session
+                // id is not reused with a different batch width until 65536 batches
+                // later (see `triple_counter`).
+                let triple_seq = self.counters.triple_counter.get_next().await?;
                 let sessionid = SessionId::new(
                     ProtocolType::Triple,
-                    SessionId::pack_slot24(triple_counter, 0, round_id),
+                    SessionId::pack_wide_slot24(triple_seq),
                     self.params.instance_id,
                 );
                 self.preprocess
@@ -1251,13 +1272,6 @@ where
                     .await
                     .add(Some(triples), None, None, None);
                 assert!(self.preprocess.triple_gen.clear_store(sessionid).await);
-
-                if round_id == 255 {
-                    triple_counter = self.counters.triple_counter.get_next().await?;
-                    round_id = 0;
-                } else {
-                    round_id += 1;
-                }
 
                 group_index += batch_groups;
             }
@@ -1303,12 +1317,10 @@ where
         let columns_needed = (needed + output_per_column - 1) / output_per_column;
         let max_columns_per_run = 2048usize;
         let run = (columns_needed + max_columns_per_run - 1) / max_columns_per_run;
-        let mut round_id = 0u8;
-        let mut ran_sha_counter = self.counters.ran_sha_counter.get_next().await?;
 
-        // Counter wraps across calls; only reject a single call exceeding the
-        // whole exec*round session-id space.
-        if 256 * 255 < run {
+        // Wide (u16) counter wraps across calls; only reject a single call
+        // exceeding the whole u16 session-id space.
+        if 65536 < run {
             return Err(HoneyBadgerError::LimitError);
         }
 
@@ -1317,9 +1329,11 @@ where
             let columns_remaining = columns_needed - i * max_columns_per_run;
             let batch_size = columns_remaining.min(max_columns_per_run);
 
+            // Fresh u16 exec id per batch (see `pack_wide_slot24`).
+            let ran_sha_seq = self.counters.ran_sha_counter.get_next().await?;
             let sessionid = SessionId::new(
                 ProtocolType::Ransha,
-                SessionId::pack_slot24(ran_sha_counter, 0, round_id),
+                SessionId::pack_wide_slot24(ran_sha_seq),
                 self.params.instance_id,
             );
 
@@ -1346,13 +1360,6 @@ where
                     .clear_completed_session(sessionid)
                     .await
             );
-
-            if round_id == 255 {
-                ran_sha_counter = self.counters.ran_sha_counter.get_next().await.unwrap();
-                round_id = 0;
-            } else {
-                round_id += 1;
-            }
         }
         Ok(())
     }
@@ -1375,21 +1382,23 @@ where
         let columns_needed = (needed + output_per_column - 1) / output_per_column;
         let max_columns_per_run = ran_dou_sha_batch_columns_limit();
         let run = (columns_needed + max_columns_per_run - 1) / max_columns_per_run;
-        let mut round_id = 0u8;
-        let mut ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await?;
 
-        // Counter wraps across calls; only reject a single call exceeding the
-        // whole exec*round session-id space.
-        if 256 * 255 < run {
+        // Wide (u16) counter wraps across calls; only reject a single call
+        // exceeding the whole u16 session-id space.
+        if 65536 < run {
             return Err(HoneyBadgerError::LimitError);
         }
 
         for i in 0..run {
             let columns_remaining = columns_needed - i * max_columns_per_run;
             let batch_size = columns_remaining.min(max_columns_per_run);
+            // Fresh u16 exec id per batch (see `pack_wide_slot24`). The dou_sha
+            // sub-step below reuses this same session id, so it inherits the wide
+            // packing too.
+            let ran_dou_sha_seq = self.counters.ran_dou_sha_counter.get_next().await?;
             let sessionid = SessionId::new(
                 ProtocolType::Randousha,
-                SessionId::pack_slot24(ran_dou_sha_counter, 0, round_id),
+                SessionId::pack_wide_slot24(ran_dou_sha_seq),
                 self.params.instance_id,
             );
 
@@ -1432,13 +1441,6 @@ where
                     .clear_completed_session(sessionid)
                     .await
             );
-
-            if round_id == 255 {
-                ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await.unwrap();
-                round_id = 0;
-            } else {
-                round_id += 1;
-            }
         }
         Ok(pair)
     }
@@ -1547,7 +1549,7 @@ where
         for randbit_chunk in randbit_output.chunks(max_prandbit_batch) {
             let prandbit_sessionid = SessionId::new(
                 ProtocolType::PRandBit,
-                SessionId::pack_slot24(self.counters.prand_bit_counter.get_next().await?, 0, 0),
+                SessionId::pack_wide_slot24(self.counters.prand_bit_counter.get_next().await?),
                 self.params.instance_id,
             );
 
@@ -1610,7 +1612,7 @@ where
         for batch_size in chunk_sizes(missing, max_prandint_batch) {
             let sessionid = SessionId::new(
                 ProtocolType::PRandInt,
-                SessionId::pack_slot24(self.counters.prand_int_counter.get_next().await?, 0, 0),
+                SessionId::pack_wide_slot24(self.counters.prand_int_counter.get_next().await?),
                 self.params.instance_id,
             );
 
@@ -1917,6 +1919,24 @@ impl SessionId {
     #[inline]
     pub fn pack_mul_parent_slot24(exec_id: u16) -> u32 {
         Self::pack_slot24((exec_id & 0x00FF) as u8, (exec_id >> 8) as u8, 0)
+    }
+
+    /// Pack a 16-bit exec counter into the slot, keeping `sub_id == 0`. The
+    /// counter's low byte goes in `exec_id` and its high byte in `round_id`.
+    ///
+    /// Used by the preprocessing sub-protocols whose parent session has
+    /// `sub_id == 0` (triple-gen, ran-sha, ran-dou-sha). A deep computation
+    /// drives hundreds of preprocessing regenerations; an 8-bit exec counter
+    /// wraps after 256 and reuses a session id whose batch shape may differ from
+    /// the prior epoch's, which strands the protocol (e.g. batch_recon
+    /// "inconsistent width", or an AVID session a straggler still needs being
+    /// re-used). A 16-bit period (65536) is far beyond any in-flight /
+    /// recently-cleared window, so reuse cannot collide. Per-dealer AVID children
+    /// are derived from `exec_id()` AND `round_id()`, so both bytes propagate and
+    /// the child ids stay unique too.
+    #[inline]
+    pub fn pack_wide_slot24(exec_id: u16) -> u32 {
+        Self::pack_slot24((exec_id & 0x00FF) as u8, 0, (exec_id >> 8) as u8)
     }
 
     #[inline]
