@@ -428,7 +428,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 for (i, chunk) in share_rplusb.chunks(self.t + 1).enumerate() {
                     let session_id_batch = SessionId::new(
                         calling_proto,
-                        SessionId::pack_slot24(session_id.exec_id(), i as u8, 0),
+                        // Carry the parent's round_id (a widened u16 exec counter's
+                        // high byte; 0 for non-widened callers) so child batch ids
+                        // stay unique across a u8 exec wrap. See `pack_wide_slot24`.
+                        SessionId::pack_slot24(session_id.exec_id(), i as u8, session_id.round_id()),
                         session_id.instance_id(),
                     );
                     self.batch_recon
@@ -456,8 +459,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     ) -> Result<(), PRandError> {
         info!(node_id = self.id, "RISS started");
 
+        // sub_id must be 0; round_id may carry a widened exec counter's high byte
+        // (see `pack_wide_slot24`).
         assert_eq!(session_id.sub_id(), 0);
-        assert_eq!(session_id.round_id(), 0);
 
         if batch_size % (self.t + 1) != 0
             && session_id.calling_protocol() == Some(ProtocolType::PRandBit)
@@ -616,7 +620,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(sid.exec_id(), 0, 0),
+            // Recover the parent session id from a child message: preserve round_id
+            // (the widened exec counter's high byte) so we map to the correct
+            // parent across a u8 exec wrap. round_id == 0 for non-widened callers.
+            SessionId::pack_slot24(sid.exec_id(), 0, sid.round_id()),
             sid.instance_id(),
         );
 

@@ -143,7 +143,12 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             for p in 0..self.n {
                 let rbc_id = SessionId::new(
                     calling_proto,
-                    SessionId::pack_slot24(session_id.exec_id(), p as u8, 0),
+                    // Carry the parent's round_id into the child RBC id. Callers
+                    // that widen their exec counter to u16 stash its high byte in
+                    // round_id (see `pack_wide_slot24`); propagating it keeps the
+                    // per-dealer RBC ids unique across a u8 exec wrap. Callers that
+                    // don't widen pass round_id == 0, so this is a no-op for them.
+                    SessionId::pack_slot24(session_id.exec_id(), p as u8, session_id.round_id()),
                     session_id.instance_id(),
                 );
                 self.rbc.clear_session(rbc_id).await;
@@ -306,7 +311,10 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(session.exec_id(), self.id as u8, 0),
+            // Carry the parent's round_id (a widened exec counter's high byte) so
+            // the per-dealer RBC id is unique across a u8 exec wrap; round_id == 0
+            // for non-widened callers, matching the previous behaviour.
+            SessionId::pack_slot24(session.exec_id(), self.id as u8, session.round_id()),
             session.instance_id(),
         );
         self.rbc
@@ -326,9 +334,12 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             "TruncPr open handler"
         );
 
-        if msg.session_id.sub_id() != 0 || msg.session_id.round_id() != 0 {
+        // sub_id must be 0 (the parent trunc session reserves it). round_id may be
+        // non-zero: callers that widen their exec counter to u16 stash its high
+        // byte there (see `pack_wide_slot24`).
+        if msg.session_id.sub_id() != 0 {
             error!(
-                "Wrong session. Sub ID or Round ID is not zero. Session ID: {:?}",
+                "Wrong session. Sub ID is not zero. Session ID: {:?}",
                 msg.session_id
             );
             return Err(TruncPrError::SessionIdError(msg.session_id));
