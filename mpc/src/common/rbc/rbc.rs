@@ -855,7 +855,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         if store.ended || store.has_echo(msg.sender_id) {
             return Ok(());
         }
-        store.insert_shard(root.clone(), msg.sender_id, msg.payload.clone())?;
+        store.insert_shard(root.clone(), msg.sender_id, msg.payload.clone(), self.k)?;
         store.insert_fingerprint(root.clone(), msg.sender_id, proof_bytes);
         store.increment_echo(&root);
         store.set_echo_sent(msg.sender_id);
@@ -951,7 +951,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         let mut send_shards_map: Option<HashMap<usize, Vec<u8>>> = None;
         let mut send_output: Option<Vec<u8>> = None;
 
-        store.insert_shard(root.clone(), msg.sender_id, msg.payload.clone())?;
+        store.insert_shard(root.clone(), msg.sender_id, msg.payload.clone(), self.k)?;
         store.insert_fingerprint(root.clone(), msg.sender_id, proof_bytes);
         store.increment_ready(&root);
         store.set_ready_sent(msg.sender_id);

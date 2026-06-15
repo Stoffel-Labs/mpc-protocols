@@ -297,8 +297,10 @@ impl AvidStore {
         root: Vec<u8>,
         sender_id: usize,
         shard: Vec<u8>,
+        data_shards: usize,
     ) -> Result<(), ShardError> {
-        if shard.len() > MAX_PAYLOAD_SIZE + 8 {
+        let max_shard_size = (MAX_PAYLOAD_SIZE + 8 + data_shards - 1) / data_shards;
+        if shard.len() > max_shard_size {
             return Err(ShardError::Config(format!(
                 "Shard from {} exceeds maximum allowed size ({})",
                 sender_id,
