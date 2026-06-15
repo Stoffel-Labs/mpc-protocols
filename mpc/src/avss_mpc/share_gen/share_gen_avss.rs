@@ -87,7 +87,10 @@ where
                 return Err(RanShaAvssError::LimitError);
             }
             let per_peer_limit = MAX_RANSHA_AVSS_SESSIONS / self.n_parties;
-            let peer_count = storage.values().filter(|(id, _)| *id == initiator_id).count();
+            let peer_count = storage
+                .values()
+                .filter(|(id, _)| *id == initiator_id)
+                .count();
             if peer_count >= per_peer_limit {
                 warn!("RanShaAvss per-peer session limit reached");
                 return Err(RanShaAvssError::LimitError);
@@ -96,7 +99,10 @@ where
 
         Ok(storage
             .entry(session_id)
-            .or_insert((initiator_id, Arc::new(Mutex::new(RanShaAvssStore::empty(self.n_parties)))))
+            .or_insert((
+                initiator_id,
+                Arc::new(Mutex::new(RanShaAvssStore::empty(self.n_parties))),
+            ))
             .1
             .clone())
     }
@@ -167,11 +173,13 @@ where
                 if usize::from(sender_id) >= self.n_parties {
                     return Err(RanShaAvssError::InvalidPartyId);
                 }
-                ransha_storage
-                    .initial_shares
-                    .insert(sender_id.into(), avss_share.first()
+                ransha_storage.initial_shares.insert(
+                    sender_id.into(),
+                    avss_share
+                        .first()
                         .ok_or(RanShaAvssError::InvalidPartyId)?
-                        .clone());
+                        .clone(),
+                );
 
                 ransha_storage.reception_tracker[sender_id as usize] = true;
                 // Check if the protocol has reached an end

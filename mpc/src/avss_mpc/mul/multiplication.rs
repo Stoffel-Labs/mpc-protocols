@@ -192,7 +192,9 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     }
 
     pub async fn open_mult_handler(&self, msg: MultMessage) -> Result<(), MulError> {
-        let storage_bind = self.get_or_create_mult_storage(msg.session_id, msg.sender).await?;
+        let storage_bind = self
+            .get_or_create_mult_storage(msg.session_id, msg.sender)
+            .await?;
         let mut storage = storage_bind.lock().await;
         if storage.protocol_state == MultProtocolState::Finished {
             return Ok(());
@@ -263,7 +265,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
                 return Err(MulError::LimitError);
             }
             let per_peer_limit = MAX_AVSS_MUL_SESSIONS / self.n;
-            let peer_count = storage.values().filter(|(id, _)| *id == initiator_id).count();
+            let peer_count = storage
+                .values()
+                .filter(|(id, _)| *id == initiator_id)
+                .count();
             if peer_count >= per_peer_limit {
                 warn!("AVSS Mul per-peer session limit reached");
                 return Err(MulError::LimitError);
