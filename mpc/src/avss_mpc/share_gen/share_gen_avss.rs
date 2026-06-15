@@ -169,7 +169,9 @@ where
                 }
                 ransha_storage
                     .initial_shares
-                    .insert(sender_id.into(), avss_share[0].clone());
+                    .insert(sender_id.into(), avss_share.first()
+                        .ok_or(RanShaAvssError::InvalidPartyId)?
+                        .clone());
 
                 ransha_storage.reception_tracker[sender_id as usize] = true;
                 // Check if the protocol has reached an end

@@ -385,6 +385,9 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        if cts.is_empty() {
+            return Err(AvssError::InvalidShareLength);
+        }
         if cts.len() != all_commitments.len() {
             return Err(AvssError::InvalidShareLength);
         }
