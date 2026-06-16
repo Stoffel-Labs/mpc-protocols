@@ -619,7 +619,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         //Generating shards for the message to be broadcasted, here we are using Reed Solomon erasure coding
         let shards = encode_rs(payload.clone(), self.k, self.n - self.k)?;
         //Generating the merkle tree out of the shards
-        let tree = gen_merkletree(shards.clone());
+        let tree = gen_merkletree(&shards);
         let root = tree.root().ok_or_else(|| {
             RbcError::Internal(format!("Merkle root missing for session {:?}", session_id))
         })?;
@@ -1008,7 +1008,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
 
         // When a server reconstructs a shard, it also reconstructs the corresponding
         // hashes on the path from j to the root, and uses them for later verification
-        match generate_merkle_proofs_map(shards.clone()) {
+        match generate_merkle_proofs_map(&shards) {
             Ok(proof_map) => {
                 // Get fingerprint for self, for creating message later
                 let self_proof = proof_map.get(&(self.id)).cloned().unwrap_or_else(|| {

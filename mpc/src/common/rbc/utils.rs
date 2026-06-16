@@ -168,7 +168,7 @@ impl Hasher for Sha256Algorithm {
 }
 
 /// Generate a Merkle tree from a list of shards.
-pub fn gen_merkletree(shards: Vec<Vec<u8>>) -> MerkleTree<Sha256Algorithm> {
+pub fn gen_merkletree(shards: &[Vec<u8>]) -> MerkleTree<Sha256Algorithm> {
     let leaves: Vec<[u8; 32]> = shards.iter().map(|x| Sha256Algorithm::hash(&x)).collect();
     MerkleTree::<Sha256Algorithm>::from_leaves(&leaves)
 }
@@ -202,7 +202,7 @@ pub fn verify_merkle(
 
 /// Generate Merkle proofs for all leaves and return them as a map.
 pub fn generate_merkle_proofs_map(
-    shards: Vec<Vec<u8>>,
+    shards: &[Vec<u8>],
 ) -> Result<HashMap<usize, Vec<u8>>, ShardError> {
     let n = shards.len();
     let tree = gen_merkletree(shards);
@@ -296,11 +296,11 @@ mod tests {
         // Encode and generate Merkle tree
         let shards = encode_rs(payload.clone(), data_shards, parity_shards)
             .expect("Encoding should succeed");
-        let tree = gen_merkletree(shards.clone());
+        let tree = gen_merkletree(&shards);
 
         // Generate proofs
         let proofs_map =
-            generate_merkle_proofs_map(shards.clone()).expect("Proof generation should succeed");
+            generate_merkle_proofs_map(&shards).expect("Proof generation should succeed");
 
         for (i, shard) in shards.iter().enumerate() {
             let mut proof_with_root = vec![];
