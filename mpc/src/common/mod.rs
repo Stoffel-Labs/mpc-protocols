@@ -431,7 +431,7 @@ pub trait ProtocolTag:
 ///
 /// Layout (u64):
 /// [ protocol | slot24 | instance_id ]
-///   16 bits     24 bits   32 bits
+///   8 bits     24 bits   32 bits
 ///
 /// Interpretation of `slot24` is protocol-defined.
 pub trait ProtocolSessionId:
