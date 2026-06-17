@@ -23,6 +23,7 @@ use tokio::sync::{
 use tracing::{info, warn};
 
 const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+const MAX_PENDING_SESSIONS: usize = 512;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AvssError {
@@ -52,6 +53,8 @@ pub enum AvssError {
     Abort,
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("pending session limit exceeded")]
+    LimitExceeded,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -418,6 +421,10 @@ where
 
         {
             let mut map = self.shares.lock().await;
+            if map.len() >= MAX_PENDING_SESSIONS {
+                warn!("AVSS share cache full; dropping session {:?}", msg.session_id);
+                return Err(AvssError::LimitExceeded);
+            }
             map.insert(msg.session_id, Some(shares));
         };
 
