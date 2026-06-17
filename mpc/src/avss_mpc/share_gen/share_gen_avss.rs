@@ -203,7 +203,7 @@ where
                     self.ransha_gen(shares_deg_t, session_id).await?;
                     break;
                 }
-             } else {
+            } else {
                 let mut store = self.avss.shares.lock().await;
                 store.remove(&id);
             }

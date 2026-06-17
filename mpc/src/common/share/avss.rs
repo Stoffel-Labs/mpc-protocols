@@ -422,7 +422,10 @@ where
         {
             let mut map = self.shares.lock().await;
             if map.len() >= MAX_PENDING_SESSIONS {
-                warn!("AVSS share cache full; dropping session {:?}", msg.session_id);
+                warn!(
+                    "AVSS share cache full; dropping session {:?}",
+                    msg.session_id
+                );
                 return Err(AvssError::LimitExceeded);
             }
             map.insert(msg.session_id, Some(shares));
