@@ -7,7 +7,7 @@ use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::honeybadger::MAX_MESSAGE_SIZE;
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
         share_gen::{
             RanShaError, RanShaMessage, RanShaMessageType, RanShaPayload, RanShaState, RanShaStore,
         },
-        ProtocolType, SessionId, WrappedMessage,
+        SessionId, WrappedMessage,
     },
 };
 
@@ -134,6 +134,7 @@ where
         let mut store = self.store.lock().await;
         store.remove(&session_id).is_some()
     }
+
     pub async fn wait_for_result(
         &self,
         session_id: SessionId,
@@ -159,6 +160,7 @@ where
             Ok(Ok(shares)) => Ok(shares),
         }
     }
+
     async fn try_finalize(&mut self, session_id: SessionId) -> Result<bool, RanShaError> {
         // phase 1: decide + extract under lock
         let output = {
@@ -225,7 +227,7 @@ where
             ));
             let bytes_generic_msg = bincode::serialize(&generic_message)?;
 
-            info!("sending shares from {:?} to {:?}", self.id, recipient_id);
+            info!("Sending shares from {:?} to {:?}", self.id, recipient_id);
             network.send(recipient_id, &bytes_generic_msg).await?;
         }
 
@@ -284,7 +286,7 @@ where
         ransha_storage.initial_shares.insert(msg.sender_id, share);
         info!(
             session_id = msg.session_id.as_u64(),
-            "party {:?} received shares from {:?}", self.id, msg.sender_id,
+            "Party {:?} received shares from {:?}", self.id, msg.sender_id,
         );
 
         ransha_storage.reception_tracker[msg.sender_id] = true;
@@ -325,7 +327,7 @@ where
         N: Network,
     {
         info!(
-            "party {:?} received shares for Random sharing generation",
+            "Party {:?} received shares for random sharing generation",
             self.id
         );
 
@@ -344,7 +346,9 @@ where
             let share_deg_t = r_deg_t[i].clone();
 
             let mut bytes_rec_message = Vec::new();
-            share_deg_t.serialize_compressed(&mut bytes_rec_message)?;
+            share_deg_t
+                .serialize_compressed(&mut bytes_rec_message)
+                .inspect_err(|_| error!("error serializing r_deg_t"))?;
             let message = WrappedMessage::RanSha(RanShaMessage::new(
                 self.id,
                 RanShaMessageType::ReconstructMessage,
@@ -414,7 +418,9 @@ where
             );
             let bytes = bincode::serialize(&result)?;
             let sessionid = SessionId::new(
-                ProtocolType::Ransha,
+                msg.session_id
+                    .calling_protocol()
+                    .ok_or(RanShaError::NoCallingProtocol)?,
                 SessionId::pack_slot24(
                     msg.session_id.exec_id(),
                     self.id as u8,
@@ -483,7 +489,7 @@ mod tests {
     use crate::common::rbc::rbc::Avid;
     use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use crate::honeybadger::share_gen::{RanShaMessage, RanShaMessageType, RanShaPayload};
-    use crate::honeybadger::SessionId;
+    use crate::honeybadger::{ProtocolType, SessionId};
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
     use std::sync::Arc;

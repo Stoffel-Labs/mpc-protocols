@@ -835,7 +835,6 @@ impl ProtocolSessionId for AvssSessionId {
         AvssSessionId(id)
     }
 }
-
 impl AvssSessionId {
     //Second 8 bits
     pub fn exec_id(self) -> u8 {

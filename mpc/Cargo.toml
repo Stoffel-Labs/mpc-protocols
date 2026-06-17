@@ -32,6 +32,8 @@ uuid.workspace = true
 ark-ec.workspace = true
 chacha20poly1305.workspace = true
 num-integer.workspace = true
+turmoil.workspace = true
+num-traits.workspace = true
 
 [dev-dependencies]
 once_cell.workspace = true

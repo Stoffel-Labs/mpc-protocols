@@ -102,10 +102,12 @@ where
             .or_insert(Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))))
             .clone())
     }
+
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.storage.lock().await;
         store.remove(&session_id).is_some()
     }
+
     pub async fn wait_for_result(
         &self,
         session_id: SessionId,
@@ -200,7 +202,7 @@ where
         //todo: Better handle duplicate messages from a sender, check the shares
         if dousha_storage.share.contains_key(&recv_message.sender_id) {
             warn!(
-                session_id = recv_message.session_id.as_u64(),
+                session_id = ?recv_message.session_id,
                 "Duplicate double share received from party {:?}, ignoring.",
                 recv_message.sender_id
             );

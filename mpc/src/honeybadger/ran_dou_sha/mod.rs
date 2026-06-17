@@ -8,8 +8,7 @@ use crate::{
     },
     honeybadger::{
         double_share::DoubleShamirShare, ran_dou_sha::messages::RanDouShaPayload,
-        robust_interpolate::InterpolateError, ProtocolType, SessionId, WrappedMessage,
-        MAX_MESSAGE_SIZE,
+        robust_interpolate::InterpolateError, SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::FftField;
@@ -34,6 +33,9 @@ use tracing::{info, warn};
 /// Error that occurs during the execution of the Random Double Share Error.
 #[derive(Debug, Error)]
 pub enum RanDouShaError {
+    /// There's no calling protocol
+    #[error("there is no calling protocol")]
+    NoCallingProtocol,
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
@@ -243,6 +245,7 @@ where
 
         Ok(())
     }
+
     pub async fn wait_for_result(
         &self,
         session_id: SessionId,
@@ -509,7 +512,9 @@ where
 
                 // if the verification succeeds, broadcast true (aka. OK)
                 let sessionid = SessionId::new(
-                    ProtocolType::Randousha,
+                    msg.session_id
+                        .calling_protocol()
+                        .ok_or(RanDouShaError::NoCallingProtocol)?,
                     SessionId::pack_slot24(
                         msg.session_id.exec_id(),
                         self.id as u8,
@@ -580,7 +585,7 @@ mod tests {
     use crate::honeybadger::ran_dou_sha::messages::{
         RanDouShaMessage, RanDouShaPayload, ReconstructionMessage,
     };
-    use crate::honeybadger::SessionId;
+    use crate::honeybadger::{ProtocolType, SessionId};
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
     use std::sync::Arc;

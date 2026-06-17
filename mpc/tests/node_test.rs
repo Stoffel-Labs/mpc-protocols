@@ -16,6 +16,7 @@ use futures::future::join_all;
 use std::collections::HashMap;
 use stoffelmpc_mpc::{
     common::{
+        math::goldilocks::GoldilocksField,
         rbc::rbc::Avid,
         types::{
             fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
@@ -25,7 +26,7 @@ use stoffelmpc_mpc::{
         ShamirShare,
     },
     honeybadger::{
-        fpmul::f256::Gf2568,
+        fpmul::f256::Gf256,
         input::input::InputClient,
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -132,11 +133,7 @@ async fn ransha_e2e() {
     setup_tracing();
     let n_parties = 4;
     let t = 1;
-    let session_id = SessionId::new(
-        ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -154,7 +151,8 @@ async fn ransha_e2e() {
         Duration::from_secs(30),
         vec![],
     );
-    // spawn tasks to process received messages
+
+    // Spawn tasks to process received messages
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         receivers,
         nodes.clone(),
@@ -511,10 +509,14 @@ async fn mul_e2e() {
     //Load the triples
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        node.preprocessing_material
-            .lock()
-            .await
-            .add(Some(triple[pid].clone()), None, None, None);
+        node.preprocessing_material.lock().await.add(
+            Some(triple[pid].clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
     }
 
     // init all nodes
@@ -816,11 +818,9 @@ async fn preprocessing_e2e() {
         let mut rng = StdRng::from_rng(OsRng).unwrap();
 
         let handle = tokio::spawn(async move {
-            {
-                node.run_preprocessing(net[pid].clone(), &mut rng)
-                    .await
-                    .expect("Preprocessing failed");
-            }
+            node.run_preprocessing(net[pid].clone(), &mut rng)
+                .await
+                .expect("Preprocessing failed");
         });
         handles.push(handle);
     }
@@ -833,12 +833,13 @@ async fn preprocessing_e2e() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_shares, n_prandbit, n_prandint) =
-            node.preprocessing_material.lock().await.len();
-        assert_eq!(n_triples, 5); //>no_of_triples
-        assert_eq!(n_shares, 0); //>no_of_randomshares
-        assert_eq!(n_prandbit, 4);
-        assert_eq!(n_prandint, 4);
+        let length_preproc = node.preprocessing_material.lock().await.length();
+        // The number of generated triples should be the closest multiple of 2t + 1 greater than the required
+        // number of triples.
+        assert_eq!(length_preproc.beaver_triples, 9);
+        assert_eq!(length_preproc.random_shr, 4);
+        assert_eq!(length_preproc.prandbit, 4);
+        assert_eq!(length_preproc.prandint, 4);
     }
 }
 
@@ -912,13 +913,15 @@ async fn preprocessing_e2e_big() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_shares, n_prandbit, n_prandint) =
-            node.preprocessing_material.lock().await.len();
-        info!("{}: {} {}", pid, n_triples, n_shares);
-        assert_eq!(n_triples, 20000); //>no_of_triples
-        assert_eq!(n_shares, 20000); //>no_of_randomshares
-        assert_eq!(n_prandbit, 0);
-        assert_eq!(n_prandint, 0);
+        let preproc_length = node.preprocessing_material.lock().await.length();
+        info!(
+            "{}: {} {}",
+            pid, preproc_length.beaver_triples, preproc_length.random_shr
+        );
+        assert_eq!(preproc_length.beaver_triples, 20000); //>no_of_triples
+        assert_eq!(preproc_length.random_shr, 20000); //>no_of_randomshares
+        assert_eq!(preproc_length.prandbit, 0);
+        assert_eq!(preproc_length.prandint, 0);
     }
 }
 
@@ -946,7 +949,7 @@ async fn test_rand_bit() {
     let mut a = Vec::new();
     let mut shares_a = Vec::new();
     for _ in 0..no_of_rand_bits {
-        let a_value = Fr::rand(&mut rng);
+        let a_value = GoldilocksField::rand(&mut rng);
         a.push(a_value);
         let shares = RobustShare::compute_shares(a_value, n_parties, t, None, &mut rng).unwrap();
         shares_a.push(shares);
@@ -957,8 +960,8 @@ async fn test_rand_bit() {
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        no_of_rand_bits,
-        no_of_rand_bits,
+        0,
+        0,
         111,
         0,
         0,
@@ -981,7 +984,7 @@ async fn test_rand_bit() {
     let mut handles = Vec::new();
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let mut prand_bit_node = node.preprocess.rand_bit;
+        let mut prand_bit_node = node.preprocess.small_field_preproc.rand_bit;
         let net = network[pid].clone();
 
         // Prepare the input shares for this party
@@ -1021,6 +1024,7 @@ async fn test_rand_bit() {
         let node = nodes[pid].clone();
         let store = node
             .preprocess
+            .small_field_preproc
             .rand_bit
             .storage
             .lock()
@@ -1045,14 +1049,14 @@ async fn test_rand_bit() {
         .1;
     println!("recovered bit: {}", bit0);
     // check if bit is 0 or 1
-    assert!(bit0 == Fr::ZERO || bit0 == Fr::ONE);
+    assert!(bit0 == GoldilocksField::ZERO || bit0 == GoldilocksField::ONE);
 
     let bit1 = RobustShare::recover_secret(&bit_share1, n_parties, t)
         .unwrap()
         .1;
     println!("recovered bit: {}", bit1);
     // check if bit is 0 or 1
-    assert!(bit1 == Fr::ZERO || bit1 == Fr::ONE);
+    assert!(bit1 == GoldilocksField::ZERO || bit1 == GoldilocksField::ONE);
 }
 //----------------------------------------MUL----------------------------------------
 
@@ -1099,7 +1103,7 @@ async fn fpmul_e2e() {
         let x = RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
             .unwrap();
         for (i, share) in x.iter().enumerate() {
-            r_bits[i].push((share.clone(), Gf2568::one()));
+            r_bits[i].push((share.clone(), Gf256::one()));
         }
     }
     //----------------------------------------SETUP NODES----------------------------------------
@@ -1133,6 +1137,8 @@ async fn fpmul_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             Some(triple[pid].clone()),
+            None,
+            None,
             None,
             Some(r_bits[pid].clone()),
             Some(vec![r_int[pid].clone()]),
@@ -1232,7 +1238,7 @@ async fn fpmul_e2e_with_preprocessing() {
         n_prandint,
         bound_l,
         security_k,
-        Duration::from_secs(30),
+        Duration::from_secs(10),
         vec![],
     );
 
@@ -1711,7 +1717,7 @@ async fn fpdiv_const_e2e() {
             RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
                 .unwrap();
         for (i, share) in bit_shares.iter().enumerate() {
-            r_bits[i].push((share.clone(), Gf2568::one()));
+            r_bits[i].push((share.clone(), Gf256::one()));
         }
     }
 
@@ -1743,6 +1749,8 @@ async fn fpdiv_const_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             None, // No Beaver triple needed
+            None,
+            None,
             None,
             Some(r_bits[pid].clone()),      // PRandBit[]
             Some(vec![r_int[pid].clone()]), // PRandInt[]

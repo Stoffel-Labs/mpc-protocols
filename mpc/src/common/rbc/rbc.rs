@@ -114,7 +114,7 @@ where
         );
         info!(
             id = self.id,
-            session_id = session_id.as_u64(),
+            session_id = ?session_id,
             msg_type = "INIT",
             "Broadcasting INIT message"
         );
@@ -175,7 +175,7 @@ where
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling INIT message"
@@ -187,7 +187,7 @@ where
             None => {
                 debug!(
                     id = self.id,
-                    session_id = msg.session_id.as_u64(),
+                    session_id = ?msg.session_id,
                     "Session already ended, ignoring"
                 );
                 return Ok(());
@@ -209,7 +209,7 @@ where
             store.mark_echo(); // Mark that ECHO has been sent.
             info!(
                 id = self.id,
-                session_id = msg.session_id.as_u64(),
+                session_id = ?msg.session_id,
                 msg_type = "ECHO",
                 "Broadcasting ECHO in response to INIT"
             );
@@ -226,7 +226,7 @@ where
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling ECHO message"
@@ -239,7 +239,7 @@ where
             None => {
                 debug!(
                     id = self.id,
-                    session_id = msg.session_id.as_u64(),
+                    session_id = ?msg.session_id,
                     "Session already ended, ignoring"
                 );
                 return Ok(());
@@ -252,7 +252,7 @@ where
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id.as_u64(),
+                session_id = ?msg.session_id,
                 "Session already ended, ignoring ECHO"
             );
             return Ok(());
@@ -319,7 +319,7 @@ where
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling READY message"
@@ -335,7 +335,7 @@ where
             None => {
                 debug!(
                     id = self.id,
-                    session_id = msg.session_id.as_u64(),
+                    session_id = ?msg.session_id,
                     "Session already ended, ignoring"
                 );
                 return Ok(());
@@ -348,7 +348,7 @@ where
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id.as_u64(),
+                session_id = ?msg.session_id,
                 "Session already ended, ignoring READY"
             );
             return Ok(());
@@ -396,7 +396,7 @@ where
         if let Some(m) = broadcast_ready {
             info!(
                 id = self.id,
-                session_id = msg.session_id.as_u64(),
+                session_id = ?msg.session_id,
                 msg_type = "READY",
                 "Broadcasting READY after t+1 threshold"
             );
@@ -405,7 +405,7 @@ where
         if let Some(m) = broadcast_echo {
             info!(
                 id = self.id,
-                session_id = msg.session_id.as_u64(),
+                session_id = ?msg.session_id,
                 msg_type = "ECHO",
                 "Broadcasting ECHO along with READY"
             );
@@ -414,7 +414,7 @@ where
         if let Some(m) = send_output {
             info!(
                 id = self.id,
-                session_id = msg.session_id.as_u64(),
+                session_id = ?msg.session_id,
                 output = ?m,
                 "Consensus achieved; RBC instance ended"
             );
@@ -702,7 +702,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             None => {
                 debug!(
                     id = self.id,
-                    session_id = msg.session_id.as_u64(),
+                    session_id = ?msg.session_id,
                     "Session already ended, ignoring SEND"
                 );
                 return Ok(());
@@ -740,7 +740,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 Ok(false) => {
                     error!(
                         id = self.id,
-                        session_id = msg.session_id.as_u64(),
+                        session_id = ?msg.session_id,
                         sender = msg.sender_id,
                         "Merkle proof verification failed on SEND message"
                     );
@@ -749,7 +749,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 Err(e) => {
                     error!(
                         id = self.id,
-                        session_id = msg.session_id.as_u64(),
+                        session_id = ?msg.session_id,
                         sender = msg.sender_id,
                         error = %e,
                         "Error during Merkle proof verification"
@@ -768,7 +768,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling ECHO message"
@@ -782,7 +782,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             None => {
                 debug!(
                     id = self.id,
-                    session_id = msg.session_id.as_u64(),
+                    session_id = ?msg.session_id,
                     "Session already ended, ignoring"
                 );
                 return Ok(());
@@ -883,7 +883,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             None => {
                 debug!(
                     id = self.id,
-                    session_id = msg.session_id.as_u64(),
+                    session_id = ?msg.session_id,
                     "Session already ended, ignoring"
                 );
                 return Ok(());
@@ -896,7 +896,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id.as_u64(),
+                session_id = ?msg.session_id,
                 "Session already ended, ignoring READY"
             );
             return Ok(());
@@ -958,7 +958,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                     if let Some(m) = send_output {
                         info!(
                             id = self.id,
-                            session_id = msg.session_id.as_u64(),
+                            session_id = ?msg.session_id,
                             output = ?m,
                             "Consensus achieved; AVID instance ended"
                         );
@@ -971,7 +971,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 Ok(false) => {
                     warn!(
                         id = self.id,
-                        session_id = msg.session_id.as_u64(),
+                        session_id = ?msg.session_id,
                         sender = msg.sender_id,
                         "Merkle verification failed in READY handler"
                     );
@@ -982,7 +982,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 Err(e) => {
                     warn!(
                         id = self.id,
-                        session_id = msg.session_id.as_u64(),
+                        session_id = ?msg.session_id,
                         sender = msg.sender_id,
                         error = %e,
                         "Error during Merkle verification in READY handler"
@@ -1030,7 +1030,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                         Ok(false) => {
                             error!(
                                 id = self.id,
-                                session_id = msg.session_id.as_u64(),
+                                session_id = ?msg.session_id,
                                 "Merkle proof generation failed in {handler_type} handler. Aborting."
                             );
                             return Err(RbcError::Internal(format!(
@@ -1041,7 +1041,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                         Err(e) => {
                             error!(
                                 id = self.id,
-                                session_id = msg.session_id.as_u64(),
+                                session_id = ?msg.session_id,
                                 error = %e,
                                 "Error during Merkle verification in {handler_type} handler"
                             );
@@ -1053,7 +1053,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             Err(e) => {
                 error!(
                     id = self.id,
-                    session_id = msg.session_id.as_u64(),
+                    session_id = ?msg.session_id,
                     error = %e,
                     "Failed to generate Merkle proof map in {handler_type} handler"
                 );
@@ -1072,7 +1072,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         );
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             msg_type = "READY",
             "Broadcasting READY in response to a {handler_type}"
         );
@@ -1333,7 +1333,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id.as_u64(),
+                session_id = ?msg.session_id,
                 "Session already ended, ignoring est"
             );
             return Ok(());
@@ -1345,7 +1345,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
             None => {
                 warn!(
                     id = self.id,
-                    session_id = msg.session_id.as_u64(),
+                    session_id = ?msg.session_id,
                     "Error while getting value at est handler"
                 );
                 return Err(RbcError::Internal(
@@ -1402,7 +1402,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling AUX message for round {}",msg.round_id
@@ -1419,7 +1419,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
             None => {
                 warn!(
                     id = self.id,
-                    session_id = msg.session_id.as_u64(),
+                    session_id = ?msg.session_id,
                     "Error while getting value at aux handler"
                 );
                 return Err(RbcError::Internal(
@@ -1432,7 +1432,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
         if store.ended {
             debug!(
                 id = self.id,
-                session_id = msg.session_id.as_u64(),
+                session_id = ?msg.session_id,
                 "Session already ended, ignoring aux"
             );
             return Ok(());
@@ -1671,7 +1671,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
     fn key_handler(&self, msg: Msg<Id>) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Handling Key setup message"
@@ -1696,7 +1696,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             round = msg.round_id,
@@ -1708,7 +1708,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
             None => {
                 error!(
                     id = self.id,
-                    session_id = msg.session_id.as_u64(),
+                    session_id = ?msg.session_id,
                     "Error while getting secret key share"
                 );
                 return Err(RbcError::Internal(
@@ -1733,7 +1733,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
             GenericMsgType::ABA(MsgTypeAba::Coin),
         );
         info!(
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             id = self.id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
@@ -1746,7 +1746,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
     //Collect the signature share and generate the common coin
     async fn coin_handler(&self, msg: Msg<Id>) -> Result<(), RbcError> {
         info!(
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             id = self.id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
@@ -1791,7 +1791,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                 None => {
                     error!(
                         id = self.id,
-                        session_id = msg.session_id.as_u64(),
+                        session_id = ?msg.session_id,
                         "Error while getting pk key set"
                     );
                     return Err(RbcError::Internal(
@@ -1851,7 +1851,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
 
                                 store.set_coin(msg.round_id, coin_bit);
                                 info!(
-                                    session_id = msg.session_id.as_u64(),
+                                    session_id = ?msg.session_id,
                                     id = self.id,
                                     "Successfully combined and verified signature for round {} with coin = {}",
                                     msg.round_id,
@@ -1992,7 +1992,7 @@ impl<Id: ProtocolSessionId + 'static> ACS<Id> {
     ) -> Result<(), RbcError> {
         info!(
             id = self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = ?msg.session_id,
             sender = msg.sender_id,
             msg_type = %msg.msg_type,
             "Initiating common subset"
