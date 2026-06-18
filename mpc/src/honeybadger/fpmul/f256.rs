@@ -128,8 +128,7 @@ impl From<u16> for Gf256 {
 
 impl From<BigUint> for Gf256 {
     fn from(value: BigUint) -> Self {
-        let first_byte = value.to_bytes_be()[0];
-        Gf256(first_byte as u8)
+        Gf256(value.to_bytes_le().first().copied().unwrap_or(0))
     }
 }
 
