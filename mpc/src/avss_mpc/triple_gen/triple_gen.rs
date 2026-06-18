@@ -163,7 +163,8 @@ where
 
             let dealer = done.sub_id() as usize;
             if dealer >= m {
-                continue; // ignore non-dealer sub-sessions
+                self.avss.shares.lock().await.remove(&done);
+                continue;
             }
 
             let mut avss_map = self.avss.shares.lock().await;
