@@ -222,6 +222,7 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     pub output_bit_receiver: Option<Receiver<Vec<(RobustShare<G>, Gf256)>>>,
     pub output_int_receiver: Option<Receiver<Vec<RobustShare<G>>>>,
     pub open_started: bool,
+    pub r_t_bound: Option<BigUint>,
 }
 
 impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
@@ -246,6 +247,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
             output_bit_receiver: Some(output_bit_receiver),
             output_int_receiver: Some(output_int_receiver),
             open_started: false,
+            r_t_bound: None,
         }
     }
 }

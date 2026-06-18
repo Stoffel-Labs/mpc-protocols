@@ -499,14 +499,21 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         // Step 2: P_i samples randomness and sends
         // Random integer range: [0, 2^(l+k)]
-        // First we need to check that k + l + (2 bits for b) fit into both moduli.
+        // Check that k + l + (2 bits for b) + ceil(log2(n)) fit into both moduli.
+        // The ceil(log2(n)) accounts for summing n individual shares without overflow.
         const B_MARGIN: usize = 2;
-        let max_bits = k + l + B_MARGIN;
+        let n_margin = (self.n as f64).log2().ceil() as usize;
+        let required_bits = k + l + B_MARGIN + n_margin;
         let max_field_cap = F::MODULUS_BIT_SIZE.min(G::MODULUS_BIT_SIZE);
-        if max_bits as u32 >= max_field_cap {
+        if required_bits as u32 >= max_field_cap {
             return Err(PRandError::SurpassedFieldCapacity);
         }
         let bound = BigUint::from(2 as u32).pow((k + l) as u32);
+        {
+            let binding = self.get_or_create_store(session_id).await?;
+            let mut store = binding.lock().await;
+            store.r_t_bound = Some(bound.clone());
+        }
         let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
         for tset in tsets {
             let r_t_i: Vec<BigUint> = (0..batch_size)
@@ -564,6 +571,17 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                     msg.r_t.len(),
                     batch_size
                 )));
+            }
+        }
+
+        if let Some(ref bound) = store.r_t_bound {
+            for val in &msg.r_t {
+                if val > bound {
+                    return Err(PRandError::InvalidMessage(format!(
+                        "r_t value from sender {} exceeds maximum allowed bound",
+                        msg.sender_id
+                    )));
+                }
             }
         }
 
