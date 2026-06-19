@@ -206,6 +206,8 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     /// For every maximal unqualified set T that excludes this player,
     /// we store the full mask r_T = sum_i r_T^i
     pub batch_size: Option<usize>,
+    /// Messages that arrived before batch_size/r_t_bound were set; reprocessed once initialized.
+    pub pending_riss_messages: Vec<PRandBitDMessage>,
     pub output_open: HashMap<u8, Vec<F>>,
     pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<BigUint>>>, // tset -> {sender -> val}
     pub r_t: HashMap<Vec<usize>, Vec<BigUint>>,
@@ -231,6 +233,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
         let (output_int_sender, output_int_receiver) = channel();
         Self {
             batch_size: None,
+            pending_riss_messages: Vec::new(),
             output_open: HashMap::new(),
             riss_shares: HashMap::new(),
             r_t: HashMap::new(),

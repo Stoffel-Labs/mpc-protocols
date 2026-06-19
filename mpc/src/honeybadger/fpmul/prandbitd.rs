@@ -509,10 +509,20 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             return Err(PRandError::SurpassedFieldCapacity);
         }
         let bound = BigUint::from(2 as u32).pow((k + l) as u32);
-        {
+        let pending = {
             let binding = self.get_or_create_store(session_id).await?;
             let mut store = binding.lock().await;
             store.r_t_bound = Some(bound.clone());
+            std::mem::take(&mut store.pending_riss_messages)
+        };
+        for pending_msg in pending {
+            match self.process(pending_msg, network.clone()).await {
+                Ok(()) => {}
+                Err(PRandError::InvalidMessage(_)) | Err(PRandError::Duplicate(_)) => {
+                    warn!("dropping invalid pending RISS message from Byzantine peer");
+                }
+                Err(e) => return Err(e),
+            }
         }
         let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
         for tset in tsets {
@@ -560,6 +570,48 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 "node {} received message for tset that contains itself: {:?}",
                 self.id, msg.tset
             )));
+        }
+
+        if msg.tset.len() != self.t {
+            return Err(PRandError::InvalidMessage(format!(
+                "tset length {} != threshold {}",
+                msg.tset.len(),
+                self.t
+            )));
+        }
+        if msg.tset.iter().any(|&id| id >= self.n) {
+            return Err(PRandError::InvalidMessage(
+                "tset contains out-of-range party ID".into(),
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if msg.tset.iter().any(|id| !seen.insert(id)) {
+            return Err(PRandError::InvalidMessage(
+                "tset contains duplicate IDs".into(),
+            ));
+        }
+
+        // If bounds are not yet set, queue the message for retroactive validation
+        // once generate_riss() initialises the session.
+        if store.batch_size.is_none() || store.r_t_bound.is_none() {
+            const MAX_PENDING_RISS: usize = 4096;
+            if msg.r_t.len() > MAX_PENDING_RISS {
+                return Err(PRandError::InvalidMessage(
+                    "r_t too large for uninitialized session".into(),
+                ));
+            }
+            if store
+                .pending_riss_messages
+                .iter()
+                .any(|m| m.sender_id == msg.sender_id && m.tset == msg.tset)
+            {
+                return Err(PRandError::Duplicate(format!(
+                    "Already queued from {} for tset {:?}",
+                    msg.sender_id, msg.tset
+                )));
+            }
+            store.pending_riss_messages.push(msg);
+            return Ok(());
         }
 
         let maybe_batch_size = store.batch_size;
