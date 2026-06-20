@@ -15,7 +15,7 @@
 
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
-use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain, Polynomial};
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -26,7 +26,7 @@ use stoffelmpc_mpc::common::{
 };
 use stoffelmpc_mpc::honeybadger::{
     batch_recon::{BatchReconMsg, BatchReconMsgType},
-    robust_interpolate::robust_interpolate::{Robust, RobustShare},
+    robust_interpolate::robust_interpolate::{batch_recover_secret, Robust, RobustShare},
     ProtocolType, SessionId, WrappedMessage,
 };
 
@@ -61,6 +61,48 @@ fn bench_recover_secret(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let _ = RobustShare::recover_secret(black_box(&corrupted), n, t).unwrap();
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+/// `batch_recover_secret` is the dominant per-round compute in the batched mul: it runs once on the
+/// EvalBatch→RevealBatch transition and once on RevealBatch→done, per session, per node. This prices
+/// the honest (optimistic) path at a fixed `batch_len` (number of (t+1)-chunks) matching a real mul
+/// session size, so the matrix-flattening optimization can be measured in isolation.
+fn bench_batch_recover(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_recover_secret");
+    for &(n, t) in PARAMS {
+        let degree = t;
+        let batch_len = 16; // chunks — a 16·(t+1)-pair session (64 pairs at t=3, 32 at t=6)
+        let mut rng = test_rng();
+        let domain = GeneralEvaluationDomain::<Fr>::new(n).unwrap();
+        let polys: Vec<DensePolynomial<Fr>> = (0..batch_len)
+            .map(|_| DensePolynomial::<Fr>::rand(degree, &mut rng))
+            .collect();
+        // Per-sender evaluation vectors in the `(sender_id, values)` representation used by batch
+        // reconstruction: `evals_by_sender[id].1[c]` = P_c(α_id).
+        let evals_by_sender: Vec<(usize, Vec<Fr>)> = (0..n)
+            .map(|id| {
+                let x = domain.element(id);
+                (id, polys.iter().map(|p| p.evaluate(&x)).collect())
+            })
+            .collect();
+
+        group.bench_with_input(
+            BenchmarkId::new("honest", format!("n{n}_t{t}_b{batch_len}")),
+            &(n, t),
+            |b, _| {
+                b.iter(|| {
+                    let _ = batch_recover_secret(
+                        black_box(&evals_by_sender),
+                        black_box(n),
+                        black_box(degree),
+                        black_box(t),
+                    )
+                    .unwrap();
                 })
             },
         );
@@ -175,6 +217,7 @@ fn bench_serialize(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_recover_secret,
+    bench_batch_recover,
     bench_vandermonde,
     bench_domain,
     bench_share_arith,

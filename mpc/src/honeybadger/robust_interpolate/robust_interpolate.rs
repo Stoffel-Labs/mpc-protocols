@@ -377,21 +377,53 @@ pub fn batch_recover_secret<F: FftField>(
     // Points used for verification: the lowest `needed` sender evaluations.
     let verify_xs: Vec<F> = (0..needed).map(|s| domain.element(sorted[s].0)).collect();
 
+    // Flatten the Lagrange basis into pure field arithmetic so the per-chunk apply is a pair of
+    // matrix-vector products with zero polynomial allocation:
+    //   recovery      coeffs[k] = sum_i y_i * L_i[k]     (L_i[k] = basis[i].coeffs[k])
+    //   verification  P(x_s)    = sum_i y_i * L_i(x_s)   (== y_s on the honest path)
+    // Both depend only on the (already id-sorted) sender points, so they are computed ONCE and
+    // reused for every chunk — identical to building `candidate = sum y_i * L_i` and evaluating it
+    // (polynomial evaluation is linear), but without the per-chunk `DensePolynomial` allocations
+    // and Horner evaluations that made the honest path allocation-heavy. The optimistic path needs
+    // all `needed` verify points to agree (there are exactly `needed`), so the first mismatch
+    // short-circuits into the per-chunk robust fallback, which is unchanged.
+    let basis_coeffs: Vec<&[F]> = basis.iter().map(|p| p.coeffs.as_slice()).collect();
+    let mut verify_matrix = vec![F::zero(); needed * m]; // row-major [needed][m]
+    for s in 0..needed {
+        let xs = verify_xs[s];
+        let row = &mut verify_matrix[s * m..(s + 1) * m];
+        for (i, slot) in row.iter_mut().enumerate() {
+            *slot = basis[i].evaluate(&xs);
+        }
+    }
+
     let mut results: Vec<Vec<F>> = Vec::with_capacity(batch_len);
     for c in 0..batch_len {
-        // candidate(x) = sum_i y_i * L_i(x)
-        let mut candidate = DensePolynomial::from_coefficients_slice(&[F::zero()]);
-        for i in 0..m {
-            candidate = &candidate + &(&basis[i] * sorted[i].1[c]);
+        // Verification: candidate(verify_xs[s]) must equal sorted[s].1[c] for all s in 0..needed.
+        let mut ok = true;
+        for s in 0..needed {
+            let row = &verify_matrix[s * m..(s + 1) * m];
+            let mut acc = F::zero();
+            for i in 0..m {
+                acc += row[i] * sorted[i].1[c];
+            }
+            if acc != sorted[s].1[c] {
+                ok = false;
+                break;
+            }
         }
 
-        let valid = (0..needed)
-            .filter(|&s| candidate.evaluate(&verify_xs[s]) == sorted[s].1[c])
-            .count();
-
-        if valid >= needed {
-            let mut coeffs = candidate.coeffs.clone();
-            coeffs.resize(degree + 1, F::zero());
+        if ok {
+            // Recovery: coeffs[k] = sum_i y_i * L_i[k].
+            let mut coeffs = vec![F::zero(); degree + 1];
+            for k in 0..=degree {
+                let mut acc = F::zero();
+                for i in 0..m {
+                    let bik = basis_coeffs[i].get(k).copied().unwrap_or(F::zero());
+                    acc += bik * sorted[i].1[c];
+                }
+                coeffs[k] = acc;
+            }
             results.push(coeffs);
         } else {
             // Fall back to the full robust path for this chunk alone — identical to the pre-batch

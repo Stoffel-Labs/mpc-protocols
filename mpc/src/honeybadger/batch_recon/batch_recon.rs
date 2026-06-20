@@ -365,13 +365,22 @@ impl<F: FftField> BatchReconNode<F> {
                 if store.batch_evals_received.len() >= self.degree + self.t + 1
                     && store.y_j_batch.is_none()
                 {
-                    let evals_by_sender = store.batch_evals_received.clone();
                     // Decode all chunks in one shot: the Lagrange basis depends only on the sender
                     // ids (identical across every chunk), so build it once and reuse instead of
                     // rebuilding `A(x)` and the per-point divisions per chunk. Each chunk is still
                     // verified against all evaluations and falls back to robust `recover_secret`
                     // (OEC/Gao) on disagreement, so `t`-fault tolerance is unchanged.
-                    let decoded = batch_recover_secret(&evals_by_sender, self.n, self.degree, self.t)?;
+                    //
+                    // Borrow the received evaluations directly (no clone): `batch_recover_secret`
+                    // only reads them through internal `&Vec<F>` references, and we hold the session
+                    // lock for the whole call. The prior `.clone()` deep-copied every sender's
+                    // evaluation vector on the threshold message of every round.
+                    let decoded = batch_recover_secret(
+                        &store.batch_evals_received,
+                        self.n,
+                        self.degree,
+                        self.t,
+                    )?;
                     // The opened value per chunk is the constant term P(0).
                     let y_j_values: Vec<F> = decoded.into_iter().map(|coeffs| coeffs[0]).collect();
 
@@ -434,11 +443,15 @@ impl<F: FftField> BatchReconNode<F> {
                 if store.batch_reveals_received.len() >= self.degree + self.t + 1
                     && store.secrets.is_none()
                 {
-                    let reveals_by_sender = store.batch_reveals_received.clone();
                     // Batched decode (see the EvalBatch arm): one Lagrange basis for all chunks,
-                    // verified per chunk with robust `recover_secret` (OEC/Gao) fallback.
-                    let decoded =
-                        batch_recover_secret(&reveals_by_sender, self.n, self.degree, self.t)?;
+                    // verified per chunk with robust `recover_secret` (OEC/Gao) fallback. Borrow the
+                    // received reveals directly (no clone) — same rationale as the EvalBatch arm.
+                    let decoded = batch_recover_secret(
+                        &store.batch_reveals_received,
+                        self.n,
+                        self.degree,
+                        self.t,
+                    )?;
                     let mut result = Vec::with_capacity(decoded.len() * (self.degree + 1));
                     for coeffs in decoded {
                         // `batch_recover_secret` already resizes each chunk to `degree + 1`.
