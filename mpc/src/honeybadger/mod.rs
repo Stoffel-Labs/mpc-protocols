@@ -1331,46 +1331,61 @@ where
             let phase_start = Instant::now();
             let max_batch_groups = triple_batch_groups_limit();
 
+            // Build the full (session id, slice range) list up front. TripleGen sessions are
+            // independent — distinct session ids, disjoint input slices (taken once above), and
+            // disjoint Beaver randomness — so issuing every session's init before awaiting any result
+            // lets their 2-round reconstructions overlap instead of running strictly back-to-back.
+            // This mirrors the already-shipped mul pipelining (mod.rs `mul`) and is threat-model
+            // neutral: it is purely a scheduling change (when results are awaited). Per-session
+            // t-fault tolerance, the deterministic session-id sequence, and the protocol logic are
+            // all unchanged.
+            let mut sessions: Vec<(SessionId, usize, usize)> = Vec::new();
             while group_index < total_groups {
                 let batch_groups = (total_groups - group_index).min(max_batch_groups);
                 let share_start = group_index * group_size;
                 let share_end = share_start + batch_groups * group_size;
-
                 let sessionid = SessionId::new(
                     ProtocolType::Triple,
                     SessionId::pack_slot(triple_counter, 0, round_id),
                     self.params.instance_id,
                 );
-                self.preprocess
-                    .triple_gen
-                    .init_batch(
-                        random_shares_a[share_start..share_end].to_vec(),
-                        random_shares_b[share_start..share_end].to_vec(),
-                        ran_dou_sha_pair[share_start..share_end].to_vec(),
-                        sessionid,
-                        network.clone(),
-                    )
-                    .await?;
-
-                let triples = self
-                    .preprocess
-                    .triple_gen
-                    .wait_for_result(sessionid, self.params.timeout)
-                    .await?;
-                self.preprocessing_material
-                    .lock()
-                    .await
-                    .add(Some(triples), None, None, None, None, None);
-                assert!(self.preprocess.triple_gen.clear_store(sessionid).await);
-
+                sessions.push((sessionid, share_start, share_end));
                 if round_id == 255 {
                     triple_counter = self.counters.triple_counter.get_next().await?;
                     round_id = 0;
                 } else {
                     round_id += 1;
                 }
-
                 group_index += batch_groups;
+            }
+
+            // Phase 1 — issue every session's init_batch (sequential awaits; every session's round-1
+            // messages are now in flight and processed concurrently by the other nodes).
+            for (sessionid, share_start, share_end) in &sessions {
+                self.preprocess
+                    .triple_gen
+                    .init_batch(
+                        random_shares_a[*share_start..*share_end].to_vec(),
+                        random_shares_b[*share_start..*share_end].to_vec(),
+                        ran_dou_sha_pair[*share_start..*share_end].to_vec(),
+                        *sessionid,
+                        network.clone(),
+                    )
+                    .await?;
+            }
+
+            // Phase 2 — collect each result as it completes (all sessions' rounds overlap here).
+            for (sessionid, _, _) in &sessions {
+                let triples = self
+                    .preprocess
+                    .triple_gen
+                    .wait_for_result(*sessionid, self.params.timeout)
+                    .await?;
+                self.preprocessing_material
+                    .lock()
+                    .await
+                    .add(Some(triples), None, None, None, None, None);
+                assert!(self.preprocess.triple_gen.clear_store(*sessionid).await);
             }
             trace_preprocessing_phase(self.id, "triples", total_triples_to_generate, phase_start);
         }
@@ -1417,42 +1432,51 @@ where
         let mut round_id = 0u8;
         let mut ran_sha_counter = self.counters.ran_sha_counter.get_next().await?;
 
+        // Build the full (session id, batch size) list up front. ShareGen sessions are independent
+        // (distinct session ids and fresh per-session randomness), so pipelining their inits before
+        // awaiting results lets the 3-round sessions overlap. Threat-model neutral, mirroring the
+        // mul pipelining: a pure scheduling change (when results are awaited); per-session t-fault
+        // tolerance and the deterministic session-id sequence are unchanged. `rng` still advances
+        // sequentially during the init phase, exactly as before.
+        let mut sessions: Vec<(SessionId, usize)> = Vec::with_capacity(run);
         for i in 0..run {
             info!("Random share generation run {}", i);
             let columns_remaining = columns_needed - i * max_columns_per_run;
             let batch_size = columns_remaining.min(max_columns_per_run);
-
             let sessionid = SessionId::new(
                 ProtocolType::Ransha,
                 SessionId::pack_slot(ran_sha_counter, 0, round_id),
                 self.params.instance_id,
             );
-
-            // Run ShareGen protocol
-            self.preprocess
-                .share_gen
-                .init_batch(sessionid, batch_size, rng, network.clone())
-                .await?;
-
-            // Collect its output
-            let output = self
-                .preprocess
-                .share_gen
-                .wait_for_result(sessionid, self.params.timeout)
-                .await?;
-
-            self.preprocessing_material
-                .lock()
-                .await
-                .add(None, None, Some(output), None, None, None);
-            assert!(self.preprocess.share_gen.clear_store(sessionid).await);
-
+            sessions.push((sessionid, batch_size));
             if round_id == 255 {
                 ran_sha_counter = self.counters.ran_sha_counter.get_next().await.unwrap();
                 round_id = 0;
             } else {
                 round_id += 1;
             }
+        }
+
+        // Phase 1 — issue every ShareGen init (sequential awaits; rng advances in order).
+        for (sessionid, batch_size) in &sessions {
+            self.preprocess
+                .share_gen
+                .init_batch(*sessionid, *batch_size, rng, network.clone())
+                .await?;
+        }
+
+        // Phase 2 — collect each result as it completes (sessions' rounds overlap here).
+        for (sessionid, _) in &sessions {
+            let output = self
+                .preprocess
+                .share_gen
+                .wait_for_result(*sessionid, self.params.timeout)
+                .await?;
+            self.preprocessing_material
+                .lock()
+                .await
+                .add(None, None, Some(output), None, None, None);
+            assert!(self.preprocess.share_gen.clear_store(*sessionid).await);
         }
         Ok(())
     }
@@ -1478,6 +1502,17 @@ where
         let mut round_id = 0u8;
         let mut ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await?;
 
+        // Build the (session id, batch size) list up front. Each iteration runs a DoubleShare
+        // session (1 round) whose output feeds the RanDouSha session (2 rounds) under the SAME
+        // session id but a SEPARATE protocol node (disjoint storage). Across iterations the sessions
+        // are independent — distinct session ids, fresh randomness, disjoint output columns — so we
+        // pipeline in two phases: run every DoubleShare session with overlapping rounds, then run
+        // every RanDouSha session with overlapping rounds. The per-iteration data dependency
+        // (DoubleShare(i) -> RanDouSha(i)) is preserved: RanDouSha(i) still consumes exactly
+        // DoubleShare(i)'s output, collected in session order. Threat-model neutral, mirroring the
+        // mul pipelining: only when results are awaited changes; per-session t-fault tolerance, the
+        // deterministic session-id sequence, and protocol logic are unchanged.
+        let mut sessions: Vec<(SessionId, usize)> = Vec::with_capacity(run);
         for i in 0..run {
             let columns_remaining = columns_needed - i * max_columns_per_run;
             let batch_size = columns_remaining.min(max_columns_per_run);
@@ -1486,13 +1521,44 @@ where
                 SessionId::pack_slot(ran_dou_sha_counter, 0, round_id),
                 self.params.instance_id,
             );
+            sessions.push((sessionid, batch_size));
+            if round_id == 255 {
+                ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await.unwrap();
+                round_id = 0;
+            } else {
+                round_id += 1;
+            }
+        }
 
-            let double_shares = self
-                .ensure_double_shares_batch(sessionid, batch_size, network.clone(), rng)
+        // Phase 1 — DoubleShare for every session, pipelined (rng advances sequentially, as before).
+        // 1a: issue all DoubleShare inits.
+        for (sessionid, batch_size) in &sessions {
+            self.preprocess
+                .dou_sha
+                .init_batch(*sessionid, *batch_size, rng, network.clone())
                 .await?;
+        }
+        // 1b: collect every DoubleShare output (rounds overlap here), in session order.
+        let mut all_double_shares: Vec<Vec<DoubleShamirShare<F>>> =
+            Vec::with_capacity(sessions.len());
+        for (sessionid, _) in &sessions {
+            let double_shares = self
+                .preprocess
+                .dou_sha
+                .wait_for_result(*sessionid, self.params.timeout)
+                .await?;
+            assert!(self.preprocess.dou_sha.clear_store(*sessionid).await);
+            all_double_shares.push(double_shares);
+        }
 
-            let mut shares_deg_t_by_batch = Vec::with_capacity(batch_size);
-            let mut shares_deg_2t_by_batch = Vec::with_capacity(batch_size);
+        // Phase 2 — RanDouSha for every session, pipelined, each fed by its own DoubleShare output.
+        // 2a: transform inputs and issue all RanDouSha inits.
+        let mut rds_sessions: Vec<SessionId> = Vec::with_capacity(sessions.len());
+        for ((sessionid, batch_size), double_shares) in
+            sessions.iter().zip(all_double_shares.into_iter())
+        {
+            let mut shares_deg_t_by_batch = Vec::with_capacity(*batch_size);
+            let mut shares_deg_2t_by_batch = Vec::with_capacity(*batch_size);
             for double_share_batch in double_shares.chunks_exact(self.params.n_parties) {
                 let (shares_deg_t, shares_deg_2t) = double_share_batch
                     .iter()
@@ -1502,60 +1568,28 @@ where
                 shares_deg_t_by_batch.push(shares_deg_t);
                 shares_deg_2t_by_batch.push(shares_deg_2t);
             }
-
-            // Run RanDouSha
             self.preprocess
                 .ran_dou_sha
                 .init_batch(
                     shares_deg_t_by_batch,
                     shares_deg_2t_by_batch,
-                    sessionid,
+                    *sessionid,
                     network.clone(),
                 )
                 .await?;
-
+            rds_sessions.push(*sessionid);
+        }
+        // 2b: collect every RanDouSha output (rounds overlap here), in session order.
+        for sessionid in &rds_sessions {
             let output = self
                 .preprocess
                 .ran_dou_sha
-                .wait_for_result(sessionid, self.params.timeout)
+                .wait_for_result(*sessionid, self.params.timeout)
                 .await?;
             pair.extend(output);
-            assert!(self.preprocess.ran_dou_sha.clear_store(sessionid).await);
-
-            if round_id == 255 {
-                ran_dou_sha_counter = self.counters.ran_dou_sha_counter.get_next().await.unwrap();
-                round_id = 0;
-            } else {
-                round_id += 1;
-            }
+            assert!(self.preprocess.ran_dou_sha.clear_store(*sessionid).await);
         }
         Ok(pair)
-    }
-
-    async fn ensure_double_shares_batch<G, N>(
-        &mut self,
-        sessionid: SessionId,
-        batch_size: usize,
-        network: Arc<N>,
-        rng: &mut G,
-    ) -> Result<Vec<DoubleShamirShare<F>>, HoneyBadgerError>
-    where
-        N: Network + Send + Sync + 'static,
-        G: Rng + Send,
-    {
-        self.preprocess
-            .dou_sha
-            .init_batch(sessionid, batch_size, rng, network.clone())
-            .await?;
-
-        let dou_sha = self
-            .preprocess
-            .dou_sha
-            .wait_for_result(sessionid, self.params.timeout)
-            .await?;
-        assert!(self.preprocess.dou_sha.clear_store(sessionid).await);
-
-        Ok(dou_sha)
     }
 
     /// Ensure we have enough random shares in the small (Goldilocks) field.
