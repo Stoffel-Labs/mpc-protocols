@@ -117,14 +117,14 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         session: SessionId,
     ) -> Result<Arc<Mutex<TruncPrStore<F>>>, TruncPrError> {
         let mut map = self.store.lock().await;
-        if map.len() >= 256 && !map.contains_key(&session) {
-            warn!("TruncPr session limit reached");
-            return Err(TruncPrError::LimitError);
-        }
         Ok(map
             .entry(session)
             .or_insert((|| Arc::new(Mutex::new(TruncPrStore::empty())))())
             .clone())
+    }
+
+    pub async fn store_len(&self) -> usize {
+        self.store.lock().await.len()
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> Result<(), TruncPrError> {
@@ -286,7 +286,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(session.exec_id(), self.id as u8, 0),
+            SessionId::pack_slot(session.exec_id(), self.id as u8, 0),
             session.instance_id(),
         );
         self.rbc
@@ -364,7 +364,7 @@ mod tests {
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(
             crate::honeybadger::ProtocolType::Trunc,
-            SessionId::pack_slot24(0, 1, 0),
+            SessionId::pack_slot(0, 1, 0),
             111,
         );
 

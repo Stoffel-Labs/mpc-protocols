@@ -20,20 +20,72 @@ use crate::common::{
     share::ShareError,
 };
 use ark_ff::{FftField, Zero};
-use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
+use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use async_trait::async_trait;
+use std::any::{Any, TypeId};
 use std::fmt;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     marker::PhantomData,
     ops::{Add, Mul, Sub},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
     usize,
 };
 use stoffelnet::network_utils::{ClientId, Network, PartyId};
 use tokio::sync::mpsc::Sender;
+
+type DomainCacheMap = HashMap<(TypeId, usize), Box<dyn Any + Send + Sync>>;
+
+static EVALUATION_DOMAIN_CACHE: OnceLock<Mutex<DomainCacheMap>> = OnceLock::new();
+
+/// Returns the `GeneralEvaluationDomain<F>` of size `n`, memoized across calls.
+///
+/// The domain is a pure deterministic function of `(F, n)`, so caching is exact (no correctness or
+/// security impact). The cache is keyed by `(TypeId::<F>, n)` and stays tiny/bounded (a handful of
+/// field types × a handful of party counts), so it needs no eviction. `GeneralEvaluationDomain::new`
+/// is ~2.9 µs and was rebuilt on every `recover_secret` / interpolation call.
+pub fn get_or_create_evaluation_domain<F: FftField + 'static>(
+    n: usize,
+) -> Option<GeneralEvaluationDomain<F>> {
+    let key = (TypeId::of::<F>(), n);
+    let cache = EVALUATION_DOMAIN_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(boxed) = guard.get(&key) {
+            if let Some(d) = boxed.downcast_ref::<GeneralEvaluationDomain<F>>() {
+                return Some(d.clone());
+            }
+        }
+    }
+    let domain = GeneralEvaluationDomain::<F>::new(n)?;
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, Box::new(domain.clone()) as Box<dyn Any + Send + Sync>);
+    }
+    Some(domain)
+}
+
+static G0_CACHE: OnceLock<Mutex<DomainCacheMap>> = OnceLock::new();
+
+/// Returns the cached `g0(x) = ∏_{i<n} (x - domain.element(i))` for `(F, n)`, if present.
+/// Like the domain cache, g0 is a pure deterministic function of `(F, n)`, so memoization is exact.
+pub fn get_cached_g0_polynomial<F: FftField + 'static>(n: usize) -> Option<DensePolynomial<F>> {
+    let key = (TypeId::of::<F>(), n);
+    let cache = G0_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = cache.lock().ok()?;
+    guard
+        .get(&key)?
+        .downcast_ref::<DensePolynomial<F>>()
+        .cloned()
+}
+
+/// Stores a computed g0 polynomial under `(TypeId::<F>, n)`.
+pub fn store_g0_polynomial<F: FftField + 'static>(n: usize, g0: DensePolynomial<F>) {
+    let key = (TypeId::of::<F>(), n);
+    if let Ok(mut guard) = G0_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        guard.insert(key, Box::new(g0) as Box<dyn Any + Send + Sync>);
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ShamirShare<F: FftField, const N: usize, P> {
@@ -269,6 +321,7 @@ pub trait RBC: Send + Sync {
     /// Returns the unique identifier of the current party.
     fn id(&self) -> usize;
     async fn clear_store(&self);
+    async fn clear_session(&self, session_id: Self::Id);
     async fn get_store(&self, session_id: Self::Id) -> Result<Vec<u8>, RbcError>;
     /// Required for initiating the broadcast
     async fn init<N: Network + Send + Sync>(
@@ -429,18 +482,20 @@ pub trait ProtocolTag:
 
 /// Fixed-layout session identifier.
 ///
-/// Layout (u64):
-/// [ protocol | slot24 | instance_id ]
-///   8 bits     24 bits   32 bits
+/// Layout (u128):
+/// [ reserved | protocol | slot | instance_id ]
+///     8 bits    8 bits   80 bits   32 bits
 ///
-/// Interpretation of `slot24` is protocol-defined.
+/// where `slot` packs (exec_id 64 bits | sub_id 8 bits | round_id 8 bits) and is produced by
+/// each type's `pack_slot`. `exec_id` is 64 bits so back-to-back sessions do not wrap.
+/// Interpretation of `slot` is protocol-defined.
 pub trait ProtocolSessionId:
     Copy + Clone + Eq + Ord + std::hash::Hash + Send + Sync + fmt::Debug
 {
     type Protocol: ProtocolTag;
 
     /* ---------- construction ---------- */
-    fn new(protocol: Self::Protocol, slot24: u32, instance_id: u32) -> Self;
+    fn new(protocol: Self::Protocol, slot: u128, instance_id: u32) -> Self;
 
     /* ---------- fixed fields ---------- */
     fn calling_protocol(self) -> Option<Self::Protocol>;
@@ -448,13 +503,13 @@ pub trait ProtocolSessionId:
 
     /* ---------- flexible field ---------- */
 
-    /// Protocol-defined 24-bit field
-    fn slot24(self) -> u32;
+    /// Protocol-defined 80-bit field (round | sub | exec).
+    fn slot(self) -> u128;
 
     /* ---------- raw access ---------- */
-    fn as_u64(self) -> u64;
+    fn as_u128(self) -> u128;
 
     /// # Safety
     /// Caller must ensure the raw value is well-formed.
-    unsafe fn from_u64(raw: u64) -> Self;
+    unsafe fn from_u128(raw: u128) -> Self;
 }

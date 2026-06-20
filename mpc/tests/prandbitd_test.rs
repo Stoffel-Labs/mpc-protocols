@@ -31,7 +31,7 @@ async fn prandbitd_correctness_e2e() {
 
     let session_id = SessionId::new(
         ProtocolType::PRandBit,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
 

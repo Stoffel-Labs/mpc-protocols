@@ -59,11 +59,12 @@ pub enum RanShaError {
 
 #[derive(Debug)]
 pub struct RanShaStore<F: FftField> {
-    pub initial_shares: HashMap<usize, RobustShare<F>>,
+    pub initial_shares: HashMap<usize, Vec<RobustShare<F>>>,
     pub reception_tracker: Vec<bool>,
-    pub received_r_shares: HashMap<usize, RobustShare<F>>,
+    pub received_r_shares: HashMap<usize, Vec<RobustShare<F>>>,
     pub computed_r_shares: Vec<RobustShare<F>>,
     pub received_ok_msg: Vec<usize>,
+    pub batch_size: usize,
     pub state: RanShaState,
     pub protocol_output: Vec<RobustShare<F>>,
     pub output_sender: Option<Sender<Vec<RobustShare<F>>>>,
@@ -87,6 +88,7 @@ impl<F: FftField> RanShaStore<F> {
             received_r_shares: HashMap::new(),
             computed_r_shares: Vec::new(),
             received_ok_msg: Vec::new(),
+            batch_size: 1,
             state: RanShaState::Initialized,
             protocol_output: Vec::new(),
             output_sender: Some(output_sender),
@@ -109,8 +111,10 @@ pub enum RanShaMessageType {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum RanShaPayload {
     Share(Vec<u8>),
+    SharesBatch(Vec<u8>),
     /// Contains the share of r sent during reconstruction.
     Reconstruct(Vec<u8>),
+    ReconstructSharesBatch(Vec<u8>),
     /// Output message confirming reconstruction success or failure.
     Output(bool),
 }

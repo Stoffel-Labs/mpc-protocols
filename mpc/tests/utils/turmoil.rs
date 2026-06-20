@@ -35,15 +35,24 @@ pub fn turmoil_setup(
     client_ids: Vec<ClientId>,
     latency: Option<(u64, u64)>,
 ) -> (turmoil::Sim<'static>, TurmoilInnerNetwork) {
+    turmoil_setup_with_duration(n_nodes, client_ids, latency, Duration::from_mins(20))
+}
+
+pub fn turmoil_setup_with_duration(
+    n_nodes: usize,
+    client_ids: Vec<ClientId>,
+    latency: Option<(u64, u64)>,
+    simulation_duration: Duration,
+) -> (turmoil::Sim<'static>, TurmoilInnerNetwork) {
     let sim = if let Some((min, max)) = latency {
         Builder::new()
             .min_message_latency(Duration::from_millis(min))
             .max_message_latency(Duration::from_millis(max))
-            .simulation_duration(Duration::from_mins(20))
+            .simulation_duration(simulation_duration)
             .build()
     } else {
         Builder::new()
-            .simulation_duration(Duration::from_mins(20))
+            .simulation_duration(simulation_duration)
             .build()
     };
 

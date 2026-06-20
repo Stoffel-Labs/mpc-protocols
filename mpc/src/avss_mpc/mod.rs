@@ -307,21 +307,24 @@ pub struct AvssMPCNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
 }
 
 #[derive(Clone, Debug)]
-pub struct SubProtocolCounter(Arc<Mutex<Option<u8>>>);
+pub struct SubProtocolCounter(Arc<Mutex<Option<u64>>>);
 
 trait GetNext<T> {
     async fn get_next(&self) -> Result<T, AvssMPCError>;
 }
 
-impl GetNext<u8> for SubProtocolCounter {
-    async fn get_next(&self) -> Result<u8, AvssMPCError> {
+impl GetNext<u64> for SubProtocolCounter {
+    async fn get_next(&self) -> Result<u64, AvssMPCError> {
         let mut counter = self.0.lock().await;
 
         match &mut *counter {
             None => Err(AvssMPCError::LimitError),
             Some(value) => {
                 let current = *value;
-                if *value == 255 {
+                // 64-bit exec_id: for all practical workloads this never saturates. Guard the
+                // theoretical u64::MAX wrap so the counter faults loudly instead of silently
+                // aliasing an old exec_id.
+                if *value == u64::MAX {
                     *counter = None;
                 } else {
                     *value += 1;
@@ -334,7 +337,7 @@ impl GetNext<u8> for SubProtocolCounter {
 
 /// Per sub-protocol there is a counter to increment the exec ID within the
 /// session ID and distinguish different executions of the same sub-protocol.
-/// Since the exec ID is a `u8`, the counter is an `AtomicU8`.
+/// The exec ID is a `u64` (64 bits in the session id).
 #[derive(Clone, Debug)]
 pub struct SubProtocolCounters {
     pub ran_sha_avss_counter: SubProtocolCounter,
@@ -512,7 +515,7 @@ where
 
         let session_id = AvssSessionId::new(
             ProtocolType::Mul,
-            AvssSessionId::pack_slot24(self.counters.mul_counter.get_next().await?, 0, 0),
+            AvssSessionId::pack_slot(self.counters.mul_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
 
@@ -604,7 +607,11 @@ where
             // return Ok(());
         } else {
             let mut triple_counter = self.counters.triple_counter.get_next().await?;
-            if (256 - triple_counter as usize) * 255 < total_triples_to_generate / group_size {
+            // exec_id is 64-bit, so remaining capacity (exec slots × 255 round slots) is effectively
+            // unbounded; compute in u128 to avoid underflow/overflow vs the old u8 `256 - counter`.
+            if (u64::MAX - triple_counter) as u128 * 255u128
+                < (total_triples_to_generate / group_size) as u128
+            {
                 return Err(AvssMPCError::LimitError);
             }
 
@@ -638,7 +645,7 @@ where
             for (a, b) in a_chunks.zip(b_chunks) {
                 let sessionid = AvssSessionId::new(
                     ProtocolType::Triple,
-                    AvssSessionId::pack_slot24(triple_counter, 0, round_id),
+                    AvssSessionId::pack_slot(triple_counter, 0, round_id),
                     self.params.instance_id,
                 );
                 let triples = self
@@ -689,7 +696,8 @@ where
         let mut round_id = 0u8;
         let mut v_ran_sha_counter = self.counters.ran_sha_avss_counter.get_next().await?;
 
-        if (256 - v_ran_sha_counter as usize) * 255 < run {
+        // exec_id is 64-bit; remaining capacity is effectively unbounded (see triple-counter check).
+        if (u64::MAX - v_ran_sha_counter) as u128 * 255u128 < run as u128 {
             return Err(AvssMPCError::LimitError);
         }
 
@@ -697,7 +705,7 @@ where
             info!("Verifiable random share generation run {}", i);
             let sessionid = AvssSessionId::new(
                 ProtocolType::Avss,
-                AvssSessionId::pack_slot24(v_ran_sha_counter, 0, round_id),
+                AvssSessionId::pack_slot(v_ran_sha_counter, 0, round_id),
                 self.params.instance_id,
             );
 
@@ -787,73 +795,74 @@ impl ProtocolTag for ProtocolType {
 }
 
 #[derive(PartialOrd, Ord, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Hash)]
-pub struct AvssSessionId(u64);
+pub struct AvssSessionId(u128);
 
 impl fmt::Debug for AvssSessionId {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        let caller = (self.0 >> 56) as u8;
-        let slot24 = self.slot24();
+        let caller = ((self.0 >> 112) & 0xFF) as u8;
+        let slot = self.slot();
         let instance_id = self.instance_id();
 
         write!(
             f,
-            "[caller={},slot24_id={},instance_id={}]",
-            caller, slot24, instance_id
+            "[caller={},slot_id={},instance_id={}]",
+            caller, slot, instance_id
         )
     }
 }
 impl ProtocolSessionId for AvssSessionId {
     type Protocol = ProtocolType;
 
-    fn new(protocol: ProtocolType, slot24: u32, instance_id: u32) -> Self {
-        let value = ((protocol as u64 & 0xFF) << 56)
-            | ((slot24 as u64 & 0xFF_FFFF) << 32)
-            | (instance_id as u64);
+    /// `slot` is the 80-bit field (round|sub|exec) produced by [`AvssSessionId::pack_slot`].
+    fn new(protocol: ProtocolType, slot: u128, instance_id: u32) -> Self {
+        let slot_mask: u128 = (1u128 << 80) - 1; // round+sub+exec = 8+8+64 bits
+        let value = (((protocol as u128) & 0xFF) << 112)
+            | (((slot & slot_mask) as u128) << 32)
+            | (instance_id as u128);
 
         AvssSessionId(value)
     }
 
     fn calling_protocol(self) -> Option<ProtocolType> {
-        let val = ((self.0 >> 56) & 0xFF) as u8;
+        let val = ((self.0 >> 112) & 0xFF) as u8;
         ProtocolType::from_u8(val)
     }
 
-    fn slot24(self) -> u32 {
-        ((self.0 >> 32) & 0xFF_FFFF) as u32
+    fn slot(self) -> u128 {
+        (self.0 >> 32) & ((1u128 << 80) - 1)
     }
 
     fn instance_id(self) -> u32 {
         self.0 as u32
     }
 
-    fn as_u64(self) -> u64 {
+    fn as_u128(self) -> u128 {
         self.0
     }
-    //Unsafe because this is meant for the FFI
-    //The caller must ensure that the u64 is well-formed
-    unsafe fn from_u64(id: u64) -> Self {
+    /// # Safety
+    /// Caller must ensure the raw value is well-formed.
+    unsafe fn from_u128(id: u128) -> Self {
         AvssSessionId(id)
     }
 }
 impl AvssSessionId {
-    //Second 8 bits
-    pub fn exec_id(self) -> u8 {
-        ((self.0 >> 48) & 0xFF) as u8
+    /// Execution id — widened to 64 bits (bits 48..112) so back-to-back sessions do not wrap.
+    pub fn exec_id(self) -> u64 {
+        (self.0 >> 48) as u64
     }
 
-    //Third 8 bits
     pub fn sub_id(self) -> u8 {
         ((self.0 >> 40) & 0xFF) as u8
     }
 
-    //Fourth 8 bits
     pub fn round_id(self) -> u8 {
         ((self.0 >> 32) & 0xFF) as u8
     }
 
+    /// Pack the flexible field: exec_id at the top of the 80-bit slot, sub_id and round_id below.
     #[inline]
-    pub fn pack_slot24(exec_id: u8, sub_id: u8, round_id: u8) -> u32 {
-        ((exec_id as u32) << 16) | ((sub_id as u32) << 8) | round_id as u32
+    pub fn pack_slot(exec_id: u64, sub_id: u8, round_id: u8) -> u128 {
+        ((exec_id as u128) << 16) | ((sub_id as u128) << 8) | (round_id as u128)
     }
 }
 

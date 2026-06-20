@@ -26,7 +26,7 @@ async fn truncpr_e2e() {
     let kappa = 10;
     let duration = std::time::Duration::from_secs(10);
 
-    let session_id = SessionId::new(ProtocolType::Trunc, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::Trunc, SessionId::pack_slot(123, 0, 0), 111);
 
     // Generate the inputs for the protocol.
     let (a, a_input_shares) = generate_input_integer_z_k(num_parties, threshold, k);

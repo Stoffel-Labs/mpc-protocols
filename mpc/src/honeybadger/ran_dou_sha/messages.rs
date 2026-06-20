@@ -8,6 +8,7 @@ use crate::{common::share::shamir::NonRobustShare, honeybadger::SessionId};
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum RanDouShaPayload {
     Reconstruct(Vec<u8>),
+    ReconstructBatch(Vec<Vec<u8>>),
     Output(bool),
 }
 

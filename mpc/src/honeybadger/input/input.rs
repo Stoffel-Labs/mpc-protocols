@@ -513,7 +513,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
             //Broadcast to servers
             let sessionid = SessionId::new(
                 ProtocolType::Input,
-                SessionId::pack_slot24(
+                SessionId::pack_slot(
                     0, // subprotocol ID not needed because only called once
                     self.client_id as u8,
                     0,

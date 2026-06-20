@@ -3,19 +3,19 @@ mod utils;
 use crate::utils::{
     test_utils::{
         construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
-        generate_independent_shares, setup_tracing,
+        generate_independent_shares, setup_quiet_tracing, setup_tracing,
     },
-    turmoil::{add_driver, collect_results, turmoil_setup},
+    turmoil::{add_driver, collect_results, turmoil_setup, turmoil_setup_with_duration},
 };
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
-use ark_serialize::CanonicalDeserialize;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{
     rand::{rngs::StdRng, SeedableRng},
     test_rng,
 };
 use chacha20poly1305::aead::OsRng;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 use stoffelmpc_mpc::{
     common::{
         rbc::rbc::Avid,
@@ -24,12 +24,14 @@ use stoffelmpc_mpc::{
         ShamirShare,
     },
     honeybadger::{
-        batch_recon::{batch_recon::BatchReconNode, BatchReconError},
+        batch_recon::{
+            batch_recon::BatchReconNode, BatchReconError, BatchReconMsg, BatchReconMsgType,
+        },
         fpmul::f256::Gf256,
         input::input::{InputClient, InputType},
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
-        share_gen::{RanShaError, RanShaState},
+        share_gen::{RanShaError, RanShaMessage, RanShaMessageType, RanShaPayload, RanShaState},
         ProtocolType, SessionId, WrappedMessage,
     },
 };
@@ -41,7 +43,7 @@ use stoffelmpc_network::{
 use stoffelnet::network_utils::{ClientId, NetworkError};
 use tokio::sync::Barrier;
 use tokio::time::{sleep, timeout, Duration};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 #[derive(Clone)]
 struct DelayedStart {
@@ -56,7 +58,11 @@ fn ransha_e2e_turmoil() {
     let n_parties = 4;
     let t = 1;
 
-    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(
+        ProtocolType::Ransha,
+        SessionId::pack_slot(123, 0, 0),
+        111,
+    );
 
     let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
@@ -187,6 +193,153 @@ fn ransha_e2e_turmoil() {
 
     add_driver(&mut sim, 60);
     collect_results(sim, rx_done, n_parties);
+}
+
+#[test]
+fn ransha_late_message_recreates_cleared_store_turmoil() {
+    setup_tracing();
+
+    let n_parties = 5;
+    let t = 1;
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(7, 0, 0), 111);
+
+    let (mut sim, inner) = turmoil_setup(1, vec![], Some((10, 2000)));
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        Duration::from_secs(30),
+        vec![],
+    );
+    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(), String>>();
+
+    let node = nodes[0].clone();
+    let host_tx = tx.clone();
+    sim.host("node0", move || {
+        let inner = inner.clone();
+        let mut node = node.clone();
+        let tx = host_tx.clone();
+
+        async move {
+            let (network, _rx) = TurmoilNetwork::new(SenderId::Node(0), inner).await;
+            let network_arc = Arc::new(network);
+
+            node.preprocess
+                .share_gen
+                .get_or_create_store(session_id)
+                .await
+                .unwrap();
+            if !node.preprocess.share_gen.clear_store(session_id).await {
+                let _ = tx.send(Err(
+                    "expected initial RanSha store to be cleared".to_string()
+                ));
+                return Ok(());
+            }
+
+            let late_share = RobustShare::new(Fr::from(9u8), 0, t);
+            let mut payload = Vec::new();
+            late_share.serialize_compressed(&mut payload).unwrap();
+            let late_msg = RanShaMessage::new(
+                1,
+                RanShaMessageType::ShareMessage,
+                session_id,
+                RanShaPayload::Share(payload),
+            );
+
+            node.preprocess
+                .share_gen
+                .process(late_msg, network_arc)
+                .await
+                .unwrap();
+
+            let resurrected = node
+                .preprocess
+                .share_gen
+                .get_or_create_store(session_id)
+                .await
+                .unwrap();
+            let resurrected = resurrected.lock().await;
+            if !resurrected.initial_shares.contains_key(&1) {
+                let _ = tx.send(Err(
+                    "late RanSha message did not recreate cleared session state".to_string(),
+                ));
+                return Ok(());
+            }
+
+            let _ = tx.send(Ok(()));
+            Ok(())
+        }
+    });
+
+    drop(tx);
+    add_driver(&mut sim, 10);
+    collect_results(sim, rx_done, 1);
+}
+
+#[test]
+fn batch_recon_late_message_recreates_cleared_store_turmoil() {
+    setup_tracing();
+
+    let n_parties = 5;
+    let t = 1;
+    let session_id = SessionId::new(
+        ProtocolType::BatchRecon,
+        SessionId::pack_slot(7, 0, 0),
+        111,
+    );
+
+    let (mut sim, inner) = turmoil_setup(1, vec![], Some((10, 2000)));
+    let (output_tx, _output_rx) = tokio::sync::mpsc::channel(8);
+    let node = BatchReconNode::<Fr>::new(0, n_parties, t, t, output_tx).unwrap();
+    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(), String>>();
+
+    let host_tx = tx.clone();
+    sim.host("node0", move || {
+        let inner = inner.clone();
+        let mut node = node.clone();
+        let tx = host_tx.clone();
+
+        async move {
+            let (network, _rx) = TurmoilNetwork::new(SenderId::Node(0), inner).await;
+            let network_arc = Arc::new(network);
+
+            node.get_or_create_store(session_id).await.unwrap();
+            if !node.clear_store(session_id).await {
+                let _ = tx.send(Err(
+                    "expected initial BatchRecon store to be cleared".to_string()
+                ));
+                return Ok(());
+            }
+
+            let mut payload = Vec::new();
+            Fr::from(11u8).serialize_compressed(&mut payload).unwrap();
+            let late_msg = BatchReconMsg::new(1, session_id, BatchReconMsgType::Eval, payload);
+
+            node.process(late_msg, network_arc).await.unwrap();
+
+            let resurrected = node.get_or_create_store(session_id).await.unwrap().unwrap();
+            let resurrected = resurrected.lock().await;
+            if resurrected.evals_received.len() != 1 {
+                let _ = tx.send(Err(
+                    "late BatchRecon message did not recreate cleared session state".to_string(),
+                ));
+                return Ok(());
+            }
+
+            let _ = tx.send(Ok(()));
+            Ok(())
+        }
+    });
+
+    drop(tx);
+    add_driver(&mut sim, 10);
+    collect_results(sim, rx_done, 1);
 }
 
 #[test]
@@ -432,7 +585,12 @@ fn preprocessing_e2e_turmoil(
     let n_prandbit = 4;
     let n_prandint = 4;
 
-    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
+    let (mut sim, inner) = turmoil_setup_with_duration(
+        n_parties,
+        vec![],
+        Some((10, 2000)),
+        Duration::from_secs(300_000),
+    );
 
     let (tx, rx_done) = std::sync::mpsc::channel::<Result<(usize, usize, usize, usize), String>>();
     let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
@@ -470,17 +628,16 @@ fn preprocessing_e2e_turmoil(
                 let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
                 let network_arc = Arc::new(network);
                 barrier.wait().await;
-                info!("Network set up complete");
 
                 let mut rng = StdRng::from_rng(OsRng).unwrap();
 
-                // Run preprocessing concurrently with the message loop
+                // run preprocessing concurrently with the message loop
                 // since run_preprocessing sends messages that trigger responses
                 let net = network_arc.clone();
                 let mut node_for_init = node.clone();
                 let preprocessing_handle = tokio::spawn(async move {
                     if let Err(e) = node_for_init.run_preprocessing(net, &mut rng).await {
-                        error!("Node {} preprocessing error: {:?}", id, e);
+                        eprintln!("node {} preprocessing error: {:?}", id, e);
                     }
                 });
 
@@ -501,29 +658,27 @@ fn preprocessing_e2e_turmoil(
 
                     tokio::task::yield_now().await;
 
-                    // Only check counts once preprocessing has fully finished
+                    // only check counts once preprocessing has fully finished
                     if preprocessing_handle.is_finished() {
-                        let length_preproc = node.preprocessing_material.lock().await.length();
-                        if length_preproc.beaver_triples == 9
-                            && length_preproc.prandbit == n_prandbit
-                            && length_preproc.prandint == n_prandint
-                        {
+                        let len = node.preprocessing_material.lock().await.length();
+                        let n_triples = len.beaver_triples;
+                        let n_pbit = len.prandbit;
+                        let n_pint = len.prandint;
+                        // no_of_triples=7 rounds up to a multiple of group_size (2t+1=3) -> 9.
+                        if n_triples == 9 && n_pbit == n_prandbit && n_pint == n_prandint {
                             break;
-                        } else {
-                            warn!("The required preprocessing is not yet obtained: Beaver triples: {}, PRandBit: {}, PRandInt: {}", length_preproc.beaver_triples, length_preproc.prandbit, length_preproc.prandint);
                         }
                     }
                 }
 
                 // collect final counts
-                let length_preproc = node.preprocessing_material.lock().await.length();
+                let len = node.preprocessing_material.lock().await.length();
+                let n_triples = len.beaver_triples;
+                let n_shares = len.random_shr;
+                let n_pbit = len.prandbit;
+                let n_pint = len.prandint;
 
-                let _ = tx.send(Ok((
-                    length_preproc.beaver_triples,
-                    length_preproc.random_shr,
-                    length_preproc.prandbit,
-                    length_preproc.prandint,
-                )));
+                let _ = tx.send(Ok((n_triples, n_shares, n_pbit, n_pint)));
                 let _ = done_tx.send(());
                 Ok(())
             }
@@ -600,8 +755,8 @@ fn preprocessing_e2e_turmoil(
         match r {
             Err(e) => panic!("node failed: {}", e),
             Ok((n_triples, n_shares, n_pbit, n_pint)) => {
-                assert_eq!(n_triples, 9);
-                assert_eq!(n_shares, 4);
+                assert_eq!(n_triples, 9); // no_of_triples=7 rounds up to group_size (2t+1=3) -> 9
+                assert_eq!(n_shares, 4); // no_of_randomshares=4 remain after triple gen
                 assert_eq!(n_pbit, 4);
                 assert_eq!(n_pint, 4);
             }
@@ -628,6 +783,867 @@ fn preprocessing_e2e_with_freeze_start() {
             delayed_nodes: vec![0],
             time: Duration::from_secs(3),
         }),
+    );
+}
+
+#[test]
+#[ignore = "expensive repro: attempts to produce 402,000,000 HoneyBadger random shares"]
+fn honeybadger_402m_random_shares_5_nodes_t1_turmoil() {
+    setup_quiet_tracing();
+
+    let n_parties = 5;
+    let t = 1;
+    let n_random_shares = 402_000_000usize;
+    let instance_id = 111;
+
+    let (mut sim, inner) = turmoil_setup_with_duration(
+        n_parties,
+        vec![],
+        Some((10, 2000)),
+        Duration::from_secs(300_000),
+    );
+    let (tx, rx_done) = std::sync::mpsc::channel::<Result<usize, String>>();
+    let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
+    let barrier = Arc::new(Barrier::new(n_parties));
+
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+        n_parties,
+        t,
+        0,
+        n_random_shares,
+        instance_id,
+        0,
+        0,
+        0,
+        0,
+        Duration::from_secs(120),
+        vec![],
+    );
+
+    for id in 0..n_parties {
+        let inner = inner.clone();
+        let node = nodes[id].clone();
+        let tx = tx.clone();
+        let done_tx = done_tx.clone();
+        let barrier = barrier.clone();
+
+        sim.host(format!("node{}", id), move || {
+            let inner = inner.clone();
+            let mut node = node.clone();
+            let tx = tx.clone();
+            let done_tx = done_tx.clone();
+            let barrier = barrier.clone();
+
+            async move {
+                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
+                let network_arc = Arc::new(network);
+                barrier.wait().await;
+
+                let net = network_arc.clone();
+                let mut node_for_preprocessing = node.clone();
+                let preprocessing_handle = tokio::spawn(async move {
+                    let mut rng = StdRng::from_rng(OsRng).unwrap();
+                    node_for_preprocessing
+                        .run_preprocessing(net, &mut rng)
+                        .await
+                });
+
+                let mut msg_count = 0usize;
+                let mut last_store_log = Instant::now();
+                loop {
+                    if preprocessing_handle.is_finished() {
+                        break;
+                    }
+
+                    match timeout(Duration::from_millis(100), rx.recv()).await {
+                        Ok(Some((sender, msg))) => {
+                            msg_count += 1;
+                            if last_store_log.elapsed() >= Duration::from_secs(5) {
+                                eprintln!(
+                                    "[402m-store] node={} msgs={} {}",
+                                    id,
+                                    msg_count,
+                                    node.debug_store_sizes().await
+                                );
+                                last_store_log = Instant::now();
+                            }
+                            let sender_id = match sender {
+                                SenderId::Node(i) => i,
+                                SenderId::Client(i) => i,
+                            };
+                            if let Err(e) = node.process(sender_id, msg, network_arc.clone()).await
+                            {
+                                let _ = tx.send(Err(format!(
+                                    "node {} process error after {} msgs: {:?}; {}",
+                                    id,
+                                    msg_count,
+                                    e,
+                                    node.debug_store_sizes().await
+                                )));
+                                let _ = done_tx.send(());
+                                return Ok(());
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            if last_store_log.elapsed() >= Duration::from_secs(5) {
+                                eprintln!(
+                                    "[402m-store] node={} msgs={} {}",
+                                    id,
+                                    msg_count,
+                                    node.debug_store_sizes().await
+                                );
+                                last_store_log = Instant::now();
+                            }
+                        }
+                    }
+                }
+
+                match preprocessing_handle.await {
+                    Ok(Ok(())) => {
+                        let len = node.preprocessing_material.lock().await.length();
+                        let produced_random_shares = len.random_shr;
+                        if produced_random_shares == n_random_shares {
+                            eprintln!(
+                                "[402m-store] node={} completed msgs={} {}",
+                                id,
+                                msg_count,
+                                node.debug_store_sizes().await
+                            );
+                            let _ = tx.send(Ok(produced_random_shares));
+                        } else {
+                            let _ = tx.send(Err(format!(
+                                "node {} produced {} random shares, expected {}; {}",
+                                id,
+                                produced_random_shares,
+                                n_random_shares,
+                                node.debug_store_sizes().await
+                            )));
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        let _ = tx.send(Err(format!(
+                            "node {} preprocessing failed after {} msgs: {:?}; {}",
+                            id,
+                            msg_count,
+                            e,
+                            node.debug_store_sizes().await
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!(
+                            "node {} preprocessing join error: {:?}",
+                            id, e
+                        )));
+                    }
+                }
+
+                let _ = done_tx.send(());
+                Ok(())
+            }
+        });
+    }
+
+    drop(tx);
+    drop(done_tx);
+
+    let mut done_rx = done_rx;
+    sim.client("driver", async move {
+        let mut count = 0;
+        while count < n_parties {
+            match done_rx.recv().await {
+                Ok(()) => count += 1,
+                Err(_) => break,
+            }
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    });
+
+    if let Err(error) = sim.run() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            for (id, node) in nodes.iter().enumerate() {
+                eprintln!(
+                    "[402m-store-final] node={} sim_error={} {}",
+                    id,
+                    error,
+                    node.debug_store_sizes().await
+                );
+            }
+        });
+        panic!("turmoil simulation failed: {error}");
+    }
+
+    let results: Vec<_> = std::iter::from_fn(|| rx_done.try_recv().ok()).collect();
+    assert_eq!(
+        results.len(),
+        n_parties,
+        "not all nodes reported: got {}/{}",
+        results.len(),
+        n_parties
+    );
+
+    for result in results {
+        match result {
+            Ok(produced) => assert_eq!(produced, n_random_shares),
+            Err(error) => panic!("{}", error),
+        }
+    }
+}
+
+fn run_preprocessing_stress_turmoil(
+    n_parties: usize,
+    t: usize,
+    n_triples: usize,
+    n_random_shares: usize,
+    n_prandbit: usize,
+    n_prandint: usize,
+    env_overrides: &[(&str, &str)],
+) {
+    setup_quiet_tracing();
+
+    let old_env = env_overrides
+        .iter()
+        .map(|(key, _)| (*key, std::env::var(key).ok()))
+        .collect::<Vec<_>>();
+    for (key, value) in env_overrides {
+        std::env::set_var(key, value);
+    }
+
+    let instance_id = 111;
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((1, 20)));
+    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(usize, usize, usize, usize), String>>();
+    let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
+    let barrier = Arc::new(Barrier::new(n_parties));
+
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+        n_parties,
+        t,
+        n_triples,
+        n_random_shares,
+        instance_id,
+        n_prandbit,
+        n_prandint,
+        8,
+        4,
+        Duration::from_secs(120),
+        vec![],
+    );
+
+    for id in 0..n_parties {
+        let inner = inner.clone();
+        let node = nodes[id].clone();
+        let tx = tx.clone();
+        let done_tx = done_tx.clone();
+        let barrier = barrier.clone();
+
+        sim.host(format!("node{}", id), move || {
+            let inner = inner.clone();
+            let mut node = node.clone();
+            let tx = tx.clone();
+            let done_tx = done_tx.clone();
+            let barrier = barrier.clone();
+
+            async move {
+                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
+                let network_arc = Arc::new(network);
+                barrier.wait().await;
+
+                let net = network_arc.clone();
+                let mut node_for_preprocessing = node.clone();
+                let preprocessing_handle = tokio::spawn(async move {
+                    let mut rng = StdRng::from_rng(OsRng).unwrap();
+                    node_for_preprocessing
+                        .run_preprocessing(net, &mut rng)
+                        .await
+                });
+
+                let mut msg_count = 0usize;
+                loop {
+                    if preprocessing_handle.is_finished() {
+                        break;
+                    }
+
+                    match timeout(Duration::from_millis(100), rx.recv()).await {
+                        Ok(Some((sender, msg))) => {
+                            msg_count += 1;
+                            let sender_id = match sender {
+                                SenderId::Node(i) => i,
+                                SenderId::Client(i) => i,
+                            };
+                            if let Err(e) = node.process(sender_id, msg, network_arc.clone()).await
+                            {
+                                let _ = tx.send(Err(format!(
+                                    "node {} process error after {} msgs: {:?}",
+                                    id, msg_count, e
+                                )));
+                                let _ = done_tx.send(());
+                                return Ok(());
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {}
+                    }
+                }
+
+                match preprocessing_handle.await {
+                    Ok(Ok(())) => {
+                        let len = node.preprocessing_material.lock().await.length();
+                        let counts = (
+                            len.beaver_triples,
+                            len.random_shr,
+                            len.prandbit,
+                            len.prandint,
+                        );
+                        let _ = tx.send(Ok(counts));
+                    }
+                    Ok(Err(e)) => {
+                        let _ = tx.send(Err(format!(
+                            "node {} preprocessing failed after {} msgs: {:?}",
+                            id, msg_count, e
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!(
+                            "node {} preprocessing join error: {:?}",
+                            id, e
+                        )));
+                    }
+                }
+
+                let _ = done_tx.send(());
+                Ok(())
+            }
+        });
+    }
+
+    drop(tx);
+    drop(done_tx);
+
+    let mut done_rx = done_rx;
+    sim.client("driver", async move {
+        let mut count = 0;
+        while count < n_parties {
+            match done_rx.recv().await {
+                Ok(()) => count += 1,
+                Err(_) => break,
+            }
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    });
+
+    if let Err(error) = sim.run() {
+        let snapshot = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { preprocessing_stress_snapshot(&nodes).await });
+        panic!("turmoil run failed: {error}\n{snapshot}");
+    }
+
+    for (key, value) in old_env {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    let results: Vec<_> = std::iter::from_fn(|| rx_done.try_recv().ok()).collect();
+    assert_eq!(
+        results.len(),
+        n_parties,
+        "not all nodes reported: got {}/{}",
+        results.len(),
+        n_parties
+    );
+
+    for result in results {
+        let (produced_triples, produced_random_shares, produced_pbits, produced_pints) =
+            result.unwrap_or_else(|error| panic!("{}", error));
+
+        assert!(
+            produced_triples >= n_triples.saturating_sub(n_prandbit),
+            "produced {} triples, expected at least {}",
+            produced_triples,
+            n_triples.saturating_sub(n_prandbit)
+        );
+        assert!(
+            produced_random_shares >= n_random_shares.saturating_sub(n_prandbit),
+            "produced {} random shares, expected at least {}",
+            produced_random_shares,
+            n_random_shares.saturating_sub(n_prandbit)
+        );
+        assert!(
+            produced_pbits >= n_prandbit,
+            "produced {} probabilistic bits, expected at least {}",
+            produced_pbits,
+            n_prandbit
+        );
+        assert!(
+            produced_pints >= n_prandint,
+            "produced {} probabilistic ints, expected at least {}",
+            produced_pints,
+            n_prandint
+        );
+    }
+}
+
+async fn preprocessing_stress_snapshot(
+    nodes: &[stoffelmpc_mpc::honeybadger::HoneyBadgerMPCNode<Fr, Avid<SessionId>>],
+) -> String {
+    let mut out = String::new();
+    out.push_str("preprocessing stress snapshot:\n");
+
+    for node in nodes {
+        let len = node.preprocessing_material.lock().await.length();
+        let n_triples = len.beaver_triples;
+        let n_random = len.random_shr;
+        let n_pbits = len.prandbit;
+        let n_pints = len.prandint;
+        out.push_str(&format!(
+            "node {} material triples={} random={} pbits={} pints={}\n",
+            node.id, n_triples, n_random, n_pbits, n_pints
+        ));
+
+        let rand_bit_sessions = node.preprocess.small_field_preproc.rand_bit.storage.lock().await;
+        out.push_str(&format!(
+            "node {} rand_bit.sessions={}\n",
+            node.id,
+            rand_bit_sessions.len()
+        ));
+        for (session_id, store) in rand_bit_sessions.iter().take(8) {
+            let store = store.lock().await;
+            out.push_str(&format!(
+                "  rand_bit {:?} state={:?} a_len={} output_len={} openings={}\n",
+                session_id,
+                store.protocol_state,
+                store
+                    .a_share
+                    .as_ref()
+                    .map(|shares| shares.len())
+                    .unwrap_or(0),
+                store
+                    .protocol_output
+                    .as_ref()
+                    .map(|shares| shares.len())
+                    .unwrap_or(0),
+                store.output_open.len()
+            ));
+        }
+        drop(rand_bit_sessions);
+
+        let rand_bit_batch_output_len = node
+            .preprocess
+            .small_field_preproc
+            .rand_bit
+            .batch_output
+            .lock()
+            .await
+            .len();
+        out.push_str(&format!(
+            "node {} rand_bit.batch_output.pending={}\n",
+            node.id, rand_bit_batch_output_len
+        ));
+
+        let rand_bit_mul_sessions = node
+            .preprocess
+            .small_field_preproc
+            .rand_bit
+            .mult_node
+            .mult_storage
+            .lock()
+            .await;
+        out.push_str(&format!(
+            "node {} rand_bit.mul.sessions={}\n",
+            node.id,
+            rand_bit_mul_sessions.len()
+        ));
+        for (session_id, store) in rand_bit_mul_sessions.iter().take(8) {
+            let store = store.lock().await;
+            out.push_str(&format!(
+                "  rand_bit.mul {:?} state={:?} no_of_mul={:?} inputs=({}, {}) received_shares={} openings={} open_mult1={} open_mult2={}\n",
+                session_id,
+                store.protocol_state,
+                store.no_of_mul,
+                store.inputs.0.len(),
+                store.inputs.1.len(),
+                store.received_shares.len(),
+                store.openings.is_some(),
+                store.output_open_mult1.len(),
+                store.output_open_mult2.len()
+            ));
+        }
+        drop(rand_bit_mul_sessions);
+
+        let rand_bit_mul_batch_output_len = node
+            .preprocess
+            .small_field_preproc
+            .rand_bit
+            .mult_node
+            .batch_output
+            .lock()
+            .await
+            .len();
+        let rand_bit_mul_rbc_output_len = node
+            .preprocess
+            .small_field_preproc
+            .rand_bit
+            .mult_node
+            .rbc_output
+            .lock()
+            .await
+            .len();
+        out.push_str(&format!(
+            "node {} rand_bit.mul.batch_output.pending={} rbc_output.pending={}\n",
+            node.id, rand_bit_mul_batch_output_len, rand_bit_mul_rbc_output_len
+        ));
+
+        let rand_bit_mul_batch_sessions = node
+            .preprocess
+            .small_field_preproc
+            .rand_bit
+            .mult_node
+            .batch_recon
+            .store
+            .lock()
+            .await;
+        let mut min_sub_id = u8::MAX;
+        let mut max_sub_id = 0u8;
+        let mut y_j_count = 0usize;
+        let mut any_reveals = 0usize;
+        let mut secrets_count = 0usize;
+        let mut total_evals = 0usize;
+        let mut total_reveals = 0usize;
+        for (session_id, store) in rand_bit_mul_batch_sessions.iter() {
+            let store = store.lock().await;
+            min_sub_id = min_sub_id.min(session_id.sub_id());
+            max_sub_id = max_sub_id.max(session_id.sub_id());
+            if store.y_j.is_some() {
+                y_j_count += 1;
+            }
+            if !store.reveals_received.is_empty() {
+                any_reveals += 1;
+            }
+            if store.secrets.is_some() {
+                secrets_count += 1;
+            }
+            total_evals += store.evals_received.len();
+            total_reveals += store.reveals_received.len();
+        }
+        out.push_str(&format!(
+            "node {} rand_bit.mul.batch_recon.sessions={} sub_id_range={}..={} y_j_sessions={} sessions_with_reveals={} secrets_sessions={} total_evals={} total_reveals={}\n",
+            node.id,
+            rand_bit_mul_batch_sessions.len(),
+            if rand_bit_mul_batch_sessions.is_empty() {
+                0
+            } else {
+                min_sub_id
+            },
+            max_sub_id,
+            y_j_count,
+            any_reveals,
+            secrets_count,
+            total_evals,
+            total_reveals
+        ));
+        for (session_id, store) in rand_bit_mul_batch_sessions.iter().take(8) {
+            let store = store.lock().await;
+            out.push_str(&format!(
+                "  rand_bit.mul.batch {:?} evals={} reveals={} batch_evals={} batch_reveals={} y_j={} y_j_batch_len={} secrets_len={}\n",
+                session_id,
+                store.evals_received.len(),
+                store.reveals_received.len(),
+                store.batch_evals_received.len(),
+                store.batch_reveals_received.len(),
+                store.y_j.is_some(),
+                store.y_j_batch.as_ref().map(|values| values.len()).unwrap_or(0),
+                store.secrets.as_ref().map(|values| values.len()).unwrap_or(0)
+            ));
+        }
+        drop(rand_bit_mul_batch_sessions);
+
+        let rand_bit_batch_sessions = node
+            .preprocess
+            .small_field_preproc
+            .rand_bit
+            .batch_recon
+            .store
+            .lock()
+            .await;
+        let mut y_j_count = 0usize;
+        let mut any_reveals = 0usize;
+        let mut secrets_count = 0usize;
+        let mut total_evals = 0usize;
+        let mut total_reveals = 0usize;
+        for (_, store) in rand_bit_batch_sessions.iter() {
+            let store = store.lock().await;
+            if store.y_j.is_some() {
+                y_j_count += 1;
+            }
+            if !store.reveals_received.is_empty() {
+                any_reveals += 1;
+            }
+            if store.secrets.is_some() {
+                secrets_count += 1;
+            }
+            total_evals += store.evals_received.len();
+            total_reveals += store.reveals_received.len();
+        }
+        out.push_str(&format!(
+            "node {} rand_bit.batch_recon.sessions={} y_j_sessions={} sessions_with_reveals={} secrets_sessions={} total_evals={} total_reveals={}\n",
+            node.id,
+            rand_bit_batch_sessions.len(),
+            y_j_count,
+            any_reveals,
+            secrets_count,
+            total_evals,
+            total_reveals
+        ));
+        for (session_id, store) in rand_bit_batch_sessions.iter().take(8) {
+            let store = store.lock().await;
+            out.push_str(&format!(
+                "  rand_bit.batch {:?} evals={} reveals={} batch_evals={} batch_reveals={} y_j={} y_j_batch_len={} secrets_len={}\n",
+                session_id,
+                store.evals_received.len(),
+                store.reveals_received.len(),
+                store.batch_evals_received.len(),
+                store.batch_reveals_received.len(),
+                store.y_j.is_some(),
+                store.y_j_batch.as_ref().map(|values| values.len()).unwrap_or(0),
+                store.secrets.as_ref().map(|values| values.len()).unwrap_or(0)
+            ));
+        }
+    }
+
+    out
+}
+
+#[test]
+#[ignore = "stress repro: 1000 back-to-back top-level Mul executions (regression for the u8 exec_id / 256 LimitError, now u64)"]
+fn honeybadger_sequential_mul_1000_turmoil() {
+    setup_quiet_tracing();
+
+    let n_parties = 4;
+    let t = 1;
+    let no_of_multiplication = 1000;
+
+    let mut rng = test_rng();
+    let mut x_values = Vec::with_capacity(no_of_multiplication);
+    let mut y_values = Vec::with_capacity(no_of_multiplication);
+    let mut x_inputs_per_node = vec![Vec::with_capacity(no_of_multiplication); n_parties];
+    let mut y_inputs_per_node = vec![Vec::with_capacity(no_of_multiplication); n_parties];
+
+    for _ in 0..no_of_multiplication {
+        let x_value = Fr::rand(&mut rng);
+        let y_value = Fr::rand(&mut rng);
+        x_values.push(x_value);
+        y_values.push(y_value);
+
+        let shares_x = RobustShare::compute_shares(x_value, n_parties, t, None, &mut rng).unwrap();
+        let shares_y = RobustShare::compute_shares(y_value, n_parties, t, None, &mut rng).unwrap();
+
+        for p in 0..n_parties {
+            x_inputs_per_node[p].push(shares_x[p].clone());
+            y_inputs_per_node[p].push(shares_y[p].clone());
+        }
+    }
+
+    let (_, triple) = construct_e2e_input_mul(n_parties, no_of_multiplication, t);
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        0,
+        0,
+        Duration::from_secs(120),
+        vec![],
+    );
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        for pid in 0..n_parties {
+            nodes[pid].preprocessing_material.lock().await.add(
+                Some(triple[pid].clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+    });
+
+    let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((1, 20)));
+    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(usize, Vec<RobustShare<Fr>>), String>>();
+    let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
+    let barrier = Arc::new(Barrier::new(n_parties));
+
+    for id in 0..n_parties {
+        let inner = inner.clone();
+        let node = nodes[id].clone();
+        let tx = tx.clone();
+        let done_tx = done_tx.clone();
+        let barrier = barrier.clone();
+        let x_shares = x_inputs_per_node[id].clone();
+        let y_shares = y_inputs_per_node[id].clone();
+
+        sim.host(format!("node{}", id), move || {
+            let inner = inner.clone();
+            let mut node = node.clone();
+            let tx = tx.clone();
+            let done_tx = done_tx.clone();
+            let barrier = barrier.clone();
+            let x_shares = x_shares.clone();
+            let y_shares = y_shares.clone();
+
+            async move {
+                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
+                let network_arc = Arc::new(network);
+                barrier.wait().await;
+
+                let net = network_arc.clone();
+                let mut node_for_mul = node.clone();
+                let mul_handle = tokio::spawn(async move {
+                    let mut outputs = Vec::with_capacity(no_of_multiplication);
+                    for i in 0..no_of_multiplication {
+                        info!("Sequential Mul run {}", i);
+                        let mut result = node_for_mul
+                            .mul(
+                                vec![x_shares[i].clone()],
+                                vec![y_shares[i].clone()],
+                                net.clone(),
+                            )
+                            .await?;
+                        outputs.push(result.remove(0));
+                    }
+                    Ok::<Vec<RobustShare<Fr>>, stoffelmpc_mpc::honeybadger::HoneyBadgerError>(
+                        outputs,
+                    )
+                });
+
+                let mut msg_count = 0usize;
+                loop {
+                    if mul_handle.is_finished() {
+                        break;
+                    }
+
+                    match timeout(Duration::from_millis(100), rx.recv()).await {
+                        Ok(Some((sender, msg))) => {
+                            msg_count += 1;
+                            let sender_id = match sender {
+                                SenderId::Node(i) => i,
+                                SenderId::Client(i) => i,
+                            };
+                            if let Err(e) = node.process(sender_id, msg, network_arc.clone()).await
+                            {
+                                let _ = tx.send(Err(format!(
+                                    "node {} process error after {} msgs: {:?}",
+                                    id, msg_count, e
+                                )));
+                                let _ = done_tx.send(());
+                                return Ok(());
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {}
+                    }
+                }
+
+                match mul_handle.await {
+                    Ok(Ok(shares)) => {
+                        let _ = tx.send(Ok((id, shares)));
+                    }
+                    Ok(Err(e)) => {
+                        let _ = tx.send(Err(format!(
+                            "node {} sequential mul failed after {} msgs: {:?}",
+                            id, msg_count, e
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("node {} mul join error: {:?}", id, e)));
+                    }
+                }
+
+                let _ = done_tx.send(());
+                Ok(())
+            }
+        });
+    }
+
+    drop(tx);
+    drop(done_tx);
+
+    let mut done_rx = done_rx;
+    sim.client("driver", async move {
+        let mut count = 0;
+        while count < n_parties {
+            match done_rx.recv().await {
+                Ok(()) => count += 1,
+                Err(_) => break,
+            }
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    });
+
+    sim.run().unwrap();
+
+    let results: Vec<_> = std::iter::from_fn(|| rx_done.try_recv().ok()).collect();
+    assert_eq!(
+        results.len(),
+        n_parties,
+        "not all nodes reported: got {}/{}",
+        results.len(),
+        n_parties
+    );
+
+    let mut final_results = std::collections::HashMap::<usize, Vec<RobustShare<Fr>>>::new();
+    for result in results {
+        match result {
+            Ok((id, shares)) => {
+                assert_eq!(shares.len(), no_of_multiplication);
+                final_results.insert(id, shares);
+            }
+            Err(error) => panic!("{}", error),
+        }
+    }
+
+    for i in 0..no_of_multiplication {
+        let shares_for_i = (0..n_parties)
+            .map(|pid| final_results.get(&pid).unwrap()[i].clone())
+            .collect::<Vec<_>>();
+        let (_, z_rec) =
+            RobustShare::recover_secret(&shares_for_i[0..=(2 * t)], n_parties, t).unwrap();
+        assert_eq!(z_rec, x_values[i] * y_values[i]);
+    }
+}
+
+#[test]
+#[ignore = "stress repro: forces more than 256 triple-generation protocol sessions"]
+fn honeybadger_triple_heavy_preprocessing_turmoil() {
+    run_preprocessing_stress_turmoil(4, 1, 771, 0, 0, 0, &[("HMPC_TRIPLE_BATCH_GROUPS", "1")]);
+}
+
+#[test]
+#[ignore = "stress repro: forces more than 256 RanDouSha protocol sessions"]
+fn honeybadger_randousha_heavy_preprocessing_turmoil() {
+    run_preprocessing_stress_turmoil(4, 1, 771, 0, 0, 0, &[("HMPC_RANDOUSHA_BATCH_COLUMNS", "1")]);
+}
+
+#[test]
+#[ignore = "stress repro: generates triple, RanDouSha, RandBit, PRandBit, and PRandInt material"]
+fn honeybadger_multiply_heavy_preprocessing_turmoil() {
+    run_preprocessing_stress_turmoil(
+        4,
+        1,
+        1536,
+        512,
+        512,
+        512,
+        &[
+            ("HMPC_TRIPLE_BATCH_GROUPS", "8"),
+            ("HMPC_RANDOUSHA_BATCH_COLUMNS", "8"),
+        ],
     );
 }
 
@@ -857,8 +1873,13 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
 
                     tokio::task::yield_now().await;
 
-                    let preproc_length = node.preprocessing_material.lock().await.length();
-                    if preproc_length.beaver_triples >= 3 {
+                    let n_triples = node
+                        .preprocessing_material
+                        .lock()
+                        .await
+                        .length()
+                        .beaver_triples;
+                    if n_triples >= 3 {
                         break;
                     }
                 }
@@ -1040,7 +2061,7 @@ fn randousha_e2e_turmoil() {
     let degree_t = 1;
     let session_id = SessionId::new(
         ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
 
@@ -1985,7 +3006,7 @@ fn ransha_e2e_turmoil_with_hold(
 ) {
     setup_tracing();
 
-    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(123, 0, 0), 111);
 
     let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
@@ -2219,7 +3240,7 @@ fn batch_reconstruction_with_partition(hold_nodes: Vec<usize>, n_parties: usize,
 
     let session_id = SessionId::new(
         ProtocolType::BatchRecon,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
     let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
@@ -2299,29 +3320,19 @@ fn batch_reconstruction_with_partition(hold_nodes: Vec<usize>, n_parties: usize,
                                 // If the y_j were received and in place, send a signal to interrupt
                                 // the node.
                                 {
-                                    let store_retrieval =
-                                        node.get_or_create_store(session_id).await.unwrap();
-                                    match store_retrieval {
-                                        Some(store) => {
-                                            // The protocol has not finished yet.
-                                            if store.lock().await.y_j.is_some() && !signaled {
-                                                tx_partition.send(()).unwrap();
-                                                signaled = true;
-                                            }
+                                    if node.get_store(session_id).await.is_ok() {
+                                        if !signaled {
+                                            tx_partition.send(()).unwrap();
                                         }
-                                        None => {
-                                            // The protocol already finished here. However, it is
-                                            // possible that the party did not store the y_j.
-                                            // Case: Consider a n = 10 and t = 1, then, 2t + 1 = 3.
-                                            // Hence the first three nodes may compute all the Evals
-                                            // and only send the Reveals to the other nodes.
-                                            // For this last node y_j = None. Also, the protocol
-                                            // is finished, and this is correct.
-                                            if !signaled {
-                                                tx_partition.send(()).unwrap();
-                                            }
-                                            break;
-                                        }
+                                        break;
+                                    }
+
+                                    let Some(store) = node.get_or_create_store(session_id).await.unwrap() else {
+                                        continue;
+                                    };
+                                    if store.lock().await.y_j.is_some() && !signaled {
+                                        tx_partition.send(()).unwrap();
+                                        signaled = true;
                                     }
                                 }
                             }

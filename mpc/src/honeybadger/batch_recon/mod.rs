@@ -19,6 +19,8 @@ use thiserror::Error;
 pub enum BatchReconMsgType {
     Eval,   // sent in the first round
     Reveal, // sent in the second round
+    EvalBatch,
+    RevealBatch,
 }
 
 ///Message exchanged between network nodes during the batch reconstruction protocol.
@@ -48,7 +50,10 @@ impl BatchReconMsg {
 pub struct BatchReconStore<F: FftField> {
     pub evals_received: Vec<RobustShare<F>>, // Stores (sender_id, eval_share) messages
     pub reveals_received: Vec<RobustShare<F>>, // Stores (sender_id, y_j_value) messages
-    pub y_j: Option<RobustShare<F>>,         // The interpolated y_j value for this node's index
+    pub batch_evals_received: Vec<(usize, Vec<F>)>,
+    pub batch_reveals_received: Vec<(usize, Vec<F>)>,
+    pub y_j: Option<RobustShare<F>>, // The interpolated y_j value for this node's index
+    pub y_j_batch: Option<Vec<F>>,
     pub secrets: Option<Vec<u8>>, // The finally reconstructed original secrets (polynomial coefficients)
 }
 
@@ -57,7 +62,10 @@ impl<F: FftField> BatchReconStore<F> {
         Self {
             evals_received: vec![],
             reveals_received: vec![],
+            batch_evals_received: vec![],
+            batch_reveals_received: vec![],
             y_j: None,
+            y_j_batch: None,
             secrets: None,
         }
     }

@@ -61,6 +61,11 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             .map(|_| ())
             .ok_or(PRandError::ClearStoreError(session_id))
     }
+
+    pub async fn store_len(&self) -> usize {
+        self.store.lock().await.len()
+    }
+
     pub async fn drain_batch_recon_output(&mut self) -> Result<(), PRandError> {
         loop {
             let id = {
@@ -430,7 +435,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 for (i, chunk) in share_rplusb.chunks(self.t + 1).enumerate() {
                     let session_id_batch = SessionId::new(
                         calling_proto,
-                        SessionId::pack_slot24(session_id.exec_id(), i as u8, 0),
+                        SessionId::pack_slot(session_id.exec_id(), i as u8, 0),
                         session_id.instance_id(),
                     );
                     self.batch_recon
@@ -697,7 +702,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(sid.exec_id(), 0, 0),
+            SessionId::pack_slot(sid.exec_id(), 0, 0),
             sid.instance_id(),
         );
 
@@ -728,10 +733,6 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     ) -> Result<Arc<Mutex<PRandBitDStore<F, G>>>, PRandError> {
         let mut storage = self.store.lock().await;
 
-        if storage.len() >= 256 && !storage.contains_key(&session_id) {
-            warn!("PRandBitD session limit reached");
-            return Err(PRandError::LimitError);
-        }
         Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(PRandBitDStore::empty())))

@@ -6,7 +6,7 @@ use crate::common::{
 use ark_ff::{FftField, Zero};
 use ark_poly::{
     univariate::{DenseOrSparsePolynomial, DensePolynomial},
-    DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain, Polynomial,
+    DenseUVPolynomial, EvaluationDomain, Polynomial,
 };
 use ark_std::rand::Rng;
 use std::collections::HashSet;
@@ -62,7 +62,7 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShare<F> {
                 n, degree
             )));
         }
-        let domain = GeneralEvaluationDomain::<F>::new(n)
+        let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
             .ok_or_else(|| InterpolateError::NoSuitableDomain(n))?;
 
         let mut poly = DensePolynomial::<F>::rand(degree, rng);
@@ -210,7 +210,7 @@ fn robust_interpolate_fnt<F: FftField>(
 ) -> Result<DensePolynomial<F>, InterpolateError> {
     let degree = shares[0].degree;
     let domain =
-        GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
+        crate::common::get_or_create_evaluation_domain::<F>(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
     let subset = &shares[..=degree];
     let xs: Vec<F> = subset.iter().map(|s| domain.element(s.id)).collect();
     let ys: Vec<F> = subset.iter().map(|s| s.share[0]).collect();
@@ -289,7 +289,7 @@ fn gao_rs_decode<F: FftField>(
         )));
     }
     let domain =
-        GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
+        crate::common::get_or_create_evaluation_domain::<F>(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
 
     let s_set: HashSet<usize> = erasure_positions.iter().copied().collect();
     let s = s_set.len();
@@ -361,9 +361,16 @@ fn gao_rs_decode<F: FftField>(
 }
 
 pub fn compute_g0_from_domain<F: FftField>(n: usize) -> DensePolynomial<F> {
+    // g0(x) = ∏_{i<n} (x - domain.element(i)) is a pure deterministic function of (F, n), so it is
+    // memoized. It is rebuilt from scratch on every OEC/Gao call otherwise (O(n^2)), which made the
+    // corruption/robustness path 44–175× slower than the optimistic path.
+    if let Some(cached) = crate::common::get_cached_g0_polynomial::<F>(n) {
+        return cached;
+    }
+
     // Create an FFT-compatible evaluation domain of size n
     let domain =
-        GeneralEvaluationDomain::<F>::new(n).expect("Domain of size n must exist over the field");
+        crate::common::get_or_create_evaluation_domain::<F>(n).expect("Domain of size n must exist over the field");
 
     // Extract evaluation points: ω^0, ω^1, ..., ω^{n-1}
     let evaluation_points: Vec<F> = domain.elements().collect();
@@ -376,6 +383,7 @@ pub fn compute_g0_from_domain<F: FftField>(n: usize) -> DensePolynomial<F> {
         g0 = &g0 * &factor;
     }
 
+    crate::common::store_g0_polynomial(n, g0.clone());
     g0
 }
 /// Implements OEC decoding by incrementally increasing the number of shares until decoding succeeds.
@@ -397,7 +405,7 @@ fn oec_decode<F: FftField>(
     shares: Vec<RobustShare<F>>,
 ) -> Result<(DensePolynomial<F>, F), InterpolateError> {
     let domain =
-        GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
+        crate::common::get_or_create_evaluation_domain::<F>(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
     let degree = shares[0].degree;
 
     // Iterate, increasing the number of shares considered (r) to handle more erasures/errors
@@ -445,6 +453,7 @@ fn oec_decode<F: FftField>(
 mod tests {
     use super::*;
     use ark_bls12_381::Fr;
+    use ark_poly::GeneralEvaluationDomain;
     use ark_std::test_rng;
 
     #[test]

@@ -5,25 +5,28 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define F2_8_MODULUS 283
+#define Gf2568_MODULUS 283
 
-typedef enum ProtocolType {
+enum ProtocolType
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint8_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
   None = 0,
-  Randousha = 1,
-  Ransha = 2,
-  Input = 3,
-  Rbc = 4,
-  Triple = 5,
-  BatchRecon = 6,
-  Dousha = 7,
-  Mul = 8,
-  PRandInt = 9,
-  PRandBit = 10,
-  RandBit = 11,
-  FpMul = 12,
-  Trunc = 13,
-  FpDivConst = 14,
-} ProtocolType;
+  Rbc = 1,
+  Avss = 2,
+  Triple = 3,
+  Mul = 4,
+  Input = 5,
+  Output = 6,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum ProtocolType ProtocolType;
+#else
+typedef uint8_t ProtocolType;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
 
 typedef enum FieldKind {
   Bls12_381Fr,
@@ -53,6 +56,11 @@ typedef enum HoneyBadgerErrorCode {
   HoneyBadgerFPDivConstError,
   HoneyBadgerTypesError,
   HoneyBadgerAlreadyReservedError,
+  HoneyBadgerInvalidThesholdError,
+  HoneyBadgerInvalidPartySizeError,
+  HoneyBadgerInvalidPartyIdError,
+  HoneyBadgerLimitError,
+  HoneyBadgerInstanceIdError,
 } HoneyBadgerErrorCode;
 
 typedef enum NetworkErrorCode {
@@ -89,7 +97,6 @@ typedef enum RbcMessageType {
 typedef enum RbcErrorCode {
   RbcSuccess,
   RbcInvalidThreshold,
-  RbcSessionEnded,
   RbcUnknownMsgType,
   RbcSendFailed,
   RbcInternal,
@@ -100,6 +107,7 @@ typedef enum RbcErrorCode {
   RbcSerializationError,
   RbcShardError,
   RbcSessionNotFound,
+  RbcSendError,
 } RbcErrorCode;
 
 typedef enum ShareErrorCode {
@@ -117,7 +125,7 @@ typedef enum ShareErrorCode {
 /**
  * Finite field GF(2^8) with AES modulus x^8 + x^4 + x^3 + x + 1 (0x11B)
  */
-typedef struct F2_8 F2_8;
+typedef struct Gf2568 Gf2568;
 
 typedef struct U256 {
   uint64_t data[4];
@@ -132,6 +140,15 @@ typedef struct ByteSlice {
   uint8_t *pointer;
   uintptr_t len;
 } ByteSlice;
+
+/**
+ * C-compatible view of a 128-bit `SessionId` (C has no `u128`). `lo` holds the low 64 bits,
+ * `hi` the high 64 bits. Matches `SessionIdBits` in `honey_badger_bindings.h`.
+ */
+typedef struct SessionIdBits {
+  uint64_t lo;
+  uint64_t hi;
+} SessionIdBits;
 
 typedef struct HoneyBadgerMPCClientOpaque {
 
@@ -160,17 +177,27 @@ typedef struct QuicPeerConnectionsOpaque {
 
 typedef struct RbcMsg {
   uintptr_t sender_id;
-  uint64_t session_id;
+  struct SessionIdBits session_id;
   uintptr_t round_id;
   struct ByteSlice payload;
   struct ByteSlice metadata;
   enum RbcMessageType msg_type;
-  uintptr_t msg_len;
 } RbcMsg;
 
 typedef struct BrachaOpaque {
 
 } BrachaOpaque;
+
+typedef uintptr_t FfiCtx;
+
+typedef struct RbcWrapCtx {
+  FfiCtx ctx;
+  enum RbcErrorCode (*call)(void *ctx,
+                            const uint8_t *msg_ptr,
+                            uintptr_t msg_len,
+                            uint8_t **out_ptr,
+                            uintptr_t *out_len);
+} RbcWrapCtx;
 
 typedef struct AvidOpaque {
 
@@ -179,17 +206,6 @@ typedef struct AvidOpaque {
 typedef struct AbaOpaque {
 
 } AbaOpaque;
-
-typedef struct {
-    uintptr_t ctx;
-    enum RbcErrorCode (*call)(
-        void *ctx,
-        const uint8_t *msg_ptr,
-        size_t msg_len,
-        uint8_t **out_ptr,
-        size_t *out_len
-    );
-} RbcWrapCtx;
 
 typedef struct FieldOpaque {
 
@@ -248,21 +264,21 @@ struct ByteSlice u256_to_be_bytes(struct U256 num);
 
 struct ByteSlice u256_to_le_bytes(struct U256 num);
 
-uint64_t new_session_id(enum ProtocolType caller,
-                        uint8_t exec_id,
-                        uint8_t sub_id,
-                        uint8_t round_id,
-                        uint32_t instance_id);
+struct SessionIdBits new_session_id(ProtocolType caller,
+                                    uint64_t exec_id,
+                                    uint8_t sub_id,
+                                    uint8_t round_id,
+                                    uint32_t instance_id);
 
-enum ProtocolType calling_protocol(uint64_t session_id);
+ProtocolType calling_protocol(struct SessionIdBits session_id);
 
-uint8_t exec_id(uint64_t session_id);
+uint64_t exec_id(struct SessionIdBits session_id);
 
-uint8_t sub_id(uint64_t session_id);
+uint8_t sub_id(struct SessionIdBits session_id);
 
-uint8_t round_id(uint64_t session_id);
+uint8_t round_id(struct SessionIdBits session_id);
 
-uint32_t instance_id(uint64_t session_id);
+uint32_t instance_id(struct SessionIdBits session_id);
 
 struct HoneyBadgerMPCClientOpaque *new_honey_badger_mpc_client(uintptr_t id,
                                                                uintptr_t n,
@@ -274,6 +290,7 @@ struct HoneyBadgerMPCClientOpaque *new_honey_badger_mpc_client(uintptr_t id,
 
 enum HoneyBadgerErrorCode hb_client_process(struct HoneyBadgerMPCClientOpaque *client_ptr,
                                             struct NetworkOpaque *net_ptr,
+                                            uintptr_t sender_id,
                                             struct ByteSlice raw_msg);
 
 enum HoneyBadgerErrorCode hb_client_get_output(struct HoneyBadgerMPCClientOpaque *client_ptr,
@@ -297,7 +314,8 @@ struct NetworkOpaque *new_fake_network(uintptr_t n_nodes,
                                        struct FakeNetworkReceiversOpaque **returned_receivers);
 
 struct ByteSlice node_receiver_recv_sync(struct FakeNetworkReceiversOpaque *receivers,
-                                         uintptr_t node_index);
+                                         uintptr_t to_node,
+                                         uintptr_t from_node);
 
 void free_fake_network_receivers(struct FakeNetworkReceiversOpaque *receivers);
 
@@ -382,6 +400,8 @@ void free_rbc_msg(struct RbcMsg msg);
 
 enum RbcErrorCode deserialize_rbc_msg(struct ByteSlice msg, struct RbcMsg *output_rbc_msg);
 
+uint8_t *rbc_alloc(uintptr_t len);
+
 /**
  * Creates a new Bracha instance with the given parameters.
  *
@@ -393,13 +413,10 @@ enum RbcErrorCode deserialize_rbc_msg(struct ByteSlice msg, struct RbcMsg *outpu
 enum RbcErrorCode bracha_new(uintptr_t id,
                              uintptr_t n,
                              uintptr_t t,
-                             struct BrachaOpaque **bracha_pointer,    
-                             RbcWrapCtx wrapper
-);
+                             struct BrachaOpaque **bracha_pointer,
+                             struct RbcWrapCtx wrapper);
 
 void free_bracha(struct BrachaOpaque *bracha_pointer);
-
-uint8_t *rbc_alloc(size_t len);
 
 uintptr_t get_bracha_id(struct BrachaOpaque *bracha_pointer);
 
@@ -410,16 +427,16 @@ uintptr_t get_bracha_t(struct BrachaOpaque *bracha_pointer);
 void sync_bracha_clear_store(struct BrachaOpaque *bracha_pointer);
 
 enum RbcErrorCode has_bracha_session_ended(struct BrachaOpaque *bracha_pointer,
-                                           uint64_t session_id,
+                                           struct SessionIdBits session_id,
                                            bool *output);
 
 enum RbcErrorCode get_bracha_output(struct BrachaOpaque *bracha_pointer,
-                                    uint64_t session_id,
+                                    struct SessionIdBits session_id,
                                     struct ByteSlice *output);
 
 enum RbcErrorCode sync_bracha_init(struct BrachaOpaque *bracha_pointer,
                                    struct ByteSlice payload,
-                                   uint64_t session_id,
+                                   struct SessionIdBits session_id,
                                    struct NetworkOpaque *net_ptr);
 
 enum RbcErrorCode sync_bracha_process(struct BrachaOpaque *bracha_pointer,
@@ -442,7 +459,8 @@ enum RbcErrorCode avid_new(uintptr_t id,
                            uintptr_t n,
                            uintptr_t t,
                            uintptr_t k,
-                           struct AvidOpaque **avid_pointer);
+                           struct AvidOpaque **avid_pointer,
+                           struct RbcWrapCtx wrapper);
 
 void free_avid(struct AvidOpaque *avid_pointer);
 
@@ -455,16 +473,16 @@ uintptr_t get_avid_t(struct AvidOpaque *avid_pointer);
 void sync_avid_clear_store(struct AvidOpaque *avid_pointer);
 
 enum RbcErrorCode has_avid_session_ended(struct AvidOpaque *avid_pointer,
-                                         uint64_t session_id,
+                                         struct SessionIdBits session_id,
                                          bool *output);
 
 enum RbcErrorCode get_avid_output(struct AvidOpaque *avid_pointer,
-                                  uint64_t session_id,
+                                  struct SessionIdBits session_id,
                                   struct ByteSlice *output);
 
 enum RbcErrorCode sync_avid_init(struct AvidOpaque *avid_pointer,
                                  struct ByteSlice payload,
-                                 uint64_t session_id,
+                                 struct SessionIdBits session_id,
                                  struct NetworkOpaque *net_ptr);
 
 enum RbcErrorCode sync_avid_process(struct AvidOpaque *avid_pointer,
@@ -480,14 +498,12 @@ enum RbcErrorCode sync_avid_send(struct AvidOpaque *avid_pointer,
                                  struct NetworkOpaque *net_ptr,
                                  uintptr_t recv);
 
-/**
- * Creates a new Avid instance with the given parameters.
- */
 enum RbcErrorCode aba_new(uintptr_t id,
                           uintptr_t n,
                           uintptr_t t,
                           uintptr_t k,
-                          struct AbaOpaque **aba_pointer);
+                          struct AbaOpaque **aba_pointer,
+                          struct RbcWrapCtx wrapper);
 
 void free_aba(struct AbaOpaque *aba_pointer);
 
@@ -500,14 +516,16 @@ uintptr_t get_aba_t(struct AbaOpaque *aba_pointer);
 void sync_aba_clear_store(struct AbaOpaque *aba_pointer);
 
 enum RbcErrorCode has_aba_session_ended(struct AbaOpaque *aba_pointer,
-                                        uint64_t session_id,
+                                        struct SessionIdBits session_id,
                                         bool *output);
 
-enum RbcErrorCode get_aba_output(struct AbaOpaque *aba_pointer, uint64_t session_id, bool *output);
+enum RbcErrorCode get_aba_output(struct AbaOpaque *aba_pointer,
+                                 struct SessionIdBits session_id,
+                                 bool *output);
 
 enum RbcErrorCode sync_aba_init(struct AbaOpaque *aba_pointer,
                                 struct ByteSlice payload,
-                                uint64_t session_id,
+                                struct SessionIdBits session_id,
                                 struct NetworkOpaque *net_ptr);
 
 enum RbcErrorCode sync_aba_process(struct AbaOpaque *aba_pointer,

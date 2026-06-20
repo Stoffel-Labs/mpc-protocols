@@ -23,7 +23,7 @@ async fn rand_bit_with_small_field_e2e() {
 
     let session_id = SessionId::new(
         ProtocolType::RandBit,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
 

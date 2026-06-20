@@ -20,7 +20,7 @@ use tokio::time::timeout;
 async fn run_batch_recon(n_parties: usize, t: usize, n_secrets: usize) {
     // n_secrets must equal t+1 (the batch size)
     let (network, mut receivers) = test_setup(n_parties);
-    let session_id = SessionId::new(ProtocolType::BatchRecon, SessionId::pack_slot24(0, 0, 0), 1);
+    let session_id = SessionId::new(ProtocolType::BatchRecon, SessionId::pack_slot(0, 0, 0), 1);
 
     // Generate independent shares for each secret
     let mut rng = ark_std::test_rng();
@@ -62,7 +62,7 @@ async fn run_batch_recon(n_parties: usize, t: usize, n_secrets: usize) {
                 let s = session_store.lock().await;
                 s.secrets.is_none()
             } {
-                let (_from, raw) = match timeout(Duration::from_secs(30), merged.recv()).await {
+                let (_from, raw) = match timeout(Duration::from_secs(30), merged.0.recv()).await {
                     Ok(Some(v)) => v,
                     _ => continue,
                 };

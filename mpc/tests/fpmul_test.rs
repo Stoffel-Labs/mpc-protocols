@@ -40,7 +40,7 @@ async fn test_prandbitd_end_to_end() {
     let batch_size = 2;
     let session_id = SessionId::new(
         ProtocolType::PRandBit,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
     let mut rng = test_rng();
@@ -179,7 +179,7 @@ async fn test_prandbitd_r_reconstruction() {
     let batch_size = 2;
     let session_id = SessionId::new(
         ProtocolType::PRandBit,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         222,
     );
     let mut rng = test_rng();
@@ -371,7 +371,7 @@ async fn test_truncpr_end_to_end() {
     let t = 1;
     let k = 16; // total bitlength (example)
     let m = 4; // fractional bits to truncate
-    let session_id = SessionId::new(ProtocolType::Trunc, SessionId::pack_slot24(123, 0, 0), 999);
+    let session_id = SessionId::new(ProtocolType::Trunc, SessionId::pack_slot(123, 0, 0), 999);
 
     // === Build fake network ===
     let (network, mut recv, _, _) = test_setup(n, vec![]);
@@ -476,7 +476,7 @@ async fn fpmul_e2e() {
 
     let precision = FixedPointPrecision::new(k, f);
 
-    let session_id = SessionId::new(ProtocolType::FpMul, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::FpMul, SessionId::pack_slot(123, 0, 0), 111);
     info!("Session ID: {:?}", session_id);
 
     // Build a fake network.
