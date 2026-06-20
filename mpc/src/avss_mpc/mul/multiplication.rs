@@ -6,7 +6,7 @@ use crate::avss_mpc::{
     deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, MAX_MESSAGE_SIZE,
 };
 use crate::common::share::feldman::FeldmanShamirShare;
-use crate::common::{share::ShareError, RBC};
+use crate::common::{rbc::RbcError, share::ShareError, RBC};
 use crate::common::{ProtocolSessionId, SecretSharingScheme};
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -73,7 +73,17 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
                 }
             };
 
-            let output = self.rbc.get_store(id).await?;
+            let output = match self.rbc.get_store(id).await {
+                Ok(output) => output,
+                Err(RbcError::Internal(msg)) if msg.contains("does not exist") => {
+                    warn!(
+                        session_id = ?id,
+                        "ignoring stale RBC output for cleared/finished AVSS multiplication session"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
             let msg: MultMessage = bincode::DefaultOptions::new()
                 .with_fixint_encoding()
                 .allow_trailing_bytes()

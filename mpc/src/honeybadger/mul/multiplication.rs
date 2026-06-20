@@ -1,10 +1,10 @@
 use crate::{
     common::{
-        share::ShareError, utils::deser_bounded_vec, ProtocolSessionId, SecretSharingScheme,
-        ShamirShare, RBC,
+        rbc::RbcError, share::ShareError, utils::deser_bounded_vec, ProtocolSessionId,
+        SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
-        batch_recon::batch_recon::BatchReconNode,
+        batch_recon::{batch_recon::BatchReconNode, BatchReconError},
         mul::{
             concat_sorted, InterpolateError, MulError, MultMessage, MultProtocolState, MultStorage,
             ReconstructionMessage,
@@ -188,7 +188,17 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 }
             };
 
-            let output = self.rbc.get_store(id).await?;
+            let output = match self.rbc.get_store(id).await {
+                Ok(output) => output,
+                Err(RbcError::Internal(msg)) if msg.contains("does not exist") => {
+                    warn!(
+                        session_id = ?id,
+                        "ignoring stale RBC output for cleared/finished multiplication session"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
             let msg: MultMessage = bincode::DefaultOptions::new()
                 .with_fixint_encoding()
                 .allow_trailing_bytes()
@@ -245,7 +255,17 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                     }
                 }
             };
-            let output = self.batch_recon.get_store(id).await?;
+            let output = match self.batch_recon.get_store(id).await {
+                Ok(output) => output,
+                Err(BatchReconError::InvalidInput(msg)) if msg.contains("does not exist") => {
+                    warn!(
+                        session_id = ?id,
+                        "ignoring stale batch-recon output for cleared/finished multiplication session"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
             match self.open_mult_handler(self.id, id, output).await {
                 Ok(()) => {}
                 Err(e) => {
@@ -1200,5 +1220,102 @@ pub mod tests {
             assert_eq!(real_share.id, node_id);
             assert_eq!(real_share.share[0], correct_share.share[0]);
         }
+    }
+
+    /// Regression test for the mul pipelining / RBC late-output race.
+    ///
+    /// `drain_rbc_output` reads session ids the RBC queued on delivery, then calls
+    /// `rbc.get_store(id)`. After a pipelined mul finishes, `mul()` calls
+    /// `clear_store`, which removes the round-2 RBC sessions. An id queued just
+    /// before the clear becomes stale: its session is gone, so `get_store` returns
+    /// "Session ID does not exist". Previously that propagated as a fatal
+    /// `MulError::RbcError` (crashing the node's message loop under workloads like
+    /// `aes-unoptimized.stflb`); it must now be ignored as harmless late traffic.
+    ///
+    /// The post-clear state (stale id in the drain queue, RBC session absent) is
+    /// reproduced directly rather than by driving a full network, which is enough
+    /// to cover the fixed branch.
+    #[tokio::test]
+    async fn test_drain_rbc_output_ignores_cleared_session() {
+        let n = 10;
+        let t = 3;
+        let node_id = 0;
+        // Odd count not divisible by t + 1 so the RBC remainder path is active.
+        let no_of_mul = 5;
+        let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot(7, 0, 0), 111);
+
+        let mut node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n, t).unwrap();
+
+        // Swap in a drain queue we control so we can inject a stale id. (The real
+        // queue is fed by RBC delivery; here we only need the post-clear state.)
+        let (stale_tx, stale_rx) = mpsc::channel(200);
+        node.rbc_output = Arc::new(Mutex::new(stale_rx));
+
+        // `clear_store` needs a mult_storage entry; create one for this session.
+        {
+            let storage = node.get_or_create_mult_storage(session_id).await.unwrap();
+            storage.lock().await.no_of_mul = Some(no_of_mul);
+        }
+
+        // A round-2 RBC id for this party, as would be queued on RBC delivery.
+        let stale_id = SessionId::new(
+            ProtocolType::Mul,
+            SessionId::pack_slot(session_id.exec_id(), node_id as u8, 2),
+            session_id.instance_id(),
+        );
+        stale_tx.send(stale_id).await.unwrap();
+
+        // The mul finished: `clear_store` removes the round-2 RBC sessions (a
+        // no-op here since none ran) and the mult_storage entry. The queued id is
+        // now stale.
+        node.clear_store(session_id).await.unwrap();
+
+        // Without the fix: Err(MulError::RbcError("Session ID does not exist")).
+        // With the fix: the stale output is dropped and drain succeeds.
+        assert!(
+            node.drain_rbc_output().await.is_ok(),
+            "drain_rbc_output must ignore stale outputs for cleared sessions"
+        );
+        // Draining an empty queue afterwards must also be fine.
+        assert!(node.drain_rbc_output().await.is_ok());
+    }
+
+    /// Same race as above, but on the batch-reconstruction output queue.
+    /// `drain_batch_recon_output` must also ignore ids whose session was cleared
+    /// by `clear_store` instead of propagating "Session ID does not exist".
+    #[tokio::test]
+    async fn test_drain_batch_recon_output_ignores_cleared_session() {
+        let n = 10;
+        let t = 3;
+        let node_id = 0;
+        // no_of_batch = 5 / (t + 1) = 1 > 0, so `clear_store` clears the
+        // round-1 batch-recon sessions (sub_id 0 and 1).
+        let no_of_mul = 5;
+        let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot(9, 0, 0), 222);
+
+        let mut node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n, t).unwrap();
+
+        let (stale_tx, stale_rx) = mpsc::channel(200);
+        node.batch_output = Arc::new(Mutex::new(stale_rx));
+
+        {
+            let storage = node.get_or_create_mult_storage(session_id).await.unwrap();
+            storage.lock().await.no_of_mul = Some(no_of_mul);
+        }
+
+        // A round-1 batch-recon id (sub_id 0 = a-x values), as queued on delivery.
+        let stale_id = SessionId::new(
+            ProtocolType::Mul,
+            SessionId::pack_slot(session_id.exec_id(), 0, 1),
+            session_id.instance_id(),
+        );
+        stale_tx.send(stale_id).await.unwrap();
+
+        node.clear_store(session_id).await.unwrap();
+
+        assert!(
+            node.drain_batch_recon_output().await.is_ok(),
+            "drain_batch_recon_output must ignore stale outputs for cleared sessions"
+        );
     }
 }
