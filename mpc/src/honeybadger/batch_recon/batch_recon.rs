@@ -5,7 +5,10 @@ use crate::{
         utils::deser_bounded_vec,
         SecretSharingScheme,
     },
-    honeybadger::{robust_interpolate::robust_interpolate::RobustShare, WrappedMessage},
+    honeybadger::{
+        robust_interpolate::robust_interpolate::{batch_recover_secret, RobustShare},
+        WrappedMessage,
+    },
 };
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -362,20 +365,15 @@ impl<F: FftField> BatchReconNode<F> {
                 if store.batch_evals_received.len() >= self.degree + self.t + 1
                     && store.y_j_batch.is_none()
                 {
-                    let batch_len = store.batch_evals_received[0].1.len();
                     let evals_by_sender = store.batch_evals_received.clone();
-                    let mut y_j_values = Vec::with_capacity(batch_len);
-
-                    for idx in 0..batch_len {
-                        let shares: Vec<_> = evals_by_sender
-                            .iter()
-                            .map(|(sender_id, vals)| {
-                                RobustShare::new(vals[idx], *sender_id, self.degree)
-                            })
-                            .collect();
-                        let (_, value) = RobustShare::recover_secret(&shares, self.n, self.t)?;
-                        y_j_values.push(value);
-                    }
+                    // Decode all chunks in one shot: the Lagrange basis depends only on the sender
+                    // ids (identical across every chunk), so build it once and reuse instead of
+                    // rebuilding `A(x)` and the per-point divisions per chunk. Each chunk is still
+                    // verified against all evaluations and falls back to robust `recover_secret`
+                    // (OEC/Gao) on disagreement, so `t`-fault tolerance is unchanged.
+                    let decoded = batch_recover_secret(&evals_by_sender, self.n, self.degree, self.t)?;
+                    // The opened value per chunk is the constant term P(0).
+                    let y_j_values: Vec<F> = decoded.into_iter().map(|coeffs| coeffs[0]).collect();
 
                     store.y_j_batch = Some(y_j_values.clone());
                     drop(store);
@@ -436,20 +434,15 @@ impl<F: FftField> BatchReconNode<F> {
                 if store.batch_reveals_received.len() >= self.degree + self.t + 1
                     && store.secrets.is_none()
                 {
-                    let batch_len = store.batch_reveals_received[0].1.len();
                     let reveals_by_sender = store.batch_reveals_received.clone();
-                    let mut result = Vec::with_capacity(batch_len * (self.degree + 1));
-
-                    for idx in 0..batch_len {
-                        let shares: Vec<_> = reveals_by_sender
-                            .iter()
-                            .map(|(sender_id, vals)| {
-                                RobustShare::new(vals[idx], *sender_id, self.degree)
-                            })
-                            .collect();
-                        let (mut poly, _) = RobustShare::recover_secret(&shares, self.n, self.t)?;
-                        poly.resize(self.degree + 1, F::zero());
-                        result.extend(poly);
+                    // Batched decode (see the EvalBatch arm): one Lagrange basis for all chunks,
+                    // verified per chunk with robust `recover_secret` (OEC/Gao) fallback.
+                    let decoded =
+                        batch_recover_secret(&reveals_by_sender, self.n, self.degree, self.t)?;
+                    let mut result = Vec::with_capacity(decoded.len() * (self.degree + 1));
+                    for coeffs in decoded {
+                        // `batch_recover_secret` already resizes each chunk to `degree + 1`.
+                        result.extend(coeffs);
                     }
 
                     let mut bytes_message = Vec::new();
