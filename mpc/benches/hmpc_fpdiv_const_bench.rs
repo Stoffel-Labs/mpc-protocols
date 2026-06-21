@@ -9,13 +9,13 @@ use ark_std::rand::{
 use bench_utils::{create_nodes, spawn_receivers, test_setup};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::{sync::Arc, time::Duration};
-use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::types::fixed::{
+use stoffelcrypto::common::rbc::rbc::Avid;
+use stoffelcrypto::common::types::fixed::{
     ClearFixedPoint, FixedPointPrecision, SecretFixedPoint,
 };
-use stoffelmpc_mpc::common::MPCTypeOps;
-use stoffelmpc_mpc::common::{PreprocessingMPCProtocol, SecretSharingScheme};
-use stoffelmpc_mpc::honeybadger::{
+use stoffelcrypto::common::MPCTypeOps;
+use stoffelcrypto::common::{PreprocessingMPCProtocol, SecretSharingScheme};
+use stoffelcrypto::honeybadger::{
     robust_interpolate::robust_interpolate::RobustShare, HoneyBadgerMPCNode, SessionId,
 };
 use stoffelmpc_network::fake_network::FakeNetwork;

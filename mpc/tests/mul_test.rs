@@ -7,9 +7,9 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::{collections::HashMap, sync::Arc, time::Duration, vec};
-use stoffelmpc_mpc::common::ProtocolSessionId;
-use stoffelmpc_mpc::common::{rbc::rbc::Avid, SecretSharingScheme, RBC};
-use stoffelmpc_mpc::honeybadger::{
+use stoffelcrypto::common::ProtocolSessionId;
+use stoffelcrypto::common::{rbc::rbc::Avid, SecretSharingScheme, RBC};
+use stoffelcrypto::honeybadger::{
     mul::multiplication::Multiply, robust_interpolate::robust_interpolate::RobustShare,
     ProtocolType, SessionId, WrappedMessage,
 };

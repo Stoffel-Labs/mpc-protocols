@@ -8,15 +8,15 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::time::Duration;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
-use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::rbc::RbcError;
-use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
-use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme, RBC};
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode};
-use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use stoffelmpc_mpc::honeybadger::share_gen::RanShaError;
-use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
-use stoffelmpc_mpc::honeybadger::{
+use stoffelcrypto::common::rbc::rbc::Avid;
+use stoffelcrypto::common::rbc::RbcError;
+use stoffelcrypto::common::share::shamir::NonRobustShare;
+use stoffelcrypto::common::{MPCProtocol, SecretSharingScheme, RBC};
+use stoffelcrypto::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode};
+use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use stoffelcrypto::honeybadger::share_gen::RanShaError;
+use stoffelcrypto::honeybadger::triple_gen::ShamirBeaverTriple;
+use stoffelcrypto::honeybadger::{
     HoneyBadgerMPCClient, HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
 use stoffelmpc_network::fake_network::{
@@ -352,7 +352,7 @@ static TRACING_INIT: Lazy<()> = Lazy::new(|| {
 static QUIET_TRACING_INIT: Lazy<()> = Lazy::new(|| {
     let subscriber = FmtSubscriber::builder()
         .with_env_filter(EnvFilter::new(
-            "warn,stoffelmpc_mpc::honeybadger=info,stoffelmpc_mpc::honeybadger::batch_recon=warn,stoffelmpc_mpc::honeybadger::mul=warn,stoffelmpc_mpc::honeybadger::share_gen=warn,stoffelmpc_mpc::honeybadger::triple_gen=warn,stoffelmpc_mpc::honeybadger::ran_dou_sha=warn,stoffelmpc_mpc::honeybadger::double_share=warn,stoffelmpc_mpc::common::rbc=warn",
+            "warn,stoffelcrypto::honeybadger=info,stoffelcrypto::honeybadger::batch_recon=warn,stoffelcrypto::honeybadger::mul=warn,stoffelcrypto::honeybadger::share_gen=warn,stoffelcrypto::honeybadger::triple_gen=warn,stoffelcrypto::honeybadger::ran_dou_sha=warn,stoffelcrypto::honeybadger::double_share=warn,stoffelcrypto::common::rbc=warn",
         ))
         .pretty()
         .finish();

@@ -10,9 +10,9 @@ use ark_std::rand::{
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::{sync::Arc, time::Duration};
-use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::{MPCProtocol, PreprocessingMPCProtocol, SecretSharingScheme};
-use stoffelmpc_mpc::honeybadger::{
+use stoffelcrypto::common::rbc::rbc::Avid;
+use stoffelcrypto::common::{MPCProtocol, PreprocessingMPCProtocol, SecretSharingScheme};
+use stoffelcrypto::honeybadger::{
     robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple,
     HoneyBadgerMPCNode, SessionId,
 };

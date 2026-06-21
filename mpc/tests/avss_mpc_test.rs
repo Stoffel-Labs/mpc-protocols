@@ -10,7 +10,7 @@ use ark_std::{
     test_rng,
 };
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     avss_mpc::{triple_gen::BeaverTriple, AvssMPCNode, AvssMPCNodeOpts, AvssSessionId},
     common::{
         rbc::rbc::Avid, share::feldman::FeldmanShamirShare, MPCProtocol, PreprocessingMPCProtocol,

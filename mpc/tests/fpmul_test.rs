@@ -14,17 +14,17 @@ use num_bigint::BigUint;
 use num_traits::FromPrimitive;
 use std::collections::HashMap;
 use std::time::Duration;
-use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::types::fixed::{FixedPointPrecision, SecretFixedPoint};
-use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC};
-use stoffelmpc_mpc::honeybadger::fpmul::f256::{
+use stoffelcrypto::common::rbc::rbc::Avid;
+use stoffelcrypto::common::types::fixed::{FixedPointPrecision, SecretFixedPoint};
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC};
+use stoffelcrypto::honeybadger::fpmul::f256::{
     build_all_f_polys_2_8, lagrange_interpolate_f2_8, Gf256, Gf256Domain,
 };
-use stoffelmpc_mpc::honeybadger::fpmul::fpmul::FPMulNode;
-use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitDNode;
-use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
-use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::{Robust, RobustShare};
-use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
+use stoffelcrypto::honeybadger::fpmul::fpmul::FPMulNode;
+use stoffelcrypto::honeybadger::fpmul::prandbitd::PRandBitDNode;
+use stoffelcrypto::honeybadger::fpmul::truncpr::TruncPrNode;
+use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::{Robust, RobustShare};
+use stoffelcrypto::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use stoffelmpc_network::fake_network::SenderId;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;

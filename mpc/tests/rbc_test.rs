@@ -3,7 +3,7 @@ pub mod utils;
 mod tests {
     use rand::Rng;
     use std::{collections::HashMap, sync::Arc, time::Duration};
-    use stoffelmpc_mpc::{
+    use stoffelcrypto::{
         common::{
             rbc::{
                 rbc::{Avid, Bracha, Dealer, ABA},

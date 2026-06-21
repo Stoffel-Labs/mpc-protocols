@@ -4,12 +4,12 @@ use ark_bls12_381::Fr;
 use ark_ff::{One, PrimeField, Zero};
 use num_integer::binomial;
 use std::time::Duration;
-use stoffelmpc_mpc::common::math::goldilocks::GoldilocksField;
-use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme};
-use stoffelmpc_mpc::honeybadger::fpmul::f256::{lagrange_interpolate_f2_8, Gf256Domain};
-use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitDNode;
-use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
+use stoffelcrypto::common::math::goldilocks::GoldilocksField;
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
+use stoffelcrypto::honeybadger::fpmul::f256::{lagrange_interpolate_f2_8, Gf256Domain};
+use stoffelcrypto::honeybadger::fpmul::prandbitd::PRandBitDNode;
+use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use stoffelcrypto::honeybadger::{ProtocolType, SessionId};
 use tokio::task::JoinSet;
 use tracing::info;
 

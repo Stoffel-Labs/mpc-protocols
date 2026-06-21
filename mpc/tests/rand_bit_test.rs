@@ -2,12 +2,12 @@ use crate::utils::rand_bit_utils::{create_rand_bit_input, spawn_receiver_tasks};
 use crate::utils::test_utils::{setup_tracing, test_setup};
 use ark_ff::{AdditiveGroup, Field};
 use std::time::Duration;
-use stoffelmpc_mpc::common::math::goldilocks::GoldilocksField;
-use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme};
-use stoffelmpc_mpc::honeybadger::fpmul::rand_bit::RandBit;
-use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
+use stoffelcrypto::common::math::goldilocks::GoldilocksField;
+use stoffelcrypto::common::rbc::rbc::Avid;
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
+use stoffelcrypto::honeybadger::fpmul::rand_bit::RandBit;
+use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use stoffelcrypto::honeybadger::{ProtocolType, SessionId};
 use tokio::task::JoinSet;
 
 mod utils;

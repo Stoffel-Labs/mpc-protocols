@@ -4,8 +4,8 @@ use ark_bls12_381::Fr;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
-use stoffelmpc_mpc::common::{rbc::rbc::Avid, MPCProtocol};
-use stoffelmpc_mpc::honeybadger::{
+use stoffelcrypto::common::{rbc::rbc::Avid, MPCProtocol};
+use stoffelcrypto::honeybadger::{
     robust_interpolate::robust_interpolate::RobustShare, HoneyBadgerMPCNode,
     HoneyBadgerMPCNodeOpts, SessionId,
 };

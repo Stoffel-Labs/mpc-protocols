@@ -2,7 +2,7 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::sync::Arc;
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::{share::shamir::NonRobustShare, SecretSharingScheme},
     honeybadger::{
         double_share::DoubleShamirShare, robust_interpolate::robust_interpolate::RobustShare,

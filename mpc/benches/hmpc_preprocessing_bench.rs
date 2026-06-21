@@ -7,7 +7,7 @@ use bench_utils::test_setup;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::env;
 use std::time::Duration;
-use stoffelmpc_mpc::common::PreprocessingMPCProtocol;
+use stoffelcrypto::common::PreprocessingMPCProtocol;
 
 fn env_usize(name: &str, default: usize) -> usize {
     env::var(name)

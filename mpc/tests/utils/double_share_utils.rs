@@ -1,6 +1,6 @@
 use ark_bls12_381::Fr;
 use std::sync::Arc;
-use stoffelmpc_mpc::honeybadger::{
+use stoffelcrypto::honeybadger::{
     double_share::{
         double_share_generation::{DoubleShareNode, ProtocolState},
         DoubleShamirShare,

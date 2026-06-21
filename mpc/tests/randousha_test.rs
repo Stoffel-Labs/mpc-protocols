@@ -10,14 +10,14 @@ use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use std::mem;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, time::Duration, vec};
-use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
-use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme, RBC};
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::messages::{
+use stoffelcrypto::common::rbc::rbc::Avid;
+use stoffelcrypto::common::share::shamir::NonRobustShare;
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme, RBC};
+use stoffelcrypto::honeybadger::ran_dou_sha::messages::{
     RanDouShaMessage, RanDouShaPayload, ReconstructionMessage,
 };
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
-use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId, WrappedMessage};
+use stoffelcrypto::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode, RanDouShaState};
+use stoffelcrypto::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use stoffelmpc_network::fake_network::SenderId;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;

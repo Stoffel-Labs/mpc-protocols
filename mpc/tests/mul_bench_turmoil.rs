@@ -5,7 +5,7 @@
 //!
 //! Latency is read from env so the report can sweep it:
 //!   MUL_TURMOIL_N=64 MUL_TURMOIL_LAT_MIN=1 MUL_TURMOIL_LAT_MAX=5 \
-//!     cargo test -p stoffelmpc-mpc --test mul_bench_turmoil --release -- --nocapture --ignored
+//!     cargo test -p stoffelcrypto --test mul_bench_turmoil --release -- --nocapture --ignored
 //!
 //! Defaults (fast enough for CI): n=5, t=1, N=8, latency 1..5 ms.
 
@@ -19,7 +19,7 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::{sync::Arc, time::Instant};
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::{rbc::rbc::Avid, MPCProtocol, SecretSharingScheme},
     honeybadger::{robust_interpolate::robust_interpolate::RobustShare, SessionId},
 };
@@ -143,7 +143,7 @@ fn run_config(n: usize, t: usize, n_muls: usize, lat: Option<(u64, u64)>) {
                     // Signal the drain loop that the result is in. (Receiver may be gone if the
                     // loop already exited — ignore the error.)
                     let _ = mul_done_tx.send(());
-                    Ok::<_, stoffelmpc_mpc::honeybadger::HoneyBadgerError>((t0.elapsed(), out))
+                    Ok::<_, stoffelcrypto::honeybadger::HoneyBadgerError>((t0.elapsed(), out))
                 });
 
                 // Drain the network for this node until the mul finishes. Use select! on a done

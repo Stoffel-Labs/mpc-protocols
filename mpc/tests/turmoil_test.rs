@@ -16,7 +16,7 @@ use ark_std::{
 };
 use chacha20poly1305::aead::OsRng;
 use std::{sync::Arc, time::Instant};
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::{
         rbc::rbc::Avid,
         types::fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
@@ -1183,7 +1183,7 @@ fn run_preprocessing_stress_turmoil(
 }
 
 async fn preprocessing_stress_snapshot(
-    nodes: &[stoffelmpc_mpc::honeybadger::HoneyBadgerMPCNode<Fr, Avid<SessionId>>],
+    nodes: &[stoffelcrypto::honeybadger::HoneyBadgerMPCNode<Fr, Avid<SessionId>>],
 ) -> String {
     let mut out = String::new();
     out.push_str("preprocessing stress snapshot:\n");
@@ -1519,7 +1519,7 @@ fn honeybadger_sequential_mul_1000_turmoil() {
                             .await?;
                         outputs.push(result.remove(0));
                     }
-                    Ok::<Vec<RobustShare<Fr>>, stoffelmpc_mpc::honeybadger::HoneyBadgerError>(
+                    Ok::<Vec<RobustShare<Fr>>, stoffelcrypto::honeybadger::HoneyBadgerError>(
                         outputs,
                     )
                 });

@@ -5,7 +5,7 @@ use ark_bls12_381::Fr;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use std::{sync::Arc, time::Duration};
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::{rbc::rbc::Avid, ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
         robust_interpolate::robust_interpolate::RobustShare,

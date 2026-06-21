@@ -6,7 +6,7 @@ use crate::utils::{
 use ark_bls12_381::Fr;
 use itertools::izip;
 use std::{matches, time::Duration};
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::{share::shamir::NonRobustShare, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
         robust_interpolate::robust_interpolate::RobustShare,

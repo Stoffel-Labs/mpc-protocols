@@ -1,5 +1,5 @@
 [package]
-name = "stoffelmpc-mpc"
+name = "stoffelcrypto"
 version.workspace = true
 edition.workspace = true
 

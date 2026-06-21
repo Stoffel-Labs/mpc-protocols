@@ -4,9 +4,9 @@ use crate::utils::test_utils::{
 };
 use ark_bls12_381::Fr;
 use futures::future::join_all;
-use stoffelmpc_mpc::honeybadger::input::InputError;
-use stoffelmpc_mpc::honeybadger::SessionId;
-use stoffelmpc_mpc::{
+use stoffelcrypto::honeybadger::input::InputError;
+use stoffelcrypto::honeybadger::SessionId;
+use stoffelcrypto::{
     common::{rbc::rbc::Avid, SecretSharingScheme, ShamirShare},
     honeybadger::{
         input::input::InputClient,

@@ -2,7 +2,7 @@ use std::{collections::HashMap, thread, time::Duration};
 
 use crate::utils::test_utils::test_setup;
 use ark_std::test_rng;
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::{share::shamir::NonRobustShare, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{ProtocolType, SessionId},
 };

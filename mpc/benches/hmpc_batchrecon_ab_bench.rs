@@ -12,7 +12,7 @@
 //! cost of the per-chunk-session design — causation-isolated because nothing else varies.
 //!
 //! Run:
-//!   cargo bench -p stoffelmpc-mpc --bench hmpc_batchrecon_ab_bench
+//!   cargo bench -p stoffelcrypto --bench hmpc_batchrecon_ab_bench
 //!   HMPC_BRAB_CONFIGS=n10_t3,n5_t1 HMPC_BRAB_COUNTS=64,256,1024
 
 use ark_bls12_381::Fr;
@@ -27,8 +27,8 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme};
-use stoffelmpc_mpc::honeybadger::{
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
+use stoffelcrypto::honeybadger::{
     batch_recon::batch_recon::BatchReconNode, robust_interpolate::robust_interpolate::RobustShare,
     ProtocolType, SessionId, WrappedMessage,
 };

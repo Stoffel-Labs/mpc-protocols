@@ -7,7 +7,7 @@
 //! `hmpc_mul_bench`, which uses `let _ = node.process(...)`), and count every delivered message.
 //!
 //! Run:
-//!   cargo bench -p stoffelmpc-mpc --bench hmpc_mul_e2e_bench
+//!   cargo bench -p stoffelcrypto --bench hmpc_mul_e2e_bench
 //!   HMPC_MUL_E2E_STRESS=1                                  # enable large-N sweep
 //!   HMPC_MUL_E2E_COUNTS=256,1024,4096                      # custom N list
 //!   HMPC_MUL_E2E_CONFIGS=n10_t3,n5_t1                      # custom (n,t) list
@@ -26,8 +26,8 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use stoffelmpc_mpc::common::{rbc::rbc::Avid, MPCProtocol, SecretSharingScheme};
-use stoffelmpc_mpc::honeybadger::{
+use stoffelcrypto::common::{rbc::rbc::Avid, MPCProtocol, SecretSharingScheme};
+use stoffelcrypto::honeybadger::{
     robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple,
     HoneyBadgerMPCNode, SessionId,
 };

@@ -12,7 +12,7 @@ use ark_std::test_rng;
 use bench_utils::{fan_in_inboxes, test_setup};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::{sync::Arc, time::Duration};
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     avss_mpc::{triple_gen::BeaverTriple, AvssMPCNode, AvssMPCNodeOpts, AvssSessionId},
     common::{
         rbc::rbc::Avid, share::feldman::FeldmanShamirShare, MPCProtocol, PreprocessingMPCProtocol,

@@ -14,7 +14,7 @@ use ark_std::{
 };
 use futures::future::join_all;
 use std::collections::HashMap;
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::{
         math::goldilocks::GoldilocksField,
         rbc::rbc::Avid,

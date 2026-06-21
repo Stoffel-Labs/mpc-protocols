@@ -11,7 +11,7 @@
 //!   - share arithmetic `.mul(F)` / `- share` (the `finalize_mul` inner loop)
 //!   - bincode of a `WrappedMessage::BatchRecon(Eval)` and ark-serialize of a `Vec<F>` reveal batch
 //!
-//! Run:  cargo bench -p stoffelmpc-mpc --bench hmpc_mul_micro_bench
+//! Run:  cargo bench -p stoffelcrypto --bench hmpc_mul_micro_bench
 
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
@@ -23,11 +23,11 @@ use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::ops::Mul;
-use stoffelmpc_mpc::common::{
+use stoffelcrypto::common::{
     share::{apply_vandermonde, make_vandermonde},
     ProtocolSessionId, SecretSharingScheme, ShamirShare,
 };
-use stoffelmpc_mpc::honeybadger::{
+use stoffelcrypto::honeybadger::{
     batch_recon::{BatchReconMsg, BatchReconMsgType},
     robust_interpolate::robust_interpolate::{batch_recover_secret, Robust, RobustShare},
     ProtocolType, SessionId, WrappedMessage,

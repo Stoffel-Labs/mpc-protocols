@@ -6,7 +6,7 @@ mod tests {
     use ark_ff::Zero;
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
     use std::time::Duration;
-    use stoffelmpc_mpc::{
+    use stoffelcrypto::{
         common::{
             share::{apply_vandermonde, make_vandermonde},
             ProtocolSessionId, SecretSharingScheme,

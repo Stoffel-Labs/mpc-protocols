@@ -5,7 +5,7 @@ use ark_bls12_381::Fr;
 use bench_utils::{fan_in_inboxes, test_setup};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::time::Duration;
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::ProtocolSessionId,
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
@@ -26,7 +26,7 @@ async fn run_batch_recon(n_parties: usize, t: usize, n_secrets: usize) {
     let mut rng = ark_std::test_rng();
     let secrets: Vec<Fr> = (0..n_secrets).map(|i| Fr::from(i as u64 + 1)).collect();
     let all_shares = {
-        use stoffelmpc_mpc::common::SecretSharingScheme;
+        use stoffelcrypto::common::SecretSharingScheme;
         let mut per_node = vec![Vec::new(); n_parties];
         for &secret in &secrets {
             let shares = RobustShare::compute_shares(secret, n_parties, t, None, &mut rng).unwrap();
