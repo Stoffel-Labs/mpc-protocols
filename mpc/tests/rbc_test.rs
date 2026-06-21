@@ -52,7 +52,7 @@ mod tests {
                 let store_map = bracha.store.lock().await;
                 store_map
                     .get(&session_id)
-                    .cloned()
+                    .map(|(_, arc)| arc.clone())
                     .expect(&format!("Party {} did not create session store", bracha.id))
             };
 
@@ -104,7 +104,7 @@ mod tests {
         for bracha in &parties {
             let store = bracha.store.lock().await;
             for (i, sid) in session_ids.iter().enumerate() {
-                let store_arc = store.get(sid).expect("Missing session");
+                let (_, store_arc) = store.get(sid).expect("Missing session");
                 let s = store_arc.lock().await;
 
                 assert!(
@@ -159,7 +159,7 @@ mod tests {
         for bracha in &parties {
             let store = bracha.store.lock().await;
             for (i, session_id) in session_ids.iter().enumerate() {
-                let store_arc = store.get(session_id).expect("Missing session");
+                let (_, store_arc) = store.get(session_id).expect("Missing session");
                 let s = store_arc.lock().await;
                 assert!(
                     s.ended,
@@ -235,7 +235,7 @@ mod tests {
         // Check if parties reached consensus
         for bracha in &parties {
             let store = bracha.store.lock().await;
-            if let Some(state) = store.get(&session_id) {
+            if let Some((_, state)) = store.get(&session_id) {
                 let s = state.lock().await;
 
                 if s.ended {
@@ -278,7 +278,7 @@ mod tests {
                 let store_map = avid.store.lock().await;
                 store_map
                     .get(&session_id)
-                    .cloned()
+                    .map(|(_, arc)| arc.clone())
                     .expect(&format!("Party {} did not create session store", avid.id))
             };
 
@@ -362,7 +362,7 @@ mod tests {
         for avid in &parties {
             let store = avid.store.lock().await;
             for (i, session_id) in session_ids.iter().enumerate() {
-                let store_arc = store.get(session_id).expect("Missing session");
+                let (_, store_arc) = store.get(session_id).expect("Missing session");
                 let s = store_arc.lock().await;
                 assert!(
                     s.ended,
@@ -439,7 +439,7 @@ mod tests {
         // Check if parties reached consensus
         for avid in &parties {
             let store = avid.store.lock().await;
-            if let Some(state) = store.get(&session_id) {
+            if let Some((_, state)) = store.get(&session_id) {
                 let s = state.lock().await;
 
                 assert!(s.ended, "Party {} has not yet ended", avid.id);
@@ -486,7 +486,7 @@ mod tests {
                 let store_map = rbc.store.lock().await;
                 store_map
                     .get(&session_id)
-                    .cloned()
+                    .map(|(_, arc)| arc.clone())
                     .expect(&format!("Party {} did not create session store", rbc.id))
             };
 
@@ -535,7 +535,7 @@ mod tests {
                 let store_map = avid.store.lock().await;
                 store_map
                     .get(&session_id)
-                    .cloned()
+                    .map(|(_, arc)| arc.clone())
                     .expect(&format!("Party {} did not create session store", avid.id))
             };
 

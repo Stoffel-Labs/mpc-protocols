@@ -18,6 +18,8 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+// const MAX_RBC_SESSIONS: usize = 1024;
+
 ///--------------------------Bracha RBC--------------------------
 ///
 /// Protocol works as follows(m is the message to broadcast) :
@@ -32,11 +34,11 @@ use tracing::{debug, error, info, warn};
 /// 4. Party on recieving 2t+1 (READY, m) output m and terminate
 #[derive(Clone)]
 pub struct Bracha<Id: ProtocolSessionId + 'static> {
-    pub id: usize,                                               // The ID of the initiator
-    pub n: usize, // Total number of parties in the network
-    pub t: usize, // Number of allowed malicious parties
-    pub k: usize, //threshold (Not really used in Bracha)
-    pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<BrachaStore>>>>>, // Stores the session state
+    pub id: usize, // The ID of the initiator
+    pub n: usize,  // Total number of parties in the network
+    pub t: usize,  // Number of allowed malicious parties
+    pub k: usize,  //threshold (Not really used in Bracha)
+    pub store: Arc<Mutex<HashMap<Id, (usize, Arc<Mutex<BrachaStore>>)>>>, // Stores the session state
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
 }
@@ -77,11 +79,11 @@ where
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let store = self.store.lock().await;
 
-        let output_store = store
+        let (_, arc) = store
             .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
-        let store_lock = output_store.lock().await;
+        let store_lock = arc.lock().await;
 
         if !store_lock.ended {
             return Err(RbcError::Internal("Rbc has not terminated".to_string()));
@@ -184,7 +186,10 @@ where
         );
 
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -236,7 +241,10 @@ where
         let mut broadcast_ready: Option<Msg<Id>> = None;
         let mut broadcast_echo: Option<Msg<Id>> = None;
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -332,7 +340,10 @@ where
         let mut send_output: Option<Vec<u8>> = None;
 
         // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -428,12 +439,38 @@ where
 
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: Id) -> Option<Arc<Mutex<BrachaStore>>> {
+    async fn get_or_create_store(
+        &self,
+        session_id: Id,
+        sender_id: usize,
+    ) -> Option<Arc<Mutex<BrachaStore>>> {
         let store_lock = {
             let mut store = self.store.lock().await;
+            // TODO: restore session limits
+            // if !store.contains_key(&session_id) {
+            //     if store.len() >= MAX_RBC_SESSIONS {
+            //         warn!(
+            //             id = self.id,
+            //             session_id = session_id.as_u64(),
+            //             "Bracha session limit reached, dropping message"
+            //         );
+            //         return None;
+            //     }
+            //     let per_peer_limit = MAX_RBC_SESSIONS / self.n;
+            //     let peer_count = store.values().filter(|(id, _)| *id == sender_id).count();
+            //     if peer_count >= per_peer_limit {
+            //         warn!(
+            //             id = self.id,
+            //             session_id = session_id.as_u64(),
+            //             "Bracha per-peer session limit reached, dropping message"
+            //         );
+            //         return None;
+            //     }
+            // }
             store
                 .entry(session_id)
-                .or_insert_with(|| Arc::new(Mutex::new(BrachaStore::default())))
+                .or_insert_with(|| (sender_id, Arc::new(Mutex::new(BrachaStore::default()))))
+                .1
                 .clone()
         };
 
@@ -520,11 +557,11 @@ where
 
 #[derive(Clone)]
 pub struct Avid<Id: ProtocolSessionId> {
-    pub id: usize,                                             //Initiators ID
-    pub n: usize,                                              //Network size
-    pub t: usize,                                              //No. of malicious parties
-    pub k: usize,                                              //Threshold
-    pub store: Arc<Mutex<HashMap<Id, Arc<Mutex<AvidStore>>>>>, // Sessionid => store
+    pub id: usize,                                                      //Initiators ID
+    pub n: usize,                                                       //Network size
+    pub t: usize,                                                       //No. of malicious parties
+    pub k: usize,                                                       //Threshold
+    pub store: Arc<Mutex<HashMap<Id, (usize, Arc<Mutex<AvidStore>>)>>>, // Sessionid => store
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
 }
@@ -575,11 +612,11 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let store = self.store.lock().await;
 
-        let output_store = store
+        let (_, arc) = store
             .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
-        let store_lock = output_store.lock().await;
+        let store_lock = arc.lock().await;
 
         if !store_lock.ended {
             return Err(RbcError::Internal("Rbc has not terminated".to_string()));
@@ -605,7 +642,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
         //Generating shards for the message to be broadcasted, here we are using Reed Solomon erasure coding
         let shards = encode_rs(payload.clone(), self.k, self.n - self.k)?;
         //Generating the merkle tree out of the shards
-        let tree = gen_merkletree(shards.clone());
+        let tree = gen_merkletree(&shards);
         let root = tree.root().ok_or_else(|| {
             RbcError::Internal(format!("Merkle root missing for session {:?}", session_id))
         })?;
@@ -694,8 +731,44 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         if msg.metadata.len() < 32 {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
-        // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        // Read-only dedup check: if the session already exists and echo was sent, skip.
+        {
+            let store = self.store.lock().await;
+            if let Some((_, session_store)) = store.get(&msg.session_id) {
+                let session = session_store.lock().await;
+                if session.ended || session.echo {
+                    return Ok(());
+                }
+            }
+        }
+        // Verify Merkle proof before allocating session state.
+        match verify_merkle(self.id, self.n, msg.metadata.clone(), msg.payload.clone()) {
+            Ok(true) => {}
+            Ok(false) => {
+                error!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u128(),
+                    sender = msg.sender_id,
+                    "Merkle proof verification failed on SEND message"
+                );
+                return Err(RbcError::Internal("Merkle proof failed in SEND".into()));
+            }
+            Err(e) => {
+                error!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u128(),
+                    sender = msg.sender_id,
+                    error = %e,
+                    "Error during Merkle proof verification"
+                );
+                return Err(RbcError::ShardError(e));
+            }
+        }
+        // Safe to allocate session state now that the proof is valid.
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -706,55 +779,25 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 return Ok(());
             }
         };
-
-        // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
-
-        // Only broadcast the ECHO if it hasn't already been sent.
         if !store.echo {
-            //Verify the merkle path(fingerprint) against shared root for the given shard
-            match verify_merkle(self.id, self.n, msg.metadata.clone(), msg.payload.clone()) {
-                Ok(true) => {
-                    //Create echo message
-                    let msg = Msg::new(
-                        self.id,
-                        msg.session_id,
-                        msg.round_id,
-                        msg.payload,
-                        msg.metadata,
-                        GenericMsgType::Avid(MsgTypeAvid::Echo),
-                    );
-                    store.mark_echo(); // Mark that ECHO has been sent to avoid resending it
-                    info!(
-                        id = self.id,
-                        session_id = ?msg.session_id,
-                        msg_type = "ECHO",
-                        "Broadcasting ECHO in response to SEND"
-                    );
-                    drop(store);
-                    //Send message to every party
-                    self.broadcast(msg, net).await?;
-                }
-                Ok(false) => {
-                    error!(
-                        id = self.id,
-                        session_id = msg.session_id.as_u128(),
-                        sender = msg.sender_id,
-                        "Merkle proof verification failed on SEND message"
-                    );
-                    return Err(RbcError::Internal("Merkle proof failed in SEND".into()));
-                }
-                Err(e) => {
-                    error!(
-                        id = self.id,
-                        session_id = msg.session_id.as_u128(),
-                        sender = msg.sender_id,
-                        error = %e,
-                        "Error during Merkle proof verification"
-                    );
-                    return Err(RbcError::ShardError(e));
-                }
-            };
+            let msg = Msg::new(
+                self.id,
+                msg.session_id,
+                msg.round_id,
+                msg.payload,
+                msg.metadata,
+                GenericMsgType::Avid(MsgTypeAvid::Echo),
+            );
+            store.mark_echo();
+            info!(
+                id = self.id,
+                session_id = ?msg.session_id,
+                msg_type = "ECHO",
+                "Broadcasting ECHO in response to SEND"
+            );
+            drop(store);
+            self.broadcast(msg, net).await?;
         }
         Ok(())
     }
@@ -774,8 +817,53 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         if msg.metadata.len() < 32 {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
-        // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        // Read-only dedup check: if the session already exists and this sender's echo was seen, skip.
+        {
+            let store = self.store.lock().await;
+            if let Some((_, session_store)) = store.get(&msg.session_id) {
+                let session = session_store.lock().await;
+                if session.ended || session.has_echo(msg.sender_id) {
+                    return Ok(());
+                }
+            }
+        }
+        // Verify Merkle proof before allocating session state.
+        let root = msg.metadata[0..32].to_vec();
+        let proof_bytes = msg.metadata[32..].to_vec();
+        match verify_merkle(
+            msg.sender_id,
+            self.n,
+            msg.metadata.clone(),
+            msg.payload.clone(),
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    id = self.id,
+                    session_id = ?msg.session_id,
+                    sender = msg.sender_id,
+                    "Merkle verification failed for ECHO"
+                );
+                return Err(RbcError::Internal(
+                    "Merkle verification failed in ECHO".into(),
+                ));
+            }
+            Err(e) => {
+                warn!(
+                    id = self.id,
+                    session_id = ?msg.session_id,
+                    sender = msg.sender_id,
+                    error = %e,
+                    "Merkle verification threw error"
+                );
+                return Err(RbcError::ShardError(e));
+            }
+        }
+        // Safe to allocate session state now that the proof is valid.
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -786,73 +874,22 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 return Ok(());
             }
         };
-        // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
-
-        // Ignore the message if the session has already ended.
-        if store.ended {
-            debug!(
-                id = self.id,
-                session_id = ?msg.session_id,
-                "Session already ended, ignoring ECHO"
-            );
+        if store.ended || store.has_echo(msg.sender_id) {
             return Ok(());
         }
-        // If this sender has not already sent an ECHO, process it.
-        if !store.has_echo(msg.sender_id) {
-            let root = &msg.metadata[0..32];
-            let proof_bytes = &msg.metadata[32..];
+        store.insert_shard(root.clone(), msg.sender_id, msg.payload.clone(), self.k)?;
+        store.insert_fingerprint(root.clone(), msg.sender_id, proof_bytes);
+        store.increment_echo(&root);
+        store.set_echo_sent(msg.sender_id);
 
-            //Verify merkle proof
-            match verify_merkle(
-                msg.sender_id,
-                self.n,
-                msg.metadata.clone(),
-                msg.payload.clone(),
-            ) {
-                Ok(true) => {
-                    //Store fingerprint and shard
-                    store.insert_shard(root.to_vec(), msg.sender_id, msg.payload.clone());
-                    store.insert_fingerprint(root.to_vec(), msg.sender_id, proof_bytes.to_vec());
-                    //Increment echo count
-                    store.increment_echo(root);
-                    // Mark this sender as having sent an ECHO.
-                    store.set_echo_sent(msg.sender_id);
-
-                    let echo_count = store.get_echo_count(root);
-                    let ready_count = store.get_ready_count(root);
-                    //compact way to compute ceil((n + t + 1) / 2) using integer arithmetic
-                    let threshold = usize::max((self.n + self.t + 2) / 2, self.k);
-                    // READY broadcast logic
-                    if echo_count == threshold && ready_count < self.k {
-                        //Send ready logic
-                        let shards_map = store.get_shards_for_root(&root.to_vec());
-                        drop(store);
-                        self.send_ready(msg, shards_map, net).await?;
-                    }
-                }
-                Ok(false) => {
-                    warn!(
-                        id = self.id,
-                        session_id = ?msg.session_id,
-                        sender = msg.sender_id,
-                        "Merkle verification failed for ECHO"
-                    );
-                    return Err(RbcError::Internal(
-                        "Merkle verification failed in ECHO".into(),
-                    ));
-                }
-                Err(e) => {
-                    warn!(
-                        id = self.id,
-                        session_id = ?msg.session_id,
-                        sender = msg.sender_id,
-                        error = %e,
-                        "Merkle verification threw error"
-                    );
-                    return Err(RbcError::ShardError(e));
-                }
-            }
+        let echo_count = store.get_echo_count(&root);
+        let ready_count = store.get_ready_count(&root);
+        let threshold = usize::max((self.n + self.t + 2) / 2, self.k);
+        if echo_count == threshold && ready_count < self.k {
+            let shards_map = store.get_shards_for_root(&root);
+            drop(store);
+            self.send_ready(msg, shards_map, net).await?;
         }
         Ok(())
     }
@@ -872,11 +909,53 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         if msg.metadata.len() < 32 {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
         }
-        let mut send_shards_map: Option<HashMap<usize, Vec<u8>>> = None;
-        let mut send_output: Option<Vec<u8>> = None;
-
-        // Lock the session store to update the session state.
-        let session_store = match self.get_or_create_store(msg.session_id).await {
+        // Read-only dedup check: if the session already exists and this sender's ready was seen, skip.
+        {
+            let store = self.store.lock().await;
+            if let Some((_, session_store)) = store.get(&msg.session_id) {
+                let session = session_store.lock().await;
+                if session.ended || session.has_ready(msg.sender_id) {
+                    return Ok(());
+                }
+            }
+        }
+        // Verify Merkle proof before allocating session state.
+        let root = msg.metadata[0..32].to_vec();
+        let proof_bytes = msg.metadata[32..].to_vec();
+        match verify_merkle(
+            msg.sender_id,
+            self.n,
+            msg.metadata.clone(),
+            msg.payload.clone(),
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u128(),
+                    sender = msg.sender_id,
+                    "Merkle verification failed in READY handler"
+                );
+                return Err(RbcError::Internal(
+                    "Merkle verification failed in READY".into(),
+                ));
+            }
+            Err(e) => {
+                warn!(
+                    id = self.id,
+                    session_id = msg.session_id.as_u128(),
+                    sender = msg.sender_id,
+                    error = %e,
+                    "Error during Merkle verification in READY handler"
+                );
+                return Err(RbcError::ShardError(e));
+            }
+        }
+        // Safe to allocate session state now that the proof is valid.
+        let session_store = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
             Some(s) => s,
             None => {
                 debug!(
@@ -887,107 +966,50 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 return Ok(());
             }
         };
-        // Lock the session-specific store to access or update the session state.
         let mut store = session_store.lock().await;
-
-        // Ignore the message if the session has already ended.
-        if store.ended {
-            debug!(
-                id = self.id,
-                session_id = msg.session_id.as_u128(),
-                "Session already ended, ignoring READY"
-            );
+        if store.ended || store.has_ready(msg.sender_id) {
             return Ok(());
         }
-        // If this sender has not already sent a READY, process it.
-        if !store.has_ready(msg.sender_id) {
-            let root = &msg.metadata[0..32];
-            let proof_bytes = &msg.metadata[32..];
 
-            //Verify merkle proof
-            match verify_merkle(
-                msg.sender_id,
-                self.n,
-                msg.metadata.clone(),
-                msg.payload.clone(),
-            ) {
-                Ok(true) => {
-                    //Store fingerprint and shard
-                    store.insert_shard(root.to_vec(), msg.sender_id, msg.payload.clone());
-                    store.insert_fingerprint(
-                        msg.metadata[0..32].to_vec(),
-                        msg.sender_id,
-                        proof_bytes.to_vec(),
-                    );
-                    //Increment ready count
-                    store.increment_ready(root);
-                    // Mark this sender as having sent an READY.
-                    store.set_ready_sent(msg.sender_id);
+        let mut send_shards_map: Option<HashMap<usize, Vec<u8>>> = None;
+        let mut send_output: Option<Vec<u8>> = None;
 
-                    let echo_count = store.get_echo_count(root);
-                    let ready_count = store.get_ready_count(root);
-                    //compact way to compute ceil((n + t + 1) / 2) using integer arithmetic
-                    let threshold = usize::max((self.n + self.t + 2) / 2, self.k);
+        store.insert_shard(root.clone(), msg.sender_id, msg.payload.clone(), self.k)?;
+        store.insert_fingerprint(root.clone(), msg.sender_id, proof_bytes);
+        store.increment_ready(&root);
+        store.set_ready_sent(msg.sender_id);
 
-                    // READY broadcast logic
-                    if echo_count < threshold && ready_count == self.k {
-                        //Send ready logic
-                        let shards_map = store.get_shards_for_root(&root.to_vec());
-                        send_shards_map = Some(shards_map);
-                    }
+        let echo_count = store.get_echo_count(&root);
+        let ready_count = store.get_ready_count(&root);
+        let threshold = usize::max((self.n + self.t + 2) / 2, self.k);
 
-                    // Final consensus stage: enough READY messages to reconstruct
-                    if ready_count >= (self.k + self.t) && !store.ended {
-                        let shards = decode_rs(
-                            store.get_shards_for_root(&root.to_vec()),
-                            self.k,
-                            self.n - self.k,
-                        )?;
-                        //Reconstruct the original message to be broadcasted
-                        let output = reconstruct_payload(shards, self.k)?;
-                        store.mark_ended(); //Terminate broadcast
-                        store.set_output(output.clone()); //store the output
-                        send_output = Some(output);
-                    }
-                    drop(store);
-                    if let Some(m) = send_shards_map {
-                        self.send_ready(msg.clone(), m, net.clone()).await?;
-                    }
-                    if let Some(m) = send_output {
-                        info!(
-                            id = self.id,
-                            session_id = msg.session_id.as_u128(),
-                            output = ?m,
-                            "Consensus achieved; AVID instance ended"
-                        );
-                        self.output_sender
-                            .send(msg.session_id)
-                            .await
-                            .map_err(|_| RbcError::SendError)?;
-                    }
-                }
-                Ok(false) => {
-                    warn!(
-                        id = self.id,
-                        session_id = msg.session_id.as_u128(),
-                        sender = msg.sender_id,
-                        "Merkle verification failed in READY handler"
-                    );
-                    return Err(RbcError::Internal(
-                        "Merkle verification failed in READY".into(),
-                    ));
-                }
-                Err(e) => {
-                    warn!(
-                        id = self.id,
-                        session_id = msg.session_id.as_u128(),
-                        sender = msg.sender_id,
-                        error = %e,
-                        "Error during Merkle verification in READY handler"
-                    );
-                    return Err(RbcError::ShardError(e));
-                }
-            }
+        if echo_count < threshold && ready_count == self.k {
+            let shards_map = store.get_shards_for_root(&root);
+            send_shards_map = Some(shards_map);
+        }
+
+        if ready_count >= (self.k + self.t) && !store.ended {
+            let shards = decode_rs(store.get_shards_for_root(&root), self.k, self.n - self.k)?;
+            let output = reconstruct_payload(shards, self.k)?;
+            store.mark_ended();
+            store.set_output(output.clone());
+            send_output = Some(output);
+        }
+        drop(store);
+        if let Some(m) = send_shards_map {
+            self.send_ready(msg.clone(), m, net.clone()).await?;
+        }
+        if let Some(m) = send_output {
+            info!(
+                id = self.id,
+                session_id = msg.session_id.as_u128(),
+                output = ?m,
+                "Consensus achieved; AVID instance ended"
+            );
+            self.output_sender
+                .send(msg.session_id)
+                .await
+                .map_err(|_| RbcError::SendError)?;
         }
         Ok(())
     }
@@ -1009,7 +1031,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
 
         // When a server reconstructs a shard, it also reconstructs the corresponding
         // hashes on the path from j to the root, and uses them for later verification
-        match generate_merkle_proofs_map(shards.clone()) {
+        match generate_merkle_proofs_map(&shards) {
             Ok(proof_map) => {
                 // Get fingerprint for self, for creating message later
                 let self_proof = proof_map.get(&(self.id)).cloned().unwrap_or_else(|| {
@@ -1079,12 +1101,38 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         self.broadcast(ready_msg, net).await?;
         Ok(())
     }
-    async fn get_or_create_store(&self, session_id: Id) -> Option<Arc<Mutex<AvidStore>>> {
+    async fn get_or_create_store(
+        &self,
+        session_id: Id,
+        sender_id: usize,
+    ) -> Option<Arc<Mutex<AvidStore>>> {
         let store_lock = {
             let mut store = self.store.lock().await;
+            // TODO: restore session limits
+            // if !store.contains_key(&session_id) {
+            //     if store.len() >= MAX_RBC_SESSIONS {
+            //         warn!(
+            //             id = self.id,
+            //             session_id = session_id.as_u64(),
+            //             "Avid session limit reached, dropping message"
+            //         );
+            //         return None;
+            //     }
+            //     let per_peer_limit = MAX_RBC_SESSIONS / self.n;
+            //     let peer_count = store.values().filter(|(id, _)| *id == sender_id).count();
+            //     if peer_count >= per_peer_limit {
+            //         warn!(
+            //             id = self.id,
+            //             session_id = session_id.as_u64(),
+            //             "Avid per-peer session limit reached, dropping message"
+            //         );
+            //         return None;
+            //     }
+            // }
             store
                 .entry(session_id)
-                .or_insert_with(|| Arc::new(Mutex::new(AvidStore::default())))
+                .or_insert_with(|| (sender_id, Arc::new(Mutex::new(AvidStore::default()))))
+                .1
                 .clone()
         };
         {

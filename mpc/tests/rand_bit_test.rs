@@ -67,7 +67,10 @@ async fn rand_bit_with_small_field_e2e() {
     let mut all_outputs = Vec::new();
 
     for node in &nodes {
-        let store = node.get_or_create_storage(session_id).await.unwrap();
+        let store = node
+            .get_or_create_storage(session_id, node.id)
+            .await
+            .unwrap();
         let id = node.id;
         let s = store.lock().await;
 

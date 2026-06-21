@@ -97,7 +97,7 @@ async fn randousha_e2e() {
             let store = node
                 .preprocess
                 .ran_dou_sha
-                .get_or_create_store(session_id)
+                .get_or_create_store(session_id, node.id)
                 .await
                 .unwrap();
 
@@ -169,7 +169,7 @@ async fn ransha_e2e() {
             let store = node
                 .preprocess
                 .share_gen
-                .get_or_create_store(session_id)
+                .get_or_create_store(session_id, node.id)
                 .await
                 .unwrap();
 
@@ -380,7 +380,7 @@ async fn gen_masks_for_input_e2e() {
             let store = node
                 .preprocess
                 .share_gen
-                .get_or_create_store(session_id)
+                .get_or_create_store(session_id, node.id)
                 .await
                 .unwrap();
 
@@ -402,7 +402,7 @@ async fn gen_masks_for_input_e2e() {
         let local_store = node
             .preprocess
             .share_gen
-            .get_or_create_store(session_id)
+            .get_or_create_store(session_id, node.id)
             .await
             .unwrap();
         let local_shares = local_store.lock().await.protocol_output.clone();
@@ -1035,7 +1035,7 @@ async fn test_rand_bit() {
             .lock()
             .await
             .get(&session_id)
-            .cloned();
+            .map(|(_, arc)| arc.clone());
         if let Some(store) = store {
             let store_lock = store.lock().await;
             let protocol_output = store_lock.protocol_output.clone();

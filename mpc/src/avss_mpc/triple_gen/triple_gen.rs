@@ -17,7 +17,7 @@ use tokio::sync::{
     mpsc::{self},
     Mutex,
 };
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Clone, Debug)]
 pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
@@ -26,8 +26,10 @@ pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
     pub threshold: usize,
     pub avss: AvssNode<F, R, C, AvssSessionId>,
     pub avss_output: Arc<Mutex<mpsc::Receiver<AvssSessionId>>>,
-    pub store: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<TripleGenStore<F, C>>>>>>,
+    pub store: Arc<Mutex<HashMap<AvssSessionId, (usize, Arc<Mutex<TripleGenStore<F, C>>>)>>>,
 }
+
+// pub static MAX_AVSS_TRIPLE_GEN_SESSIONS: usize = 256;
 
 impl<F, R, C> TripleGenNode<F, R, C>
 where
@@ -46,6 +48,7 @@ where
         let avss = AvssNode::new(
             id,
             n_parties,
+            (1..=n_parties).collect(),
             threshold,
             sk_i,
             pk_map,
@@ -67,17 +70,31 @@ where
     async fn get_or_create_store(
         &mut self,
         sid: AvssSessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<TripleGenStore<F, C>>>, TripleGenError> {
         let mut map = self.store.lock().await;
-        if map.len() >= 256 && !map.contains_key(&sid) {
-            warn!("AVSS TripleGen session limit reached");
-            return Err(TripleGenError::LimitError);
-        }
+
+        // TODO: restore session limits
+        // if !map.contains_key(&sid) {
+        //     if map.len() >= MAX_AVSS_TRIPLE_GEN_SESSIONS {
+        //         warn!("AVSS TripleGen session limit reached");
+        //         return Err(TripleGenError::LimitError);
+        //     }
+        //     let per_peer_limit = MAX_AVSS_TRIPLE_GEN_SESSIONS / self.n_parties;
+        //     let peer_count = map.values().filter(|(id, _)| *id == initiator_id).count();
+        //     if peer_count >= per_peer_limit {
+        //         warn!("AVSS TripleGen per-peer session limit reached");
+        //         return Err(TripleGenError::LimitError);
+        //     }
+        // }
+
         Ok(map
             .entry(sid)
-            .or_insert(Arc::new(Mutex::new(TripleGenStore::empty(
-                2 * self.threshold + 1,
-            ))))
+            .or_insert((
+                initiator_id,
+                Arc::new(Mutex::new(TripleGenStore::empty(2 * self.threshold + 1))),
+            ))
+            .1
             .clone())
     }
 
@@ -128,7 +145,7 @@ where
         }
 
         // Create store once
-        let store_ref = self.get_or_create_store(session_id).await?;
+        let store_ref = self.get_or_create_store(session_id, self.id).await?;
         let xs: Vec<F> = (0..m).map(|i| F::from((i + 1) as u64)).collect();
 
         // === Step 3: collect dealer outputs, then lagrange-combine component-wise ===
@@ -147,7 +164,8 @@ where
 
             let dealer = done.sub_id() as usize;
             if dealer >= m {
-                continue; // ignore non-dealer sub-sessions
+                self.avss.shares.lock().await.remove(&done);
+                continue;
             }
 
             let mut avss_map = self.avss.shares.lock().await;

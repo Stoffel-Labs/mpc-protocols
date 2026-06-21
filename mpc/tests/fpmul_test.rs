@@ -109,7 +109,7 @@ async fn test_prandbitd_end_to_end() {
     let domain_2 = Gf256Domain::new(n).unwrap();
 
     for node in &mut nodes {
-        let binding = node.get_or_create_store(session_id).await.unwrap();
+        let binding = node.get_or_create_store(session_id, node.id).await.unwrap();
         let store = binding.lock().await;
         assert_eq!(
             store.share_b_2.len(),
@@ -138,7 +138,7 @@ async fn test_prandbitd_end_to_end() {
     let mut shares = vec![Vec::new(); batch_size];
 
     for node in &mut nodes {
-        let binding = node.get_or_create_store(session_id).await.unwrap();
+        let binding = node.get_or_create_store(session_id, node.id).await.unwrap();
         {
             let store = binding.lock().await;
 
@@ -240,7 +240,7 @@ async fn test_prandbitd_r_reconstruction() {
     // === Step 1: Collect all r_T values from all nodes ===
     let mut all_r_t: HashMap<Vec<usize>, Vec<BigUint>> = HashMap::new();
     for node in &mut nodes {
-        let binding = node.get_or_create_store(session_id).await.unwrap();
+        let binding = node.get_or_create_store(session_id, node.id).await.unwrap();
         let store = binding.lock().await;
         for (tset, val) in &store.r_t {
             // all parties that know this T should agree
@@ -278,7 +278,7 @@ async fn test_prandbitd_r_reconstruction() {
             vec![Vec::with_capacity(needed); batch_size];
 
         for &id in &combo {
-            let binding = nodes[id].get_or_create_store(session_id).await.unwrap();
+            let binding = nodes[id].get_or_create_store(session_id, id).await.unwrap();
             let store = binding.lock().await;
             let share = store.share_r_q.clone().expect("missing share_r_q");
 
@@ -308,7 +308,7 @@ async fn test_prandbitd_r_reconstruction() {
 
     let mut shares_r2 = Vec::new();
     for node in &mut nodes {
-        let binding = node.get_or_create_store(session_id).await.unwrap();
+        let binding = node.get_or_create_store(session_id, node.id).await.unwrap();
         let store = binding.lock().await;
         shares_r2.push((node.id, store.share_r_2.clone().expect("missing share_r_2")));
     }
@@ -337,7 +337,7 @@ async fn test_prandbitd_r_reconstruction() {
 
     // === Step 5: Per-node sanity: recompute share_r_2 from r_T values ===
     for node in &mut nodes {
-        let binding = node.get_or_create_store(session_id).await.unwrap();
+        let binding = node.get_or_create_store(session_id, node.id).await.unwrap();
         let store = binding.lock().await;
         let tsets: Vec<Vec<usize>> = store.r_t.keys().cloned().collect();
         let poly_f2 = build_all_f_polys_2_8(n, tsets).unwrap();
@@ -434,7 +434,7 @@ async fn test_truncpr_end_to_end() {
     let mut shares = Vec::new();
 
     for node in &mut nodes {
-        let store = node.get_or_create_store(session_id).await.unwrap();
+        let store = node.get_or_create_store(session_id, node.id).await.unwrap();
         let s = store.lock().await;
 
         assert!(s.share_d.is_some(), "Node {:?} missing share_d", node.id);

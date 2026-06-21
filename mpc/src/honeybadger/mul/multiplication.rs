@@ -143,12 +143,14 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub mult_storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<MultStorage<F>>>>>>,
+    pub mult_storage: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<MultStorage<F>>>)>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
+
+// pub static MAX_MUL_SESSIONS: usize = 256;
 
 impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
@@ -280,7 +282,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             let store = self.mult_storage.lock().await;
             match store.get(&session_id) {
                 Some(storage) => {
-                    let storage = storage.lock().await;
+                    let storage = storage.1.lock().await;
                     storage.no_of_mul.unwrap_or(0) / (self.t + 1)
                 }
                 None => return Err(MulError::ClearStoreError(session_id)),
@@ -361,7 +363,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         let share_len = x.len() % (self.t + 1);
 
         // 1.
-        let storage_bind = self.get_or_create_mult_storage(session_id).await?;
+        let storage_bind = self.get_or_create_mult_storage(session_id, self.id).await?;
         let mut storage = storage_bind.lock().await;
 
         // 2. Batch reconstruction is batched: one session for all a-x values (dealer/sub_id 0)
@@ -518,7 +520,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         );
 
         // 1.
-        let storage_bind = self.get_or_create_mult_storage(session_id).await?;
+        let storage_bind = self.get_or_create_mult_storage(session_id, sender).await?;
         let mut storage = storage_bind.lock().await;
 
         if storage.protocol_state == MultProtocolState::Finished {
@@ -646,12 +648,31 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     pub async fn get_or_create_mult_storage(
         &self,
         session_id: SessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<MultStorage<F>>>, MulError> {
         let mut storage = self.mult_storage.lock().await;
 
+        // TODO: restore session limits
+        // if !storage.contains_key(&session_id) {
+        //     if storage.len() >= MAX_MUL_SESSIONS {
+        //         warn!("Mul session limit reached");
+        //         return Err(MulError::LimitError);
+        //     }
+        //     let per_peer_limit = MAX_MUL_SESSIONS / self.n;
+        //     let peer_count = storage
+        //         .values()
+        //         .filter(|(id, _)| *id == initiator_id)
+        //         .count();
+        //     if peer_count >= per_peer_limit {
+        //         warn!("Mul per-peer session limit reached");
+        //         return Err(MulError::LimitError);
+        //     }
+        // }
+
         Ok(storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(MultStorage::empty())))
+            .or_insert((initiator_id, Arc::new(Mutex::new(MultStorage::empty()))))
+            .1
             .clone())
     }
 
@@ -665,7 +686,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         let output_receiver = {
             let mult_storage = self.mult_storage.lock().await;
             let storage_bind = match mult_storage.get(&session_id) {
-                Some(value) => value,
+                Some((_, arc)) => arc,
                 None => return Err(MulError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -930,7 +951,7 @@ pub mod tests {
 
         loop {
             let storage_bind = nodes[node_id]
-                .get_or_create_mult_storage(session_id)
+                .get_or_create_mult_storage(session_id, node_id)
                 .await
                 .unwrap();
             let storage = storage_bind.lock().await;
@@ -968,7 +989,7 @@ pub mod tests {
             .is_ok());
 
         let storage_bind = nodes[node_id]
-            .get_or_create_mult_storage(session_id)
+            .get_or_create_mult_storage(session_id, node_id)
             .await
             .unwrap();
         let storage = storage_bind.lock().await;
@@ -1102,7 +1123,7 @@ pub mod tests {
         let mul_node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n_parties, t).unwrap();
 
         let storage_bind = mul_node
-            .get_or_create_mult_storage(session_id)
+            .get_or_create_mult_storage(session_id, node_id)
             .await
             .unwrap();
         let mut storage = storage_bind.lock().await;
@@ -1259,7 +1280,10 @@ pub mod tests {
 
         // `clear_store` needs a mult_storage entry; create one for this session.
         {
-            let storage = node.get_or_create_mult_storage(session_id).await.unwrap();
+            let storage = node
+                .get_or_create_mult_storage(session_id, node_id)
+                .await
+                .unwrap();
             storage.lock().await.no_of_mul = Some(no_of_mul);
         }
 
@@ -1305,7 +1329,10 @@ pub mod tests {
         node.batch_output = Arc::new(Mutex::new(stale_rx));
 
         {
-            let storage = node.get_or_create_mult_storage(session_id).await.unwrap();
+            let storage = node
+                .get_or_create_mult_storage(session_id, node_id)
+                .await
+                .unwrap();
             storage.lock().await.no_of_mul = Some(no_of_mul);
         }
 
@@ -1343,7 +1370,7 @@ pub mod tests {
         // Seed the session: init has run, and dealer 3 has already delivered its RBC shares.
         {
             let storage = mul_node
-                .get_or_create_mult_storage(session_id)
+                .get_or_create_mult_storage(session_id, node_id)
                 .await
                 .unwrap();
             let mut s = storage.lock().await;
@@ -1367,7 +1394,7 @@ pub mod tests {
 
         // No double-insert: dealer 3 still has exactly one entry.
         let storage = mul_node
-            .get_or_create_mult_storage(session_id)
+            .get_or_create_mult_storage(session_id, node_id)
             .await
             .unwrap();
         let s = storage.lock().await;

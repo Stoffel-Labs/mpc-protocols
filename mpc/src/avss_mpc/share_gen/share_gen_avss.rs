@@ -25,17 +25,19 @@ use tokio::{
     },
     time::{timeout, Duration},
 };
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Clone, Debug)]
 pub struct RanShaAvssNode<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub store: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<RanShaAvssStore<F, G>>>>>>,
+    pub store: Arc<Mutex<HashMap<AvssSessionId, (usize, Arc<Mutex<RanShaAvssStore<F, G>>>)>>>,
     pub avss: AvssNode<F, R, G, AvssSessionId>,
     pub avss_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
+
+// pub static MAX_RANSHA_AVSS_SESSIONS: usize = 256;
 
 impl<F, R, C> RanShaAvssNode<F, R, C>
 where
@@ -54,6 +56,7 @@ where
         let avss = AvssNode::new(
             id,
             n_parties,
+            (1..=n_parties).collect(),
             threshold,
             sk_i,
             pk_map,
@@ -74,15 +77,34 @@ where
     pub async fn get_or_create_store(
         &mut self,
         session_id: AvssSessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<RanShaAvssStore<F, C>>>, RanShaAvssError> {
         let mut storage = self.store.lock().await;
-        if storage.len() >= 256 && !storage.contains_key(&session_id) {
-            warn!("RanShaAvss session limit reached");
-            return Err(RanShaAvssError::LimitError);
-        }
+
+        // TODO: restore session limits
+        // if !storage.contains_key(&session_id) {
+        //     if storage.len() >= MAX_RANSHA_AVSS_SESSIONS {
+        //         warn!("RanShaAvss session limit reached");
+        //         return Err(RanShaAvssError::LimitError);
+        //     }
+        //     let per_peer_limit = MAX_RANSHA_AVSS_SESSIONS / self.n_parties;
+        //     let peer_count = storage
+        //         .values()
+        //         .filter(|(id, _)| *id == initiator_id)
+        //         .count();
+        //     if peer_count >= per_peer_limit {
+        //         warn!("RanShaAvss per-peer session limit reached");
+        //         return Err(RanShaAvssError::LimitError);
+        //     }
+        // }
+
         Ok(storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(RanShaAvssStore::empty(self.n_parties))))
+            .or_insert((
+                initiator_id,
+                Arc::new(Mutex::new(RanShaAvssStore::empty(self.n_parties))),
+            ))
+            .1
             .clone())
     }
 
@@ -94,7 +116,7 @@ where
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some(value) => value,
+                Some((_, arc)) => arc,
                 None => return Err(RanShaAvssError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -146,15 +168,19 @@ where
                 let mut store = self.avss.shares.lock().await;
                 let avss_share = store.remove(&id).unwrap().unwrap();
                 drop(store);
-                let binding = self.get_or_create_store(session_id).await?;
+                let binding = self.get_or_create_store(session_id, self.id).await?;
                 let mut ransha_storage = binding.lock().await;
                 let sender_id = id.sub_id();
                 if usize::from(sender_id) >= self.n_parties {
                     return Err(RanShaAvssError::InvalidPartyId);
                 }
-                ransha_storage
-                    .initial_shares
-                    .insert(sender_id.into(), avss_share[0].clone());
+                ransha_storage.initial_shares.insert(
+                    sender_id.into(),
+                    avss_share
+                        .first()
+                        .ok_or(RanShaAvssError::InvalidPartyId)?
+                        .clone(),
+                );
 
                 ransha_storage.reception_tracker[sender_id as usize] = true;
                 // Check if the protocol has reached an end
@@ -225,7 +251,7 @@ where
         }
 
         // Store results
-        let bind_store = self.get_or_create_store(session_id).await?;
+        let bind_store = self.get_or_create_store(session_id, self.id).await?;
         let mut store = bind_store.lock().await;
 
         store.computed_r_shares = (0..n)

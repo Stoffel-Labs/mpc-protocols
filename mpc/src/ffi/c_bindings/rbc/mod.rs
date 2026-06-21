@@ -379,7 +379,7 @@ pub extern "C" fn has_bracha_session_ended(
             .block_on(bracha.store.lock());
         let result = store_map.get(&session_id);
         match result {
-            Some(s) => s.clone(),
+            Some((_, arc)) => arc.clone(),
             None => return RbcErrorCode::RbcSessionNotFound,
         }
     };
@@ -406,7 +406,7 @@ pub extern "C" fn get_bracha_output(
             .block_on(bracha.store.lock());
         let result = store_map.get(&session_id);
         match result {
-            Some(s) => s.clone(),
+            Some((_, arc)) => arc.clone(),
             None => return RbcErrorCode::RbcSessionNotFound,
         }
     };
@@ -668,7 +668,7 @@ pub extern "C" fn has_avid_session_ended(
             .block_on(avid.store.lock());
         let result = store_map.get(&session_id);
         match result {
-            Some(s) => s.clone(),
+            Some((_, arc)) => arc.clone(),
             None => return RbcErrorCode::RbcSessionNotFound,
         }
     };
@@ -695,7 +695,7 @@ pub extern "C" fn get_avid_output(
             .block_on(avid.store.lock());
         let result = store_map.get(&session_id);
         match result {
-            Some(s) => s.clone(),
+            Some((_, arc)) => arc.clone(),
             None => return RbcErrorCode::RbcSessionNotFound,
         }
     };

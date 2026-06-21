@@ -135,7 +135,7 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     /// Threshold of corrupted parties.
     pub threshold: usize,
     /// Storage of the node.
-    pub store: Arc<Mutex<BTreeMap<SessionId, Arc<Mutex<RanDouShaStore<F>>>>>>,
+    pub store: Arc<Mutex<BTreeMap<SessionId, (usize, Arc<Mutex<RanDouShaStore<F>>>)>>>,
     ///Avid instance for RBC
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
@@ -184,12 +184,29 @@ where
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<RanDouShaStore<F>>>, RanDouShaError> {
         let mut storage = self.store.lock().await;
 
+        // TODO: restore session limits
+        // if !storage.contains_key(&session_id) {
+        //     if storage.len() >= MAX_RAN_DOU_SHA_SESSIONS {
+        //         return Err(RanDouShaError::LimitError);
+        //     }
+        //     let per_peer_limit = MAX_RAN_DOU_SHA_SESSIONS / self.n_parties;
+        //     let peer_count = storage
+        //         .values()
+        //         .filter(|(id, _)| *id == initiator_id)
+        //         .count();
+        //     if peer_count >= per_peer_limit {
+        //         return Err(RanDouShaError::LimitError);
+        //     }
+        // }
+
         Ok(storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(RanDouShaStore::empty())))
+            .or_insert((initiator_id, Arc::new(Mutex::new(RanDouShaStore::empty()))))
+            .1
             .clone())
     }
 
@@ -251,7 +268,7 @@ where
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some(value) => value,
+                Some((_, arc)) => arc,
                 None => return Err(RanDouShaError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -386,7 +403,7 @@ where
         }
 
         // Save the shares of r of degree t and 2t into the storage.
-        let bind_store = self.get_or_create_store(session_id).await?;
+        let bind_store = self.get_or_create_store(session_id, self.id).await?;
         let mut store = bind_store.lock().await;
         store.batch_size = r_deg_t.len() / self.n_parties;
         store.computed_r_shares_degree_t = r_deg_t.clone();
@@ -487,7 +504,7 @@ where
                 return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
             }
         }
-        let binding = self.get_or_create_store(msg.session_id).await?;
+        let binding = self.get_or_create_store(msg.session_id, sender_id).await?;
         let mut store = binding.lock().await;
         if store.received_r_shares_degree_t.is_empty() {
             store.batch_size = rec_messages.len();
@@ -637,7 +654,9 @@ where
         if !output {
             return Err(RanDouShaError::Abort);
         }
-        let binding = self.get_or_create_store(msg.session_id).await?;
+        let binding = self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await?;
         let mut store = binding.lock().await;
 
         // push to received_ok_msg if sender doesn't exist
@@ -674,6 +693,62 @@ mod tests {
     use ark_serialize::CanonicalSerialize;
     use std::sync::Arc;
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+
+    // // TODO: restore when session limits are re-enabled
+    // // #[tokio::test]
+    // #[allow(dead_code)]
+    // async fn test_randousha_storage_limit_in_reconstruction_handler() {
+    //     let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+    //     let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+    //     let net = Arc::new(FakeNetwork::new(0, inner));
+    //     // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
+    //     let mut exec = 0u8;
+    //     let mut round = 0u8;
+    //     for _ in 0..super::MAX_RAN_DOU_SHA_SESSIONS / 5 {
+    //         let sid = SessionId::new(
+    //             ProtocolType::Randousha,
+    //             SessionId::pack_slot24(exec, 0, round),
+    //             111,
+    //         );
+
+    //         let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
+    //         let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
+    //         let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+
+    //         let mut payload = Vec::new();
+    //         rec_msg.serialize_compressed(&mut payload).unwrap();
+    //         let msg = RanDouShaMessage::new(0, sid, RanDouShaPayload::Reconstruct(payload));
+    //         // Ignore the result, just fill up storage
+    //         let _ = node.reconstruction_handler(msg, net.clone()).await;
+
+    //         // Increment exec and round to ensure unique session IDs
+    //         if round == u8::MAX {
+    //             round = 0;
+    //             exec = exec.wrapping_add(1);
+    //         } else {
+    //             round = round.wrapping_add(1);
+    //         }
+    //     }
+
+    //     // Now try to process a message that would require a new session (should hit the limit)
+    //     let over_sid = SessionId::new(
+    //         ProtocolType::Randousha,
+    //         SessionId::pack_slot24(255, 0, 255),
+    //         0,
+    //     );
+    //     let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
+    //     let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
+    //     let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+    //     let mut payload = Vec::new();
+    //     rec_msg.serialize_compressed(&mut payload).unwrap();
+    //     let msg = RanDouShaMessage::new(0, over_sid, RanDouShaPayload::Reconstruct(payload));
+
+    //     let result = node.reconstruction_handler(msg, net).await;
+    //     assert!(
+    //         matches!(result, Err(RanDouShaError::LimitError)),
+    //         "Should error on exceeding storage limit"
+    //     );
+    // }
 
     #[tokio::test]
     async fn test_randousha_handle_invalid_sub_id() {

@@ -129,7 +129,7 @@ fn ransha_e2e_turmoil() {
                         let store = node
                             .preprocess
                             .share_gen
-                            .get_or_create_store(session_id)
+                            .get_or_create_store(session_id, node.id)
                             .await
                             .unwrap();
                         if store.lock().await.state == RanShaState::Finished {
@@ -150,7 +150,7 @@ fn ransha_e2e_turmoil() {
                 let store = node
                     .preprocess
                     .share_gen
-                    .get_or_create_store(session_id)
+                    .get_or_create_store(session_id, node.id)
                     .await
                     .unwrap();
                 let store = store.lock().await;
@@ -228,7 +228,7 @@ fn ransha_late_message_recreates_cleared_store_turmoil() {
 
             node.preprocess
                 .share_gen
-                .get_or_create_store(session_id)
+                .get_or_create_store(session_id, node.id)
                 .await
                 .unwrap();
             if !node.preprocess.share_gen.clear_store(session_id).await {
@@ -257,7 +257,7 @@ fn ransha_late_message_recreates_cleared_store_turmoil() {
             let resurrected = node
                 .preprocess
                 .share_gen
-                .get_or_create_store(session_id)
+                .get_or_create_store(session_id, node.id)
                 .await
                 .unwrap();
             let resurrected = resurrected.lock().await;
@@ -301,7 +301,7 @@ fn batch_recon_late_message_recreates_cleared_store_turmoil() {
             let (network, _rx) = TurmoilNetwork::new(SenderId::Node(0), inner).await;
             let network_arc = Arc::new(network);
 
-            node.get_or_create_store(session_id).await.unwrap();
+            node.get_or_create_store(session_id, node.id).await.unwrap();
             if !node.clear_store(session_id).await {
                 let _ = tx.send(Err(
                     "expected initial BatchRecon store to be cleared".to_string()
@@ -315,7 +315,11 @@ fn batch_recon_late_message_recreates_cleared_store_turmoil() {
 
             node.process(late_msg, network_arc).await.unwrap();
 
-            let resurrected = node.get_or_create_store(session_id).await.unwrap().unwrap();
+            let resurrected = node
+                .get_or_create_store(session_id, node.id)
+                .await
+                .unwrap()
+                .unwrap();
             let resurrected = resurrected.lock().await;
             if resurrected.evals_received.len() != 1 {
                 let _ = tx.send(Err(
@@ -1208,7 +1212,7 @@ async fn preprocessing_stress_snapshot(
             rand_bit_sessions.len()
         ));
         for (session_id, store) in rand_bit_sessions.iter().take(8) {
-            let store = store.lock().await;
+            let store = store.1.lock().await;
             out.push_str(&format!(
                 "  rand_bit {:?} state={:?} a_len={} output_len={} openings={}\n",
                 session_id,
@@ -1255,7 +1259,7 @@ async fn preprocessing_stress_snapshot(
             rand_bit_mul_sessions.len()
         ));
         for (session_id, store) in rand_bit_mul_sessions.iter().take(8) {
-            let store = store.lock().await;
+            let store = store.1.lock().await;
             out.push_str(&format!(
                 "  rand_bit.mul {:?} state={:?} no_of_mul={:?} inputs=({}, {}) received_shares={} openings={} open_mult1={} open_mult2={}\n",
                 session_id,
@@ -1311,7 +1315,7 @@ async fn preprocessing_stress_snapshot(
         let mut total_evals = 0usize;
         let mut total_reveals = 0usize;
         for (session_id, store) in rand_bit_mul_batch_sessions.iter() {
-            let store = store.lock().await;
+            let store = store.1.lock().await;
             min_sub_id = min_sub_id.min(session_id.sub_id());
             max_sub_id = max_sub_id.max(session_id.sub_id());
             if store.y_j.is_some() {
@@ -1343,7 +1347,7 @@ async fn preprocessing_stress_snapshot(
             total_reveals
         ));
         for (session_id, store) in rand_bit_mul_batch_sessions.iter().take(8) {
-            let store = store.lock().await;
+            let store = store.1.lock().await;
             out.push_str(&format!(
                 "  rand_bit.mul.batch {:?} evals={} reveals={} batch_evals={} batch_reveals={} y_j={} y_j_batch_len={} secrets_len={}\n",
                 session_id,
@@ -1372,7 +1376,7 @@ async fn preprocessing_stress_snapshot(
         let mut total_evals = 0usize;
         let mut total_reveals = 0usize;
         for (_, store) in rand_bit_batch_sessions.iter() {
-            let store = store.lock().await;
+            let store = store.1.lock().await;
             if store.y_j.is_some() {
                 y_j_count += 1;
             }
@@ -1396,7 +1400,7 @@ async fn preprocessing_stress_snapshot(
             total_reveals
         ));
         for (session_id, store) in rand_bit_batch_sessions.iter().take(8) {
-            let store = store.lock().await;
+            let store = store.1.lock().await;
             out.push_str(&format!(
                 "  rand_bit.batch {:?} evals={} reveals={} batch_evals={} batch_reveals={} y_j={} y_j_batch_len={} secrets_len={}\n",
                 session_id,
@@ -2144,7 +2148,7 @@ fn randousha_e2e_turmoil() {
                     let store = node
                         .preprocess
                         .ran_dou_sha
-                        .get_or_create_store(session_id)
+                        .get_or_create_store(session_id, node.id)
                         .await
                         .unwrap();
                     let store = store.lock().await;
@@ -2157,7 +2161,7 @@ fn randousha_e2e_turmoil() {
                 let store = node
                     .preprocess
                     .ran_dou_sha
-                    .get_or_create_store(session_id)
+                    .get_or_create_store(session_id, node.id)
                     .await
                     .unwrap();
                 let store = store.lock().await;
@@ -3087,7 +3091,7 @@ fn ransha_e2e_turmoil_with_hold(
                         let store = node
                             .preprocess
                             .share_gen
-                            .get_or_create_store(session_id)
+                            .get_or_create_store(session_id, node.preprocess.share_gen.id)
                             .await
                             .unwrap();
                         if store.lock().await.state == RanShaState::Finished {
@@ -3108,7 +3112,7 @@ fn ransha_e2e_turmoil_with_hold(
                 let store = node
                     .preprocess
                     .share_gen
-                    .get_or_create_store(session_id)
+                    .get_or_create_store(session_id, node.preprocess.share_gen.id)
                     .await
                     .unwrap();
                 let store = store.lock().await;
@@ -3325,8 +3329,10 @@ fn batch_reconstruction_with_partition(hold_nodes: Vec<usize>, n_parties: usize,
                                         break;
                                     }
 
-                                    let Some(store) =
-                                        node.get_or_create_store(session_id).await.unwrap()
+                                    let Some(store) = node
+                                        .get_or_create_store(session_id, node.id)
+                                        .await
+                                        .unwrap()
                                     else {
                                         continue;
                                     };

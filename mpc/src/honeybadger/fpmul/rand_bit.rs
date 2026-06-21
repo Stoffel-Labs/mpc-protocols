@@ -46,13 +46,14 @@ where
     /// The threshold of corrupted parties.
     pub threshold: usize,
     /// Storage for the protocol.
-    pub storage: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RandBitStorage<F>>>>>>,
+    pub storage: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<RandBitStorage<F>>>)>>>,
     /// Node to execute a secure multiplication.
     pub mult_node: Multiply<F, R>,
     /// Batch reconstruction node to reconstruct `a^2 mod p`.
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
+// pub static MAX_RANDBIT_SESSIONS: usize = 256;
 
 impl<F, R> RandBit<F, R>
 where
@@ -92,12 +93,32 @@ where
     pub async fn get_or_create_storage(
         &self,
         session_id: SessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<RandBitStorage<F>>>, RandBitError> {
         let mut storage = self.storage.lock().await;
 
+        // TODO: restore session limits
+        // if !storage.contains_key(&session_id) {
+        //     if storage.len() >= MAX_RANDBIT_SESSIONS {
+        //         return Err(RandBitError::LimitError(
+        //             "Maximum number of concurrent sessions exceeded".to_string(),
+        //         ));
+        //     }
+        //     let per_peer_limit = MAX_RANDBIT_SESSIONS / self.n_parties;
+        //     let peer_count = storage
+        //         .values()
+        //         .filter(|(id, _)| *id == initiator_id)
+        //         .count();
+        //     if peer_count >= per_peer_limit {
+        //         return Err(RandBitError::LimitError(
+        //             "Per-peer session limit exceeded".to_string(),
+        //         ));
+        //     }
+        // }
         Ok(storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(RandBitStorage::empty())))
+            .or_insert((initiator_id, Arc::new(Mutex::new(RandBitStorage::empty()))))
+            .1
             .clone())
     }
 
@@ -132,7 +153,7 @@ where
         let output_receiver = {
             let storage = self.storage.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some(value) => value,
+                Some((_, arc)) => arc,
                 None => return Err(RandBitError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -152,7 +173,7 @@ where
     async fn try_finalize(&self, session_id: SessionId) -> Result<bool, RandBitError> {
         // ---- phase 1: decide + extract under lock ----
         let (a_share_array, a_square_array) = {
-            let storage_bind = self.get_or_create_storage(session_id).await?;
+            let storage_bind = self.get_or_create_storage(session_id, self.id).await?;
             let storage = storage_bind.lock().await;
 
             if storage.protocol_state == ProtocolState::Finished {
@@ -199,7 +220,7 @@ where
         }
 
         // ---- phase 3: commit + send under lock (once) ----
-        let storage_bind = self.get_or_create_storage(session_id).await?;
+        let storage_bind = self.get_or_create_storage(session_id, self.id).await?;
         let mut storage = storage_bind.lock().await;
 
         if storage.protocol_state == ProtocolState::Finished {
@@ -239,7 +260,7 @@ where
 
         // Mark the protocol as initialized.
         {
-            let storage_bind = self.get_or_create_storage(session_id).await?;
+            let storage_bind = self.get_or_create_storage(session_id, self.id).await?;
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.a_share = Some(a.clone());
@@ -293,7 +314,7 @@ where
             SessionId::pack_slot(sid.exec_id(), 0, 0),
             sid.instance_id(),
         );
-        let storage_bind = self.get_or_create_storage(session_id).await?;
+        let storage_bind = self.get_or_create_storage(session_id, self.id).await?;
         let mut storage = storage_bind.lock().await;
         if storage.protocol_state == ProtocolState::Finished {
             return Ok(());
@@ -318,3 +339,39 @@ where
         return Ok(());
     }
 }
+
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use crate::common::rbc::rbc::Avid;
+//     use ark_bls12_381::Fr;
+
+//     // TODO: restore when session limits are re-enabled
+//     // #[tokio::test]
+//     #[allow(dead_code)]
+//     async fn test_randbit_storage_limit() {
+//         let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
+
+//         // Fill up storage to the per-peer limit (256 / n_parties = 51 sessions)
+//         for i in 0u8..51 {
+//             let session_id = SessionId::new(
+//                 crate::honeybadger::ProtocolType::RandBit,
+//                 SessionId::pack_slot24(i, 0, 0),
+//                 111,
+//             );
+//             let _ = node.get_or_create_storage(session_id, 0).await;
+//         }
+
+//         // The 52nd session from the same peer should fail
+//         let session_id = SessionId::new(
+//             crate::honeybadger::ProtocolType::RandBit,
+//             SessionId::pack_slot24(0, 1, 0),
+//             111,
+//         );
+//         let result = node.get_or_create_storage(session_id, 0).await;
+//         assert!(
+//             matches!(result, Err(RandBitError::LimitError(_))),
+//             "Should error on exceeding storage limit"
+//         );
+//     }
+// }

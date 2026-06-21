@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+use super::{ShardError, MAX_PAYLOAD_SIZE};
 use crate::common::ProtocolSessionId;
 /// Generic message type used in Reliable Broadcast (RBC) communication.
 ///
@@ -291,11 +292,26 @@ impl AvidStore {
     }
 
     /// Inserts a shard for a given root and sender ID
-    pub fn insert_shard(&mut self, root: Vec<u8>, sender_id: usize, shard: Vec<u8>) {
+    pub fn insert_shard(
+        &mut self,
+        root: Vec<u8>,
+        sender_id: usize,
+        shard: Vec<u8>,
+        data_shards: usize,
+    ) -> Result<(), ShardError> {
+        let max_shard_size = (MAX_PAYLOAD_SIZE + 8 + data_shards - 1) / data_shards;
+        if shard.len() > max_shard_size {
+            return Err(ShardError::Config(format!(
+                "Shard from {} exceeds maximum allowed size ({})",
+                sender_id,
+                shard.len()
+            )));
+        }
         self.shards
             .entry(root)
             .or_default()
             .insert(sender_id, shard);
+        Ok(())
     }
 
     /// Inserts fingerprint/merkle proof  for a given root and sender ID
