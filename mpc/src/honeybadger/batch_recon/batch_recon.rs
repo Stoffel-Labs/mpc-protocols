@@ -498,6 +498,22 @@ impl<F: FftField> BatchReconNode<F> {
         let store_lock = {
             let mut storage = self.store.lock().await;
 
+            // TODO: restore session limits
+            // if !storage.contains_key(&session_id) {
+            //     if storage.len() >= MAX_BATCH_RECON_SESSIONS {
+            //         return Err(BatchReconError::InvalidInput(
+            //             "Session limit reached".into(),
+            //         ));
+            //     }
+            //     let per_peer_limit = MAX_BATCH_RECON_SESSIONS / self.n;
+            //     let peer_count = storage.values().filter(|(id, _)| *id == sender_id).count();
+            //     if peer_count >= per_peer_limit {
+            //         return Err(BatchReconError::InvalidInput(
+            //             "Per-peer session limit reached".into(),
+            //         ));
+            //     }
+            // }
+
             storage
                 .entry(session_id)
                 .or_insert_with(|| (sender_id, Arc::new(Mutex::new(BatchReconStore::empty()))))

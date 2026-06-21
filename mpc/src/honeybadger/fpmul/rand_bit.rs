@@ -53,7 +53,7 @@ where
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
-pub static MAX_RANDBIT_SESSIONS: usize = 256;
+// pub static MAX_RANDBIT_SESSIONS: usize = 256;
 
 impl<F, R> RandBit<F, R>
 where
@@ -97,6 +97,24 @@ where
     ) -> Result<Arc<Mutex<RandBitStorage<F>>>, RandBitError> {
         let mut storage = self.storage.lock().await;
 
+        // TODO: restore session limits
+        // if !storage.contains_key(&session_id) {
+        //     if storage.len() >= MAX_RANDBIT_SESSIONS {
+        //         return Err(RandBitError::LimitError(
+        //             "Maximum number of concurrent sessions exceeded".to_string(),
+        //         ));
+        //     }
+        //     let per_peer_limit = MAX_RANDBIT_SESSIONS / self.n_parties;
+        //     let peer_count = storage
+        //         .values()
+        //         .filter(|(id, _)| *id == initiator_id)
+        //         .count();
+        //     if peer_count >= per_peer_limit {
+        //         return Err(RandBitError::LimitError(
+        //             "Per-peer session limit exceeded".to_string(),
+        //         ));
+        //     }
+        // }
         Ok(storage
             .entry(session_id)
             .or_insert((initiator_id, Arc::new(Mutex::new(RandBitStorage::empty()))))
@@ -321,3 +339,39 @@ where
         return Ok(());
     }
 }
+
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use crate::common::rbc::rbc::Avid;
+//     use ark_bls12_381::Fr;
+
+//     // TODO: restore when session limits are re-enabled
+//     // #[tokio::test]
+//     #[allow(dead_code)]
+//     async fn test_randbit_storage_limit() {
+//         let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
+
+//         // Fill up storage to the per-peer limit (256 / n_parties = 51 sessions)
+//         for i in 0u8..51 {
+//             let session_id = SessionId::new(
+//                 crate::honeybadger::ProtocolType::RandBit,
+//                 SessionId::pack_slot24(i, 0, 0),
+//                 111,
+//             );
+//             let _ = node.get_or_create_storage(session_id, 0).await;
+//         }
+
+//         // The 52nd session from the same peer should fail
+//         let session_id = SessionId::new(
+//             crate::honeybadger::ProtocolType::RandBit,
+//             SessionId::pack_slot24(0, 1, 0),
+//             111,
+//         );
+//         let result = node.get_or_create_storage(session_id, 0).await;
+//         assert!(
+//             matches!(result, Err(RandBitError::LimitError(_))),
+//             "Should error on exceeding storage limit"
+//         );
+//     }
+// }

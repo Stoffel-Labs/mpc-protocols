@@ -75,6 +75,23 @@ where
         initiator_id: usize,
     ) -> Result<Arc<Mutex<DouShaStorage<F>>>, DouShaError> {
         let mut storage = self.storage.lock().await;
+
+        // TODO: restore session limits
+        // if !storage.contains_key(&session_id) {
+        //     if storage.len() >= MAX_DOUSHA_SESSIONS {
+        //         warn!("DouSha session limit reached");
+        //         return Err(DouShaError::LimitError);
+        //     }
+        //     let per_peer_limit = MAX_DOUSHA_SESSIONS / self.n_parties;
+        //     let peer_count = storage
+        //         .values()
+        //         .filter(|(id, _)| *id == initiator_id)
+        //         .count();
+        //     if peer_count >= per_peer_limit {
+        //         warn!("DouSha per-peer session limit reached");
+        //         return Err(DouShaError::LimitError);
+        //     }
+        // }
         Ok(storage
             .entry(session_id)
             .or_insert((

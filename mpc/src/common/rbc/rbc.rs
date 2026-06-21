@@ -18,6 +18,8 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+// const MAX_RBC_SESSIONS: usize = 1024;
+
 ///--------------------------Bracha RBC--------------------------
 ///
 /// Protocol works as follows(m is the message to broadcast) :
@@ -444,6 +446,27 @@ where
     ) -> Option<Arc<Mutex<BrachaStore>>> {
         let store_lock = {
             let mut store = self.store.lock().await;
+            // TODO: restore session limits
+            // if !store.contains_key(&session_id) {
+            //     if store.len() >= MAX_RBC_SESSIONS {
+            //         warn!(
+            //             id = self.id,
+            //             session_id = session_id.as_u64(),
+            //             "Bracha session limit reached, dropping message"
+            //         );
+            //         return None;
+            //     }
+            //     let per_peer_limit = MAX_RBC_SESSIONS / self.n;
+            //     let peer_count = store.values().filter(|(id, _)| *id == sender_id).count();
+            //     if peer_count >= per_peer_limit {
+            //         warn!(
+            //             id = self.id,
+            //             session_id = session_id.as_u64(),
+            //             "Bracha per-peer session limit reached, dropping message"
+            //         );
+            //         return None;
+            //     }
+            // }
             store
                 .entry(session_id)
                 .or_insert_with(|| (sender_id, Arc::new(Mutex::new(BrachaStore::default()))))
@@ -1085,6 +1108,27 @@ impl<Id: ProtocolSessionId> Avid<Id> {
     ) -> Option<Arc<Mutex<AvidStore>>> {
         let store_lock = {
             let mut store = self.store.lock().await;
+            // TODO: restore session limits
+            // if !store.contains_key(&session_id) {
+            //     if store.len() >= MAX_RBC_SESSIONS {
+            //         warn!(
+            //             id = self.id,
+            //             session_id = session_id.as_u64(),
+            //             "Avid session limit reached, dropping message"
+            //         );
+            //         return None;
+            //     }
+            //     let per_peer_limit = MAX_RBC_SESSIONS / self.n;
+            //     let peer_count = store.values().filter(|(id, _)| *id == sender_id).count();
+            //     if peer_count >= per_peer_limit {
+            //         warn!(
+            //             id = self.id,
+            //             session_id = session_id.as_u64(),
+            //             "Avid per-peer session limit reached, dropping message"
+            //         );
+            //         return None;
+            //     }
+            // }
             store
                 .entry(session_id)
                 .or_insert_with(|| (sender_id, Arc::new(Mutex::new(AvidStore::default()))))

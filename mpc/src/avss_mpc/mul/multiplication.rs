@@ -30,7 +30,7 @@ pub struct Multiply<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub rbc_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
 
-pub static MAX_AVSS_MUL_SESSIONS: usize = 256;
+// pub static MAX_AVSS_MUL_SESSIONS: usize = 256;
 
 impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Multiply<F, R, G> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
@@ -259,21 +259,22 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     ) -> Result<Arc<Mutex<MultStorage<F, G>>>, MulError> {
         let mut storage = self.mult_storage.lock().await;
 
-        if !storage.contains_key(&session_id) {
-            if storage.len() >= MAX_AVSS_MUL_SESSIONS {
-                warn!("AVSS Mul session limit reached");
-                return Err(MulError::LimitError);
-            }
-            let per_peer_limit = MAX_AVSS_MUL_SESSIONS / self.n;
-            let peer_count = storage
-                .values()
-                .filter(|(id, _)| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                warn!("AVSS Mul per-peer session limit reached");
-                return Err(MulError::LimitError);
-            }
-        }
+        // TODO: restore session limits
+        // if !storage.contains_key(&session_id) {
+        //     if storage.len() >= MAX_AVSS_MUL_SESSIONS {
+        //         warn!("AVSS Mul session limit reached");
+        //         return Err(MulError::LimitError);
+        //     }
+        //     let per_peer_limit = MAX_AVSS_MUL_SESSIONS / self.n;
+        //     let peer_count = storage
+        //         .values()
+        //         .filter(|(id, _)| *id == initiator_id)
+        //         .count();
+        //     if peer_count >= per_peer_limit {
+        //         warn!("AVSS Mul per-peer session limit reached");
+        //         return Err(MulError::LimitError);
+        //     }
+        // }
 
         Ok(storage
             .entry(session_id)

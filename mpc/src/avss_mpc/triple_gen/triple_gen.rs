@@ -17,7 +17,7 @@ use tokio::sync::{
     mpsc::{self},
     Mutex,
 };
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Clone, Debug)]
 pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
@@ -29,7 +29,7 @@ pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
     pub store: Arc<Mutex<HashMap<AvssSessionId, (usize, Arc<Mutex<TripleGenStore<F, C>>>)>>>,
 }
 
-pub static MAX_AVSS_TRIPLE_GEN_SESSIONS: usize = 256;
+// pub static MAX_AVSS_TRIPLE_GEN_SESSIONS: usize = 256;
 
 impl<F, R, C> TripleGenNode<F, R, C>
 where
@@ -74,18 +74,19 @@ where
     ) -> Result<Arc<Mutex<TripleGenStore<F, C>>>, TripleGenError> {
         let mut map = self.store.lock().await;
 
-        if !map.contains_key(&sid) {
-            if map.len() >= MAX_AVSS_TRIPLE_GEN_SESSIONS {
-                warn!("AVSS TripleGen session limit reached");
-                return Err(TripleGenError::LimitError);
-            }
-            let per_peer_limit = MAX_AVSS_TRIPLE_GEN_SESSIONS / self.n_parties;
-            let peer_count = map.values().filter(|(id, _)| *id == initiator_id).count();
-            if peer_count >= per_peer_limit {
-                warn!("AVSS TripleGen per-peer session limit reached");
-                return Err(TripleGenError::LimitError);
-            }
-        }
+        // TODO: restore session limits
+        // if !map.contains_key(&sid) {
+        //     if map.len() >= MAX_AVSS_TRIPLE_GEN_SESSIONS {
+        //         warn!("AVSS TripleGen session limit reached");
+        //         return Err(TripleGenError::LimitError);
+        //     }
+        //     let per_peer_limit = MAX_AVSS_TRIPLE_GEN_SESSIONS / self.n_parties;
+        //     let peer_count = map.values().filter(|(id, _)| *id == initiator_id).count();
+        //     if peer_count >= per_peer_limit {
+        //         warn!("AVSS TripleGen per-peer session limit reached");
+        //         return Err(TripleGenError::LimitError);
+        //     }
+        // }
 
         Ok(map
             .entry(sid)

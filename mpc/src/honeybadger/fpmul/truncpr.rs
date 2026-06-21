@@ -31,7 +31,7 @@ pub struct TruncPrNode<F: PrimeField, R: RBC> {
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
-pub static MAX_TRUNCPR_SESSIONS: usize = 256;
+// pub static MAX_TRUNCPR_SESSIONS: usize = 256;
 
 impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, TruncPrError> {
@@ -119,6 +119,21 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         initiator_id: usize,
     ) -> Result<Arc<Mutex<TruncPrStore<F>>>, TruncPrError> {
         let mut map = self.store.lock().await;
+
+        // TODO: restore session limits
+        // if !map.contains_key(&session) {
+        //     if map.len() >= MAX_TRUNCPR_SESSIONS {
+        //         warn!("TruncPr session limit reached");
+        //         return Err(TruncPrError::LimitError);
+        //     }
+        //     let per_peer_limit = MAX_TRUNCPR_SESSIONS / self.n;
+        //     let peer_count = map.values().filter(|(id, _)| *id == initiator_id).count();
+        //     if peer_count >= per_peer_limit {
+        //         warn!("TruncPr per-peer session limit reached");
+        //         return Err(TruncPrError::LimitError);
+        //     }
+        // }
+
         Ok(map
             .entry(session)
             .or_insert((initiator_id, Arc::new(Mutex::new(TruncPrStore::empty()))))

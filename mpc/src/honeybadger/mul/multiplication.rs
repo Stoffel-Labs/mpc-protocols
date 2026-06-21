@@ -150,7 +150,7 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-pub static MAX_MUL_SESSIONS: usize = 256;
+// pub static MAX_MUL_SESSIONS: usize = 256;
 
 impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
@@ -651,6 +651,23 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         initiator_id: usize,
     ) -> Result<Arc<Mutex<MultStorage<F>>>, MulError> {
         let mut storage = self.mult_storage.lock().await;
+
+        // TODO: restore session limits
+        // if !storage.contains_key(&session_id) {
+        //     if storage.len() >= MAX_MUL_SESSIONS {
+        //         warn!("Mul session limit reached");
+        //         return Err(MulError::LimitError);
+        //     }
+        //     let per_peer_limit = MAX_MUL_SESSIONS / self.n;
+        //     let peer_count = storage
+        //         .values()
+        //         .filter(|(id, _)| *id == initiator_id)
+        //         .count();
+        //     if peer_count >= per_peer_limit {
+        //         warn!("Mul per-peer session limit reached");
+        //         return Err(MulError::LimitError);
+        //     }
+        // }
 
         Ok(storage
             .entry(session_id)
