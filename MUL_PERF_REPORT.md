@@ -30,13 +30,36 @@ This is proven — not hypothesized — by the A/B (harness C): reconstructing t
 the current per-chunk path sends **12 274 messages**; the batched path sends **170** (a 72×
 reduction), and both reconstruct identically (asserted).
 
-> **Status: all five findings now IMPLEMENTED.** Cumulative end-to-end win at n=10, t=3:
+> **Status: all six findings now IMPLEMENTED.** Cumulative end-to-end win at n=10, t=3:
 > - Messages for N=64: **6 400 → 400** (16×; now constant in N — was 100/pair, now 6.2/pair).
-> - Wall for N=64: **5.3 ms → 3.5 ms** (~34%); for N=8: ~0.9 ms → **0.6 ms**.
-> - `recover_secret` per call: **29.8 → 27.2 µs** (domain cached).
+> - Wall for N=64: **5.3 ms → 3.5 ms → 1.5 ms** (Finding 6; per-round **2.7 ms → 0.75 ms**);
+>   for N=8: ~0.9 ms → 0.6 ms → **0.42 ms**.
+> - `recover_secret` per call: **29.8 → 27.2 µs** (domain cached; single path unchanged by Finding 6).
 > - Multi-session (N > max_pairs) latency: 2 sessions **21 ms → 11 ms** (pipelined; turmoil @5 ms).
 > - OEC/Gao (Byzantine) path: **1.30 → 1.15 ms** (g0 cached).
 >
+
+### ✅ Finding 6 (CERTAIN, new highest impact) — per-chunk `recover_secret` rebuilt the Lagrange basis every chunk — **IMPLEMENTED**
+Even after Findings 1–5, the `EvalBatch`/`RevealBatch` handlers called `RobustShare::recover_secret`
+**once per chunk** (`batch_len = N/(t+1)` times), and every call rebuilt the identical Lagrange basis
+(`A(x)`, its derivative, and the per-point polynomial divisions) — identical because it depends only
+on the sender ids, which are the same for every chunk in a session. So `recover_secret`'s ~27 µs scaled
+`O(batch_len)` when the basis work is `O(1) + batch_len·O(degree)`.
+- **Established by:** micro-bench A (27.9 µs/call) × measured call count (64 calls/node at N=64:
+  16 chunks × 2 sessions × 2 rounds); code inspection confirms the per-chunk loop
+  (`batch_recon.rs` EvalBatch/RevealBatch arms).
+- **Fix applied:** new `batch_recover_secret(evals_by_sender, n, degree, t)` in `robust_interpolate.rs`
+  builds the Lagrange basis **once** and applies it to all chunks as a linear combination, verifying
+  each chunk against all `degree+t+1` evaluations and falling back to the full robust `recover_secret`
+  (OEC/Gao) path **per chunk** on disagreement. The EvalBatch/RevealBatch handlers now call it instead
+  of the per-chunk loop. Threat-model-neutral: identical optimistic-then-OEC logic, same `t`-fault
+  tolerance, only the redundant per-chunk fixed cost is removed.
+- **Validated:** new unit tests (honest-path exact match vs per-chunk `recover_secret` for any arrival
+  order; `t`-corruption OEC fallback); lib 73/73, mul_test 3/3, node_test 16/16, batchrecon_test 4/4,
+  fpmul_test 2/2. **Measured win (n=10,t=3):** wall N=64 **3.5 ms → 1.5 ms** (2.3×; per-round
+  2.7 ms → **0.75 ms**), N=8 0.6 ms → 0.42 ms; n=5,t=1 N=64 ~4.4 ms → ~0.4 ms. turmoil confirms the
+  2-round critical path is unchanged (sim_wall ≈ 2×latency + ~1 ms).
+
 > Threat model preserved: all RS / Byzantine-corruption tests pass; every change is
 > correctness-preserving and either threat-model-neutral or a strict liveness/security improvement
 > (Task #1). See §4 for per-finding detail.
