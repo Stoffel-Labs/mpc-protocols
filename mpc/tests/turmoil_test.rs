@@ -1620,18 +1620,21 @@ fn honeybadger_sequential_mul_1000_turmoil() {
     }
 }
 
+// Ignored on purpose, tests are meant to fail -> they stress test mpc protocols to find when it would break with unreasonable/unrealistic settings
 #[test]
 #[ignore = "stress repro: forces more than 256 triple-generation protocol sessions"]
 fn honeybadger_triple_heavy_preprocessing_turmoil() {
     run_preprocessing_stress_turmoil(4, 1, 771, 0, 0, 0, &[("HMPC_TRIPLE_BATCH_GROUPS", "1")]);
 }
 
+// Ignored on purpose, tests are meant to fail -> they stress test mpc protocols to find when it would break with unreasonable/unrealistic settings
 #[test]
 #[ignore = "stress repro: forces more than 256 RanDouSha protocol sessions"]
 fn honeybadger_randousha_heavy_preprocessing_turmoil() {
     run_preprocessing_stress_turmoil(4, 1, 771, 0, 0, 0, &[("HMPC_RANDOUSHA_BATCH_COLUMNS", "1")]);
 }
 
+// Ignored on purpose, tests are meant to fail -> they stress test mpc protocols to find when it would break with unreasonable/unrealistic settings
 #[test]
 #[ignore = "stress repro: generates triple, RanDouSha, RandBit, PRandBit, and PRandInt material"]
 fn honeybadger_multiply_heavy_preprocessing_turmoil() {
