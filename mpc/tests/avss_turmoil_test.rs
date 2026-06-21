@@ -33,8 +33,7 @@ fn avss_e2e() {
     let (tx_out, rx_out) = std::sync::mpsc::channel::<Result<(usize, Vec<_>), String>>();
     let (tx_client, mut rx_client) = tokio::sync::broadcast::channel::<()>(n_parties);
 
-    let session_id =
-        AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot24(0, 0, 0), 111);
+    let session_id = AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot(0, 0, 0), 111);
     let mut rng = test_rng();
 
     // PKI setup. This is executed once.

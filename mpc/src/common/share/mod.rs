@@ -4,7 +4,7 @@ pub mod shamir;
 use std::ops::{Add, Mul};
 
 use ark_ff::FftField;
-use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+use ark_poly::EvaluationDomain;
 use thiserror::Error;
 
 use super::ShamirShare;
@@ -29,7 +29,8 @@ pub enum ShareError {
 /// Creates a Vandermonde matrix `V` of size `n x (t+1)`.
 /// Each row `j` contains powers of `domain.element(j)`: `[1, alpha_j, alpha_j^2, ..., alpha_j^t]`.
 pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Result<Vec<Vec<F>>, ShareError> {
-    let domain = GeneralEvaluationDomain::<F>::new(n).ok_or(ShareError::NoSuitableDomain(n))?;
+    let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
+        .ok_or(ShareError::NoSuitableDomain(n))?;
     let mut matrix = vec![vec![F::zero(); t + 1]; n];
     for j in 0..n {
         let alpha_j = domain.element(j);

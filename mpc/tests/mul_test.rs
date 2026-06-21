@@ -64,7 +64,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
     setup_tracing();
 
     let mut rng = test_rng();
-    let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot(123, 0, 0), 111);
 
     // 1. Setup network
     let (network, mut receivers, _, _) = test_setup(n_parties, vec![]);

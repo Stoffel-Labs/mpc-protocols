@@ -327,7 +327,7 @@ where
     pub async fn process(&mut self, msg: AvssMessage<Id>) -> Result<(), AvssError> {
         info!(
             party_id = ?self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = msg.session_id.as_u128(),
             "Processing AVSS share"
         );
         match msg.session_id.calling_protocol() {

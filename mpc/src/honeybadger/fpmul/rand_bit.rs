@@ -85,18 +85,16 @@ where
             .ok_or(RandBitError::ClearStoreError(session_id))
     }
 
+    pub async fn store_len(&self) -> usize {
+        self.storage.lock().await.len()
+    }
+
     pub async fn get_or_create_storage(
         &self,
         session_id: SessionId,
     ) -> Result<Arc<Mutex<RandBitStorage<F>>>, RandBitError> {
         let mut storage = self.storage.lock().await;
 
-        // only exec ID changes between different runs
-        if storage.len() >= 256 && !storage.contains_key(&session_id) {
-            return Err(RandBitError::LimitError(
-                "Maximum number of concurrent sessions (256) exceeded".to_string(),
-            ));
-        }
         Ok(storage
             .entry(session_id)
             .or_insert(Arc::new(Mutex::new(RandBitStorage::empty())))
@@ -235,10 +233,6 @@ where
             return Err(RandBitError::Incompatible);
         }
 
-        if a.len() / (self.threshold + 1) > 256 {
-            return Err(RandBitError::ShareLimitError(a.len()));
-        }
-
         assert!(session_id.calling_protocol().is_some());
         assert_eq!(session_id.sub_id(), 0);
         assert_eq!(session_id.round_id(), 0);
@@ -266,7 +260,7 @@ where
         for (i, chunk) in a_square_share.chunks(self.threshold + 1).enumerate() {
             let session_id_batch = SessionId::new(
                 session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot24(session_id.exec_id(), i as u8, 0),
+                SessionId::pack_slot(session_id.exec_id(), i as u8, 0),
                 session_id.instance_id(),
             );
             self.batch_recon
@@ -296,7 +290,7 @@ where
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(sid.exec_id(), 0, 0),
+            SessionId::pack_slot(sid.exec_id(), 0, 0),
             sid.instance_id(),
         );
         let storage_bind = self.get_or_create_storage(session_id).await?;
@@ -322,39 +316,5 @@ where
         drop(storage);
         let _done = self.try_finalize(session_id).await?;
         return Ok(());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::common::rbc::rbc::Avid;
-    use ark_bls12_381::Fr;
-
-    #[tokio::test]
-    async fn test_randbit_storage_limit() {
-        let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
-
-        // Fill up storage to the limit (256 sessions)
-        for i in 0u8..=255 {
-            let session_id = SessionId::new(
-                crate::honeybadger::ProtocolType::RandBit,
-                SessionId::pack_slot24(i, 0, 0),
-                111,
-            );
-            let _ = node.get_or_create_storage(session_id).await;
-        }
-
-        // The 257th session should fail
-        let session_id = SessionId::new(
-            crate::honeybadger::ProtocolType::RandBit,
-            SessionId::pack_slot24(0, 1, 0),
-            111,
-        );
-        let result = node.get_or_create_storage(session_id).await;
-        assert!(
-            matches!(result, Err(RandBitError::LimitError(_))),
-            "Should error on exceeding storage limit"
-        );
     }
 }

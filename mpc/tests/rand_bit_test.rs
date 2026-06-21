@@ -21,11 +21,7 @@ async fn rand_bit_with_small_field_e2e() {
     let batch_size = threshold + 1;
     let duration = Duration::from_secs(10);
 
-    let session_id = SessionId::new(
-        ProtocolType::RandBit,
-        SessionId::pack_slot24(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::RandBit, SessionId::pack_slot(123, 0, 0), 111);
 
     // === Build fake network ===
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);

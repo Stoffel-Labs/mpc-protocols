@@ -576,40 +576,40 @@ impl fmt::Display for MsgTypeAcs {
 }
 #[derive(Default, Clone)]
 pub struct AcsStore {
-    pub aba_input: HashMap<u64, bool>,     //Session id => aba input
-    pub aba_output: HashMap<u64, bool>,    //Session id => aba output
-    pub rbc_output: HashMap<u64, Vec<u8>>, //Session id => rbc output
+    pub aba_input: HashMap<u128, bool>,     //Session slot => aba input
+    pub aba_output: HashMap<u128, bool>,    //Session slot => aba output
+    pub rbc_output: HashMap<u128, Vec<u8>>, //Session slot => rbc output
     pub ended: bool,
     pub commonsubset: Vec<Vec<u8>>,
 }
 
 impl AcsStore {
-    /// Checks if ABA input is stored for the given session ID.
-    pub fn has_aba_input(&self, session_id: u64) -> bool {
+    /// Checks if ABA input is stored for the given session slot.
+    pub fn has_aba_input(&self, session_id: u128) -> bool {
         self.aba_input.contains_key(&session_id)
     }
-    /// Sets the ABA input for a given session ID.
-    pub fn set_aba_input(&mut self, session_id: u64, value: bool) {
+    /// Sets the ABA input for a given session slot.
+    pub fn set_aba_input(&mut self, session_id: u128, value: bool) {
         self.aba_input.insert(session_id, value);
     }
-    /// Sets the ABA output for a given session ID.
-    pub fn set_aba_output(&mut self, session_id: u64, value: bool) {
+    /// Sets the ABA output for a given session slot.
+    pub fn set_aba_output(&mut self, session_id: u128, value: bool) {
         self.aba_output.insert(session_id, value);
     }
     /// Get the ABA output 1 count
     pub fn get_aba_output_one_count(&mut self) -> usize {
         self.aba_output.iter().filter(|&(_, &val)| val).count()
     }
-    /// Checks if RBC output is stored for the given session ID.
-    pub fn has_rbc_output(&self, session_id: u64) -> bool {
+    /// Checks if RBC output is stored for the given session slot.
+    pub fn has_rbc_output(&self, session_id: u128) -> bool {
         self.rbc_output.contains_key(&session_id)
     }
-    /// Sets the RBC output for a given session ID.
-    pub fn set_rbc_output(&mut self, session_id: u64, output: Vec<u8>) {
+    /// Sets the RBC output for a given session slot.
+    pub fn set_rbc_output(&mut self, session_id: u128, output: Vec<u8>) {
         self.rbc_output.insert(session_id, output);
     }
-    /// Get the RBC output for a given session ID.
-    pub fn get_rbc_output(&mut self, session_id: u64) -> Option<&Vec<u8>> {
+    /// Get the RBC output for a given session slot.
+    pub fn get_rbc_output(&mut self, session_id: u128) -> Option<&Vec<u8>> {
         self.rbc_output.get(&session_id)
     }
 

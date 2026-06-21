@@ -29,11 +29,7 @@ async fn prandbitd_correctness_e2e() {
 
     info!("l value: {}, Bits big field: {}", l, Fr::MODULUS_BIT_SIZE);
 
-    let session_id = SessionId::new(
-        ProtocolType::PRandBit,
-        SessionId::pack_slot24(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::PRandBit, SessionId::pack_slot(123, 0, 0), 111);
 
     // Build a fake network.
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);

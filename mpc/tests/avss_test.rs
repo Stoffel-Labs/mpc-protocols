@@ -23,8 +23,7 @@ async fn test_avss_end_to_end() {
 
     let n = 4;
     let t = 1;
-    let session_id =
-        AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot24(0, 0, 0), 111);
+    let session_id = AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot(0, 0, 0), 111);
     let mut rng = test_rng();
 
     // --- Fake network ---

@@ -13,7 +13,9 @@ pub fn deser_bounded_vec<T: CanonicalDeserialize>(
         return Err(SerializationError::InvalidData);
     }
     *r = tail;
-    (0..len)
-        .map(|_| T::deserialize_compressed(&mut *r))
-        .collect()
+    let mut values = Vec::new();
+    for _ in 0..len {
+        values.push(T::deserialize_compressed(&mut *r)?);
+    }
+    Ok(values)
 }

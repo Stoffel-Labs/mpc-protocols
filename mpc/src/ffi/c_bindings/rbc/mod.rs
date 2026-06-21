@@ -12,7 +12,7 @@ use crate::{
     ffi::c_bindings::{
         free_bytes_slice,
         network::{GenericNetwork, NetworkOpaque},
-        ByteSlice,
+        ByteSlice, SessionIdBits,
     },
     honeybadger::{SessionId, WrappedMessage},
 };
@@ -129,9 +129,9 @@ pub struct AbaOutputReceiverOpaque {
 }
 #[repr(C)]
 pub struct RbcMsg {
-    pub sender_id: usize,         // ID of the sender node
-    pub session_id: u64,          // Unique session ID for each broadcast instance
-    pub round_id: usize,          //Round ID
+    pub sender_id: usize,          // ID of the sender node
+    pub session_id: SessionIdBits, // Unique session ID for each broadcast instance
+    pub round_id: usize,           //Round ID
     pub payload: ByteSlice, // Actual data being broadcasted (e.g., bytes of a secret or message)
     pub metadata: ByteSlice, // info related to the message shared
     pub msg_type: RbcMessageType, // Type of message like INIT, ECHO, or READY
@@ -151,7 +151,7 @@ impl<Id: ProtocolSessionId> From<Msg<Id>> for RbcMsg {
         };
         RbcMsg {
             sender_id: value.sender_id,
-            session_id: value.session_id.as_u64(),
+            session_id: value.session_id.as_u128().into(),
             round_id: value.round_id,
             payload,
             metadata,
@@ -368,11 +368,11 @@ pub extern "C" fn sync_bracha_clear_store(bracha_pointer: *mut BrachaOpaque) {
 #[no_mangle]
 pub extern "C" fn has_bracha_session_ended(
     bracha_pointer: *mut BrachaOpaque,
-    session_id: u64,
+    session_id: SessionIdBits,
     output: *mut bool,
 ) -> RbcErrorCode {
     let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha<SessionId>) };
-    let session_id = unsafe { SessionId::from_u64(session_id) };
+    let session_id = unsafe { session_id.to_session_id() };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
             .unwrap()
@@ -395,11 +395,11 @@ pub extern "C" fn has_bracha_session_ended(
 #[no_mangle]
 pub extern "C" fn get_bracha_output(
     bracha_pointer: *mut BrachaOpaque,
-    session_id: u64,
+    session_id: SessionIdBits,
     output: *mut ByteSlice,
 ) -> RbcErrorCode {
     let bracha = unsafe { &mut *(bracha_pointer as *mut Bracha<SessionId>) };
-    let session_id = unsafe { SessionId::from_u64(session_id) };
+    let session_id = unsafe { session_id.to_session_id() };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
             .unwrap()
@@ -428,7 +428,7 @@ pub extern "C" fn get_bracha_output(
 pub extern "C" fn sync_bracha_init(
     bracha_pointer: *mut BrachaOpaque,
     payload: ByteSlice,
-    session_id: u64,
+    session_id: SessionIdBits,
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
     let payload = unsafe { slice::from_raw_parts(payload.pointer, payload.len) }.to_vec();
@@ -441,7 +441,7 @@ pub extern "C" fn sync_bracha_init(
                 .unwrap()
                 .block_on(bracha.init(
                     payload,
-                    unsafe { SessionId::from_u64(session_id) },
+                    unsafe { session_id.to_session_id() },
                     Arc::clone(n),
                 ));
             r
@@ -451,7 +451,7 @@ pub extern "C" fn sync_bracha_init(
                 .unwrap()
                 .block_on(bracha.init(
                     payload,
-                    unsafe { SessionId::from_u64(session_id) },
+                    unsafe { session_id.to_session_id() },
                     Arc::clone(n),
                 ));
             r
@@ -477,7 +477,7 @@ pub extern "C" fn sync_bracha_process(
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
-        session_id: unsafe { SessionId::from_u64(msg.session_id) },
+        session_id: unsafe { msg.session_id.to_session_id() },
         round_id: msg.round_id,
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
@@ -511,7 +511,7 @@ pub extern "C" fn sync_bracha_broadcast(
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
-        session_id: unsafe { SessionId::from_u64(msg.session_id) },
+        session_id: unsafe { msg.session_id.to_session_id() },
         round_id: msg.round_id,
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
@@ -546,7 +546,7 @@ pub extern "C" fn sync_bracha_send(
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
-        session_id: unsafe { SessionId::from_u64(msg.session_id) },
+        session_id: unsafe { msg.session_id.to_session_id() },
         round_id: msg.round_id,
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
@@ -657,11 +657,11 @@ pub extern "C" fn sync_avid_clear_store(avid_pointer: *mut AvidOpaque) {
 #[no_mangle]
 pub extern "C" fn has_avid_session_ended(
     avid_pointer: *mut AvidOpaque,
-    session_id: u64,
+    session_id: SessionIdBits,
     output: *mut bool,
 ) -> RbcErrorCode {
     let avid = unsafe { &mut *(avid_pointer as *mut Avid<SessionId>) };
-    let session_id = unsafe { SessionId::from_u64(session_id) };
+    let session_id = unsafe { session_id.to_session_id() };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
             .unwrap()
@@ -684,11 +684,11 @@ pub extern "C" fn has_avid_session_ended(
 #[no_mangle]
 pub extern "C" fn get_avid_output(
     avid_pointer: *mut AvidOpaque,
-    session_id: u64,
+    session_id: SessionIdBits,
     output: *mut ByteSlice,
 ) -> RbcErrorCode {
     let avid = unsafe { &mut *(avid_pointer as *mut Avid<SessionId>) };
-    let session_id = unsafe { SessionId::from_u64(session_id) };
+    let session_id = unsafe { session_id.to_session_id() };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
             .unwrap()
@@ -717,7 +717,7 @@ pub extern "C" fn get_avid_output(
 pub extern "C" fn sync_avid_init(
     avid_pointer: *mut AvidOpaque,
     payload: ByteSlice,
-    session_id: u64,
+    session_id: SessionIdBits,
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
     let payload = unsafe { slice::from_raw_parts(payload.pointer, payload.len) }.to_vec();
@@ -728,7 +728,7 @@ pub extern "C" fn sync_avid_init(
         GenericNetwork::FakeNetwork(n) => {
             let r = tokio::runtime::Runtime::new().unwrap().block_on(avid.init(
                 payload,
-                unsafe { SessionId::from_u64(session_id) },
+                unsafe { session_id.to_session_id() },
                 Arc::clone(n),
             ));
             r
@@ -736,7 +736,7 @@ pub extern "C" fn sync_avid_init(
         GenericNetwork::QuicNetworkManager(n) => {
             let r = tokio::runtime::Runtime::new().unwrap().block_on(avid.init(
                 payload,
-                unsafe { SessionId::from_u64(session_id) },
+                unsafe { session_id.to_session_id() },
                 Arc::clone(n),
             ));
             r
@@ -762,7 +762,7 @@ pub extern "C" fn sync_avid_process(
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
-        session_id: unsafe { SessionId::from_u64(msg.session_id) },
+        session_id: unsafe { msg.session_id.to_session_id() },
         round_id: msg.round_id,
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
@@ -796,7 +796,7 @@ pub extern "C" fn sync_avid_broadcast(
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
-        session_id: unsafe { SessionId::from_u64(msg.session_id) },
+        session_id: unsafe { msg.session_id.to_session_id() },
         round_id: msg.round_id,
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
@@ -831,7 +831,7 @@ pub extern "C" fn sync_avid_send(
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
-        session_id: unsafe { SessionId::from_u64(msg.session_id) },
+        session_id: unsafe { msg.session_id.to_session_id() },
         round_id: msg.round_id,
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
@@ -949,11 +949,11 @@ pub extern "C" fn sync_aba_clear_store(aba_pointer: *mut AbaOpaque) {
 #[no_mangle]
 pub extern "C" fn has_aba_session_ended(
     aba_pointer: *mut AbaOpaque,
-    session_id: u64,
+    session_id: SessionIdBits,
     output: *mut bool,
 ) -> RbcErrorCode {
     let aba = unsafe { &mut *(aba_pointer as *mut ABA<SessionId>) };
-    let session_id = unsafe { SessionId::from_u64(session_id) };
+    let session_id = unsafe { session_id.to_session_id() };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
             .unwrap()
@@ -976,11 +976,11 @@ pub extern "C" fn has_aba_session_ended(
 #[no_mangle]
 pub extern "C" fn get_aba_output(
     aba_pointer: *mut AbaOpaque,
-    session_id: u64,
+    session_id: SessionIdBits,
     output: *mut bool,
 ) -> RbcErrorCode {
     let aba = unsafe { &mut *(aba_pointer as *mut ABA<SessionId>) };
-    let session_id = unsafe { SessionId::from_u64(session_id) };
+    let session_id = unsafe { session_id.to_session_id() };
     let session_store = {
         let store_map = tokio::runtime::Runtime::new()
             .unwrap()
@@ -1005,7 +1005,7 @@ pub extern "C" fn get_aba_output(
 pub extern "C" fn sync_aba_init(
     aba_pointer: *mut AbaOpaque,
     payload: ByteSlice,
-    session_id: u64,
+    session_id: SessionIdBits,
     net_ptr: *mut NetworkOpaque,
 ) -> RbcErrorCode {
     let payload = unsafe { slice::from_raw_parts(payload.pointer, payload.len) }.to_vec();
@@ -1016,7 +1016,7 @@ pub extern "C" fn sync_aba_init(
         GenericNetwork::FakeNetwork(n) => {
             let r = tokio::runtime::Runtime::new().unwrap().block_on(aba.init(
                 payload,
-                unsafe { SessionId::from_u64(session_id) },
+                unsafe { session_id.to_session_id() },
                 Arc::clone(n),
             ));
             r
@@ -1024,7 +1024,7 @@ pub extern "C" fn sync_aba_init(
         GenericNetwork::QuicNetworkManager(n) => {
             let r = tokio::runtime::Runtime::new().unwrap().block_on(aba.init(
                 payload,
-                unsafe { SessionId::from_u64(session_id) },
+                unsafe { session_id.to_session_id() },
                 Arc::clone(n),
             ));
             r
@@ -1050,7 +1050,7 @@ pub extern "C" fn sync_aba_process(
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
-        session_id: unsafe { SessionId::from_u64(msg.session_id) },
+        session_id: unsafe { msg.session_id.to_session_id() },
         round_id: msg.round_id,
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
@@ -1084,7 +1084,7 @@ pub extern "C" fn sync_aba_broadcast(
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
-        session_id: unsafe { SessionId::from_u64(msg.session_id) },
+        session_id: unsafe { msg.session_id.to_session_id() },
         round_id: msg.round_id,
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),
@@ -1119,7 +1119,7 @@ pub extern "C" fn sync_aba_send(
 
     let rbc_msg = Msg {
         sender_id: msg.sender_id,
-        session_id: unsafe { SessionId::from_u64(msg.session_id) },
+        session_id: unsafe { msg.session_id.to_session_id() },
         round_id: msg.round_id,
         payload: payload.to_vec(),
         metadata: metadata.to_vec(),

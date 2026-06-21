@@ -76,7 +76,7 @@ fn spawn_avss_receivers(
             .collect();
         let mut merged = fan_in_inboxes(labeled);
         tokio::spawn(async move {
-            while let Some((sender, raw)) = merged.recv().await {
+            while let Some((sender, raw)) = merged.0.recv().await {
                 let id = match sender {
                     SenderId::Node(i) | SenderId::Client(i) => i,
                 };

@@ -349,8 +349,29 @@ static TRACING_INIT: Lazy<()> = Lazy::new(|| {
     }));
 });
 
+static QUIET_TRACING_INIT: Lazy<()> = Lazy::new(|| {
+    let subscriber = FmtSubscriber::builder()
+        .with_env_filter(EnvFilter::new(
+            "warn,stoffelmpc_mpc::honeybadger=info,stoffelmpc_mpc::honeybadger::batch_recon=warn,stoffelmpc_mpc::honeybadger::mul=warn,stoffelmpc_mpc::honeybadger::share_gen=warn,stoffelmpc_mpc::honeybadger::triple_gen=warn,stoffelmpc_mpc::honeybadger::ran_dou_sha=warn,stoffelmpc_mpc::honeybadger::double_share=warn,stoffelmpc_mpc::common::rbc=warn",
+        ))
+        .pretty()
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    let old_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        old_hook(info);
+        tracing::error!("{}", info);
+        std::process::exit(1);
+    }));
+});
+
 pub fn setup_tracing() {
     Lazy::force(&TRACING_INIT);
+}
+
+pub fn setup_quiet_tracing() {
+    Lazy::force(&QUIET_TRACING_INIT);
 }
 //--------------------------BATCH RECON--------------------------
 

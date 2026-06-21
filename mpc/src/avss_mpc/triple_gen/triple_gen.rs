@@ -115,7 +115,7 @@ where
         if is_dealer {
             let avss_sid = AvssSessionId::new(
                 session_id.calling_protocol().unwrap(),
-                AvssSessionId::pack_slot24(
+                AvssSessionId::pack_slot(
                     session_id.exec_id(),
                     self.id as u8,
                     session_id.round_id(),

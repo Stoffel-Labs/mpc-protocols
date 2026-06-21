@@ -6,7 +6,7 @@ use crate::common::{
 use ark_ff::{FftField, Zero};
 use ark_poly::{
     univariate::{DenseOrSparsePolynomial, DensePolynomial},
-    DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain, Polynomial,
+    DenseUVPolynomial, EvaluationDomain, Polynomial,
 };
 use ark_std::rand::Rng;
 use std::collections::HashSet;
@@ -62,7 +62,7 @@ impl<F: FftField> SecretSharingScheme<F> for RobustShare<F> {
                 n, degree
             )));
         }
-        let domain = GeneralEvaluationDomain::<F>::new(n)
+        let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
             .ok_or_else(|| InterpolateError::NoSuitableDomain(n))?;
 
         let mut poly = DensePolynomial::<F>::rand(degree, rng);
@@ -209,8 +209,8 @@ fn robust_interpolate_fnt<F: FftField>(
     shares: &[RobustShare<F>],
 ) -> Result<DensePolynomial<F>, InterpolateError> {
     let degree = shares[0].degree;
-    let domain =
-        GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
+    let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
+        .ok_or(InterpolateError::NoSuitableDomain(n))?;
     let subset = &shares[..=degree];
     let xs: Vec<F> = subset.iter().map(|s| domain.element(s.id)).collect();
     let ys: Vec<F> = subset.iter().map(|s| s.share[0]).collect();
@@ -265,6 +265,183 @@ fn robust_interpolate_fnt<F: FftField>(
     }
 }
 
+/// Batched analogue of [`SecretSharingScheme::recover_secret`] for the `(sender_id, values)`
+/// representation used by batch reconstruction.
+///
+/// `evals_by_sender[i]` is `(sender_id, values)` where `values[c]` is that sender's evaluation of
+/// the `c`-th independent degree-`degree` polynomial. All inner vectors must have the same length
+/// (`batch_len` = number of chunks). Returns one coefficient vector (length `degree + 1`) per chunk.
+///
+/// The Lagrange interpolation basis depends only on the evaluation points (the sender ids), which
+/// are identical across chunks, so it is built **once** and applied to every chunk as a linear
+/// combination — instead of rebuilding `A(x)` and the per-point polynomial divisions for each chunk
+/// as the per-chunk `recover_secret` loop does. Each chunk is still verified against all
+/// `degree + t + 1` evaluations; any chunk failing the optimistic check falls back to the full
+/// robust `recover_secret` (OEC/Gao) path for that chunk alone, passing every evaluation so OEC can
+/// use the extras. This preserves the exact `t`-fault tolerance of `recover_secret` while removing
+/// the redundant per-chunk fixed cost (the part that made per-chunk `recover_secret`'s ~28 µs scale
+/// `O(batch_len)` instead of `O(1) + batch_len · O(degree)`).
+pub fn batch_recover_secret<F: FftField>(
+    evals_by_sender: &[(usize, Vec<F>)],
+    n: usize,
+    degree: usize,
+    t: usize,
+) -> Result<Vec<Vec<F>>, InterpolateError> {
+    if n < 3 * t + 1 {
+        return Err(InterpolateError::InvalidInput(format!(
+            "n ({}) must be >= 3t + 1 ({}) for Byzantine fault tolerance",
+            n,
+            3 * t + 1
+        )));
+    }
+    if evals_by_sender.is_empty() {
+        return Err(InterpolateError::InvalidInput(
+            "No evaluations provided".to_string(),
+        ));
+    }
+    let batch_len = evals_by_sender[0].1.len();
+    if batch_len == 0 {
+        return Err(InterpolateError::InvalidInput("Empty batch".to_string()));
+    }
+    if !evals_by_sender.iter().all(|(_, v)| v.len() == batch_len) {
+        return Err(InterpolateError::InvalidInput(
+            "Inconsistent batch widths".to_string(),
+        ));
+    }
+
+    // Sort by sender id (callers accumulate evaluations in arrival order) and validate ids.
+    let mut sorted: Vec<(usize, &Vec<F>)> =
+        evals_by_sender.iter().map(|(id, v)| (*id, v)).collect();
+    sorted.sort_by_key(|(id, _)| *id);
+
+    let mut seen = HashSet::new();
+    for (id, _) in &sorted {
+        if !seen.insert(*id) {
+            return Err(InterpolateError::InvalidInput(
+                "Duplicate sender id".to_string(),
+            ));
+        }
+        if *id >= n {
+            return Err(InterpolateError::InvalidInput(format!(
+                "Sender id {} out of range (n = {})",
+                id, n
+            )));
+        }
+    }
+
+    let needed = degree + t + 1;
+    if sorted.len() < needed {
+        return Err(InterpolateError::InvalidInput(format!(
+            "Not enough evaluations ({}) for degree {} and t {} (need {})",
+            sorted.len(),
+            degree,
+            t,
+            needed
+        )));
+    }
+
+    let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
+        .ok_or(InterpolateError::NoSuitableDomain(n))?;
+
+    // The lowest (degree + 1) senders define the optimistic interpolation subset — matches
+    // `robust_interpolate_fnt`, which interpolates from `shares[..=degree]` on the id-sorted slice.
+    let m = degree + 1;
+    let subset_xs: Vec<F> = (0..m).map(|i| domain.element(sorted[i].0)).collect();
+
+    // Build the Lagrange basis {L_i(x)} for the subset ONCE:
+    //   A(x) = prod_i (x - x_i),  L_i(x) = A(x) / ((x - x_i) * A'(x_i)).
+    let mut a_poly = DensePolynomial::from_coefficients_slice(&[F::one()]);
+    for &x in &subset_xs {
+        a_poly = &a_poly * &DensePolynomial::from_coefficients_slice(&[-x, F::one()]);
+    }
+    let a_derivative = poly_derivative(&a_poly);
+
+    let mut basis: Vec<DensePolynomial<F>> = Vec::with_capacity(m);
+    for &x_i in &subset_xs {
+        let denom = a_derivative.evaluate(&x_i);
+        if denom.is_zero() {
+            return Err(InterpolateError::PolynomialOperationError(
+                "Denominator evaluated to zero during interpolation basis calculation".into(),
+            ));
+        }
+        let inv = F::one() / denom;
+        let divisor = DensePolynomial::from_coefficients_slice(&[-x_i, F::one()]);
+        let (basis_poly, rem) = div_with_remainder(&a_poly, &divisor)?;
+        if !rem.is_zero() {
+            return Err(InterpolateError::PolynomialOperationError(
+                "A(x) not perfectly divisible by (x - x_i)".into(),
+            ));
+        }
+        basis.push(&basis_poly * inv);
+    }
+
+    // Points used for verification: the lowest `needed` sender evaluations.
+    let verify_xs: Vec<F> = (0..needed).map(|s| domain.element(sorted[s].0)).collect();
+
+    // Flatten the Lagrange basis into pure field arithmetic so the per-chunk apply is a pair of
+    // matrix-vector products with zero polynomial allocation:
+    //   recovery      coeffs[k] = sum_i y_i * L_i[k]     (L_i[k] = basis[i].coeffs[k])
+    //   verification  P(x_s)    = sum_i y_i * L_i(x_s)   (== y_s on the honest path)
+    // Both depend only on the (already id-sorted) sender points, so they are computed ONCE and
+    // reused for every chunk — identical to building `candidate = sum y_i * L_i` and evaluating it
+    // (polynomial evaluation is linear), but without the per-chunk `DensePolynomial` allocations
+    // and Horner evaluations that made the honest path allocation-heavy. The optimistic path needs
+    // all `needed` verify points to agree (there are exactly `needed`), so the first mismatch
+    // short-circuits into the per-chunk robust fallback, which is unchanged.
+    let basis_coeffs: Vec<&[F]> = basis.iter().map(|p| p.coeffs.as_slice()).collect();
+    let mut verify_matrix = vec![F::zero(); needed * m]; // row-major [needed][m]
+    for s in 0..needed {
+        let xs = verify_xs[s];
+        let row = &mut verify_matrix[s * m..(s + 1) * m];
+        for (i, slot) in row.iter_mut().enumerate() {
+            *slot = basis[i].evaluate(&xs);
+        }
+    }
+
+    let mut results: Vec<Vec<F>> = Vec::with_capacity(batch_len);
+    for c in 0..batch_len {
+        // Verification: candidate(verify_xs[s]) must equal sorted[s].1[c] for all s in 0..needed.
+        let mut ok = true;
+        for s in 0..needed {
+            let row = &verify_matrix[s * m..(s + 1) * m];
+            let mut acc = F::zero();
+            for i in 0..m {
+                acc += row[i] * sorted[i].1[c];
+            }
+            if acc != sorted[s].1[c] {
+                ok = false;
+                break;
+            }
+        }
+
+        if ok {
+            // Recovery: coeffs[k] = sum_i y_i * L_i[k].
+            let mut coeffs = vec![F::zero(); degree + 1];
+            for k in 0..=degree {
+                let mut acc = F::zero();
+                for i in 0..m {
+                    let bik = basis_coeffs[i].get(k).copied().unwrap_or(F::zero());
+                    acc += bik * sorted[i].1[c];
+                }
+                coeffs[k] = acc;
+            }
+            results.push(coeffs);
+        } else {
+            // Fall back to the full robust path for this chunk alone — identical to the pre-batch
+            // handler's per-chunk `recover_secret` call, including the OEC/Gao error-correction
+            // path. Preserves exact t-fault tolerance.
+            let shares: Vec<RobustShare<F>> = sorted
+                .iter()
+                .map(|(id, vals)| RobustShare::new(vals[c], *id, degree))
+                .collect();
+            let (coeffs, _) = RobustShare::recover_secret(&shares, n, t)?;
+            results.push(coeffs);
+        }
+    }
+
+    Ok(results)
+}
+
 /// Decodes a Reed-Solomon codeword with known erasure positions using Gao's algorithm.
 ///
 /// https://www.math.clemson.edu/~sgao/papers/RS.pdf
@@ -288,8 +465,8 @@ fn gao_rs_decode<F: FftField>(
             k, n
         )));
     }
-    let domain =
-        GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
+    let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
+        .ok_or(InterpolateError::NoSuitableDomain(n))?;
 
     let s_set: HashSet<usize> = erasure_positions.iter().copied().collect();
     let s = s_set.len();
@@ -361,9 +538,16 @@ fn gao_rs_decode<F: FftField>(
 }
 
 pub fn compute_g0_from_domain<F: FftField>(n: usize) -> DensePolynomial<F> {
+    // g0(x) = ∏_{i<n} (x - domain.element(i)) is a pure deterministic function of (F, n), so it is
+    // memoized. It is rebuilt from scratch on every OEC/Gao call otherwise (O(n^2)), which made the
+    // corruption/robustness path 44–175× slower than the optimistic path.
+    if let Some(cached) = crate::common::get_cached_g0_polynomial::<F>(n) {
+        return cached;
+    }
+
     // Create an FFT-compatible evaluation domain of size n
-    let domain =
-        GeneralEvaluationDomain::<F>::new(n).expect("Domain of size n must exist over the field");
+    let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
+        .expect("Domain of size n must exist over the field");
 
     // Extract evaluation points: ω^0, ω^1, ..., ω^{n-1}
     let evaluation_points: Vec<F> = domain.elements().collect();
@@ -376,6 +560,7 @@ pub fn compute_g0_from_domain<F: FftField>(n: usize) -> DensePolynomial<F> {
         g0 = &g0 * &factor;
     }
 
+    crate::common::store_g0_polynomial(n, g0.clone());
     g0
 }
 /// Implements OEC decoding by incrementally increasing the number of shares until decoding succeeds.
@@ -396,8 +581,8 @@ fn oec_decode<F: FftField>(
     t: usize,
     shares: Vec<RobustShare<F>>,
 ) -> Result<(DensePolynomial<F>, F), InterpolateError> {
-    let domain =
-        GeneralEvaluationDomain::<F>::new(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
+    let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
+        .ok_or(InterpolateError::NoSuitableDomain(n))?;
     let degree = shares[0].degree;
 
     // Iterate, increasing the number of shares considered (r) to handle more erasures/errors
@@ -445,6 +630,7 @@ fn oec_decode<F: FftField>(
 mod tests {
     use super::*;
     use ark_bls12_381::Fr;
+    use ark_poly::GeneralEvaluationDomain;
     use ark_std::test_rng;
 
     #[test]
@@ -686,6 +872,97 @@ mod tests {
                     corruption_indices
                 );
             }
+        }
+    }
+
+    /// `batch_recover_secret` must reproduce per-chunk `recover_secret` exactly on the honest path,
+    /// for any arrival order of the sender evaluations.
+    #[test]
+    fn test_batch_recover_secret_matches_per_chunk() {
+        use ark_bls12_381::Fr;
+        use ark_poly::EvaluationDomain;
+
+        let mut rng = test_rng();
+        let n = 10;
+        let t = 3;
+        let degree = t;
+        let batch_len = 16; // chunks
+
+        let polys: Vec<DensePolynomial<Fr>> = (0..batch_len)
+            .map(|_| DensePolynomial::<Fr>::rand(degree, &mut rng))
+            .collect();
+        let domain = GeneralEvaluationDomain::<Fr>::new(n).unwrap();
+
+        // Build per-sender evaluation vectors (one value per chunk). Reverse the order so the
+        // function must sort internally, mirroring real arrival order.
+        let mut evals_by_sender: Vec<(usize, Vec<Fr>)> = (0..n)
+            .map(|id| {
+                let x = domain.element(id);
+                (id, polys.iter().map(|p| p.evaluate(&x)).collect())
+            })
+            .collect();
+        evals_by_sender.reverse();
+
+        let batched = batch_recover_secret(&evals_by_sender, n, degree, t).unwrap();
+        assert_eq!(batched.len(), batch_len);
+
+        for c in 0..batch_len {
+            // Compare against a per-chunk recover_secret (the pre-batch behavior).
+            let shares: Vec<RobustShare<Fr>> = evals_by_sender
+                .iter()
+                .map(|(id, vals)| RobustShare::new(vals[c], *id, degree))
+                .collect();
+            let (mut per_chunk, _) = RobustShare::recover_secret(&shares, n, t).unwrap();
+            per_chunk.resize(degree + 1, Fr::zero());
+            assert_eq!(
+                batched[c], per_chunk,
+                "chunk {c} differs from recover_secret"
+            );
+            // Constant term equals the original secret.
+            assert_eq!(
+                batched[c][0], polys[c].coeffs[0],
+                "chunk {c} secret mismatch"
+            );
+        }
+    }
+
+    /// With up to `t` corrupted senders (across all chunks), the optimistic verify fails and the
+    /// per-chunk OEC fallback must still recover the correct secrets.
+    #[test]
+    fn test_batch_recover_secret_with_corruption() {
+        use ark_bls12_381::Fr;
+        use ark_poly::EvaluationDomain;
+
+        let mut rng = test_rng();
+        let n = 10;
+        let t = 3;
+        let degree = t;
+        let batch_len = 8;
+
+        let polys: Vec<DensePolynomial<Fr>> = (0..batch_len)
+            .map(|_| DensePolynomial::<Fr>::rand(degree, &mut rng))
+            .collect();
+        let domain = GeneralEvaluationDomain::<Fr>::new(n).unwrap();
+        let mut evals_by_sender: Vec<(usize, Vec<Fr>)> = (0..n)
+            .map(|id| {
+                let x = domain.element(id);
+                (id, polys.iter().map(|p| p.evaluate(&x)).collect())
+            })
+            .collect();
+
+        // Corrupt the first `t` senders, with a distinct error per chunk.
+        for bad in 0..t {
+            for c in 0..batch_len {
+                evals_by_sender[bad].1[c] += Fr::from((c as u64 + 1) * 7 + bad as u64);
+            }
+        }
+
+        let batched = batch_recover_secret(&evals_by_sender, n, degree, t).unwrap();
+        for c in 0..batch_len {
+            assert_eq!(
+                batched[c][0], polys[c].coeffs[0],
+                "corrupted chunk {c} secret mismatch"
+            );
         }
     }
 }

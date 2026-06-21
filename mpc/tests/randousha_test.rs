@@ -32,7 +32,7 @@ async fn test_init_reconstruct_flow() {
     let threshold = 3;
     let session_id = SessionId::new(
         ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
     let degree_t = 3;
@@ -114,7 +114,7 @@ async fn test_reconstruct_handler() {
     let threshold = 3;
     let session_id = SessionId::new(
         ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
     let degree_t = 3;
@@ -208,7 +208,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     let threshold = 3;
     let session_id = SessionId::new(
         ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
 
@@ -319,7 +319,7 @@ async fn test_output_handler() {
     let threshold = 3;
     let session_id = SessionId::new(
         ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
     let degree_t = 3;
@@ -407,7 +407,7 @@ async fn randousha_e2e() {
     let threshold = 3;
     let session_id = SessionId::new(
         ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
     let degree_t = 3;
@@ -463,7 +463,7 @@ async fn test_e2e_reconstruct_mismatch() {
     let threshold = 3;
     let session_id = SessionId::new(
         ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
     let degree_t = 3;
@@ -515,7 +515,7 @@ async fn test_e2e_wrong_degree() {
     let threshold = 3;
     let session_id = SessionId::new(
         ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
     let degree_t = 3;

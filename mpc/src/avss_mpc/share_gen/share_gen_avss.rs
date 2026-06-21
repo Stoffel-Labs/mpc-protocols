@@ -127,7 +127,7 @@ where
 
         let avss_sessionid = AvssSessionId::new(
             session_id.calling_protocol().unwrap(),
-            AvssSessionId::pack_slot24(session_id.exec_id(), self.id as u8, session_id.round_id()),
+            AvssSessionId::pack_slot(session_id.exec_id(), self.id as u8, session_id.round_id()),
             session_id.instance_id(),
         );
         self.avss

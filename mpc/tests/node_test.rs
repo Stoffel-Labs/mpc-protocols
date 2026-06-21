@@ -51,7 +51,7 @@ async fn randousha_e2e() {
     let t = 1;
     let session_id = SessionId::new(
         ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
     let degree_t = 1;
@@ -133,7 +133,7 @@ async fn ransha_e2e() {
     setup_tracing();
     let n_parties = 4;
     let t = 1;
-    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(123, 0, 0), 111);
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -151,8 +151,7 @@ async fn ransha_e2e() {
         Duration::from_secs(30),
         vec![],
     );
-
-    // Spawn tasks to process received messages
+    // spawn tasks to process received messages
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         receivers,
         nodes.clone(),
@@ -303,7 +302,7 @@ async fn gen_masks_for_input_e2e() {
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 4;
     let t = 1;
-    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(123, 0, 0), 111);
     let clientid: Vec<ClientId> = vec![100];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     //Setup the network for servers and client
@@ -818,9 +817,11 @@ async fn preprocessing_e2e() {
         let mut rng = StdRng::from_rng(OsRng).unwrap();
 
         let handle = tokio::spawn(async move {
-            node.run_preprocessing(net[pid].clone(), &mut rng)
-                .await
-                .expect("Preprocessing failed");
+            {
+                node.run_preprocessing(net[pid].clone(), &mut rng)
+                    .await
+                    .expect("Preprocessing failed");
+            }
         });
         handles.push(handle);
     }
@@ -833,13 +834,17 @@ async fn preprocessing_e2e() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let length_preproc = node.preprocessing_material.lock().await.length();
-        // The number of generated triples should be the closest multiple of 2t + 1 greater than the required
-        // number of triples.
-        assert_eq!(length_preproc.beaver_triples, 9);
-        assert_eq!(length_preproc.random_shr, 4);
-        assert_eq!(length_preproc.prandbit, 4);
-        assert_eq!(length_preproc.prandint, 4);
+        let len = node.preprocessing_material.lock().await.length();
+        let n_triples = len.beaver_triples;
+        let n_shares = len.random_shr;
+        let n_prandbit = len.prandbit;
+        let n_prandint = len.prandint;
+        // no_of_triples=7 is rounded up to a multiple of group_size (2t+1=3) -> 9.
+        // no_of_randomshares=4 remain after triple generation consumes its share pool.
+        assert_eq!(n_triples, 9); //>no_of_triples
+        assert_eq!(n_shares, 4); //>no_of_randomshares
+        assert_eq!(n_prandbit, 4);
+        assert_eq!(n_prandint, 4);
     }
 }
 
@@ -913,15 +918,16 @@ async fn preprocessing_e2e_big() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let preproc_length = node.preprocessing_material.lock().await.length();
-        info!(
-            "{}: {} {}",
-            pid, preproc_length.beaver_triples, preproc_length.random_shr
-        );
-        assert_eq!(preproc_length.beaver_triples, 20000); //>no_of_triples
-        assert_eq!(preproc_length.random_shr, 20000); //>no_of_randomshares
-        assert_eq!(preproc_length.prandbit, 0);
-        assert_eq!(preproc_length.prandint, 0);
+        let len = node.preprocessing_material.lock().await.length();
+        let n_triples = len.beaver_triples;
+        let n_shares = len.random_shr;
+        let n_prandbit = len.prandbit;
+        let n_prandint = len.prandint;
+        info!("{}: {} {}", pid, n_triples, n_shares);
+        assert_eq!(n_triples, 20000); //>no_of_triples
+        assert_eq!(n_shares, 20000); //>no_of_randomshares
+        assert_eq!(n_prandbit, 0);
+        assert_eq!(n_prandint, 0);
     }
 }
 
@@ -932,18 +938,17 @@ async fn test_rand_bit() {
     let n_parties = 4;
     let t = 1;
     let mut rng = test_rng();
-    let session_id = SessionId::new(
-        ProtocolType::RandBit,
-        SessionId::pack_slot24(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::RandBit, SessionId::pack_slot(123, 0, 0), 111);
     let no_of_rand_bits = 2;
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
-    // The construction of triples is same as that of mul
-    let (_, per_party_triples) = construct_e2e_input_mul(n_parties, no_of_rand_bits, t);
+    // The construction of triples is same as that of mul.
+    // RandBit operates in the small (Goldilocks) field, so the input shares and
+    // Beaver triples must be over `GoldilocksField`.
+    let (_, per_party_triples) =
+        construct_e2e_input_mul::<GoldilocksField>(n_parties, no_of_rand_bits, t);
 
     // assumes each party holds shares of some secrets
     let mut a = Vec::new();
@@ -960,8 +965,8 @@ async fn test_rand_bit() {
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
-        0,
+        no_of_rand_bits,
+        no_of_rand_bits,
         111,
         0,
         0,
@@ -1238,7 +1243,7 @@ async fn fpmul_e2e_with_preprocessing() {
         n_prandint,
         bound_l,
         security_k,
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         vec![],
     );
 

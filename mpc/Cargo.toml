@@ -67,3 +67,15 @@ harness = false
 [[bench]]
 name = "hmpc_batch_recon_bench"
 harness = false
+
+[[bench]]
+name = "hmpc_mul_micro_bench"
+harness = false
+
+[[bench]]
+name = "hmpc_mul_e2e_bench"
+harness = false
+
+[[bench]]
+name = "hmpc_batchrecon_ab_bench"
+harness = false

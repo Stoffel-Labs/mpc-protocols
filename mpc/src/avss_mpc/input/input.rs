@@ -514,7 +514,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             // Broadcast to servers
             let sessionid = AvssSessionId::new(
                 ProtocolType::Input,
-                AvssSessionId::pack_slot24(
+                AvssSessionId::pack_slot(
                     0, // subprotocol ID not needed because only called once
                     self.client_id as u8,
                     0,
