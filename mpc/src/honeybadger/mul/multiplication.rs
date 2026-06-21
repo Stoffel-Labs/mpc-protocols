@@ -543,11 +543,14 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 (&mut storage.output_open_mult2, "b-y")
             };
 
+            // Late/duplicate batch-recon delivery: the opened values are final, so a duplicate
+            // cannot change the reconstructed result. Ignore it instead of erroring.
             if target_map.contains_key(&dealer_id) {
-                return Err(MulError::Duplicate(format!(
-                    "Received duplicate of round {}",
-                    dealer_id
-                )));
+                warn!(
+                    self_id = self.id,
+                    dealer_id, "ignoring duplicate batch-recon opening in open_mult_handler"
+                );
+                return Ok(());
             }
 
             info!(
@@ -564,10 +567,15 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 self_id = self.id,
                 "Received shares for reconstruction using RBC for session_id: {:?}", session_id
             );
+            // Late/duplicate RBC delivery from a dealer we already have shares from. Benign:
+            // RBC agreement delivers one value per dealer and reconstruction counts each dealer
+            // once, so a duplicate cannot change the result. Ignore it instead of erroring.
             if storage.received_shares.contains_key(&sender) {
-                return Err(MulError::Duplicate(
-                    "Already received shares for reconstruction using RBC inside multiplication in open_mult_handler".to_string(),
-                ));
+                warn!(
+                    self_id = self.id,
+                    sender, "ignoring duplicate RBC shares from dealer in open_mult_handler"
+                );
+                return Ok(());
             }
 
             let mut r = payload.as_slice();
@@ -1317,5 +1325,55 @@ pub mod tests {
             node.drain_batch_recon_output().await.is_ok(),
             "drain_batch_recon_output must ignore stale outputs for cleared sessions"
         );
+    }
+
+    /// Regression test for the "Duplicate" symptom of the mul late-message race.
+    ///
+    /// A late/duplicate RBC delivery can hand the same dealer to `open_mult_handler` twice.
+    /// Previously that returned a fatal `MulError::Duplicate`; it must now be idempotent
+    /// (return `Ok(())`) — RBC agreement delivers one value per dealer and reconstruction counts
+    /// each dealer once, so a duplicate cannot change the result.
+    #[tokio::test]
+    async fn test_open_mult_handler_ignores_duplicate_rbc_sender() {
+        let n = 10;
+        let t = 3;
+        let node_id = 0;
+        let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot(7, 0, 0), 111);
+
+        let mul_node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n, t).unwrap();
+
+        // Seed the session: init has run, and dealer 3 has already delivered its RBC shares.
+        {
+            let storage = mul_node
+                .get_or_create_mult_storage(session_id)
+                .await
+                .unwrap();
+            let mut s = storage.lock().await;
+            s.no_of_mul = Some(5);
+            s.received_shares.insert(3, (Vec::new(), Vec::new()));
+        }
+
+        // A late/duplicate round-2 delivery from dealer 3.
+        let dup_sid = SessionId::new(
+            ProtocolType::Mul,
+            SessionId::pack_slot(session_id.exec_id(), 3, 2),
+            session_id.instance_id(),
+        );
+
+        // Pre-fix: Err(MulError::Duplicate(...)). Post-fix: idempotent Ok(()).
+        let result = mul_node.open_mult_handler(3, dup_sid, Vec::new()).await;
+        assert!(
+            result.is_ok(),
+            "duplicate RBC delivery must be tolerated: {result:?}"
+        );
+
+        // No double-insert: dealer 3 still has exactly one entry.
+        let storage = mul_node
+            .get_or_create_mult_storage(session_id)
+            .await
+            .unwrap();
+        let s = storage.lock().await;
+        assert!(s.received_shares.contains_key(&3));
+        assert_eq!(s.received_shares.len(), 1);
     }
 }

@@ -199,11 +199,15 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             self_id = self.id,
             "Received shares for reconstruction using RBC for session_id: {:?}", msg.session_id
         );
+        // Late/duplicate RBC delivery: benign (one value/dealer under RBC agreement;
+        // reconstruction counts each dealer once). Ignore it instead of erroring.
         if storage.received_shares.contains_key(&msg.sender) {
-            return Err(MulError::Duplicate(format!(
-                "Already received shares for reconstruction using RBC from {} in open handler inside AVSS multiplication",
-                msg.sender
-            )));
+            warn!(
+                self_id = self.id,
+                sender = msg.sender,
+                "ignoring duplicate RBC shares from dealer in AVSS open_mult_handler"
+            );
+            return Ok(());
         }
 
         if msg.payload.len() as u64 > MAX_MESSAGE_SIZE {
