@@ -209,8 +209,8 @@ fn robust_interpolate_fnt<F: FftField>(
     shares: &[RobustShare<F>],
 ) -> Result<DensePolynomial<F>, InterpolateError> {
     let degree = shares[0].degree;
-    let domain =
-        crate::common::get_or_create_evaluation_domain::<F>(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
+    let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
+        .ok_or(InterpolateError::NoSuitableDomain(n))?;
     let subset = &shares[..=degree];
     let xs: Vec<F> = subset.iter().map(|s| domain.element(s.id)).collect();
     let ys: Vec<F> = subset.iter().map(|s| s.share[0]).collect();
@@ -310,7 +310,8 @@ pub fn batch_recover_secret<F: FftField>(
     }
 
     // Sort by sender id (callers accumulate evaluations in arrival order) and validate ids.
-    let mut sorted: Vec<(usize, &Vec<F>)> = evals_by_sender.iter().map(|(id, v)| (*id, v)).collect();
+    let mut sorted: Vec<(usize, &Vec<F>)> =
+        evals_by_sender.iter().map(|(id, v)| (*id, v)).collect();
     sorted.sort_by_key(|(id, _)| *id);
 
     let mut seen = HashSet::new();
@@ -464,8 +465,8 @@ fn gao_rs_decode<F: FftField>(
             k, n
         )));
     }
-    let domain =
-        crate::common::get_or_create_evaluation_domain::<F>(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
+    let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
+        .ok_or(InterpolateError::NoSuitableDomain(n))?;
 
     let s_set: HashSet<usize> = erasure_positions.iter().copied().collect();
     let s = s_set.len();
@@ -545,8 +546,8 @@ pub fn compute_g0_from_domain<F: FftField>(n: usize) -> DensePolynomial<F> {
     }
 
     // Create an FFT-compatible evaluation domain of size n
-    let domain =
-        crate::common::get_or_create_evaluation_domain::<F>(n).expect("Domain of size n must exist over the field");
+    let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
+        .expect("Domain of size n must exist over the field");
 
     // Extract evaluation points: ω^0, ω^1, ..., ω^{n-1}
     let evaluation_points: Vec<F> = domain.elements().collect();
@@ -580,8 +581,8 @@ fn oec_decode<F: FftField>(
     t: usize,
     shares: Vec<RobustShare<F>>,
 ) -> Result<(DensePolynomial<F>, F), InterpolateError> {
-    let domain =
-        crate::common::get_or_create_evaluation_domain::<F>(n).ok_or(InterpolateError::NoSuitableDomain(n))?;
+    let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
+        .ok_or(InterpolateError::NoSuitableDomain(n))?;
     let degree = shares[0].degree;
 
     // Iterate, increasing the number of shares considered (r) to handle more erasures/errors
@@ -913,9 +914,15 @@ mod tests {
                 .collect();
             let (mut per_chunk, _) = RobustShare::recover_secret(&shares, n, t).unwrap();
             per_chunk.resize(degree + 1, Fr::zero());
-            assert_eq!(batched[c], per_chunk, "chunk {c} differs from recover_secret");
+            assert_eq!(
+                batched[c], per_chunk,
+                "chunk {c} differs from recover_secret"
+            );
             // Constant term equals the original secret.
-            assert_eq!(batched[c][0], polys[c].coeffs[0], "chunk {c} secret mismatch");
+            assert_eq!(
+                batched[c][0], polys[c].coeffs[0],
+                "chunk {c} secret mismatch"
+            );
         }
     }
 
@@ -953,8 +960,7 @@ mod tests {
         let batched = batch_recover_secret(&evals_by_sender, n, degree, t).unwrap();
         for c in 0..batch_len {
             assert_eq!(
-                batched[c][0],
-                polys[c].coeffs[0],
+                batched[c][0], polys[c].coeffs[0],
                 "corrupted chunk {c} secret mismatch"
             );
         }

@@ -133,11 +133,7 @@ async fn ransha_e2e() {
     setup_tracing();
     let n_parties = 4;
     let t = 1;
-    let session_id = SessionId::new(
-        ProtocolType::Ransha,
-        SessionId::pack_slot(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(123, 0, 0), 111);
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -512,10 +508,14 @@ async fn mul_e2e() {
     //Load the triples
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        node.preprocessing_material
-            .lock()
-            .await
-            .add(Some(triple[pid].clone()), None, None, None, None, None);
+        node.preprocessing_material.lock().await.add(
+            Some(triple[pid].clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
     }
 
     // init all nodes
@@ -938,11 +938,7 @@ async fn test_rand_bit() {
     let n_parties = 4;
     let t = 1;
     let mut rng = test_rng();
-    let session_id = SessionId::new(
-        ProtocolType::RandBit,
-        SessionId::pack_slot(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::RandBit, SessionId::pack_slot(123, 0, 0), 111);
     let no_of_rand_bits = 2;
 
     //Setup

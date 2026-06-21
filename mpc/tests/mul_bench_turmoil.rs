@@ -89,28 +89,26 @@ fn run_config(n: usize, t: usize, n_muls: usize, lat: Option<(u64, u64)>) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             for pid in 0..n {
-                nodes[pid]
-                    .preprocessing_material
-                    .lock()
-                    .await
-                    .add(Some(triples[pid].clone()), None, None, None, None, None);
+                nodes[pid].preprocessing_material.lock().await.add(
+                    Some(triples[pid].clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
             }
         });
     }
 
-    let (mut sim, inner) = turmoil_setup(
-        n,
-        vec![],
-        lat,
-    );
+    let (mut sim, inner) = turmoil_setup(n, vec![], lat);
     let latency_label = match lat {
         None => "none".to_string(),
         Some((a, b)) => format!("{a}..{b}ms"),
     };
 
-    let (tx, rx_done) = std::sync::mpsc::channel::<
-        Result<(usize, u128, Vec<RobustShare<Fr>>), String>,
-    >();
+    let (tx, rx_done) =
+        std::sync::mpsc::channel::<Result<(usize, u128, Vec<RobustShare<Fr>>), String>>();
     let (done_tx, mut done_rx) = tokio::sync::broadcast::channel::<()>(n);
     let barrier = Arc::new(Barrier::new(n));
 
@@ -254,7 +252,12 @@ fn mul_batched_turmoil_timing() {
 
     // Sweep fixed latencies (min == max) so the report can derive rounds ≈ sim_wall / latency.
     // Turmoil's `None` uses an unspecified default, so we pass explicit values instead.
-    for lat in [Some((1, 1)), Some((5, 5)), Some((20, 20)), Some((lat_min, lat_max))] {
+    for lat in [
+        Some((1, 1)),
+        Some((5, 5)),
+        Some((20, 20)),
+        Some((lat_min, lat_max)),
+    ] {
         run_config(n, t, n_muls, lat);
     }
 }

@@ -15,11 +15,11 @@
 #[path = "bench_utils.rs"]
 mod bench_utils;
 
-use bench_utils::{create_nodes, test_setup};
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
-use ark_std::rand::{rngs::OsRng, SeedableRng};
 use ark_std::rand::rngs::StdRng;
+use ark_std::rand::{rngs::OsRng, SeedableRng};
+use bench_utils::{create_nodes, test_setup};
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::{
     sync::atomic::{AtomicU64, Ordering},
@@ -173,18 +173,27 @@ async fn synthetic_inputs(
 
     // Inject triples into each node's preprocessing store (mul() consumes them).
     for pid in 0..n {
-        nodes[pid]
-            .preprocessing_material
-            .lock()
-            .await
-            .add(Some(triples_per_node[pid].clone()), None, None, None, None, None);
+        nodes[pid].preprocessing_material.lock().await.add(
+            Some(triples_per_node[pid].clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
     }
 
     (x_per_node, y_per_node, x_secret, y_secret)
 }
 
 /// Verify every multiplication reconstructed to x*y across (2t+1) parties.
-fn verify(results: &[Vec<RobustShare<Fr>>], x_secret: &[Fr], y_secret: &[Fr], n: usize, t: usize) -> bool {
+fn verify(
+    results: &[Vec<RobustShare<Fr>>],
+    x_secret: &[Fr],
+    y_secret: &[Fr],
+    n: usize,
+    t: usize,
+) -> bool {
     let n_muls = x_secret.len();
     for i in 0..n_muls {
         let shares: Vec<RobustShare<Fr>> = (0..n).map(|pid| results[pid][i].clone()).collect();
@@ -217,9 +226,7 @@ fn run_case(n: usize, t: usize, n_muls: usize) -> CaseResult {
                 let net = network[pid].clone();
                 let x = x_per_node[pid].clone();
                 let y = y_per_node[pid].clone();
-                tokio::spawn(async move {
-                    node.mul(x, y, net).await.expect("mul failed")
-                })
+                tokio::spawn(async move { node.mul(x, y, net).await.expect("mul failed") })
             })
             .collect();
         let mut results = Vec::with_capacity(n);

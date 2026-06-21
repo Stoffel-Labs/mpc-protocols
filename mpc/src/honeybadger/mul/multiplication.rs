@@ -368,10 +368,8 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         //    and one for all b-y values (dealer/sub_id 1). When there are no full (t+1)-chunks
         //    (no_of_batch == 0, i.e. N < t+1), everything goes through RBC and these are vacuously
         //    satisfied.
-        let have_batch_recon1 =
-            no_of_batch == 0 || storage.output_open_mult1.contains_key(&0u8);
-        let have_batch_recon2 =
-            no_of_batch == 0 || storage.output_open_mult2.contains_key(&1u8);
+        let have_batch_recon1 = no_of_batch == 0 || storage.output_open_mult1.contains_key(&0u8);
+        let have_batch_recon2 = no_of_batch == 0 || storage.output_open_mult2.contains_key(&1u8);
 
         // 3.
         storage.no_of_mul = Some(no_of_mul);

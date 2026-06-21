@@ -58,11 +58,7 @@ fn ransha_e2e_turmoil() {
     let n_parties = 4;
     let t = 1;
 
-    let session_id = SessionId::new(
-        ProtocolType::Ransha,
-        SessionId::pack_slot(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(123, 0, 0), 111);
 
     let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((10, 2000)));
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
@@ -288,11 +284,7 @@ fn batch_recon_late_message_recreates_cleared_store_turmoil() {
 
     let n_parties = 5;
     let t = 1;
-    let session_id = SessionId::new(
-        ProtocolType::BatchRecon,
-        SessionId::pack_slot(7, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::BatchRecon, SessionId::pack_slot(7, 0, 0), 111);
 
     let (mut sim, inner) = turmoil_setup(1, vec![], Some((10, 2000)));
     let (output_tx, _output_rx) = tokio::sync::mpsc::channel(8);
@@ -1203,7 +1195,13 @@ async fn preprocessing_stress_snapshot(
             node.id, n_triples, n_random, n_pbits, n_pints
         ));
 
-        let rand_bit_sessions = node.preprocess.small_field_preproc.rand_bit.storage.lock().await;
+        let rand_bit_sessions = node
+            .preprocess
+            .small_field_preproc
+            .rand_bit
+            .storage
+            .lock()
+            .await;
         out.push_str(&format!(
             "node {} rand_bit.sessions={}\n",
             node.id,
@@ -3327,7 +3325,9 @@ fn batch_reconstruction_with_partition(hold_nodes: Vec<usize>, n_parties: usize,
                                         break;
                                     }
 
-                                    let Some(store) = node.get_or_create_store(session_id).await.unwrap() else {
+                                    let Some(store) =
+                                        node.get_or_create_store(session_id).await.unwrap()
+                                    else {
                                         continue;
                                     };
                                     if store.lock().await.y_j.is_some() && !signaled {

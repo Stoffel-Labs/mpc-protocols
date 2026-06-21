@@ -15,7 +15,10 @@
 
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
-use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain, Polynomial};
+use ark_poly::{
+    univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain,
+    Polynomial,
+};
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -50,11 +53,15 @@ fn bench_recover_secret(c: &mut Criterion) {
     let mut group = c.benchmark_group("recover_secret");
     for &(n, t) in PARAMS {
         let (honest, corrupted) = build_shares(n, t);
-        group.bench_with_input(BenchmarkId::new("optimistic", format!("n{n}_t{t}")), &(n, t), |b, _| {
-            b.iter(|| {
-                let _ = RobustShare::recover_secret(black_box(&honest), n, t).unwrap();
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("optimistic", format!("n{n}_t{t}")),
+            &(n, t),
+            |b, _| {
+                b.iter(|| {
+                    let _ = RobustShare::recover_secret(black_box(&honest), n, t).unwrap();
+                })
+            },
+        );
         group.bench_with_input(
             BenchmarkId::new("oec_gao_corrupted", format!("n{n}_t{t}")),
             &(n, t),

@@ -18,8 +18,8 @@
 use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_serialize::CanonicalDeserialize;
-use ark_std::rand::{rngs::OsRng, SeedableRng};
 use ark_std::rand::rngs::StdRng;
+use ark_std::rand::{rngs::OsRng, SeedableRng};
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::{
     collections::HashMap,
@@ -32,7 +32,9 @@ use stoffelmpc_mpc::honeybadger::{
     batch_recon::batch_recon::BatchReconNode, robust_interpolate::robust_interpolate::RobustShare,
     ProtocolType, SessionId, WrappedMessage,
 };
-use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig, SenderId};
+use stoffelmpc_network::fake_network::{
+    FakeInnerNetwork, FakeNetwork, FakeNetworkConfig, SenderId,
+};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -230,7 +232,10 @@ fn parse_configs() -> Vec<(usize, usize)> {
             .filter_map(|s| {
                 let s = s.trim();
                 let (n, t) = s.split_once('_')?;
-                Some((n.trim_start_matches('n').parse().ok()?, t.trim_start_matches('t').parse().ok()?))
+                Some((
+                    n.trim_start_matches('n').parse().ok()?,
+                    t.trim_start_matches('t').parse().ok()?,
+                ))
             })
             .collect();
         if !parsed.is_empty() {
@@ -278,7 +283,8 @@ fn bench_batchrecon_ab(c: &mut Criterion) {
                             let (wall, msgs, recon) = run(n, t, &secrets, mode);
                             // Correctness gate: every run must reconstruct the originals.
                             assert_eq!(
-                                recon, secrets,
+                                recon,
+                                secrets,
                                 "{} reconstructed wrong secrets",
                                 mode.label()
                             );

@@ -129,9 +129,9 @@ pub struct AbaOutputReceiverOpaque {
 }
 #[repr(C)]
 pub struct RbcMsg {
-    pub sender_id: usize,         // ID of the sender node
-    pub session_id: SessionIdBits,          // Unique session ID for each broadcast instance
-    pub round_id: usize,          //Round ID
+    pub sender_id: usize,          // ID of the sender node
+    pub session_id: SessionIdBits, // Unique session ID for each broadcast instance
+    pub round_id: usize,           //Round ID
     pub payload: ByteSlice, // Actual data being broadcasted (e.g., bytes of a secret or message)
     pub metadata: ByteSlice, // info related to the message shared
     pub msg_type: RbcMessageType, // Type of message like INIT, ECHO, or READY

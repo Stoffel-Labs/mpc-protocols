@@ -2099,10 +2099,7 @@ impl<Id: ProtocolSessionId + 'static> ACS<Id> {
                     }
                 }
             });
-        } else if store
-            .get_rbc_output(msg.session_id.slot().into())
-            .is_none()
-        {
+        } else if store.get_rbc_output(msg.session_id.slot().into()).is_none() {
             // RBC finished *after* ABA started
             store.set_rbc_output(msg.session_id.slot().into(), msg.payload);
 

@@ -1381,10 +1381,14 @@ where
                     .triple_gen
                     .wait_for_result(*sessionid, self.params.timeout)
                     .await?;
-                self.preprocessing_material
-                    .lock()
-                    .await
-                    .add(Some(triples), None, None, None, None, None);
+                self.preprocessing_material.lock().await.add(
+                    Some(triples),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
                 assert!(self.preprocess.triple_gen.clear_store(*sessionid).await);
             }
             trace_preprocessing_phase(self.id, "triples", total_triples_to_generate, phase_start);
@@ -1472,10 +1476,14 @@ where
                 .share_gen
                 .wait_for_result(*sessionid, self.params.timeout)
                 .await?;
-            self.preprocessing_material
-                .lock()
-                .await
-                .add(None, None, Some(output), None, None, None);
+            self.preprocessing_material.lock().await.add(
+                None,
+                None,
+                Some(output),
+                None,
+                None,
+                None,
+            );
             assert!(self.preprocess.share_gen.clear_store(*sessionid).await);
         }
         Ok(())
@@ -2130,10 +2138,14 @@ where
 
             self.preprocess.prand_bit.clear_store(sessionid).await?;
         }
-        self.preprocessing_material
-            .lock()
-            .await
-            .add(None, None, None, None, None, Some(prandint_output));
+        self.preprocessing_material.lock().await.add(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(prandint_output),
+        );
         Ok(())
     }
 }

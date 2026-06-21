@@ -682,8 +682,7 @@ mod tests {
         let net = Arc::new(FakeNetwork::new(0, inner));
 
         // Create a session id with sub_id != 0
-        let session_id =
-            SessionId::new(ProtocolType::Randousha, SessionId::pack_slot(0, 1, 0), 0);
+        let session_id = SessionId::new(ProtocolType::Randousha, SessionId::pack_slot(0, 1, 0), 0);
 
         // Create a dummy payload
         let rec_msg = ReconstructionMessage::<Fr>::new(Default::default(), Default::default());
