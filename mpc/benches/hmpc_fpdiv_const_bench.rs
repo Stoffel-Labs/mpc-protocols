@@ -10,9 +10,7 @@ use bench_utils::{create_nodes, spawn_receivers, test_setup};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::{sync::Arc, time::Duration};
 use stoffelcrypto::common::rbc::rbc::Avid;
-use stoffelcrypto::common::types::fixed::{
-    ClearFixedPoint, FixedPointPrecision, SecretFixedPoint,
-};
+use stoffelcrypto::common::types::fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint};
 use stoffelcrypto::common::MPCTypeOps;
 use stoffelcrypto::common::{PreprocessingMPCProtocol, SecretSharingScheme};
 use stoffelcrypto::honeybadger::{
