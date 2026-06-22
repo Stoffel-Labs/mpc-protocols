@@ -1,6 +1,6 @@
 /// This file contains more common reliable broadcast protocols used in MPC.
 /// You can reuse them in your own custom MPC protocol implementations.
-use super::{rbc_store::*, utils::*, RbcError};
+use super::{rbc_store::*, utils::*, RbcError, MAX_PAYLOAD_SIZE};
 use crate::common::{ProtocolSessionId, RbcWrapFn, RBC};
 use async_trait::async_trait;
 use bincode;
@@ -730,6 +730,13 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         );
         if msg.metadata.len() < 32 {
             return Err(RbcError::Internal("Incorrect message length".to_string()));
+        }
+        let max_shard_size = (MAX_PAYLOAD_SIZE + 8 + self.k - 1) / self.k;
+        if msg.payload.len() > max_shard_size {
+            return Err(RbcError::Internal(format!(
+                "Payload exceeds maximum shard size ({})",
+                msg.payload.len()
+            )));
         }
         // Read-only dedup check: if the session already exists and echo was sent, skip.
         {
