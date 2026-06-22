@@ -1,0 +1,159 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish crates and create GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve release ref
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "ref=refs/tags/${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "ref=${GITHUB_REF}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Read workspace metadata
+        id: meta
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import subprocess
+
+          metadata = json.loads(
+              subprocess.check_output([
+                  "cargo", "metadata", "--no-deps", "--format-version", "1"
+              ])
+          )
+
+          # Keep only publishable members (publish == [] means publish = false).
+          members = [p for p in metadata["packages"] if p.get("publish") != []]
+
+          versions = {p["version"] for p in members}
+          assert len(versions) == 1, f"workspace member versions are not synced: {versions}"
+
+          names = sorted(p["name"] for p in members)
+          print(f"version={versions.pop()}")
+          print(f"names={' '.join(names)}")
+          PY
+
+      - name: Check tag matches workspace version
+        run: |
+          tag_version="${{ steps.ref.outputs.tag }}"
+          tag_version="${tag_version#v}"
+          crate_version="${{ steps.meta.outputs.version }}"
+
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "Tag ${{ steps.ref.outputs.tag }} does not match workspace version $crate_version"
+            exit 1
+          fi
+
+      - name: Check tag commit is contained in main
+        run: |
+          git fetch origin main
+          git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/main'
+
+      - name: Validate release
+        run: |
+          cargo fmt --check
+          cargo check --workspace
+          cargo test --doc --workspace
+          cargo clippy --workspace --all-targets
+          cargo test --workspace
+          # Packages and verifies every publishable member together, using an
+          # in-memory registry overlay so stoffelcrypto verifies against the
+          # about-to-be-published stoffelmpc-network. Fails fast if an internal
+          # path dependency is missing a version. Does not need the token.
+          cargo publish --workspace --dry-run
+
+      - name: Compute crate checksums
+        id: checksum
+        run: |
+          : > "$RUNNER_TEMP/SHA256SUMS"
+          for crate in target/package/*.crate; do
+            ( cd target/package && sha256sum "$(basename "$crate")" ) >> "$RUNNER_TEMP/SHA256SUMS"
+          done
+          echo "----- SHA256SUMS -----"
+          cat "$RUNNER_TEMP/SHA256SUMS"
+          echo "sha_file=$RUNNER_TEMP/SHA256SUMS" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already published
+        id: published
+        run: |
+          all_exist=true
+          for name in ${{ steps.meta.outputs.names }}; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -A "mpc-protocols-release-ci (+https://github.com/${{ github.repository }})" \
+              "https://crates.io/api/v1/crates/$name/${{ steps.meta.outputs.version }}")"
+            echo "$name@${{ steps.meta.outputs.version }} -> HTTP $code"
+            if [ "$code" != "200" ]; then
+              all_exist=false
+            fi
+          done
+          echo "all_exist=$all_exist" >> "$GITHUB_OUTPUT"
+
+      - name: Publish workspace to crates.io
+        if: steps.published.outputs.all_exist == 'false'
+        run: cargo publish --workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes_file="$(mktemp)"
+          {
+            echo "Released from tag ${{ steps.ref.outputs.tag }} (version ${{ steps.meta.outputs.version }})."
+            echo
+            echo "Published crates:"
+            for name in ${{ steps.meta.outputs.names }}; do
+              echo "- $name: https://crates.io/crates/$name/${{ steps.meta.outputs.version }}"
+            done
+            echo
+            echo "commit: https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+            echo "Crate checksums are attached as the SHA256SUMS asset."
+          } > "$notes_file"
+
+          if gh release view "${{ steps.ref.outputs.tag }}" >/dev/null 2>&1; then
+            gh release edit "${{ steps.ref.outputs.tag }}" \
+              --title "${{ steps.ref.outputs.tag }}" \
+              --notes-file "$notes_file"
+          else
+            gh release create "${{ steps.ref.outputs.tag }}" \
+              --title "${{ steps.ref.outputs.tag }}" \
+              --notes-file "$notes_file"
+          fi
+
+          gh release upload "${{ steps.ref.outputs.tag }}" \
+            target/package/*.crate \
+            "${{ steps.checksum.outputs.sha_file }}" \
+            --clobber
