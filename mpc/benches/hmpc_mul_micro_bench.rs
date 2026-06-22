@@ -43,8 +43,8 @@ fn build_shares(n: usize, t: usize) -> (Vec<RobustShare<Fr>>, Vec<RobustShare<Fr
     let secret = Fr::rand(&mut rng);
     let honest = RobustShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
     let mut corrupted = honest.clone();
-    for i in 0..t {
-        corrupted[i].share[0] += Fr::from((i as u64) + 7);
+    for (i, share) in corrupted.iter_mut().take(t).enumerate() {
+        share.share[0] += Fr::from((i as u64) + 7);
     }
     (honest, corrupted)
 }
