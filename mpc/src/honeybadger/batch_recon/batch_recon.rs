@@ -11,7 +11,7 @@ use crate::{
     },
 };
 use ark_ff::FftField;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::CanonicalSerialize;
 use futures::lock::Mutex;
 use std::sync::Arc;
 use std::{collections::HashMap, marker::PhantomData};
@@ -416,7 +416,8 @@ impl<F: FftField> BatchReconNode<F> {
                     "Received RevealBatch message"
                 );
                 let sender_id = msg.sender_id;
-                let values = Vec::<F>::deserialize_compressed(msg.payload.as_slice())
+                let mut payload_slice = msg.payload.as_slice();
+                let values = deser_bounded_vec::<F>(&mut payload_slice, msg.payload.len())
                     .map_err(BatchReconError::ArkDeserialization)?;
 
                 if values.is_empty() {
