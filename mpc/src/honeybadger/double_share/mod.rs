@@ -75,6 +75,13 @@ impl<F: FftField> DoubleShamirShare<F> {
     }
 }
 
+/// Payload for one or more faulty double shares.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DouShaPayload {
+    Share(Vec<u8>),
+    Shares(Vec<u8>),
+}
+
 /// Generic message for the faulty double share distribution protocol.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DouShaMessage {
@@ -83,12 +90,12 @@ pub struct DouShaMessage {
     /// ID of the session.
     pub session_id: SessionId,
     /// Payload of the message.
-    payload: Vec<u8>,
+    payload: DouShaPayload,
 }
 
 impl DouShaMessage {
     /// Creates a new generic message for the faulty double share protocol.
-    pub fn new(sender: PartyId, session_id: SessionId, payload: Vec<u8>) -> Self {
+    pub fn new(sender: PartyId, session_id: SessionId, payload: DouShaPayload) -> Self {
         Self {
             sender_id: sender,
             session_id,
@@ -106,7 +113,8 @@ where
 {
     /// Double shares resulting from the execution of the protocol.
     pub protocol_output: Vec<DoubleShamirShare<F>>,
-    pub share: BTreeMap<usize, DoubleShamirShare<F>>,
+    pub share: BTreeMap<usize, Vec<DoubleShamirShare<F>>>,
+    pub batch_size: usize,
 
     /// Current state of the protocol.
     pub state: ProtocolState,
@@ -130,6 +138,7 @@ where
         Self {
             protocol_output: Vec::new(),
             share: BTreeMap::new(),
+            batch_size: 1,
             reception_tracker: vec![false; n_parties],
             state: ProtocolState::NotInitialized,
             output_sender: Some(output_sender),

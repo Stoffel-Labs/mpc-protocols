@@ -6,11 +6,11 @@ use ark_ec::PrimeGroup;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::sync::Arc;
-use stoffelmpc_mpc::avss_mpc::{AvssSessionId, AvssWrappedMessage, ProtocolType};
-use stoffelmpc_mpc::common::ProtocolSessionId;
-use stoffelmpc_mpc::common::{rbc::rbc::Avid, ShamirShare};
-use stoffelmpc_mpc::common::{share::avss::verify_feldman, SecretSharingScheme};
-use stoffelmpc_mpc::common::{share::avss::AvssNode, RBC};
+use stoffelcrypto::avss_mpc::{AvssSessionId, AvssWrappedMessage, ProtocolType};
+use stoffelcrypto::common::ProtocolSessionId;
+use stoffelcrypto::common::{rbc::rbc::Avid, ShamirShare};
+use stoffelcrypto::common::{share::avss::verify_feldman, SecretSharingScheme};
+use stoffelcrypto::common::{share::avss::AvssNode, RBC};
 use stoffelmpc_network::fake_network::SenderId;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinSet;
@@ -23,8 +23,7 @@ async fn test_avss_end_to_end() {
 
     let n = 4;
     let t = 1;
-    let session_id =
-        AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot24(0, 0, 0), 111);
+    let session_id = AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot(0, 0, 0), 111);
     let mut rng = test_rng();
 
     // --- Fake network ---
@@ -55,6 +54,7 @@ async fn test_avss_end_to_end() {
             AvssNode::new(
                 i,
                 n,
+                (1..=n).collect(),
                 t,
                 sks[i],
                 pk_map.clone(),

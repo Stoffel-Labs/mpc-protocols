@@ -4,7 +4,7 @@ use ark_bls12_381::{Fr, G1Projective as G};
 use ark_ff::UniformRand;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     avss_mpc::output::{output::AvssOutputClient, AvssOutputMessage},
     common::{share::feldman::FeldmanShamirShare, SecretSharingScheme},
 };

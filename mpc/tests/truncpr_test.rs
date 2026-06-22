@@ -5,12 +5,12 @@ use crate::utils::truncpr_utils::{
 };
 use ark_bls12_381::Fr;
 use ark_ff::{One, Zero};
-use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme};
-use stoffelmpc_mpc::honeybadger::fpmul::mod_pow_2_from_field;
-use stoffelmpc_mpc::honeybadger::fpmul::truncpr::TruncPrNode;
-use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
+use stoffelcrypto::common::rbc::rbc::Avid;
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
+use stoffelcrypto::honeybadger::fpmul::mod_pow_2_from_field;
+use stoffelcrypto::honeybadger::fpmul::truncpr::TruncPrNode;
+use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use stoffelcrypto::honeybadger::{ProtocolType, SessionId};
 use tokio::task::JoinSet;
 use tracing::info;
 
@@ -26,7 +26,7 @@ async fn truncpr_e2e() {
     let kappa = 10;
     let duration = std::time::Duration::from_secs(10);
 
-    let session_id = SessionId::new(ProtocolType::Trunc, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::Trunc, SessionId::pack_slot(123, 0, 0), 111);
 
     // Generate the inputs for the protocol.
     let (a, a_input_shares) = generate_input_integer_z_k(num_parties, threshold, k);

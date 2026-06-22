@@ -9,7 +9,7 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
-stoffelnet =  { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-networking.git" }
+stoffelnet = "0.1.0"
 ark-ff = { version = "0.5.0", features = [ "asm" ] }
 ark-poly = "0.5.0"
 tokio = { version = "1.46.1", features = ["full"] }
@@ -31,7 +31,8 @@ ark-serialize = { version = "0.5", features = ["derive"] }
 futures = "0.3.31"
 itertools = "0.14.0"
 rustls = "0.23"
-num-bigint = "0.4"
+num-bigint = { version = "0.4", features = ["rand", "serde"] }
+num-traits = "0.2"
 uuid = { version = "1.18.1", features = ["v4", "v5", "serde"] }
 ark-ec = "0.5.0"
 chacha20poly1305 = "0.10.1"
@@ -39,3 +40,6 @@ turmoil = "0.7.1"
 criterion = { version = "0.5", features = ["async_tokio"] }
 num-integer = "0.1.46"
 once_cell = "1.21.3"
+# Pin transitive `time` to avoid 0.3.48, which triggers an E0119 coherence
+# conflict in rcgen 0.14.x. Remove once a fixed time >=0.3.49 is released.
+time = "=0.3.47"

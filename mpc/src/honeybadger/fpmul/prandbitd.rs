@@ -4,7 +4,7 @@ use crate::{
         batch_recon::batch_recon::BatchReconNode,
         fpmul::{
             build_all_f_polys,
-            f256::{build_all_f_polys_2_8, Gf2568, Gf256Domain},
+            f256::{build_all_f_polys_2_8, Gf256, Gf256Domain},
             PRandBitDMessage, PRandBitDStore, PRandError, PrandState,
         },
         mul::concat_sorted,
@@ -14,8 +14,9 @@ use crate::{
 };
 use ark_ff::{BigInteger, PrimeField};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
+use ark_std::rand::{Rng, SeedableRng};
 use itertools::Itertools;
-use rand::Rng;
+use num_bigint::BigUint;
 use std::{collections::HashMap, sync::Arc, vec};
 use stoffelnet::network_utils::Network;
 use tokio::{
@@ -24,16 +25,20 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-/// Represents the shares stored by a player
+/// Represents the shares stored by a player.
+///
+/// `F` represents a field in a small field and `G` represents a bigger field.
 #[derive(Debug, Clone)]
 pub struct PRandBitDNode<F: PrimeField, G: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PRandBitDStore<F, G>>>>>>,
+    pub store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<PRandBitDStore<F, G>>>)>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
+
+// pub static MAX_PRAND_SESSIONS: usize = 256;
 
 impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     /// Creates a new PRandBitDNode with empty shares.
@@ -58,6 +63,11 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             .map(|_| ())
             .ok_or(PRandError::ClearStoreError(session_id))
     }
+
+    pub async fn store_len(&self) -> usize {
+        self.store.lock().await.len()
+    }
+
     pub async fn drain_batch_recon_output(&mut self) -> Result<(), PRandError> {
         loop {
             let id = {
@@ -81,15 +91,16 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         }
         Ok(())
     }
+
     pub async fn wait_for_bit_result(
         &self,
         session_id: SessionId,
         duration: Duration,
-    ) -> Result<Vec<(RobustShare<G>, Gf2568)>, PRandError> {
+    ) -> Result<Vec<(RobustShare<G>, Gf256)>, PRandError> {
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some(value) => value,
+                Some((_, arc)) => arc,
                 None => return Err(PRandError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -115,7 +126,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some(value) => value,
+                Some((_, arc)) => arc,
                 None => return Err(PRandError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -181,7 +192,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         for (i, v) in share_r_plus_b.iter().enumerate() {
             let repr = v.into_bigint();
             let lsb = repr.is_odd();
-            let lsb_elem_2 = Gf2568::from(lsb as u8);
+            let lsb_elem_2 = Gf256::from(lsb as u8);
 
             let bytes = repr.to_bytes_le();
             let v_g = G::from_le_bytes_mod_order(&bytes);
@@ -234,7 +245,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     {
         // Phase 0: Terminal fast-path
         {
-            let binding = self.get_or_create_store(session_id).await?;
+            let binding = self.get_or_create_store(session_id, self.id).await?;
             let store = binding.lock().await;
 
             match calling_proto {
@@ -243,10 +254,8 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                         return Ok(true);
                     }
                 }
-                ProtocolType::PRandBit => {
-                    if store.state == PrandState::BitFinished {
-                        return Ok(true);
-                    }
+                ProtocolType::PRandBit if store.state == PrandState::BitFinished => {
+                    return Ok(true);
                 }
                 _ => {}
             }
@@ -254,7 +263,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         // Phase 1: Check readiness + decide what must be done
         let (batch_size, r_t_map, share_b_q, need_compute, need_open_start) = {
-            let binding = self.get_or_create_store(session_id).await?;
+            let binding = self.get_or_create_store(session_id, self.id).await?;
             let store = binding.lock().await;
 
             let Some(batch_size) = store.batch_size else {
@@ -320,7 +329,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
             let mut share_q = vec![RobustShare::new(F::zero(), self.id, self.t); batch_size];
             let mut share_p = vec![RobustShare::new(G::zero(), self.id, self.t); batch_size];
-            let mut share_2 = vec![Gf2568::zero(); batch_size];
+            let mut share_2 = vec![Gf256::zero(); batch_size];
 
             for (tset, r_t) in r_t_map.iter() {
                 let poly_q = &poly_fq[tset];
@@ -332,9 +341,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 let coeff_2 = poly_2.evaluate(xi_2);
 
                 for i in 0..batch_size {
-                    let r_q = F::from(r_t[i]);
-                    let r_p = G::from(r_t[i]);
-                    let r_2 = Gf2568::from((r_t[i] & 1) as u8);
+                    let r_q = F::from(r_t[i].clone());
+                    let r_p = G::from(r_t[i].clone());
+                    let r_2 = Gf256::from(r_t[i].clone() & BigUint::from(1u8));
 
                     share_q[i].share[0] += r_q * coeff_q;
                     share_p[i].share[0] += r_p * coeff_p;
@@ -350,7 +359,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // ============================================================
         // Phase 3: Commit derived shares + PRandInt finish
         // ============================================================
-        let binding = self.get_or_create_store(session_id).await?;
+        let binding = self.get_or_create_store(session_id, self.id).await?;
 
         let (int_sender, int_out) = {
             let mut store = binding.lock().await;
@@ -428,7 +437,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 for (i, chunk) in share_rplusb.chunks(self.t + 1).enumerate() {
                     let session_id_batch = SessionId::new(
                         calling_proto,
-                        SessionId::pack_slot24(session_id.exec_id(), i as u8, 0),
+                        SessionId::pack_slot(session_id.exec_id(), i as u8, 0),
                         session_id.instance_id(),
                     );
                     self.batch_recon
@@ -442,6 +451,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         Ok(true)
     }
+
     /// Distributed RISS generation
     /// generates shares in multiples of (t+1)
     pub async fn generate_riss<N: Network + Send + Sync>(
@@ -467,7 +477,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // Step 1: compute all maximal unqualified sets
         let tsets: Vec<Vec<usize>> = (0..self.n).combinations(self.t).collect();
 
-        let binding = self.get_or_create_store(session_id).await?;
+        let binding = self.get_or_create_store(session_id, self.id).await?;
         let mut store = binding.lock().await;
         let my_tsets: Vec<Vec<usize>> = tsets
             .clone()
@@ -478,6 +488,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         if smallfield_bits.len() != batch_size
             && session_id.calling_protocol() == Some(ProtocolType::PRandBit)
         {
+            tracing::error!(id = self.id, "Not enough bits from the smaller field");
             return Err(PRandError::NotSet(
                 "Not enough bits from the smaller field".to_string(),
             ));
@@ -495,13 +506,38 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         // Step 2: P_i samples randomness and sends
         // Random integer range: [0, 2^(l+k)]
-        let bound: i64 = 1 << (l + k);
+        // Check that k + l + (2 bits for b) + ceil(log2(n)) fit into both moduli.
+        // The ceil(log2(n)) accounts for summing n individual shares without overflow.
+        const B_MARGIN: usize = 2;
+        let n_margin = (self.n as f64).log2().ceil() as usize;
+        let required_bits = k + l + B_MARGIN + n_margin;
+        let max_field_cap = F::MODULUS_BIT_SIZE.min(G::MODULUS_BIT_SIZE);
+        if required_bits as u32 >= max_field_cap {
+            return Err(PRandError::SurpassedFieldCapacity);
+        }
+        let bound = BigUint::from(2 as u32).pow((k + l) as u32);
+        let pending = {
+            let binding = self.get_or_create_store(session_id, self.id).await?;
+            let mut store = binding.lock().await;
+            store.r_t_bound = Some(bound.clone());
+            std::mem::take(&mut store.pending_riss_messages)
+        };
+        for pending_msg in pending {
+            match self.process(pending_msg, network.clone()).await {
+                Ok(()) => {}
+                Err(PRandError::InvalidMessage(_)) | Err(PRandError::Duplicate(_)) => {
+                    warn!("dropping invalid pending RISS message from Byzantine peer");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
         for tset in tsets {
-            let r_t_i: Vec<i64> = (0..batch_size)
-                .map(|_| rand::thread_rng().gen_range(0, bound + 1))
+            let r_t_i: Vec<BigUint> = (0..batch_size)
+                .map(|_| gen_big_uint_range(&mut rng, &bound))
                 .collect();
 
-            // send to all players not in T
+            // Send to all players not in T
             for j in 0..self.n {
                 if !tset.contains(&j) {
                     let msg = WrappedMessage::PRandBitD(PRandBitDMessage::new(
@@ -533,7 +569,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             }
         };
 
-        let binding = self.get_or_create_store(msg.session_id).await?;
+        let binding = self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await?;
         let mut store = binding.lock().await;
 
         if msg.tset.contains(&self.id) {
@@ -541,6 +579,48 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 "node {} received message for tset that contains itself: {:?}",
                 self.id, msg.tset
             )));
+        }
+
+        if msg.tset.len() != self.t {
+            return Err(PRandError::InvalidMessage(format!(
+                "tset length {} != threshold {}",
+                msg.tset.len(),
+                self.t
+            )));
+        }
+        if msg.tset.iter().any(|&id| id >= self.n) {
+            return Err(PRandError::InvalidMessage(
+                "tset contains out-of-range party ID".into(),
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if msg.tset.iter().any(|id| !seen.insert(id)) {
+            return Err(PRandError::InvalidMessage(
+                "tset contains duplicate IDs".into(),
+            ));
+        }
+
+        // If bounds are not yet set, queue the message for retroactive validation
+        // once generate_riss() initialises the session.
+        if store.batch_size.is_none() || store.r_t_bound.is_none() {
+            const MAX_PENDING_RISS: usize = 4096;
+            if msg.r_t.len() > MAX_PENDING_RISS {
+                return Err(PRandError::InvalidMessage(
+                    "r_t too large for uninitialized session".into(),
+                ));
+            }
+            if store
+                .pending_riss_messages
+                .iter()
+                .any(|m| m.sender_id == msg.sender_id && m.tset == msg.tset)
+            {
+                return Err(PRandError::Duplicate(format!(
+                    "Already queued from {} for tset {:?}",
+                    msg.sender_id, msg.tset
+                )));
+            }
+            store.pending_riss_messages.push(msg);
+            return Ok(());
         }
 
         let maybe_batch_size = store.batch_size;
@@ -555,6 +635,17 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             }
         }
 
+        if let Some(ref bound) = store.r_t_bound {
+            for val in &msg.r_t {
+                if val > bound {
+                    return Err(PRandError::InvalidMessage(format!(
+                        "r_t value from sender {} exceeds maximum allowed bound",
+                        msg.sender_id
+                    )));
+                }
+            }
+        }
+
         // Get or create entry for this tset
         let tset_entry = store
             .riss_shares
@@ -564,7 +655,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // Deduplicate per (sender, tset)
         if tset_entry.contains_key(&msg.sender_id) {
             return Err(PRandError::Duplicate(format!(
-                "Already received from {} for tset {:?}",
+                "PRandBit: Already received from {} for tset {:?}",
                 msg.sender_id, msg.tset
             )));
         }
@@ -579,9 +670,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             Some(
                 tset_entry
                     .values()
-                    .fold(vec![0i64; batch_size], |mut acc, v| {
+                    .fold(vec![BigUint::ZERO; batch_size], |mut acc, v| {
                         for (a, x) in acc.iter_mut().zip(v) {
-                            *a += *x;
+                            *a += x;
                         }
                         acc
                     }),
@@ -615,11 +706,11 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot24(sid.exec_id(), 0, 0),
+            SessionId::pack_slot(sid.exec_id(), 0, 0),
             sid.instance_id(),
         );
 
-        let binding = self.get_or_create_store(session_id).await?;
+        let binding = self.get_or_create_store(session_id, self.id).await?;
         let mut store = binding.lock().await;
         if store.state == PrandState::BitFinished {
             return Ok(());
@@ -643,16 +734,51 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<PRandBitDStore<F, G>>>, PRandError> {
         let mut storage = self.store.lock().await;
 
-        if storage.len() >= 256 && !storage.contains_key(&session_id) {
-            warn!("PRandBitD session limit reached");
-            return Err(PRandError::LimitError);
-        }
+        // TODO: restore session limits
+        // if !storage.contains_key(&session_id) {
+        //     if storage.len() >= MAX_PRAND_SESSIONS {
+        //         warn!("PRandBitD session limit reached");
+        //         return Err(PRandError::LimitError);
+        //     }
+        //     let per_peer_limit = MAX_PRAND_SESSIONS / self.n;
+        //     let peer_count = storage
+        //         .values()
+        //         .filter(|(id, _)| *id == initiator_id)
+        //         .count();
+        //     if peer_count >= per_peer_limit {
+        //         warn!("PRandBitD per-peer session limit reached");
+        //         return Err(PRandError::LimitError);
+        //     }
+        // }
         Ok(storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(PRandBitDStore::empty())))
+            .or_insert((initiator_id, Arc::new(Mutex::new(PRandBitDStore::empty()))))
+            .1
             .clone())
+    }
+}
+
+/// Generates a random number in the range [0, bound] via rejection sampling.
+fn gen_big_uint_range<R>(rng: &mut R, bound: &BigUint) -> BigUint
+where
+    R: Rng,
+{
+    // To generate the random element including `bound`.
+    let bound = bound + BigUint::from(1 as usize);
+    let n_bytes = bound.to_bytes_le().len();
+    let n_bits = bound.bits();
+    let excess_bits = (8 - n_bits % 8) % 8;
+
+    // Rejection sampling.
+    loop {
+        let bytes: Vec<u8> = (0..n_bytes).map(|_| rng.gen()).collect();
+        let candidate = BigUint::from_bytes_le(&bytes) >> excess_bits;
+        if candidate < bound {
+            return candidate;
+        }
     }
 }

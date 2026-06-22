@@ -73,6 +73,10 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
+    TripleSmallField = 15,
+    RanShaSmallField = 16,
+    RanDouShaSmallField = 17,
+    DouShaSmallField = 18,
 }
 
 impl From<ProtocolType> for crate::honeybadger::ProtocolType {
@@ -93,6 +97,12 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             ProtocolType::FpMul => crate::honeybadger::ProtocolType::FpMul,
             ProtocolType::Trunc => crate::honeybadger::ProtocolType::Trunc,
             ProtocolType::FpDivConst => crate::honeybadger::ProtocolType::FpDivConst,
+            ProtocolType::TripleSmallField => crate::honeybadger::ProtocolType::TripleSmallField,
+            ProtocolType::RanShaSmallField => crate::honeybadger::ProtocolType::RanShaSmallField,
+            ProtocolType::RanDouShaSmallField => {
+                crate::honeybadger::ProtocolType::RanDouShaSmallField
+            }
+            ProtocolType::DouShaSmallField => crate::honeybadger::ProtocolType::DouShaSmallField,
         }
     }
 }
@@ -115,6 +125,12 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::FpMul => ProtocolType::FpMul,
             crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
             crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
+            crate::honeybadger::ProtocolType::TripleSmallField => ProtocolType::TripleSmallField,
+            crate::honeybadger::ProtocolType::RanShaSmallField => ProtocolType::RanShaSmallField,
+            crate::honeybadger::ProtocolType::RanDouShaSmallField => {
+                ProtocolType::RanDouShaSmallField
+            }
+            crate::honeybadger::ProtocolType::DouShaSmallField => ProtocolType::DouShaSmallField,
         }
     }
 }
@@ -183,48 +199,80 @@ pub extern "C" fn u256_to_le_bytes(num: U256) -> ByteSlice {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn new_session_id(
-    caller: ProtocolType,
-    exec_id: u8,
-    sub_id: u8,
-    round_id: u8,
-    instance_id: u32,
-) -> u64 {
-    let session_id = SessionId::new(
-        caller.into(),
-        SessionId::pack_slot24(exec_id, sub_id, round_id),
-        instance_id,
-    );
-    session_id.as_u64()
+/// C-compatible view of a 128-bit `SessionId` (C has no `u128`). `lo` holds the low 64 bits,
+/// `hi` the high 64 bits. Matches `SessionIdBits` in `honey_badger_bindings.h`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionIdBits {
+    pub lo: u64,
+    pub hi: u64,
+}
+
+impl From<SessionId> for SessionIdBits {
+    fn from(id: SessionId) -> Self {
+        id.as_u128().into()
+    }
+}
+
+impl From<u128> for SessionIdBits {
+    fn from(v: u128) -> Self {
+        SessionIdBits {
+            lo: v as u64,
+            hi: (v >> 64) as u64,
+        }
+    }
+}
+
+impl SessionIdBits {
+    /// Reconstruct the `SessionId`. Unsafe mirrors `SessionId::from_u128` (caller must supply a
+    /// well-formed value, e.g. one produced by `new_session_id`).
+    pub unsafe fn to_session_id(self) -> SessionId {
+        SessionId::from_u128(((self.hi as u128) << 64) | (self.lo as u128))
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn calling_protocol(session_id: u64) -> ProtocolType {
-    let session_id = unsafe { SessionId::from_u64(session_id) };
+pub extern "C" fn new_session_id(
+    caller: ProtocolType,
+    exec_id: u64,
+    sub_id: u8,
+    round_id: u8,
+    instance_id: u32,
+) -> SessionIdBits {
+    let session_id = SessionId::new(
+        caller.into(),
+        SessionId::pack_slot(exec_id, sub_id, round_id),
+        instance_id,
+    );
+    session_id.into()
+}
+
+#[no_mangle]
+pub extern "C" fn calling_protocol(session_id: SessionIdBits) -> ProtocolType {
+    let session_id = unsafe { session_id.to_session_id() };
     session_id.calling_protocol().unwrap().into()
 }
 
 #[no_mangle]
-pub extern "C" fn exec_id(session_id: u64) -> u8 {
-    let session_id = unsafe { SessionId::from_u64(session_id) };
+pub extern "C" fn exec_id(session_id: SessionIdBits) -> u64 {
+    let session_id = unsafe { session_id.to_session_id() };
     session_id.exec_id()
 }
 
 #[no_mangle]
-pub extern "C" fn sub_id(session_id: u64) -> u8 {
-    let session_id = unsafe { SessionId::from_u64(session_id) };
+pub extern "C" fn sub_id(session_id: SessionIdBits) -> u8 {
+    let session_id = unsafe { session_id.to_session_id() };
     session_id.sub_id()
 }
 
 #[no_mangle]
-pub extern "C" fn round_id(session_id: u64) -> u8 {
-    let session_id = unsafe { SessionId::from_u64(session_id) };
+pub extern "C" fn round_id(session_id: SessionIdBits) -> u8 {
+    let session_id = unsafe { session_id.to_session_id() };
     session_id.round_id()
 }
 
 #[no_mangle]
-pub extern "C" fn instance_id(session_id: u64) -> u32 {
-    let session_id = unsafe { SessionId::from_u64(session_id) };
+pub extern "C" fn instance_id(session_id: SessionIdBits) -> u32 {
+    let session_id = unsafe { session_id.to_session_id() };
     session_id.instance_id()
 }

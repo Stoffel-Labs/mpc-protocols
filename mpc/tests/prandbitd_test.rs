@@ -4,12 +4,12 @@ use ark_bls12_381::Fr;
 use ark_ff::{One, PrimeField, Zero};
 use num_integer::binomial;
 use std::time::Duration;
-use stoffelmpc_mpc::common::math::goldilocks::GoldilocksField;
-use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme};
-use stoffelmpc_mpc::honeybadger::fpmul::f256::{lagrange_interpolate_f2_8, Gf256Domain};
-use stoffelmpc_mpc::honeybadger::fpmul::prandbitd::PRandBitDNode;
-use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
+use stoffelcrypto::common::math::goldilocks::GoldilocksField;
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
+use stoffelcrypto::honeybadger::fpmul::f256::{lagrange_interpolate_f2_8, Gf256Domain};
+use stoffelcrypto::honeybadger::fpmul::prandbitd::PRandBitDNode;
+use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use stoffelcrypto::honeybadger::{ProtocolType, SessionId};
 use tokio::task::JoinSet;
 use tracing::info;
 
@@ -29,11 +29,7 @@ async fn prandbitd_correctness_e2e() {
 
     info!("l value: {}, Bits big field: {}", l, Fr::MODULUS_BIT_SIZE);
 
-    let session_id = SessionId::new(
-        ProtocolType::PRandBit,
-        SessionId::pack_slot24(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::PRandBit, SessionId::pack_slot(123, 0, 0), 111);
 
     // Build a fake network.
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);
@@ -78,7 +74,10 @@ async fn prandbitd_correctness_e2e() {
     let mut evaluation_points = Vec::new();
     let binary_domain = Gf256Domain::new(num_parties).unwrap();
     for node in &mut nodes {
-        let store = node.get_or_create_store(session_id.clone()).await.unwrap();
+        let store = node
+            .get_or_create_store(session_id.clone(), node.id)
+            .await
+            .unwrap();
         let node_id = node.id;
         let store_guard = store.lock().await;
 

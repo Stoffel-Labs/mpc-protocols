@@ -2,7 +2,7 @@ use crate::{
     common::{lagrange_interpolate, rbc::RbcError, share::ShareError},
     honeybadger::{
         batch_recon::BatchReconError,
-        fpmul::f256::{Gf2568, Gf256Error},
+        fpmul::f256::{Gf256, Gf256Error},
         mul::MulError,
         robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId,
@@ -12,6 +12,7 @@ use ark_ff::{BigInteger, FftField, PrimeField};
 use ark_poly::{univariate::DensePolynomial, EvaluationDomain, GeneralEvaluationDomain};
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use stoffelnet::network_utils::NetworkError;
@@ -114,6 +115,9 @@ where
 //--------------------------------------------Prandbitd--------------------------------------------
 #[derive(Debug, Error)]
 pub enum PRandError {
+    /// The parameters for the precision are too big
+    #[error("the parameters for k and l surpassed the field capacity")]
+    SurpassedFieldCapacity,
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
@@ -167,7 +171,7 @@ pub struct PRandBitDMessage {
     pub sender_id: usize,
     pub session_id: SessionId,
     pub tset: Vec<usize>,
-    pub r_t: Vec<i64>,
+    pub r_t: Vec<BigUint>,
     pub payload: Vec<u8>,
 }
 
@@ -177,7 +181,7 @@ impl PRandBitDMessage {
         sender_id: usize,
         session_id: SessionId,
         tset: Vec<usize>,
-        r_t: Vec<i64>,
+        r_t: Vec<BigUint>,
         payload: Vec<u8>,
     ) -> Self {
         Self {
@@ -202,22 +206,25 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     /// For every maximal unqualified set T that excludes this player,
     /// we store the full mask r_T = sum_i r_T^i
     pub batch_size: Option<usize>,
+    /// Messages that arrived before batch_size/r_t_bound were set; reprocessed once initialized.
+    pub pending_riss_messages: Vec<PRandBitDMessage>,
     pub output_open: HashMap<u8, Vec<F>>,
-    pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<i64>>>, // tset -> {sender -> val}
-    pub r_t: HashMap<Vec<usize>, Vec<i64>>,
+    pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<BigUint>>>, // tset -> {sender -> val}
+    pub r_t: HashMap<Vec<usize>, Vec<BigUint>>,
     pub no_of_tsets: Option<usize>,
     pub share_r_q: Option<Vec<RobustShare<F>>>, //smaller field
     pub share_r_p: Option<Vec<RobustShare<G>>>, // PrandInt output
     pub share_b_q: Option<Vec<RobustShare<F>>>, //smaller field
-    pub share_r_2: Option<Vec<Gf2568>>,
-    pub share_b_2: Vec<Gf2568>,         //PrandBitD output
+    pub share_r_2: Option<Vec<Gf256>>,
+    pub share_b_2: Vec<Gf256>,          //PrandBitD output
     pub share_b_p: Vec<RobustShare<G>>, //PrandBitD/PrandBitL output
     pub state: PrandState,
-    pub output_bit_sender: Option<Sender<Vec<(RobustShare<G>, Gf2568)>>>,
+    pub output_bit_sender: Option<Sender<Vec<(RobustShare<G>, Gf256)>>>,
     pub output_int_sender: Option<Sender<Vec<RobustShare<G>>>>,
-    pub output_bit_receiver: Option<Receiver<Vec<(RobustShare<G>, Gf2568)>>>,
+    pub output_bit_receiver: Option<Receiver<Vec<(RobustShare<G>, Gf256)>>>,
     pub output_int_receiver: Option<Receiver<Vec<RobustShare<G>>>>,
     pub open_started: bool,
+    pub r_t_bound: Option<BigUint>,
 }
 
 impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
@@ -226,6 +233,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
         let (output_int_sender, output_int_receiver) = channel();
         Self {
             batch_size: None,
+            pending_riss_messages: Vec::new(),
             output_open: HashMap::new(),
             riss_shares: HashMap::new(),
             r_t: HashMap::new(),
@@ -242,6 +250,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
             output_bit_receiver: Some(output_bit_receiver),
             output_int_receiver: Some(output_int_receiver),
             open_started: false,
+            r_t_bound: None,
         }
     }
 }

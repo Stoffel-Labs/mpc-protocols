@@ -111,7 +111,7 @@ void test_bracha_rbc_basic()
     payload.pointer = (uint8_t *)myString;
     payload.len = strlen(myString) + 1;
 
-    uint64_t session_id = new_session_id(Rbc, 0, 0, 0, 12);
+    SessionIdBits session_id = new_session_id(Rbc, 0, 0, 0, 12);
     // party 0 init
     enum RbcErrorCode e = sync_bracha_init(prt_array[0], payload, session_id, net);
     if (e != RbcSuccess)

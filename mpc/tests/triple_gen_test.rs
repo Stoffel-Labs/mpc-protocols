@@ -6,7 +6,7 @@ use crate::utils::{
 use ark_bls12_381::Fr;
 use itertools::izip;
 use std::{matches, time::Duration};
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::{share::shamir::NonRobustShare, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
         robust_interpolate::robust_interpolate::RobustShare,
@@ -20,7 +20,7 @@ async fn test_triple_gen_e2e() {
     let n_parties = 13;
     let threshold = 2;
     let n_shares = 2 * threshold + 1;
-    let session_id = SessionId::new(ProtocolType::Triple, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::Triple, SessionId::pack_slot(123, 0, 0), 111);
     let (random_shares_a, random_shares_b, randousha_pairs, a_values, b_values, _) =
         get_triple_init_test_shares(n_shares, n_parties, threshold);
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -49,7 +49,8 @@ async fn test_triple_gen_e2e() {
     for p in 0..n_parties {
         let node = nodes[p].lock().await;
         let storage = node.storage.lock().await;
-        let triple_data = storage.get(&session_id).unwrap().lock().await;
+        let (_, triple_store) = storage.get(&session_id).unwrap();
+        let triple_data = triple_store.lock().await;
         assert!(matches!(
             triple_data.protocol_state,
             ProtocolState::Finished

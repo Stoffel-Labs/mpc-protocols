@@ -2,12 +2,12 @@ use crate::utils::rand_bit_utils::{create_rand_bit_input, spawn_receiver_tasks};
 use crate::utils::test_utils::{setup_tracing, test_setup};
 use ark_ff::{AdditiveGroup, Field};
 use std::time::Duration;
-use stoffelmpc_mpc::common::math::goldilocks::GoldilocksField;
-use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::{ProtocolSessionId, SecretSharingScheme};
-use stoffelmpc_mpc::honeybadger::fpmul::rand_bit::RandBit;
-use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
+use stoffelcrypto::common::math::goldilocks::GoldilocksField;
+use stoffelcrypto::common::rbc::rbc::Avid;
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
+use stoffelcrypto::honeybadger::fpmul::rand_bit::RandBit;
+use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use stoffelcrypto::honeybadger::{ProtocolType, SessionId};
 use tokio::task::JoinSet;
 
 mod utils;
@@ -21,11 +21,7 @@ async fn rand_bit_with_small_field_e2e() {
     let batch_size = threshold + 1;
     let duration = Duration::from_secs(10);
 
-    let session_id = SessionId::new(
-        ProtocolType::RandBit,
-        SessionId::pack_slot24(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::RandBit, SessionId::pack_slot(123, 0, 0), 111);
 
     // === Build fake network ===
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);
@@ -71,7 +67,10 @@ async fn rand_bit_with_small_field_e2e() {
     let mut all_outputs = Vec::new();
 
     for node in &nodes {
-        let store = node.get_or_create_storage(session_id).await.unwrap();
+        let store = node
+            .get_or_create_storage(session_id, node.id)
+            .await
+            .unwrap();
         let id = node.id;
         let s = store.lock().await;
 

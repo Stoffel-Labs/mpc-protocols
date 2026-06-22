@@ -1,8 +1,8 @@
+use num_bigint::BigUint;
 use std::{
     collections::HashMap,
     ops::{Add, Mul, Sub},
 };
-
 use thiserror::Error;
 
 /// Error type for GF(2^8) field and domain operations.
@@ -14,7 +14,7 @@ pub enum Gf256Error {
 
     /// Element has no multiplicative inverse (should only occur for 0).
     #[error("Element {0:?} has no multiplicative inverse")]
-    NotInvertible(Gf2568),
+    NotInvertible(Gf256),
 
     /// Invalid domain size (must be ≤ 255).
     #[error("Invalid domain size for GF(2^8): n = {0}")]
@@ -27,35 +27,35 @@ pub enum Gf256Error {
 
 /// Finite field GF(2^8) with AES modulus x^8 + x^4 + x^3 + x + 1 (0x11B)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Gf2568(pub u8);
+pub struct Gf256(pub u8);
 
-impl Gf2568 {
+impl Gf256 {
     pub const MODULUS: u16 = 0x11B;
-    pub const GENERATOR: Gf2568 = Gf2568(0x03);
+    pub const GENERATOR: Gf256 = Gf256(0x03);
 
     pub fn generator() -> Self {
         Self::GENERATOR
     }
 
     pub fn new(value: u8) -> Self {
-        Gf2568(value)
+        Gf256(value)
     }
 
     pub fn zero() -> Self {
-        Gf2568(0)
+        Gf256(0)
     }
 
     pub fn one() -> Self {
-        Gf2568(1)
+        Gf256(1)
     }
 
     /// Addition in GF(2^8) is XOR
-    pub fn add(self, other: Gf2568) -> Gf2568 {
-        Gf2568(self.0 ^ other.0)
+    pub fn add(self, other: Gf256) -> Gf256 {
+        Gf256(self.0 ^ other.0)
     }
 
     /// Multiplication in GF(2^8) with reduction by MODULUS
-    pub fn mul(self, other: Gf2568) -> Gf2568 {
+    pub fn mul(self, other: Gf256) -> Gf256 {
         let mut result = 0u16;
         let mut a = self.0 as u16;
         let mut b = other.0 as u16;
@@ -71,7 +71,7 @@ impl Gf2568 {
             b >>= 1;
         }
 
-        Gf2568(result as u8)
+        Gf256(result as u8)
     }
 
     pub fn is_zero(&self) -> bool {
@@ -84,7 +84,7 @@ impl Gf2568 {
 
     /// Multiplicative inverse using Fermat’s little theorem:
     /// a^-1 = a^(2^8 - 2) = a^254
-    pub fn inverse(self) -> Option<Gf2568> {
+    pub fn inverse(self) -> Option<Gf256> {
         if self.0 == 0 {
             None
         } else {
@@ -93,8 +93,8 @@ impl Gf2568 {
     }
 
     /// Exponentiation by square-and-multiply
-    pub fn pow(self, mut exp: u64) -> Gf2568 {
-        let mut result = Gf2568::one();
+    pub fn pow(self, mut exp: u64) -> Gf256 {
+        let mut result = Gf256::one();
         let mut base = self;
 
         while exp > 0 {
@@ -113,36 +113,42 @@ impl Gf2568 {
     }
 }
 
-impl From<u8> for Gf2568 {
+impl From<u8> for Gf256 {
     fn from(value: u8) -> Self {
-        Gf2568(value)
+        Gf256(value)
     }
 }
 
-impl From<u16> for Gf2568 {
+impl From<u16> for Gf256 {
     fn from(value: u16) -> Self {
         // Reduce to 8 bits in case input > 255
-        Gf2568((value & 0xFF) as u8)
+        Gf256((value & 0xFF) as u8)
     }
 }
 
-impl Add for Gf2568 {
-    type Output = Gf2568;
-    fn add(self, other: Gf2568) -> Self::Output {
+impl From<BigUint> for Gf256 {
+    fn from(value: BigUint) -> Self {
+        Gf256(value.to_bytes_le().first().copied().unwrap_or(0))
+    }
+}
+
+impl Add for Gf256 {
+    type Output = Gf256;
+    fn add(self, other: Gf256) -> Self::Output {
         self.add(other)
     }
 }
 
-impl Mul for Gf2568 {
-    type Output = Gf2568;
-    fn mul(self, other: Gf2568) -> Gf2568 {
+impl Mul for Gf256 {
+    type Output = Gf256;
+    fn mul(self, other: Gf256) -> Gf256 {
         self.mul(other)
     }
 }
 
-impl Sub for Gf2568 {
-    type Output = Gf2568;
-    fn sub(self, other: Gf2568) -> Gf2568 {
+impl Sub for Gf256 {
+    type Output = Gf256;
+    fn sub(self, other: Gf256) -> Gf256 {
         self.add(other) // subtraction = addition in characteristic 2
     }
 }
@@ -151,23 +157,23 @@ impl Sub for Gf2568 {
 
 #[derive(Clone, Debug)]
 pub struct Poly {
-    pub coeffs: Vec<Gf2568>, // coeffs[0] + coeffs[1] x + coeffs[2] x^2 + ...
+    pub coeffs: Vec<Gf256>, // coeffs[0] + coeffs[1] x + coeffs[2] x^2 + ...
 }
 
 impl Poly {
     pub fn zero() -> Self {
         Poly {
-            coeffs: vec![Gf2568::zero()],
+            coeffs: vec![Gf256::zero()],
         }
     }
 
-    pub fn from_coeffs(c: Vec<Gf2568>) -> Self {
+    pub fn from_coeffs(c: Vec<Gf256>) -> Self {
         Poly { coeffs: c }
     }
 
-    pub fn evaluate(&self, x: Gf2568) -> Gf2568 {
-        let mut acc = Gf2568::zero();
-        let mut pow = Gf2568::one();
+    pub fn evaluate(&self, x: Gf256) -> Gf256 {
+        let mut acc = Gf256::zero();
+        let mut pow = Gf256::one();
         for &c in &self.coeffs {
             acc = acc.add(c.mul(pow));
             pow = pow.mul(x);
@@ -178,7 +184,7 @@ impl Poly {
 
 fn poly_add(a: &Poly, b: &Poly) -> Poly {
     let n = a.coeffs.len().max(b.coeffs.len());
-    let mut coeffs = vec![Gf2568::zero(); n];
+    let mut coeffs = vec![Gf256::zero(); n];
     for i in 0..a.coeffs.len() {
         coeffs[i] = coeffs[i].add(a.coeffs[i]);
     }
@@ -189,7 +195,7 @@ fn poly_add(a: &Poly, b: &Poly) -> Poly {
 }
 
 fn poly_mul(a: &Poly, b: &Poly) -> Poly {
-    let mut coeffs = vec![Gf2568::zero(); a.coeffs.len() + b.coeffs.len() - 1];
+    let mut coeffs = vec![Gf256::zero(); a.coeffs.len() + b.coeffs.len() - 1];
     for i in 0..a.coeffs.len() {
         for j in 0..b.coeffs.len() {
             coeffs[i + j] = coeffs[i + j].add(a.coeffs[i].mul(b.coeffs[j]));
@@ -198,24 +204,24 @@ fn poly_mul(a: &Poly, b: &Poly) -> Poly {
     Poly::from_coeffs(coeffs)
 }
 
-fn poly_scale(a: &Poly, k: Gf2568) -> Poly {
+fn poly_scale(a: &Poly, k: Gf256) -> Poly {
     Poly::from_coeffs(a.coeffs.iter().map(|&c| c.mul(k)).collect())
 }
 
-pub fn lagrange_interpolate_f2_8(x_vals: &[Gf2568], y_vals: &[Gf2568]) -> Poly {
+pub fn lagrange_interpolate_f2_8(x_vals: &[Gf256], y_vals: &[Gf256]) -> Poly {
     assert_eq!(x_vals.len(), y_vals.len());
     let n = x_vals.len();
     let mut result = Poly::zero();
 
     for j in 0..n {
         // numerator polynomial
-        let mut num = Poly::from_coeffs(vec![Gf2568::one()]);
-        let mut denom = Gf2568::one();
+        let mut num = Poly::from_coeffs(vec![Gf256::one()]);
+        let mut denom = Gf256::one();
 
         for m in 0..n {
             if m != j {
                 // (x - x_m)
-                num = poly_mul(&num, &Poly::from_coeffs(vec![x_vals[m], Gf2568::one()]));
+                num = poly_mul(&num, &Poly::from_coeffs(vec![x_vals[m], Gf256::one()]));
                 denom = denom.mul(x_vals[j].sub(x_vals[m]));
             }
         }
@@ -236,11 +242,11 @@ pub fn build_all_f_polys_2_8(
         .into_iter()
         .map(|tset| {
             // Construct interpolation points
-            let xs = std::iter::once(Gf2568::zero())
+            let xs = std::iter::once(Gf256::zero())
                 .chain(tset.iter().map(|&j| domain_2.element(j)))
                 .collect::<Vec<_>>();
-            let ys = std::iter::once(Gf2568::one())
-                .chain(std::iter::repeat(Gf2568::zero()).take(tset.len()))
+            let ys = std::iter::once(Gf256::one())
+                .chain(std::iter::repeat(Gf256::zero()).take(tset.len()))
                 .collect::<Vec<_>>();
             // Interpolate polynomial
             let poly = lagrange_interpolate_f2_8(&xs, &ys);
@@ -253,7 +259,7 @@ pub fn build_all_f_polys_2_8(
 
 #[derive(Clone, Debug)]
 pub struct Gf256ShamirShare {
-    pub share: Gf2568,
+    pub share: Gf256,
     ///index of the share(x-values),can be different from the reciever ID
     pub id: usize,
     pub degree: usize,
@@ -262,7 +268,7 @@ pub struct Gf256ShamirShare {
 //---------------------------------DOMAIN---------------------------------
 
 pub struct Gf256Domain {
-    pub elements: Vec<Gf2568>,
+    pub elements: Vec<Gf256>,
 }
 
 impl Gf256Domain {
@@ -272,15 +278,15 @@ impl Gf256Domain {
         }
 
         let mut elements = Vec::with_capacity(size);
-        let mut x = Gf2568::one();
+        let mut x = Gf256::one();
         for _ in 0..size {
             elements.push(x);
-            x = x.mul(Gf2568::GENERATOR);
+            x = x.mul(Gf256::GENERATOR);
         }
         Ok(Self { elements })
     }
 
-    pub fn element(&self, i: usize) -> Gf2568 {
+    pub fn element(&self, i: usize) -> Gf256 {
         self.elements[i]
     }
 }

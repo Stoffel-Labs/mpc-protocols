@@ -4,7 +4,7 @@ use ark_bls12_381::{Fr, G1Projective as G};
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::time::Duration;
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     avss_mpc::{input::input::AvssInputServer, AvssMPCClient, AvssSessionId, AvssWrappedMessage},
     common::{rbc::rbc::Avid, share::feldman::FeldmanShamirShare, SecretSharingScheme, RBC},
 };

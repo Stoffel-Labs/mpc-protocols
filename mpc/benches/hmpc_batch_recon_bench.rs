@@ -5,7 +5,7 @@ use ark_bls12_381::Fr;
 use bench_utils::{fan_in_inboxes, test_setup};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::time::Duration;
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::ProtocolSessionId,
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
@@ -20,13 +20,13 @@ use tokio::time::timeout;
 async fn run_batch_recon(n_parties: usize, t: usize, n_secrets: usize) {
     // n_secrets must equal t+1 (the batch size)
     let (network, mut receivers) = test_setup(n_parties);
-    let session_id = SessionId::new(ProtocolType::BatchRecon, SessionId::pack_slot24(0, 0, 0), 1);
+    let session_id = SessionId::new(ProtocolType::BatchRecon, SessionId::pack_slot(0, 0, 0), 1);
 
     // Generate independent shares for each secret
     let mut rng = ark_std::test_rng();
     let secrets: Vec<Fr> = (0..n_secrets).map(|i| Fr::from(i as u64 + 1)).collect();
     let all_shares = {
-        use stoffelmpc_mpc::common::SecretSharingScheme;
+        use stoffelcrypto::common::SecretSharingScheme;
         let mut per_node = vec![Vec::new(); n_parties];
         for &secret in &secrets {
             let shares = RobustShare::compute_shares(secret, n_parties, t, None, &mut rng).unwrap();
@@ -56,13 +56,17 @@ async fn run_batch_recon(n_parties: usize, t: usize, n_secrets: usize) {
                 .await
                 .expect("init failed");
 
-            let session_store = node.get_or_create_store(session_id).await.unwrap().unwrap();
+            let session_store = node
+                .get_or_create_store(session_id, node.id)
+                .await
+                .unwrap()
+                .unwrap();
 
             while {
                 let s = session_store.lock().await;
                 s.secrets.is_none()
             } {
-                let (_from, raw) = match timeout(Duration::from_secs(30), merged.recv()).await {
+                let (_from, raw) = match timeout(Duration::from_secs(30), merged.0.recv()).await {
                     Ok(Some(v)) => v,
                     _ => continue,
                 };

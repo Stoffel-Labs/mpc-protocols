@@ -7,9 +7,9 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::{collections::HashMap, sync::Arc, time::Duration, vec};
-use stoffelmpc_mpc::common::ProtocolSessionId;
-use stoffelmpc_mpc::common::{rbc::rbc::Avid, SecretSharingScheme, RBC};
-use stoffelmpc_mpc::honeybadger::{
+use stoffelcrypto::common::ProtocolSessionId;
+use stoffelcrypto::common::{rbc::rbc::Avid, SecretSharingScheme, RBC};
+use stoffelcrypto::honeybadger::{
     mul::multiplication::Multiply, robust_interpolate::robust_interpolate::RobustShare,
     ProtocolType, SessionId, WrappedMessage,
 };
@@ -64,7 +64,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
     setup_tracing();
 
     let mut rng = test_rng();
-    let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot(123, 0, 0), 111);
 
     // 1. Setup network
     let (network, mut receivers, _, _) = test_setup(n_parties, vec![]);

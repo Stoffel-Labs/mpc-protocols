@@ -3,7 +3,7 @@ pub mod utils;
 mod tests {
     use rand::Rng;
     use std::{collections::HashMap, sync::Arc, time::Duration};
-    use stoffelmpc_mpc::{
+    use stoffelcrypto::{
         common::{
             rbc::{
                 rbc::{Avid, Bracha, Dealer, ABA},
@@ -29,7 +29,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let payload = b"Hello, MPC!".to_vec();
-        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 12);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 12);
 
         let (parties, net, receivers) =
             setup_network_and_parties::<Bracha<SessionId>, FakeNetwork>(n, t, t + 1, 500)
@@ -52,7 +52,7 @@ mod tests {
                 let store_map = bracha.store.lock().await;
                 store_map
                     .get(&session_id)
-                    .cloned()
+                    .map(|(_, arc)| arc.clone())
                     .expect(&format!("Party {} did not create session store", bracha.id))
             };
 
@@ -75,9 +75,9 @@ mod tests {
         let n = 4;
         let t = 1;
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 101),
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 102),
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 103),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 101),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 102),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 103),
         ];
         let payloads = vec![
             b"Payload A".to_vec(),
@@ -104,20 +104,20 @@ mod tests {
         for bracha in &parties {
             let store = bracha.store.lock().await;
             for (i, sid) in session_ids.iter().enumerate() {
-                let store_arc = store.get(sid).expect("Missing session");
+                let (_, store_arc) = store.get(sid).expect("Missing session");
                 let s = store_arc.lock().await;
 
                 assert!(
                     s.ended,
                     "Session {} not completed at party {}",
-                    sid.as_u64(),
+                    sid.as_u128(),
                     bracha.id
                 );
                 assert_eq!(
                     &s.output,
                     &payloads[i],
                     "Incorrect payload for session {}",
-                    sid.as_u64()
+                    sid.as_u128()
                 );
             }
         }
@@ -129,10 +129,10 @@ mod tests {
         let n = 4;
         let t = 1;
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 10),
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 20),
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 30),
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 40),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 10),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 20),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 30),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 40),
         ];
         let payloads = vec![
             b"From Party 0".to_vec(),
@@ -159,12 +159,12 @@ mod tests {
         for bracha in &parties {
             let store = bracha.store.lock().await;
             for (i, session_id) in session_ids.iter().enumerate() {
-                let store_arc = store.get(session_id).expect("Missing session");
+                let (_, store_arc) = store.get(session_id).expect("Missing session");
                 let s = store_arc.lock().await;
                 assert!(
                     s.ended,
                     "Session {} not completed at party {}",
-                    session_id.as_u64(),
+                    session_id.as_u128(),
                     bracha.id
                 );
                 assert_eq!(
@@ -172,7 +172,7 @@ mod tests {
                     &payloads[i],
                     "Incorrect output at party {} for session {}",
                     bracha.id,
-                    session_id.as_u64()
+                    session_id.as_u128()
                 );
             }
         }
@@ -183,7 +183,7 @@ mod tests {
 
         let n = 4;
         let t = 1;
-        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 11);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 11);
         let payload = b"out-of-order".to_vec();
 
         let (parties, net, receivers) =
@@ -235,7 +235,7 @@ mod tests {
         // Check if parties reached consensus
         for bracha in &parties {
             let store = bracha.store.lock().await;
-            if let Some(state) = store.get(&session_id) {
+            if let Some((_, state)) = store.get(&session_id) {
                 let s = state.lock().await;
 
                 if s.ended {
@@ -278,7 +278,7 @@ mod tests {
                 let store_map = avid.store.lock().await;
                 store_map
                     .get(&session_id)
-                    .cloned()
+                    .map(|(_, arc)| arc.clone())
                     .expect(&format!("Party {} did not create session store", avid.id))
             };
 
@@ -317,7 +317,7 @@ mod tests {
                 n,
                 t,
                 k,
-                SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 100),
+                SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 100),
                 payload.clone(),
             )
             .await;
@@ -332,10 +332,10 @@ mod tests {
         let t = 1;
 
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 10),
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 20),
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 30),
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 40),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 10),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 20),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 30),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 40),
         ];
         let payloads = vec![
             b"From Party 0".to_vec(),
@@ -362,12 +362,12 @@ mod tests {
         for avid in &parties {
             let store = avid.store.lock().await;
             for (i, session_id) in session_ids.iter().enumerate() {
-                let store_arc = store.get(session_id).expect("Missing session");
+                let (_, store_arc) = store.get(session_id).expect("Missing session");
                 let s = store_arc.lock().await;
                 assert!(
                     s.ended,
                     "Session {} not completed at party {}",
-                    session_id.as_u64(),
+                    session_id.as_u128(),
                     avid.id
                 );
                 assert_eq!(
@@ -375,7 +375,7 @@ mod tests {
                     &payloads[i],
                     "Incorrect output at party {} for session {}",
                     avid.id,
-                    session_id.as_u64()
+                    session_id.as_u128()
                 );
             }
         }
@@ -387,7 +387,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = 2;
-        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 11);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 11);
         let payload = b"out-of-order".to_vec();
 
         let (parties, net, receivers) =
@@ -439,7 +439,7 @@ mod tests {
         // Check if parties reached consensus
         for avid in &parties {
             let store = avid.store.lock().await;
-            if let Some(state) = store.get(&session_id) {
+            if let Some((_, state)) = store.get(&session_id) {
                 let s = state.lock().await;
 
                 assert!(s.ended, "Party {} has not yet ended", avid.id);
@@ -457,7 +457,7 @@ mod tests {
         let n = 7;
         let t = 2;
         let payload = b"crash fault test".to_vec();
-        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 2025);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 2025);
 
         let (parties, net, receivers) =
             setup_network_and_parties::<Bracha<SessionId>, FakeNetwork>(n, t, t + 1, 500)
@@ -486,7 +486,7 @@ mod tests {
                 let store_map = rbc.store.lock().await;
                 store_map
                     .get(&session_id)
-                    .cloned()
+                    .map(|(_, arc)| arc.clone())
                     .expect(&format!("Party {} did not create session store", rbc.id))
             };
 
@@ -535,7 +535,7 @@ mod tests {
                 let store_map = avid.store.lock().await;
                 store_map
                     .get(&session_id)
-                    .cloned()
+                    .map(|(_, arc)| arc.clone())
                     .expect(&format!("Party {} did not create session store", avid.id))
             };
 
@@ -570,7 +570,7 @@ mod tests {
                 k,
                 SessionId::new(
                     ProtocolType::Rbc,
-                    SessionId::pack_slot24(123, 0, 0),
+                    SessionId::pack_slot(123, 0, 0),
                     100 + i as u32,
                 ),
                 payload.clone(),
@@ -586,7 +586,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 99);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 99);
 
         let round_id = 0;
 
@@ -672,7 +672,7 @@ mod tests {
         let n = 4;
         let t = 1;
         let k = t + 1;
-        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 42);
+        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 42);
         let round_id = 0;
 
         let (parties, net, receivers) =
@@ -784,10 +784,10 @@ mod tests {
         let t = 1;
         let k = t + 1;
         let session_ids = vec![
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 100),
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 101),
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 102),
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 103),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 100),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 101),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 102),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 103),
         ];
         let (parties, net, receivers) =
             setup_network_and_parties::<ABA<SessionId>, FakeNetwork>(n, t, k, 1000)
@@ -799,7 +799,7 @@ mod tests {
         let dealer = Dealer::new(n, t);
         let key_dist_msg = Msg::new(
             0,
-            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot24(123, 0, 0), 0),
+            SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 0),
             0,
             vec![],
             vec![],
@@ -899,14 +899,14 @@ mod tests {
                         expected,
                         "Mismatch in ABA output at party {} for session {}",
                         aba.id,
-                        session_id.as_u64()
+                        session_id.as_u128()
                     ),
                 }
             }
 
             println!(
                 "✅ Session {}: All parties agreed on value: {}",
-                session_id.as_u64(),
+                session_id.as_u128(),
                 agreed_value.unwrap()
             );
         }

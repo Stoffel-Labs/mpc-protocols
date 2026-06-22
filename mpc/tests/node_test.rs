@@ -14,8 +14,9 @@ use ark_std::{
 };
 use futures::future::join_all;
 use std::collections::HashMap;
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::{
+        math::goldilocks::GoldilocksField,
         rbc::rbc::Avid,
         types::{
             fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
@@ -25,7 +26,7 @@ use stoffelmpc_mpc::{
         ShamirShare,
     },
     honeybadger::{
-        fpmul::f256::Gf2568,
+        fpmul::f256::Gf256,
         input::input::InputClient,
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -50,7 +51,7 @@ async fn randousha_e2e() {
     let t = 1;
     let session_id = SessionId::new(
         ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
+        SessionId::pack_slot(123, 0, 0),
         111,
     );
     let degree_t = 1;
@@ -96,7 +97,7 @@ async fn randousha_e2e() {
             let store = node
                 .preprocess
                 .ran_dou_sha
-                .get_or_create_store(session_id)
+                .get_or_create_store(session_id, node.id)
                 .await
                 .unwrap();
 
@@ -132,11 +133,7 @@ async fn ransha_e2e() {
     setup_tracing();
     let n_parties = 4;
     let t = 1;
-    let session_id = SessionId::new(
-        ProtocolType::Randousha,
-        SessionId::pack_slot24(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(123, 0, 0), 111);
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -172,7 +169,7 @@ async fn ransha_e2e() {
             let store = node
                 .preprocess
                 .share_gen
-                .get_or_create_store(session_id)
+                .get_or_create_store(session_id, node.id)
                 .await
                 .unwrap();
 
@@ -305,7 +302,7 @@ async fn gen_masks_for_input_e2e() {
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 4;
     let t = 1;
-    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(123, 0, 0), 111);
     let clientid: Vec<ClientId> = vec![100];
     let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
     //Setup the network for servers and client
@@ -383,7 +380,7 @@ async fn gen_masks_for_input_e2e() {
             let store = node
                 .preprocess
                 .share_gen
-                .get_or_create_store(session_id)
+                .get_or_create_store(session_id, node.id)
                 .await
                 .unwrap();
 
@@ -405,7 +402,7 @@ async fn gen_masks_for_input_e2e() {
         let local_store = node
             .preprocess
             .share_gen
-            .get_or_create_store(session_id)
+            .get_or_create_store(session_id, node.id)
             .await
             .unwrap();
         let local_shares = local_store.lock().await.protocol_output.clone();
@@ -511,10 +508,14 @@ async fn mul_e2e() {
     //Load the triples
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        node.preprocessing_material
-            .lock()
-            .await
-            .add(Some(triple[pid].clone()), None, None, None);
+        node.preprocessing_material.lock().await.add(
+            Some(triple[pid].clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
     }
 
     // init all nodes
@@ -833,10 +834,15 @@ async fn preprocessing_e2e() {
 
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let (n_triples, n_shares, n_prandbit, n_prandint) =
-            node.preprocessing_material.lock().await.len();
-        assert_eq!(n_triples, 5); //>no_of_triples
-        assert_eq!(n_shares, 0); //>no_of_randomshares
+        let len = node.preprocessing_material.lock().await.length();
+        let n_triples = len.beaver_triples;
+        let n_shares = len.random_shr;
+        let n_prandbit = len.prandbit;
+        let n_prandint = len.prandint;
+        // no_of_triples=7 is rounded up to a multiple of group_size (2t+1=3) -> 9.
+        // no_of_randomshares=4 remain after triple generation consumes its share pool.
+        assert_eq!(n_triples, 9); //>no_of_triples
+        assert_eq!(n_shares, 4); //>no_of_randomshares
         assert_eq!(n_prandbit, 4);
         assert_eq!(n_prandint, 4);
     }
@@ -849,24 +855,23 @@ async fn test_rand_bit() {
     let n_parties = 4;
     let t = 1;
     let mut rng = test_rng();
-    let session_id = SessionId::new(
-        ProtocolType::RandBit,
-        SessionId::pack_slot24(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::RandBit, SessionId::pack_slot(123, 0, 0), 111);
     let no_of_rand_bits = 2;
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
-    // The construction of triples is same as that of mul
-    let (_, per_party_triples) = construct_e2e_input_mul(n_parties, no_of_rand_bits, t);
+    // The construction of triples is same as that of mul.
+    // RandBit operates in the small (Goldilocks) field, so the input shares and
+    // Beaver triples must be over `GoldilocksField`.
+    let (_, per_party_triples) =
+        construct_e2e_input_mul::<GoldilocksField>(n_parties, no_of_rand_bits, t);
 
     // assumes each party holds shares of some secrets
     let mut a = Vec::new();
     let mut shares_a = Vec::new();
     for _ in 0..no_of_rand_bits {
-        let a_value = Fr::rand(&mut rng);
+        let a_value = GoldilocksField::rand(&mut rng);
         a.push(a_value);
         let shares = RobustShare::compute_shares(a_value, n_parties, t, None, &mut rng).unwrap();
         shares_a.push(shares);
@@ -901,7 +906,7 @@ async fn test_rand_bit() {
     let mut handles = Vec::new();
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let mut prand_bit_node = node.preprocess.rand_bit;
+        let mut prand_bit_node = node.preprocess.small_field_preproc.rand_bit;
         let net = network[pid].clone();
 
         // Prepare the input shares for this party
@@ -941,12 +946,13 @@ async fn test_rand_bit() {
         let node = nodes[pid].clone();
         let store = node
             .preprocess
+            .small_field_preproc
             .rand_bit
             .storage
             .lock()
             .await
             .get(&session_id)
-            .cloned();
+            .map(|(_, arc)| arc.clone());
         if let Some(store) = store {
             let store_lock = store.lock().await;
             let protocol_output = store_lock.protocol_output.clone();
@@ -965,14 +971,14 @@ async fn test_rand_bit() {
         .1;
     println!("recovered bit: {}", bit0);
     // check if bit is 0 or 1
-    assert!(bit0 == Fr::ZERO || bit0 == Fr::ONE);
+    assert!(bit0 == GoldilocksField::ZERO || bit0 == GoldilocksField::ONE);
 
     let bit1 = RobustShare::recover_secret(&bit_share1, n_parties, t)
         .unwrap()
         .1;
     println!("recovered bit: {}", bit1);
     // check if bit is 0 or 1
-    assert!(bit1 == Fr::ZERO || bit1 == Fr::ONE);
+    assert!(bit1 == GoldilocksField::ZERO || bit1 == GoldilocksField::ONE);
 }
 //----------------------------------------MUL----------------------------------------
 
@@ -1019,7 +1025,7 @@ async fn fpmul_e2e() {
         let x = RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
             .unwrap();
         for (i, share) in x.iter().enumerate() {
-            r_bits[i].push((share.clone(), Gf2568::one()));
+            r_bits[i].push((share.clone(), Gf256::one()));
         }
     }
     //----------------------------------------SETUP NODES----------------------------------------
@@ -1053,6 +1059,8 @@ async fn fpmul_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             Some(triple[pid].clone()),
+            None,
+            None,
             None,
             Some(r_bits[pid].clone()),
             Some(vec![r_int[pid].clone()]),
@@ -1631,7 +1639,7 @@ async fn fpdiv_const_e2e() {
             RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
                 .unwrap();
         for (i, share) in bit_shares.iter().enumerate() {
-            r_bits[i].push((share.clone(), Gf2568::one()));
+            r_bits[i].push((share.clone(), Gf256::one()));
         }
     }
 
@@ -1663,6 +1671,8 @@ async fn fpdiv_const_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             None, // No Beaver triple needed
+            None,
+            None,
             None,
             Some(r_bits[pid].clone()),      // PRandBit[]
             Some(vec![r_int[pid].clone()]), // PRandInt[]

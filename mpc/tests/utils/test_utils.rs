@@ -8,15 +8,15 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::time::Duration;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
-use stoffelmpc_mpc::common::rbc::rbc::Avid;
-use stoffelmpc_mpc::common::rbc::RbcError;
-use stoffelmpc_mpc::common::share::shamir::NonRobustShare;
-use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme, RBC};
-use stoffelmpc_mpc::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode};
-use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use stoffelmpc_mpc::honeybadger::share_gen::RanShaError;
-use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
-use stoffelmpc_mpc::honeybadger::{
+use stoffelcrypto::common::rbc::rbc::Avid;
+use stoffelcrypto::common::rbc::RbcError;
+use stoffelcrypto::common::share::shamir::NonRobustShare;
+use stoffelcrypto::common::{MPCProtocol, SecretSharingScheme, RBC};
+use stoffelcrypto::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode};
+use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use stoffelcrypto::honeybadger::share_gen::RanShaError;
+use stoffelcrypto::honeybadger::triple_gen::ShamirBeaverTriple;
+use stoffelcrypto::honeybadger::{
     HoneyBadgerMPCClient, HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId, WrappedMessage,
 };
 use stoffelmpc_network::fake_network::{
@@ -349,8 +349,29 @@ static TRACING_INIT: Lazy<()> = Lazy::new(|| {
     }));
 });
 
+static QUIET_TRACING_INIT: Lazy<()> = Lazy::new(|| {
+    let subscriber = FmtSubscriber::builder()
+        .with_env_filter(EnvFilter::new(
+            "warn,stoffelcrypto::honeybadger=info,stoffelcrypto::honeybadger::batch_recon=warn,stoffelcrypto::honeybadger::mul=warn,stoffelcrypto::honeybadger::share_gen=warn,stoffelcrypto::honeybadger::triple_gen=warn,stoffelcrypto::honeybadger::ran_dou_sha=warn,stoffelcrypto::honeybadger::double_share=warn,stoffelcrypto::common::rbc=warn",
+        ))
+        .pretty()
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    let old_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        old_hook(info);
+        tracing::error!("{}", info);
+        std::process::exit(1);
+    }));
+});
+
 pub fn setup_tracing() {
     Lazy::force(&TRACING_INIT);
+}
+
+pub fn setup_quiet_tracing() {
+    Lazy::force(&QUIET_TRACING_INIT);
 }
 //--------------------------BATCH RECON--------------------------
 
@@ -605,24 +626,21 @@ pub async fn initialize_global_nodes_ransha<F, R, N>(
 
 //--------------------------MUL--------------------------
 
-pub fn construct_e2e_input_mul(
+pub fn construct_e2e_input_mul<F: PrimeField + FftField>(
     n_parties: usize,
     n_triples: usize,
     threshold: usize,
-) -> (
-    (Vec<Fr>, Vec<Fr>, Vec<Fr>),
-    Vec<Vec<ShamirBeaverTriple<Fr>>>,
-) {
+) -> ((Vec<F>, Vec<F>, Vec<F>), Vec<Vec<ShamirBeaverTriple<F>>>) {
     let mut rng = test_rng();
     let mut secrets_a = Vec::new();
     let mut secrets_b = Vec::new();
     let mut secrets_c = Vec::new();
-    let mut per_party_triples: Vec<Vec<ShamirBeaverTriple<Fr>>> = vec![Vec::new(); n_parties];
+    let mut per_party_triples: Vec<Vec<ShamirBeaverTriple<F>>> = vec![Vec::new(); n_parties];
 
     for _i in 0..n_triples {
         // sample secrets a,b
-        let a_secret = Fr::rand(&mut rng);
-        let b_secret = Fr::rand(&mut rng);
+        let a_secret = F::rand(&mut rng);
+        let b_secret = F::rand(&mut rng);
         let c_secret = a_secret * b_secret;
 
         // make robust shares for each secret (length == n_parties)

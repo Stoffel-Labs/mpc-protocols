@@ -23,6 +23,7 @@ use tokio::sync::{
 use tracing::{info, warn};
 
 const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+const MAX_PENDING_SESSIONS: usize = 512;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AvssError {
@@ -52,6 +53,8 @@ pub enum AvssError {
     Abort,
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("pending session limit exceeded")]
+    LimitExceeded,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -151,6 +154,7 @@ where
     Id: ProtocolSessionId,
 {
     pub id: PartyId,
+    pub ids: Vec<usize>,
     pub n_parties: usize,
     pub t: usize,
     pub sk_i: F,
@@ -190,6 +194,7 @@ where
     pub fn new(
         id: PartyId,
         n_parties: usize,
+        ids: Vec<usize>,
         t: usize,
         sk_i: F,
         pk_map: Arc<Vec<G>>,
@@ -197,11 +202,24 @@ where
         rbc_wrapper: RbcWrapFn<Id>,
         avss_wrapper: AvssWrapFn<Id>,
     ) -> Result<Self, AvssError> {
+        if ids.len() != n_parties {
+            return Err(AvssError::InvalidInput(
+                "ids length must equal n_parties".into(),
+            ));
+        }
+        if ids.iter().any(|&id| id == 0) {
+            return Err(AvssError::InvalidInput("ids must not contain 0".into()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if !ids.iter().all(|id| seen.insert(id)) {
+            return Err(AvssError::InvalidInput("ids must be unique".into()));
+        }
         let (rbc_sender, rbc_receiver) = mpsc::channel(200);
         let rbc = R::new(id, n_parties, t, t + 1, rbc_sender, rbc_wrapper)?;
         Ok(Self {
             id,
             n_parties,
+            ids,
             t,
             sk_i,
             pk_map,
@@ -247,6 +265,7 @@ where
         }
         Ok(())
     }
+
     pub async fn init<Rnd, N>(
         &mut self,
         secrets: Vec<F>,
@@ -261,11 +280,16 @@ where
         info!("Receiving init for avss from {0:?}", self.id);
         // Generate the random polynomial of degree `degree` with `secret` as constant term
 
-        let ids: Vec<usize> = (1..=self.n_parties).collect();
         let shares: Vec<Vec<FeldmanShamirShare<F, G>>> = secrets
             .into_iter()
             .map(|secret| {
-                FeldmanShamirShare::compute_shares(secret, self.n_parties, self.t, Some(&ids), rng)
+                FeldmanShamirShare::compute_shares(
+                    secret,
+                    self.n_parties,
+                    self.t,
+                    Some(&self.ids),
+                    rng,
+                )
             })
             .collect::<Result<Vec<_>, ShareError>>()?;
 
@@ -326,7 +350,7 @@ where
     pub async fn process(&mut self, msg: AvssMessage<Id>) -> Result<(), AvssError> {
         info!(
             party_id = ?self.id,
-            session_id = msg.session_id.as_u64(),
+            session_id = msg.session_id.as_u128(),
             "Processing AVSS share"
         );
         match msg.session_id.calling_protocol() {
@@ -364,6 +388,9 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        if cts.is_empty() {
+            return Err(AvssError::InvalidShareLength);
+        }
         if cts.len() != all_commitments.len() {
             return Err(AvssError::InvalidShareLength);
         }
@@ -373,6 +400,12 @@ where
             let pt = decrypt(key.clone(), ct)?;
             let shamirshare: Shamirshare<F> =
                 CanonicalDeserialize::deserialize_compressed(&pt[..])?;
+            if shamirshare.id != self.ids[self.id] {
+                return Err(AvssError::InvalidShare);
+            }
+            if shamirshare.degree != self.t {
+                return Err(AvssError::InvalidShare);
+            }
 
             let share = FeldmanShamirShare {
                 feldmanshare: shamirshare,
@@ -388,8 +421,16 @@ where
 
         {
             let mut map = self.shares.lock().await;
+            if map.len() >= MAX_PENDING_SESSIONS {
+                warn!(
+                    "AVSS share cache full; dropping session {:?}",
+                    msg.session_id
+                );
+                return Err(AvssError::LimitExceeded);
+            }
             map.insert(msg.session_id, Some(shares));
         };
+
         self.output_sender
             .send(msg.session_id)
             .await

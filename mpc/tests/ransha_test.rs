@@ -5,7 +5,7 @@ use ark_bls12_381::Fr;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use std::{sync::Arc, time::Duration};
-use stoffelmpc_mpc::{
+use stoffelcrypto::{
     common::{rbc::rbc::Avid, ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
         robust_interpolate::robust_interpolate::RobustShare,
@@ -27,7 +27,7 @@ async fn test_reconstruct_handler_incorrect_share() {
     setup_tracing();
     let n_parties = 10;
     let t = 3;
-    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(123, 0, 0), 111);
 
     let (network, mut receivers, _, _) = test_setup(n_parties, vec![]);
     let secret = Fr::from(1234);
@@ -142,7 +142,7 @@ async fn test_reconstruct_handler_incorrect_share() {
     let binding = ransha_node
         .preprocess
         .share_gen
-        .get_or_create_store(session_id)
+        .get_or_create_store(session_id, ransha_node.id)
         .await
         .unwrap();
     let store = binding.lock().await;
@@ -156,7 +156,7 @@ async fn test_output_handler() {
     setup_tracing();
     let n_parties = 10;
     let threshold = 3;
-    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(123, 0, 0), 111);
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(123, 0, 0), 111);
     let degree_t = 3;
 
     let (network, _receivers, _, _) = test_setup(n_parties, vec![]);
@@ -176,7 +176,10 @@ async fn test_output_handler() {
         .await
         .unwrap();
 
-    let node_store = ransha_node.get_or_create_store(session_id).await.unwrap();
+    let node_store = ransha_node
+        .get_or_create_store(session_id, ransha_node.id)
+        .await
+        .unwrap();
 
     // first 2t-1 message should return error
     for i in 0..(2 * threshold - 1) {
@@ -217,7 +220,7 @@ async fn test_output_handler() {
     assert!(node_store.lock().await.received_ok_msg.len() == (2 * threshold - 1));
 
     let output_message = RanShaMessage::new(
-        n_parties,
+        2 * threshold - 1, // was: n_parties
         RanShaMessageType::OutputMessage,
         session_id,
         RanShaPayload::Output(true),
