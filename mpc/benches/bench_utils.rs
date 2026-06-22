@@ -17,7 +17,13 @@ use tokio::task::JoinHandle;
 
 const BENCH_CHANNEL_BUFFER: usize = 262_144;
 
-pub fn test_setup(n: usize) -> (Vec<Arc<FakeNetwork>>, Vec<Vec<Receiver<Vec<u8>>>>) {
+type PartyNetworks = Vec<Arc<FakeNetwork>>;
+type NetworkInboxes = Vec<Vec<Receiver<Vec<u8>>>>;
+type LabeledMessage = (SenderId, Vec<u8>);
+type FanInReceiver = Receiver<LabeledMessage>;
+type TaskHandles = Vec<JoinHandle<()>>;
+
+pub fn test_setup(n: usize) -> (PartyNetworks, NetworkInboxes) {
     let config = FakeNetworkConfig::new(BENCH_CHANNEL_BUFFER);
     let (inner, receivers, _) = FakeInnerNetwork::new(n, None, config);
     let network = (0..n)
@@ -26,9 +32,7 @@ pub fn test_setup(n: usize) -> (Vec<Arc<FakeNetwork>>, Vec<Vec<Receiver<Vec<u8>>
     (network, receivers)
 }
 
-pub fn fan_in_inboxes(
-    inboxes: Vec<(SenderId, Receiver<Vec<u8>>)>,
-) -> (Receiver<(SenderId, Vec<u8>)>, Vec<JoinHandle<()>>) {
+pub fn fan_in_inboxes(inboxes: Vec<(SenderId, Receiver<Vec<u8>>)>) -> (FanInReceiver, TaskHandles) {
     let (tx, rx) = mpsc::channel(BENCH_CHANNEL_BUFFER);
     let mut handles = Vec::with_capacity(inboxes.len());
     for (sender, mut rx_i) in inboxes {

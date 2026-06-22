@@ -2,6 +2,14 @@
 name = "stoffelmpc-network"
 version.workspace = true
 edition.workspace = true
+description = "Network adapters and deterministic test networks for Stoffel MPC protocols."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/stoffelmpc-network"
+readme.workspace = true
+keywords = ["testing", "network", "simulation", "internal", "mpc"]
+categories = ["network-programming", "cryptography"]
 
 [dependencies]
 thiserror.workspace = true
@@ -22,3 +30,6 @@ time.workspace = true
 
 [dev-dependencies]
 ark-bls12-381.workspace = true
+
+[lints.clippy]
+needless_range_loop = "allow"

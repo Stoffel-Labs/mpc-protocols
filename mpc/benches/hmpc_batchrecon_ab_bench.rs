@@ -83,7 +83,7 @@ fn run(n: usize, t: usize, secrets: &[Fr], mode: Mode) -> (Duration, u64, Vec<Fr
         let n_muls = secrets.len();
         let width = t + 1;
         assert!(
-            n_muls % width == 0 && n_muls > 0,
+            n_muls.is_multiple_of(width) && n_muls > 0,
             "N must be a positive multiple of t+1 for a clean A/B"
         );
         let num_chunks = n_muls / width;
