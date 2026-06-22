@@ -5,7 +5,7 @@ use crate::{
         rbc::{
             rbc::{Avid, Bracha, ABA},
             rbc_store::{GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAcs, MsgTypeAvid},
-            RbcError,
+            RbcError, MAX_PAYLOAD_SIZE,
         },
         ProtocolSessionId, RbcWrapFn, RBC,
     },
@@ -757,6 +757,10 @@ pub extern "C" fn sync_avid_process(
 ) -> RbcErrorCode {
     let avid = unsafe { &*(avid_pointer as *mut Avid<SessionId>) };
     let network = unsafe { &*(net_ptr as *mut GenericNetwork) };
+    let max_shard_size = (MAX_PAYLOAD_SIZE + 8 + avid.k - 1) / avid.k;
+    if msg.payload.len > max_shard_size {
+        return RbcErrorCode::RbcInternal;
+    }
     let payload = unsafe { slice::from_raw_parts(msg.payload.pointer, msg.payload.len) };
     let metadata = unsafe { slice::from_raw_parts(msg.metadata.pointer, msg.metadata.len) };
 
