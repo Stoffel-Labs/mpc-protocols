@@ -91,6 +91,9 @@ pub struct RanDouShaStore<F: FftField> {
     pub protocol_output: Vec<DoubleShamirShare<F>>,
     pub output_sender: Option<Sender<Vec<DoubleShamirShare<F>>>>,
     pub output_receiver: Option<Receiver<Vec<DoubleShamirShare<F>>>>,
+    /// Messages queued before init_handler ran (computed_r_shares not yet set).
+    /// Drained and replayed once the trusted batch_size is known.
+    pub pending_messages: Vec<RanDouShaMessage>,
 }
 
 /// State of the Random Double Sharing protocol.
@@ -121,6 +124,7 @@ where
             protocol_output: Vec::new(),
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
+            pending_messages: Vec::new(),
         }
     }
 }
@@ -362,7 +366,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
         self.init_batch(vec![shares_deg_t], vec![shares_deg_2t], session_id, network)
             .await
@@ -376,7 +380,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
         info!(
             "Node {} (session {}) - Starting init_handler.",
@@ -404,11 +408,19 @@ where
 
         // Save the shares of r of degree t and 2t into the storage.
         let bind_store = self.get_or_create_store(session_id, self.id).await?;
-        let mut store = bind_store.lock().await;
-        store.batch_size = r_deg_t.len() / self.n_parties;
-        store.computed_r_shares_degree_t = r_deg_t.clone();
-        store.computed_r_shares_degree_2t = r_deg_2t.clone();
-        drop(store);
+        let pending = {
+            let mut store = bind_store.lock().await;
+            store.batch_size = r_deg_t.len() / self.n_parties;
+            store.computed_r_shares_degree_t = r_deg_t.clone();
+            store.computed_r_shares_degree_2t = r_deg_2t.clone();
+            std::mem::take(&mut store.pending_messages)
+        };
+
+        // Replay messages that arrived before local initialization.
+        for pending_msg in pending {
+            self.reconstruction_handler(pending_msg, Arc::clone(&network)).await?;
+        }
+
         // Check if pending OK messages are sufficient to finalize immediately
         if self.try_finalize(session_id, bind_store.clone()).await? {
             return Ok(());
@@ -476,6 +488,21 @@ where
             return Err(RanDouShaError::SessionIdError(msg.session_id));
         }
 
+        // Queue the raw message before any deserialization when init_handler has not run yet.
+        // session_id and sender_id are Copy so msg is not consumed by the store lookup.
+        let sender_id = msg.sender_id;
+        let binding = self.get_or_create_store(msg.session_id, sender_id).await?;
+        {
+            let mut store = binding.lock().await;
+            if store.computed_r_shares_degree_t.is_empty() {
+                // batch_size is not yet locally known; park the message.
+                // init_handler will drain and replay these once computed shares are set.
+                store.pending_messages.push(msg);
+                return Ok(());
+            }
+        }
+
+        // msg.payload not yet consumed — proceed with deserialization.
         let payloads = match msg.payload {
             RanDouShaPayload::Reconstruct(p) => vec![p],
             RanDouShaPayload::ReconstructBatch(p) => p,
@@ -493,7 +520,6 @@ where
         // one for degree t and one for degree 2t.
         // These shares originate from the *sender* of the message, but they are components of the 'r_j'
 
-        let sender_id = msg.sender_id;
         for rec_msg in &rec_messages {
             if rec_msg.r_share_deg_t.id != sender_id || rec_msg.r_share_deg_2t.id != sender_id {
                 return Err(RanDouShaError::IncorrectID);
@@ -504,11 +530,8 @@ where
                 return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
             }
         }
-        let binding = self.get_or_create_store(msg.session_id, sender_id).await?;
         let mut store = binding.lock().await;
-        if store.received_r_shares_degree_t.is_empty() {
-            store.batch_size = rec_messages.len();
-        } else if store.batch_size != rec_messages.len() {
+        if store.batch_size != rec_messages.len() {
             return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
         }
 
