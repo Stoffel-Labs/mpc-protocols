@@ -223,7 +223,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
         G: Rng,
     {
         self.init_batch(session_id, 1, rng, network).await
@@ -237,7 +237,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
         G: Rng,
     {
         info!("Receiving init for share from {0:?}", self.id);
@@ -282,9 +282,18 @@ where
 
         // Update the state of the protocol to Initialized.
         let storage_access = self.get_or_create_store(session_id, self.id).await?;
-        let mut storage = storage_access.lock().await;
-        storage.batch_size = batch_size;
-        storage.state = RanShaState::Initialized;
+        let pending = {
+            let mut storage = storage_access.lock().await;
+            storage.batch_size = batch_size;
+            storage.state = RanShaState::Initialized;
+            std::mem::take(&mut storage.pending_share_messages)
+        };
+
+        // Replay messages that arrived before local initialization.
+        for msg in pending {
+            self.receive_shares_handler(msg, Arc::clone(&network))
+                .await?;
+        }
         Ok(())
     }
 
@@ -294,7 +303,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
         if msg.session_id.sub_id() != 0 {
             return Err(RanShaError::SessionIdError(msg.session_id));
@@ -304,6 +313,22 @@ where
             return Err(RanShaError::InvalidPartyId);
         }
 
+        // Look up store BEFORE deserialization so we can queue the raw message
+        // when local initialization hasn't run yet.
+        let binding = self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await?;
+        {
+            let mut ransha_storage = binding.lock().await;
+            if ransha_storage.state == RanShaState::NotInitialized {
+                // batch_size not yet locally known; park and return.
+                // init_batch will drain and replay these once the trusted value is set.
+                ransha_storage.pending_share_messages.push(msg);
+                return Ok(());
+            }
+        }
+
+        // msg.payload not yet consumed — proceed with deserialization.
         let shares: Vec<ShamirShare<F, 1, Robust>> = match msg.payload {
             RanShaPayload::Share(payload) => {
                 vec![CanonicalDeserialize::deserialize_compressed(
@@ -323,13 +348,9 @@ where
                 return Err(ShareError::DegreeMismatch.into());
             }
         }
-        let binding = self
-            .get_or_create_store(msg.session_id, msg.sender_id)
-            .await?;
         let mut ransha_storage = binding.lock().await;
-        if ransha_storage.initial_shares.is_empty() {
-            ransha_storage.batch_size = shares.len();
-        } else if ransha_storage.batch_size != shares.len() {
+        // Always validate against the locally-set batch_size; never adopt peer-controlled length.
+        if ransha_storage.batch_size != shares.len() {
             return Err(RanShaError::Abort);
         }
 
@@ -392,7 +413,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
         self.init_ransha_batch(vec![shares_deg_t], session_id, network)
             .await
@@ -405,7 +426,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
         info!(
             "party {:?} received shares for Random sharing generation",
@@ -419,10 +440,12 @@ where
         }
 
         let bind_store = self.get_or_create_store(session_id, self.id).await?;
-        let mut store = bind_store.lock().await;
-        store.batch_size = r_deg_t.len() / self.n_parties;
-        store.computed_r_shares = r_deg_t.clone();
-        drop(store);
+        let pending = {
+            let mut store = bind_store.lock().await;
+            store.batch_size = r_deg_t.len() / self.n_parties;
+            store.computed_r_shares = r_deg_t.clone();
+            std::mem::take(&mut store.pending_recon_messages)
+        };
         if self.try_finalize(session_id).await? {
             return Ok(());
         }
@@ -450,6 +473,12 @@ where
             let bytes = bincode::serialize(&message)?;
             network.send(i, &bytes).await?;
         }
+
+        // Replay reconstruction messages that arrived before init_ransha_batch completed.
+        for msg in pending {
+            self.reconstruction_handler(msg, Arc::clone(&network))
+                .await?;
+        }
         Ok(())
     }
 
@@ -466,6 +495,22 @@ where
             return Err(RanShaError::SessionIdError(msg.session_id));
         }
 
+        let sender_id = msg.sender_id;
+        let session_id = msg.session_id;
+        // Look up store BEFORE deserialization to queue the raw message when
+        // init_ransha_batch hasn't run yet (computed_r_shares not yet set).
+        let binding = self.get_or_create_store(session_id, sender_id).await?;
+        {
+            let mut store = binding.lock().await;
+            if store.computed_r_shares.is_empty() {
+                // batch_size not yet locally known; park and return.
+                // init_ransha_batch will drain and replay these once the trusted value is set.
+                store.pending_recon_messages.push(msg);
+                return Ok(());
+            }
+        }
+
+        // msg.payload not yet consumed — proceed with deserialization.
         let shares: Vec<ShamirShare<F, 1, Robust>> = match msg.payload {
             RanShaPayload::Reconstruct(payload) => {
                 vec![CanonicalDeserialize::deserialize_compressed(
@@ -481,24 +526,20 @@ where
             if share.degree != self.threshold {
                 return Err(RanShaError::ShareError(ShareError::DegreeMismatch));
             }
-            if share.id != msg.sender_id {
+            if share.id != sender_id {
                 return Err(RanShaError::ShareError(ShareError::IdMismatch));
             }
         }
-        let binding = self
-            .get_or_create_store(msg.session_id, msg.sender_id)
-            .await?;
         let mut store = binding.lock().await;
         if store.state == RanShaState::Finished {
             return Ok(());
         }
-        if store.received_r_shares.is_empty() {
-            store.batch_size = shares.len();
-        } else if store.batch_size != shares.len() {
+        // Always validate against the locally-set batch_size; never adopt peer-controlled length.
+        if store.batch_size != shares.len() {
             return Err(RanShaError::Abort);
         }
         store.state = RanShaState::Reconstruction;
-        store.received_r_shares.insert(msg.sender_id, shares);
+        store.received_r_shares.insert(sender_id, shares);
 
         if self.id < 2 * self.threshold && store.received_r_shares.len() >= 2 * self.threshold + 1 {
             let batch_size = store.batch_size;
@@ -532,24 +573,19 @@ where
             let result = RanShaMessage::new(
                 self.id,
                 RanShaMessageType::OutputMessage,
-                msg.session_id,
+                session_id,
                 RanShaPayload::Output(ok),
             );
             let bytes = bincode::serialize(&result)?;
             // Derive the caller from the parent session so the reconstruction RBC
             // routes to the correct (big- or small-field) share_gen instance.
-            let caller = msg
-                .session_id
+            let caller = session_id
                 .calling_protocol()
                 .unwrap_or(ProtocolType::Ransha);
             let sessionid = SessionId::new(
                 caller,
-                SessionId::pack_slot(
-                    msg.session_id.exec_id(),
-                    self.id as u8,
-                    msg.session_id.round_id(),
-                ),
-                msg.session_id.instance_id(),
+                SessionId::pack_slot(session_id.exec_id(), self.id as u8, session_id.round_id()),
+                session_id.instance_id(),
             );
             self.rbc
                 .init(bytes, sessionid, Arc::clone(&network))

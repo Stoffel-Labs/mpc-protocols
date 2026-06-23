@@ -69,10 +69,17 @@ pub struct RanShaStore<F: FftField> {
     pub protocol_output: Vec<RobustShare<F>>,
     pub output_sender: Option<Sender<Vec<RobustShare<F>>>>,
     pub output_receiver: Option<Receiver<Vec<RobustShare<F>>>>,
+    /// Share messages that arrived before local init_batch set batch_size.
+    /// Drained and replayed by init_batch once the trusted batch_size is set.
+    pub pending_share_messages: Vec<RanShaMessage>,
+    /// Reconstruction messages that arrived before init_ransha_batch set computed_r_shares.
+    /// Drained and replayed by init_ransha_batch once the trusted state is set.
+    pub pending_recon_messages: Vec<RanShaMessage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RanShaState {
+    NotInitialized,
     Initialized,
     FinishedInitialSharing,
     Reconstruction,
@@ -89,10 +96,12 @@ impl<F: FftField> RanShaStore<F> {
             computed_r_shares: Vec::new(),
             received_ok_msg: Vec::new(),
             batch_size: 1,
-            state: RanShaState::Initialized,
+            state: RanShaState::NotInitialized,
             protocol_output: Vec::new(),
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
+            pending_share_messages: Vec::new(),
+            pending_recon_messages: Vec::new(),
         }
     }
 }

@@ -66,6 +66,20 @@ async fn test_reconstruct_handler_incorrect_share() {
     // receiver randousha node
     let mut ransha_node = nodes.get(receiver_id).unwrap().clone();
 
+    // Simulate init_ransha_batch having run so reconstruction_handler accepts messages.
+    // In the real protocol this is set after collecting all n initial shares.
+    {
+        let binding = ransha_node
+            .preprocess
+            .share_gen
+            .get_or_create_store(session_id, receiver_id)
+            .await
+            .unwrap();
+        let mut store = binding.lock().await;
+        store.computed_r_shares = shares_ri_t.clone();
+        store.batch_size = 1;
+    }
+
     for i in 0..n_parties {
         let mut bytes_rec_message = Vec::new();
         shares_ri_t[i]
