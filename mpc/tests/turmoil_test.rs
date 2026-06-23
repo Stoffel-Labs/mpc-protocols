@@ -261,7 +261,16 @@ fn ransha_late_message_recreates_cleared_store_turmoil() {
                 .await
                 .unwrap();
             let resurrected = resurrected.lock().await;
-            if !resurrected.initial_shares.contains_key(&1) {
+            // After the fix for state-poisoning, share messages that arrive before local
+            // init_batch has run are queued in pending_share_messages rather than being
+            // written directly to initial_shares. A late message after store clear is
+            // not dropped — it waits in the pending queue for a future init_batch.
+            let found = resurrected.initial_shares.contains_key(&1)
+                || resurrected
+                    .pending_share_messages
+                    .iter()
+                    .any(|m| m.sender_id == 1);
+            if !found {
                 let _ = tx.send(Err(
                     "late RanSha message did not recreate cleared session state".to_string(),
                 ));
