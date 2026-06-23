@@ -126,6 +126,9 @@ where
     reception_tracker: Vec<bool>,
     pub output_sender: Option<Sender<Vec<DoubleShamirShare<F>>>>,
     pub output_receiver: Option<Receiver<Vec<DoubleShamirShare<F>>>>,
+    /// Messages that arrived before local initialization (batch_size unknown).
+    /// Drained and replayed by init_batch once the trusted batch_size is set.
+    pub pending_messages: Vec<DouShaMessage>,
 }
 
 impl<F> DouShaStorage<F>
@@ -143,6 +146,7 @@ where
             state: ProtocolState::NotInitialized,
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
+            pending_messages: Vec::new(),
         }
     }
 }

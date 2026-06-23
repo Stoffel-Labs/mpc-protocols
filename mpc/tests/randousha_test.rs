@@ -136,6 +136,19 @@ async fn test_reconstruct_handler() {
     let mut randousha_node = randousha_nodes.get(receiver_id).unwrap().clone();
     let randousha_node_id = randousha_node.id;
 
+    // Simulate init_handler having run: populate the computed shares and batch_size so
+    // that the reconstruction_handler guard accepts incoming messages.
+    {
+        let store_bind = randousha_node
+            .get_or_create_store(session_id, randousha_node_id)
+            .await
+            .unwrap();
+        let mut store = store_bind.lock().await;
+        store.computed_r_shares_degree_t = shares_ri_t.clone();
+        store.computed_r_shares_degree_2t = shares_ri_2t.clone();
+        store.batch_size = 1;
+    }
+
     // receiver nodes received 2t+1 ReconstructionMessage
     for i in 0..2 * threshold + 1 {
         let rec_msg = ReconstructionMessage::new(shares_ri_t[i].clone(), shares_ri_2t[i].clone());
@@ -239,6 +252,19 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
     // receiver randousha node
     let mut randousha_node = randousha_nodes.get(receiver_id).unwrap().clone();
     let randousha_node_id = randousha_node.id;
+
+    // Simulate init_handler having run: populate the computed shares and batch_size so
+    // that the reconstruction_handler guard accepts incoming messages.
+    {
+        let store_bind = randousha_node
+            .get_or_create_store(session_id, randousha_node_id)
+            .await
+            .unwrap();
+        let mut store = store_bind.lock().await;
+        store.computed_r_shares_degree_t = shares_ri_t.clone();
+        store.computed_r_shares_degree_2t = shares_ri_2t.clone();
+        store.batch_size = 1;
+    }
 
     // Send 2t+1 reconstruction messages to the receiver node
     for i in 0..n_parties {

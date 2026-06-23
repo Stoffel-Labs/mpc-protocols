@@ -208,9 +208,18 @@ where
 
         // Update the state of the protocol to Initialized.
         let storage_access = self.get_or_create_store(session_id, self.id).await?;
-        let mut storage = storage_access.lock().await;
-        storage.batch_size = batch_size;
-        storage.state = ProtocolState::Initialized;
+        let pending = {
+            let mut storage = storage_access.lock().await;
+            storage.batch_size = batch_size;
+            storage.state = ProtocolState::Initialized;
+            std::mem::take(&mut storage.pending_messages)
+        };
+
+        // Replay messages that arrived before local initialization.
+        for msg in pending {
+            self.receive_double_shares_handler(msg).await?;
+        }
+
         Ok(())
     }
 
@@ -218,6 +227,23 @@ where
         &mut self,
         recv_message: DouShaMessage,
     ) -> Result<(), DouShaError> {
+        // Get (or create) the session store before any deserialization so we can
+        // queue the raw message when local initialization hasn't run yet.
+        // session_id and sender_id are Copy so recv_message is not consumed here.
+        let binding = self
+            .get_or_create_store(recv_message.session_id, recv_message.sender_id)
+            .await?;
+        {
+            let mut dousha_storage = binding.lock().await;
+            if dousha_storage.state == ProtocolState::NotInitialized {
+                // batch_size is not yet locally known; park the message and return.
+                // init_batch will drain and replay these once the trusted value is set.
+                dousha_storage.pending_messages.push(recv_message);
+                return Ok(());
+            }
+        }
+
+        // recv_message.payload has not been consumed — proceed with deserialization.
         let double_shares: Vec<DoubleShamirShare<F>> = match recv_message.payload {
             DouShaPayload::Share(payload) => {
                 vec![CanonicalDeserialize::deserialize_compressed(
@@ -240,13 +266,8 @@ where
             }
         }
 
-        let binding = self
-            .get_or_create_store(recv_message.session_id, recv_message.sender_id)
-            .await?;
         let mut dousha_storage = binding.lock().await;
-        if dousha_storage.share.is_empty() {
-            dousha_storage.batch_size = double_shares.len();
-        } else if dousha_storage.batch_size != double_shares.len() {
+        if dousha_storage.batch_size != double_shares.len() {
             return Err(DouShaError::ShareError(ShareError::DegreeMismatch));
         }
 
