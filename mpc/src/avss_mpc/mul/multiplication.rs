@@ -369,8 +369,12 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
 fn verify_share_against_commitments<F: FftField, G: CurveGroup<ScalarField = F>>(
     share: &FeldmanShamirShare<F, G>,
     expected_commitments: &[G],
+    expected_id: usize,
 ) -> bool {
     if expected_commitments.len() != share.feldmanshare.degree + 1 {
+        return false;
+    }
+    if share.feldmanshare.id != expected_id {
         return false;
     }
     let x = F::from(share.feldmanshare.id as u64);
@@ -404,14 +408,14 @@ fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
     let mut a_shares = vec![vec![]; no_of_mul];
     let mut b_shares = vec![vec![]; no_of_mul];
 
-    for (_, (a, b)) in storage.received_shares.iter() {
+    for (sender_id, (a, b)) in storage.received_shares.iter() {
         if a.len() != no_of_mul || b.len() != no_of_mul {
             warn!("Did not receive the right number of shares to reconstruct");
             continue;
         }
         let valid = (0..no_of_mul).all(|i| {
-            verify_share_against_commitments(&a[i], &expected_a[i])
-                && verify_share_against_commitments(&b[i], &expected_b[i])
+            verify_share_against_commitments(&a[i], &expected_a[i], *sender_id + 1)
+                && verify_share_against_commitments(&b[i], &expected_b[i], *sender_id + 1)
         });
         if !valid {
             continue;

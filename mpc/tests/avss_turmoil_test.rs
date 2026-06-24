@@ -187,7 +187,7 @@ fn avss_e2e() {
         let (_, share) = output.expect("The output should be correct");
         for (i, s) in share.iter().enumerate() {
             assert_eq!(s.feldmanshare.degree, t);
-            assert!(verify_feldman(s.clone()));
+            assert!(verify_feldman(s.clone(), s.feldmanshare.id));
             shares[i].push(s.feldmanshare.clone());
         }
     }

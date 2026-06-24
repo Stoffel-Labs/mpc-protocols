@@ -447,7 +447,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                     msg.sender_id
                 )));
             }
-            if !verify_feldman(share.clone()) {
+            if !verify_feldman(share.clone(), msg.sender_id + 1) {
                 return Err(AvssInputError::VerificationFailed(format!(
                     "Feldman verification failed for share from server {}",
                     msg.sender_id
