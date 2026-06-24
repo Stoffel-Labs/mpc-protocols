@@ -86,8 +86,12 @@ where
 
 pub fn verify_feldman<F: FftField, G: CurveGroup<ScalarField = F>>(
     share: FeldmanShamirShare<F, G>,
+    expected_id: usize,
 ) -> bool {
     if share.commitments.len() != share.feldmanshare.degree + 1 {
+        return false;
+    }
+    if share.feldmanshare.id != expected_id {
         return false;
     }
     let x = F::from(share.feldmanshare.id as u64);
@@ -433,11 +437,11 @@ where
                 commitments: commitments.clone(),
             };
 
-            shares.push(share);
-        }
+            if !verify_feldman(share.clone(), self.ids[self.id]) {
+                return Err(AvssError::InvalidShare);
+            }
 
-        if !shares.iter().cloned().all(verify_feldman) {
-            return Err(AvssError::InvalidShare);
+            shares.push(share);
         }
 
         {

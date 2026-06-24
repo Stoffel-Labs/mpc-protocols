@@ -115,7 +115,7 @@ async fn test_avss_end_to_end() {
         // Feldman verification already checked in protocol
         for (i, s) in share.iter().enumerate() {
             assert_eq!(s.feldmanshare.degree, t);
-            assert!(verify_feldman(s.clone()));
+            assert!(verify_feldman(s.clone(), s.feldmanshare.id));
             shares[i].push(s.feldmanshare.clone());
         }
     }

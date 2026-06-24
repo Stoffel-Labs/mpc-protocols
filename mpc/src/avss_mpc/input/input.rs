@@ -446,12 +446,12 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                     msg.sender_id
                 )));
             }
-        }
-        if !shares.iter().cloned().all(verify_feldman) {
-            return Err(AvssInputError::VerificationFailed(format!(
-                "Feldman verification failed for server {}",
-                msg.sender_id
-            )));
+            if !verify_feldman(share.clone(), msg.sender_id + 1) {
+                return Err(AvssInputError::VerificationFailed(format!(
+                    "Feldman verification failed for share from server {}",
+                    msg.sender_id
+                )));
+            }
         }
 
         // happens if less than `n` messages were sufficient for reconstruction

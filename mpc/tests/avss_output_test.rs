@@ -37,7 +37,7 @@ async fn test_avss_output_get_output() {
         vec![shares_vec[0].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = AvssOutputMessage::new(1, payload); // sender_id matches share id
+        let msg = AvssOutputMessage::new(0, payload);
         client.output_handler(msg).await.unwrap();
     }
 
@@ -50,7 +50,7 @@ async fn test_avss_output_get_output() {
         vec![shares_vec[1].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = AvssOutputMessage::new(2, payload);
+        let msg = AvssOutputMessage::new(1, payload);
         client.output_handler(msg).await.unwrap();
     }
 
@@ -82,7 +82,7 @@ async fn test_avss_output_wait_for_output() {
         vec![shares_vec[0].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = AvssOutputMessage::new(1, payload);
+        let msg = AvssOutputMessage::new(0, payload);
         client.output_handler(msg).await.unwrap();
     }
 
@@ -99,7 +99,7 @@ async fn test_avss_output_wait_for_output() {
         vec![shares_vec[1].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = AvssOutputMessage::new(2, payload);
+        let msg = AvssOutputMessage::new(1, payload);
         client.output_handler(msg).await.unwrap();
     }
 
@@ -130,16 +130,16 @@ async fn test_avss_output_duplicate_rejection() {
     let shares_vec =
         FeldmanShamirShare::<Fr, G>::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
 
-    // Send share from server 1
+    // Send share from server 0
     let mut payload = Vec::new();
     vec![shares_vec[0].clone()]
         .serialize_compressed(&mut payload)
         .unwrap();
-    let msg1 = AvssOutputMessage::new(1, payload.clone());
+    let msg1 = AvssOutputMessage::new(0, payload.clone());
     client.output_handler(msg1).await.unwrap();
 
     // Try sending from the same server again - should fail
-    let msg2 = AvssOutputMessage::new(1, payload);
+    let msg2 = AvssOutputMessage::new(0, payload);
     let result = client.output_handler(msg2).await;
     assert!(result.is_err(), "Expected duplicate error");
 }
@@ -179,7 +179,7 @@ async fn test_avss_output_multiple_values() {
         shares_for_server
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = AvssOutputMessage::new(server_idx + 1, payload);
+        let msg = AvssOutputMessage::new(server_idx, payload);
         client.output_handler(msg).await.unwrap();
     }
 
