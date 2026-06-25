@@ -47,7 +47,7 @@ use crate::{
             fpmul::{FPError, FPMulNode},
             prandbitd::PRandBitDNode,
             rand_bit::RandBit,
-            PRandBitDMessage, PRandError, RandBitError, TruncPrError,
+            PRandBitDEchoMessage, PRandBitDMessage, PRandError, RandBitError, TruncPrError,
         },
         input::{
             input::{InputClient, InputServer},
@@ -954,6 +954,20 @@ where
                 self.preprocess
                     .prand_bit
                     .process(prand_message, net)
+                    .await?;
+            }
+            WrappedMessage::PRandBitDEcho(echo_msg) => {
+                if sender_id != echo_msg.echoer_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if echo_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        echo_msg.session_id.instance_id(),
+                    ));
+                }
+                self.preprocess
+                    .prand_bit
+                    .process_echo(echo_msg, net)
                     .await?;
             }
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
@@ -2174,6 +2188,7 @@ pub enum WrappedMessage {
     Dousha(DouShaMessage),
     Output(OutputMessage),
     PRandBitD(PRandBitDMessage),
+    PRandBitDEcho(PRandBitDEchoMessage),
 }
 
 impl WrappedMessage {

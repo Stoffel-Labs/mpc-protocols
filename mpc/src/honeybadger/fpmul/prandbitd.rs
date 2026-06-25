@@ -5,7 +5,7 @@ use crate::{
         fpmul::{
             build_all_f_polys,
             f256::{build_all_f_polys_2_8, Gf256, Gf256Domain},
-            PRandBitDMessage, PRandBitDStore, PRandError, PrandState,
+            PRandBitDEchoMessage, PRandBitDMessage, PRandBitDStore, PRandError, PrandState,
         },
         mul::concat_sorted,
         robust_interpolate::robust_interpolate::RobustShare,
@@ -531,6 +531,23 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 Err(e) => return Err(e),
             }
         }
+
+        // Reprocess echo messages that arrived before this session was initialized
+        let pending_echoes = {
+            let binding = self.get_or_create_store(session_id, self.id).await?;
+            let mut store = binding.lock().await;
+            std::mem::take(&mut store.pending_echo_messages)
+        };
+        for echo_msg in pending_echoes {
+            match self.process_echo(echo_msg, network.clone()).await {
+                Ok(()) => {}
+                Err(PRandError::InvalidMessage(_)) | Err(PRandError::Duplicate(_)) => {
+                    warn!("dropping invalid pending echo message from Byzantine peer");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
         let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
         for tset in tsets {
             let r_t_i: Vec<BigUint> = (0..batch_size)
@@ -646,48 +663,259 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             }
         }
 
-        // Get or create entry for this tset
-        let tset_entry = store
-            .riss_shares
-            .entry(msg.tset.clone())
-            .or_insert_with(HashMap::new);
-
-        // Deduplicate per (sender, tset)
-        if tset_entry.contains_key(&msg.sender_id) {
+        // Deduplicate per (sender, tset) against the direct-receive buffer
+        let key = (msg.tset.clone(), msg.sender_id);
+        if store.riss_direct.contains_key(&key) {
             return Err(PRandError::Duplicate(format!(
                 "PRandBit: Already received from {} for tset {:?}",
                 msg.sender_id, msg.tset
             )));
         }
 
-        // Insert sender’s contribution
-        tset_entry.insert(msg.sender_id, msg.r_t);
+        // Park value pending echo verification — do NOT insert into riss_shares yet
+        store.riss_direct.insert(key, msg.r_t.clone());
+        drop(store);
 
-        // Check if we have all expected contributors
-        let r_t_sum = if tset_entry.len() == self.n {
-            let batch_size = maybe_batch_size
-                .ok_or_else(|| PRandError::NotSet("batch_size not set when folding r_t".into()))?;
-            Some(
-                tset_entry
-                    .values()
-                    .fold(vec![BigUint::ZERO; batch_size], |mut acc, v| {
-                        for (a, x) in acc.iter_mut().zip(v) {
-                            *a += x;
-                        }
-                        acc
-                    }),
-            )
-        } else {
-            None
+        // Echo the received value to all other non-T parties
+        let non_t_others: Vec<usize> = (0..self.n)
+            .filter(|&j| !msg.tset.contains(&j) && j != self.id)
+            .collect();
+        let echo = WrappedMessage::PRandBitDEcho(PRandBitDEchoMessage::new(
+            self.id,
+            msg.sender_id,
+            msg.session_id,
+            msg.tset.clone(),
+            msg.r_t,
+        ));
+        let echo_bytes = bincode::serialize(&echo)?;
+        for &j in &non_t_others {
+            network.send(j, &echo_bytes).await?;
+        }
+
+        self.try_maybe_verify_and_insert(
+            msg.session_id,
+            calling_proto,
+            msg.tset,
+            msg.sender_id,
+            network,
+        )
+        .await
+    }
+
+    /// Verifies echo consistency for a single (tset, original_sender) contribution and,
+    /// if all n-t-1 echoes have arrived and agree with the directly received value,
+    /// inserts the verified contribution into riss_shares and folds r_t when complete.
+    async fn try_maybe_verify_and_insert<N: Network + Send + Sync>(
+        &mut self,
+        session_id: SessionId,
+        calling_proto: ProtocolType,
+        tset: Vec<usize>,
+        original_sender: usize,
+        network: Arc<N>,
+    ) -> Result<(), PRandError> {
+        let key = (tset.clone(), original_sender);
+        // All non-T parties except self must send an echo: n - t - 1
+        let expected_echoes = self.n.saturating_sub(self.t + 1);
+
+        let binding = self.get_or_create_store(session_id, self.id).await?;
+
+        let should_advance = {
+            let mut store = binding.lock().await;
+
+            // Wait until the direct message has arrived
+            let direct_val = match store.riss_direct.get(&key) {
+                Some(v) => v.clone(),
+                None => return Ok(()),
+            };
+
+            // Wait until all expected echoes have arrived
+            let echo_count = store.riss_echoes.get(&key).map(|m| m.len()).unwrap_or(0);
+            if echo_count < expected_echoes {
+                return Ok(());
+            }
+
+            // Verify every echo matches what we received directly
+            if let Some(echoes) = store.riss_echoes.get(&key) {
+                for (&echoer, echo_val) in echoes {
+                    if echo_val != &direct_val {
+                        warn!(
+                            node_id = self.id,
+                            original_sender, echoer, "RISS equivocation detected"
+                        );
+                        return Err(PRandError::EquivocationDetected(
+                            original_sender,
+                            tset.clone(),
+                        ));
+                    }
+                }
+            }
+
+            // Guard against duplicate insertion (e.g. called twice)
+            if store
+                .riss_shares
+                .get(&tset)
+                .map(|m| m.contains_key(&original_sender))
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+
+            // Insert verified contribution into riss_shares
+            {
+                let entry = store
+                    .riss_shares
+                    .entry(tset.clone())
+                    .or_insert_with(HashMap::new);
+                entry.insert(original_sender, direct_val);
+            }
+
+            // Fold into r_t when all n contributors for this tset have been verified
+            let tset_len = store.riss_shares[&tset].len();
+            if tset_len == self.n {
+                let batch_size = store.batch_size.ok_or_else(|| {
+                    PRandError::NotSet("batch_size not set when folding r_t".into())
+                })?;
+                let sum = {
+                    store.riss_shares[&tset].values().fold(
+                        vec![BigUint::ZERO; batch_size],
+                        |mut acc, v| {
+                            for (a, x) in acc.iter_mut().zip(v) {
+                                *a += x;
+                            }
+                            acc
+                        },
+                    )
+                };
+                store.r_t.insert(tset.clone(), sum);
+                true
+            } else {
+                false
+            }
         };
 
-        if let Some(sum) = r_t_sum {
-            store.r_t.insert(msg.tset.clone(), sum);
+        if should_advance {
+            self.try_advance_from_riss(session_id, calling_proto, network)
+                .await?;
         }
-        drop(store);
-        self.try_advance_from_riss(msg.session_id, calling_proto, network.clone())
-            .await?;
+
         Ok(())
+    }
+
+    /// Handles an incoming RISS echo message.
+    /// Stores the echo and triggers verification once all echoes for a contribution arrive.
+    pub async fn process_echo<N: Network + Send + Sync>(
+        &mut self,
+        msg: PRandBitDEchoMessage,
+        network: Arc<N>,
+    ) -> Result<(), PRandError> {
+        if msg.tset.contains(&self.id) {
+            return Err(PRandError::InvalidMessage(format!(
+                "echo: node {} received echo for tset containing itself: {:?}",
+                self.id, msg.tset
+            )));
+        }
+        if msg.tset.len() != self.t {
+            return Err(PRandError::InvalidMessage(format!(
+                "echo: tset length {} != threshold {}",
+                msg.tset.len(),
+                self.t
+            )));
+        }
+        if msg.tset.iter().any(|&id| id >= self.n) {
+            return Err(PRandError::InvalidMessage(
+                "echo: tset contains out-of-range party ID".into(),
+            ));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            if msg.tset.iter().any(|id| !seen.insert(id)) {
+                return Err(PRandError::InvalidMessage(
+                    "echo: tset contains duplicate IDs".into(),
+                ));
+            }
+        }
+        if msg.tset.contains(&msg.echoer_id) {
+            return Err(PRandError::InvalidMessage(format!(
+                "echo: echoer {} is in the tset {:?}",
+                msg.echoer_id, msg.tset
+            )));
+        }
+        if msg.echoer_id == self.id {
+            return Err(PRandError::InvalidMessage(
+                "echo: received own echo".to_string(),
+            ));
+        }
+        if msg.original_sender >= self.n || msg.echoer_id >= self.n {
+            return Err(PRandError::InvalidMessage(
+                "echo: party ID out of range".to_string(),
+            ));
+        }
+
+        let calling_proto = match msg.session_id.calling_protocol() {
+            Some(proto) => proto,
+            None => return Err(PRandError::SessionIdError(msg.session_id)),
+        };
+
+        let binding = self
+            .get_or_create_store(msg.session_id, msg.original_sender)
+            .await?;
+
+        {
+            let mut store = binding.lock().await;
+
+            // Queue if session not yet initialized
+            if store.batch_size.is_none() || store.r_t_bound.is_none() {
+                const MAX_PENDING_ECHO: usize = 4096;
+                if store.pending_echo_messages.len() >= MAX_PENDING_ECHO {
+                    return Err(PRandError::InvalidMessage(
+                        "pending echo queue full".to_string(),
+                    ));
+                }
+                store.pending_echo_messages.push(msg);
+                return Ok(());
+            }
+
+            if let Some(batch_size) = store.batch_size {
+                if msg.r_t.len() != batch_size {
+                    return Err(PRandError::InvalidMessage(format!(
+                        "echo: r_t length {} != batch_size {}",
+                        msg.r_t.len(),
+                        batch_size
+                    )));
+                }
+            }
+            if let Some(ref bound) = store.r_t_bound {
+                for val in &msg.r_t {
+                    if val > bound {
+                        return Err(PRandError::InvalidMessage(format!(
+                            "echo: r_t value from echoer {} exceeds bound",
+                            msg.echoer_id
+                        )));
+                    }
+                }
+            }
+
+            let key = (msg.tset.clone(), msg.original_sender);
+            let echo_map = store.riss_echoes.entry(key).or_insert_with(HashMap::new);
+
+            if echo_map.contains_key(&msg.echoer_id) {
+                return Err(PRandError::Duplicate(format!(
+                    "PRandBit: Already received echo from {} for (sender={}, tset={:?})",
+                    msg.echoer_id, msg.original_sender, msg.tset
+                )));
+            }
+
+            echo_map.insert(msg.echoer_id, msg.r_t);
+        }
+
+        self.try_maybe_verify_and_insert(
+            msg.session_id,
+            calling_proto,
+            msg.tset,
+            msg.original_sender,
+            network,
+        )
+        .await
     }
 
     pub async fn output_handler(
