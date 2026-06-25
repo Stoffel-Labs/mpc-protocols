@@ -26,6 +26,10 @@ pub enum FPError {
     IncompatiblePrecision,
     #[error("error sending the thread asynchronously")]
     SendError(#[from] SendError<SessionId>),
+    #[error(
+        "the preprocessing does not have enough bits, current: {current}, required: {required}"
+    )]
+    NotEnoughBitsPrep { current: usize, required: usize },
 }
 
 #[derive(Clone, Debug)]

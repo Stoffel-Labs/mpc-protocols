@@ -2283,7 +2283,7 @@ fn mul_e2e_without_preprocessing_turmoil() {
         111,
         0,
         0,
-        0,
+        28,
         0,
         Duration::from_secs(30),
         vec![],
@@ -2475,7 +2475,7 @@ fn fpmul_e2e_with_preprocessing(
     let n_random_shares = m; // no of random bits
     let n_prandbit = m;
     let n_prandint = 1;
-    let bound_l = 8;
+    let bound_l = 28;
     let security_k = 4;
     let precision = FixedPointPrecision::new(k, m);
 
@@ -3019,7 +3019,7 @@ fn ransha_e2e_turmoil_with_hold(
         111,
         0,
         0,
-        0,
+        28,
         0,
         Duration::from_secs(30),
         vec![],
