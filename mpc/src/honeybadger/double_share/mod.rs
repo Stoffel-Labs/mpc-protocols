@@ -90,7 +90,7 @@ pub struct DouShaMessage {
     /// ID of the session.
     pub session_id: SessionId,
     /// Payload of the message.
-    payload: DouShaPayload,
+    pub payload: DouShaPayload,
 }
 
 impl DouShaMessage {

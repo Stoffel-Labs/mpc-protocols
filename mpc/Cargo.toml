@@ -11,6 +11,9 @@ readme.workspace = true
 keywords = ["async", "crypto", "cryptography", "mpc", "secret-sharing"]
 categories = ["cryptography"]
 
+[features]
+statistics = []
+
 [dependencies]
 thiserror.workspace = true
 tracing-subscriber.workspace = true

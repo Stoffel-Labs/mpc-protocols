@@ -26,6 +26,8 @@ pub mod mul;
 pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
+#[cfg(feature = "statistics")]
+pub mod statistics;
 
 use crate::{
     common::{
@@ -256,6 +258,10 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     pub type_ops: TypeOperations<F, R>,
     pub output: OutputServer,
     pub counters: SubProtocolCounters,
+    /// Shared byte and message counters.  Updated by [`CountingNetwork`] (sends)
+    /// and by [`process`] (receives).  Only present with the `statistics` feature.
+    #[cfg(feature = "statistics")]
+    pub statistics_counters: std::sync::Arc<statistics::NodeStatisticsCounters>,
 }
 
 impl<F, R> HoneyBadgerMPCNode<F, R>
@@ -263,6 +269,29 @@ where
     F: PrimeField,
     R: RBC<Id = SessionId>,
 {
+    /// Wraps `inner` in a [`CountingNetwork`] that shares this node's statistics
+    /// counters.  Pass the resulting wrapper (or an `Arc` of it) wherever the
+    /// protocol accepts `Arc<N>` to automatically record outbound bytes and
+    /// message types.  Received bytes and message types are recorded by
+    /// [`process`].
+    ///
+    /// Only available with the `statistics` cargo feature.
+    #[cfg(feature = "statistics")]
+    pub fn counting_network<N: stoffelnet::network_utils::Network>(
+        &self,
+        inner: N,
+    ) -> statistics::CountingNetwork<N> {
+        statistics::CountingNetwork::new(inner, std::sync::Arc::clone(&self.statistics_counters))
+    }
+
+    /// Returns a best-effort snapshot of all statistics counters.
+    ///
+    /// Only available with the `statistics` cargo feature.
+    #[cfg(feature = "statistics")]
+    pub fn statistics_snapshot(&self) -> statistics::NodeStatisticsSnapshot {
+        self.statistics_counters.snapshot()
+    }
+
     pub async fn debug_store_sizes(&self) -> String {
         let len = self.preprocessing_material.lock().await.length();
         let triples = len.beaver_triples;
@@ -539,6 +568,8 @@ where
             },
             output,
             counters: SubProtocolCounters::new(),
+            #[cfg(feature = "statistics")]
+            statistics_counters: std::sync::Arc::new(statistics::NodeStatisticsCounters::default()),
         })
     }
 
@@ -668,6 +699,14 @@ where
             .allow_trailing_bytes()
             .with_limit(MAX_MESSAGE_SIZE)
             .deserialize(&raw_msg)?;
+
+        #[cfg(feature = "statistics")]
+        {
+            self.statistics_counters
+                .bytes_received
+                .fetch_add(raw_msg.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            statistics::record_received(&wrapped, &self.statistics_counters.received);
+        }
 
         let is_client_input_broadcast = match &wrapped {
             WrappedMessage::Rbc(m) => {
