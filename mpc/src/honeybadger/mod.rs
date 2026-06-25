@@ -1032,6 +1032,14 @@ where
         if x.precision() != y.precision() {
             return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
+        // Checks if the PRandInt parameter has enough bits to mask the fixed point numbers.
+        if self.params.l < 2 * x.precision().k() - x.precision().f() {
+            return Err(HoneyBadgerError::FPError(FPError::NotEnoughBitsPrep {
+                current: self.params.l,
+                required: 2 * x.precision().k() - x.precision().f(),
+            }));
+        }
+
         let (no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;
             (store.length().prandbit, store.length().prandint)
