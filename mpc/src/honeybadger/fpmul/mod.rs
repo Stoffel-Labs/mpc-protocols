@@ -118,6 +118,8 @@ pub enum PRandError {
     /// The parameters for the precision are too big
     #[error("the parameters for k and l surpassed the field capacity")]
     SurpassedFieldCapacity,
+    #[error("RISS equivocation detected from party {0} for tset {1:?}")]
+    EquivocationDetected(usize, Vec<usize>),
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
@@ -194,6 +196,36 @@ impl PRandBitDMessage {
     }
 }
 
+/// Echo message for RISS consistency verification.
+/// Sent by every non-T recipient after receiving a RISS contribution, carrying the
+/// value they received so all other non-T parties can detect equivocation.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct PRandBitDEchoMessage {
+    pub echoer_id: usize,
+    pub original_sender: usize,
+    pub session_id: SessionId,
+    pub tset: Vec<usize>,
+    pub r_t: Vec<BigUint>,
+}
+
+impl PRandBitDEchoMessage {
+    pub fn new(
+        echoer_id: usize,
+        original_sender: usize,
+        session_id: SessionId,
+        tset: Vec<usize>,
+        r_t: Vec<BigUint>,
+    ) -> Self {
+        Self {
+            echoer_id,
+            original_sender,
+            session_id,
+            tset,
+            r_t,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrandState {
     Initialized,
@@ -208,8 +240,17 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     pub batch_size: Option<usize>,
     /// Messages that arrived before batch_size/r_t_bound were set; reprocessed once initialized.
     pub pending_riss_messages: Vec<PRandBitDMessage>,
+    /// Echo messages that arrived before the session was initialized.
+    pub pending_echo_messages: Vec<PRandBitDEchoMessage>,
     pub output_open: HashMap<u8, Vec<F>>,
+    /// Contributions verified by the echo protocol and accepted into the share sum.
     pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<BigUint>>>, // tset -> {sender -> val}
+    /// Raw values received directly from each RISS sender, held pending echo verification.
+    /// Key: (tset, original_sender)
+    pub riss_direct: HashMap<(Vec<usize>, usize), Vec<BigUint>>,
+    /// Echo messages received from other non-T parties for each (tset, original_sender).
+    /// Key: (tset, original_sender) -> {echoer_id -> echoed_value}
+    pub riss_echoes: HashMap<(Vec<usize>, usize), HashMap<usize, Vec<BigUint>>>,
     pub r_t: HashMap<Vec<usize>, Vec<BigUint>>,
     pub no_of_tsets: Option<usize>,
     pub share_r_q: Option<Vec<RobustShare<F>>>, //smaller field
@@ -234,8 +275,11 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
         Self {
             batch_size: None,
             pending_riss_messages: Vec::new(),
+            pending_echo_messages: Vec::new(),
             output_open: HashMap::new(),
             riss_shares: HashMap::new(),
+            riss_direct: HashMap::new(),
+            riss_echoes: HashMap::new(),
             r_t: HashMap::new(),
             no_of_tsets: None,
             share_r_q: None,

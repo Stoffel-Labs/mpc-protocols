@@ -91,6 +91,9 @@ async fn test_prandbitd_end_to_end() {
                     WrappedMessage::PRandBitD(msg) => {
                         let _ = node.process(msg, net.clone()).await;
                     }
+                    WrappedMessage::PRandBitDEcho(msg) => {
+                        let _ = node.process_echo(msg, net.clone()).await;
+                    }
                     WrappedMessage::BatchRecon(msg) => {
                         let _ = node.batch_recon.process(msg, net.clone()).await;
                         let _ = node.drain_batch_recon_output().await;
@@ -224,6 +227,9 @@ async fn test_prandbitd_r_reconstruction() {
                 match wrapped {
                     WrappedMessage::PRandBitD(msg) => {
                         let _ = node.process(msg, net.clone()).await;
+                    }
+                    WrappedMessage::PRandBitDEcho(msg) => {
+                        let _ = node.process_echo(msg, net.clone()).await;
                     }
                     WrappedMessage::BatchRecon(msg) => {
                         let _ = node.batch_recon.process(msg, net.clone()).await;

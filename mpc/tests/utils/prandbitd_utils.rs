@@ -40,6 +40,9 @@ where
                     WrappedMessage::PRandBitD(msg) => {
                         node.process(msg, net.clone()).await.unwrap();
                     }
+                    WrappedMessage::PRandBitDEcho(msg) => {
+                        node.process_echo(msg, net.clone()).await.unwrap();
+                    }
                     WrappedMessage::BatchRecon(msg) => {
                         node.batch_recon.process(msg, net.clone()).await.unwrap();
                         node.drain_batch_recon_output().await.unwrap();
