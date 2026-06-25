@@ -25,6 +25,7 @@
 //! println!("RanSha share msgs sent: {}", snap.sent.ran_sha.share);
 //! ```
 
+use std::fmt;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -278,6 +279,83 @@ pub struct NodeBenchmarkSnapshot {
     pub bytes_received: u64,
     pub sent: DirectionalMsgSnapshot,
     pub received: DirectionalMsgSnapshot,
+}
+
+impl fmt::Display for NodeBenchmarkSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let fmt_bytes = |b: u64| -> String {
+            if b >= 1_000_000_000 {
+                format!("{:.2} GB", b as f64 / 1e9)
+            } else if b >= 1_000_000 {
+                format!("{:.2} MB", b as f64 / 1e6)
+            } else if b >= 1_000 {
+                format!("{:.2} KB", b as f64 / 1e3)
+            } else {
+                format!("{} B", b)
+            }
+        };
+
+        macro_rules! row {
+            ($label:expr, $s:expr, $r:expr) => {
+                writeln!(f, "│ {:<37} │ {:>8} │ {:>8} │", $label, $s, $r)?
+            };
+        }
+
+        writeln!(f, "┌───────────────────────────────────────┬──────────┬──────────┐")?;
+        row!("Metric", "  Sent  ", "Received");
+        writeln!(f, "├───────────────────────────────────────┼──────────┼──────────┤")?;
+        row!("Bytes", fmt_bytes(self.bytes_sent), fmt_bytes(self.bytes_received));
+        writeln!(f, "├───────────────────────────────────────┼──────────┼──────────┤")?;
+        row!("RBC", "", "");
+        let s = &self.sent.rbc;
+        let r = &self.received.rbc;
+        row!("  bracha_init",       s.bracha_init,       r.bracha_init);
+        row!("  bracha_echo",       s.bracha_echo,       r.bracha_echo);
+        row!("  bracha_ready",      s.bracha_ready,      r.bracha_ready);
+        row!("  avid_send",         s.avid_send,         r.avid_send);
+        row!("  avid_echo",         s.avid_echo,         r.avid_echo);
+        row!("  avid_ready",        s.avid_ready,        r.avid_ready);
+        row!("  other",             s.other,             r.other);
+        writeln!(f, "├───────────────────────────────────────┼──────────┼──────────┤")?;
+        row!("RanSha", "", "");
+        let s = &self.sent.ran_sha;
+        let r = &self.received.ran_sha;
+        row!("  share",             s.share,             r.share);
+        row!("  reconstruct",       s.reconstruct,       r.reconstruct);
+        row!("  output",            s.output,            r.output);
+        writeln!(f, "├───────────────────────────────────────┼──────────┼──────────┤")?;
+        row!("DouSha", "", "");
+        let s = &self.sent.dou_sha;
+        let r = &self.received.dou_sha;
+        row!("  share",             s.share,             r.share);
+        row!("  shares",            s.shares,            r.shares);
+        writeln!(f, "├───────────────────────────────────────┼──────────┼──────────┤")?;
+        row!("RanDouSha", "", "");
+        let s = &self.sent.ran_dou_sha;
+        let r = &self.received.ran_dou_sha;
+        row!("  reconstruct",       s.reconstruct,       r.reconstruct);
+        row!("  reconstruct_batch", s.reconstruct_batch, r.reconstruct_batch);
+        row!("  output",            s.output,            r.output);
+        writeln!(f, "├───────────────────────────────────────┼──────────┼──────────┤")?;
+        row!("BatchRecon", "", "");
+        let s = &self.sent.batch_recon;
+        let r = &self.received.batch_recon;
+        row!("  eval",              s.eval,              r.eval);
+        row!("  reveal",            s.reveal,            r.reveal);
+        row!("  eval_batch",        s.eval_batch,        r.eval_batch);
+        row!("  reveal_batch",      s.reveal_batch,      r.reveal_batch);
+        writeln!(f, "├───────────────────────────────────────┼──────────┼──────────┤")?;
+        row!("Input",               self.sent.input,       self.received.input);
+        row!("Output",              self.sent.output,      self.received.output);
+        row!("PRandBitD",           self.sent.prand_bit_d, self.received.prand_bit_d);
+        write!(f,  "└───────────────────────────────────────┴──────────┴──────────┘")
+    }
+}
+
+impl fmt::Display for NodeBenchmarkCounters {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.snapshot(), f)
+    }
 }
 
 // ── message classification ────────────────────────────────────────────────────
