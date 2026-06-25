@@ -1038,7 +1038,7 @@ async fn fpmul_e2e() {
         111,
         0,
         0,
-        0,
+        28,
         0,
         Duration::from_secs(30),
         vec![],
@@ -1120,7 +1120,7 @@ async fn fpmul_e2e_with_preprocessing() {
     let n_random_shares = m; // no of random bits
     let n_prandbit = m;
     let n_prandint = 1;
-    let bound_l = 8;
+    let bound_l = 28;
     let security_k = 4;
 
     //Setup
