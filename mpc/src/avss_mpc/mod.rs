@@ -48,6 +48,8 @@ const MAX_AVSS_BATCH_SIZE: usize = 128;
 // dealings would be silently rejected as malformed — so catch the drift at compile time.
 const _: () = assert!(MAX_AVSS_BATCH_SIZE <= crate::common::share::avss::MAX_DEAL_BATCH);
 
+#[cfg(feature = "statistics")]
+pub mod statistics;
 pub mod input;
 pub mod mul;
 pub mod output;
@@ -314,6 +316,37 @@ pub struct AvssMPCNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub input_server: AvssInputServer<F, R, G>,
     pub output_server: AvssOutputServer,
     pub counters: SubProtocolCounters,
+    /// Shared byte and message counters.  Updated by [`statistics::CountingNetwork`]
+    /// (sends) and by [`process`](Self::process) (receives).  Only present with the
+    /// `statistics` feature.
+    #[cfg(feature = "statistics")]
+    pub statistics_counters: std::sync::Arc<statistics::NodeStatisticsCounters>,
+}
+
+#[cfg(feature = "statistics")]
+impl<F, R, G> AvssMPCNode<F, R, G>
+where
+    F: PrimeField,
+    R: RBC<Id = AvssSessionId>,
+    G: CurveGroup<ScalarField = F>,
+{
+    /// Wraps `inner` in a [`statistics::CountingNetwork`] that shares this node's
+    /// statistics counters.  Pass the resulting wrapper (or an `Arc` of it) wherever
+    /// the protocol accepts `Arc<N>` to automatically record outbound bytes and
+    /// message types.  Received bytes and message types are recorded by
+    /// [`process`](Self::process).
+    ///
+    /// Only available with the `statistics` cargo feature.
+    pub fn counting_network<N: Network>(&self, inner: N) -> statistics::CountingNetwork<N> {
+        statistics::CountingNetwork::new(inner, std::sync::Arc::clone(&self.statistics_counters))
+    }
+
+    /// Returns a best-effort snapshot of all statistics counters.
+    ///
+    /// Only available with the `statistics` cargo feature.
+    pub fn statistics_snapshot(&self) -> statistics::NodeStatisticsSnapshot {
+        self.statistics_counters.snapshot()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -414,6 +447,8 @@ where
             input_server,
             output_server,
             counters: SubProtocolCounters::new(),
+            #[cfg(feature = "statistics")]
+            statistics_counters: std::sync::Arc::new(statistics::NodeStatisticsCounters::default()),
         })
     }
 
@@ -429,6 +464,15 @@ where
             .allow_trailing_bytes()
             .with_limit(MAX_MESSAGE_SIZE)
             .deserialize(&raw_msg)?;
+
+        #[cfg(feature = "statistics")]
+        {
+            self.statistics_counters
+                .bytes_received
+                .fetch_add(raw_msg.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            statistics::record_received(&wrapped, &self.statistics_counters.received);
+        }
+
         match wrapped {
             AvssWrappedMessage::Rbc(rbc_msg) => {
                 if sender_id != rbc_msg.sender_id {
