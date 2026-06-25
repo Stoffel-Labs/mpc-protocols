@@ -26,6 +26,8 @@ pub mod mul;
 pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
+#[cfg(feature = "benchmark")]
+pub mod benchmark;
 
 use crate::{
     common::{
@@ -254,6 +256,10 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     pub type_ops: TypeOperations<F, R>,
     pub output: OutputServer,
     pub counters: SubProtocolCounters,
+    /// Shared byte and message counters.  Updated by [`CountingNetwork`] (sends)
+    /// and by [`process`] (receives).  Only present with the `benchmark` feature.
+    #[cfg(feature = "benchmark")]
+    pub benchmark_counters: std::sync::Arc<benchmark::NodeBenchmarkCounters>,
 }
 
 impl<F, R> HoneyBadgerMPCNode<F, R>
@@ -261,6 +267,29 @@ where
     F: PrimeField,
     R: RBC<Id = SessionId>,
 {
+    /// Wraps `inner` in a [`CountingNetwork`] that shares this node's benchmark
+    /// counters.  Pass the resulting wrapper (or an `Arc` of it) wherever the
+    /// protocol accepts `Arc<N>` to automatically record outbound bytes and
+    /// message types.  Received bytes and message types are recorded by
+    /// [`process`].
+    ///
+    /// Only available with the `benchmark` cargo feature.
+    #[cfg(feature = "benchmark")]
+    pub fn counting_network<N: stoffelnet::network_utils::Network>(
+        &self,
+        inner: N,
+    ) -> benchmark::CountingNetwork<N> {
+        benchmark::CountingNetwork::new(inner, std::sync::Arc::clone(&self.benchmark_counters))
+    }
+
+    /// Returns a best-effort snapshot of all benchmark counters.
+    ///
+    /// Only available with the `benchmark` cargo feature.
+    #[cfg(feature = "benchmark")]
+    pub fn benchmark_snapshot(&self) -> benchmark::NodeBenchmarkSnapshot {
+        self.benchmark_counters.snapshot()
+    }
+
     pub async fn debug_store_sizes(&self) -> String {
         let len = self.preprocessing_material.lock().await.length();
         let triples = len.beaver_triples;
@@ -537,6 +566,10 @@ where
             },
             output,
             counters: SubProtocolCounters::new(),
+            #[cfg(feature = "benchmark")]
+            benchmark_counters: std::sync::Arc::new(
+                benchmark::NodeBenchmarkCounters::default(),
+            ),
         })
     }
 
@@ -657,6 +690,14 @@ where
             .allow_trailing_bytes()
             .with_limit(MAX_MESSAGE_SIZE)
             .deserialize(&raw_msg)?;
+
+        #[cfg(feature = "benchmark")]
+        {
+            self.benchmark_counters
+                .bytes_received
+                .fetch_add(raw_msg.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            benchmark::record_received(&wrapped, &self.benchmark_counters.received);
+        }
 
         match wrapped {
             WrappedMessage::Rbc(rbc_msg) => {

@@ -3,6 +3,9 @@ name = "stoffelcrypto"
 version.workspace = true
 edition.workspace = true
 
+[features]
+benchmark = []
+
 [dependencies]
 thiserror.workspace = true
 tracing-subscriber.workspace = true
