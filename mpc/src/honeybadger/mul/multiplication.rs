@@ -1,3 +1,4 @@
+use crate::common::session_store::SessionStore;
 use crate::{
     common::{
         rbc::RbcError, share::ShareError, utils::deser_bounded_vec, ProtocolSessionId,
@@ -143,7 +144,7 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub mult_storage: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<MultStorage<F>>>)>>>,
+    pub mult_storage: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<MultStorage<F>>>)>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
     pub rbc: R,
@@ -169,7 +170,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             id,
             n,
             t: threshold,
-            mult_storage: Arc::new(Mutex::new(HashMap::new())),
+            mult_storage: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             batch_recon,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
             rbc,
@@ -317,10 +318,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         let mut store = self.mult_storage.lock().await;
-        store
-            .remove(&session_id)
-            .map(|_| ())
-            .ok_or(MulError::ClearStoreError(session_id))
+        if store.retire(session_id) {
+            Ok(())
+        } else {
+            Err(MulError::ClearStoreError(session_id))
+        }
     }
 
     pub async fn store_len(&self) -> usize {
@@ -363,7 +365,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         let share_len = x.len() % (self.t + 1);
 
         // 1.
-        let storage_bind = self.get_or_create_mult_storage(session_id, self.id).await?;
+        let storage_bind = match self.get_or_create_mult_storage(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut storage = storage_bind.lock().await;
 
         // 2. Batch reconstruction is batched: one session for all a-x values (dealer/sub_id 0)
@@ -520,7 +525,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         );
 
         // 1.
-        let storage_bind = self.get_or_create_mult_storage(session_id, sender).await?;
+        let storage_bind = match self.get_or_create_mult_storage(session_id, sender).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut storage = storage_bind.lock().await;
 
         if storage.protocol_state == MultProtocolState::Finished {
@@ -649,14 +657,14 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         &self,
         session_id: SessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<MultStorage<F>>>, MulError> {
+    ) -> Option<Arc<Mutex<MultStorage<F>>>> {
         let mut storage = self.mult_storage.lock().await;
 
         // TODO: restore session limits
         // if !storage.contains_key(&session_id) {
         //     if storage.len() >= MAX_MUL_SESSIONS {
         //         warn!("Mul session limit reached");
-        //         return Err(MulError::LimitError);
+        //         return None;
         //     }
         //     let per_peer_limit = MAX_MUL_SESSIONS / self.n;
         //     let peer_count = storage
@@ -665,15 +673,15 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         //         .count();
         //     if peer_count >= per_peer_limit {
         //         warn!("Mul per-peer session limit reached");
-        //         return Err(MulError::LimitError);
+        //         return None;
         //     }
         // }
 
-        Ok(storage
-            .entry(session_id)
-            .or_insert((initiator_id, Arc::new(Mutex::new(MultStorage::empty()))))
-            .1
-            .clone())
+        storage
+            .get_or_create_with(session_id, || {
+                (initiator_id, Arc::new(Mutex::new(MultStorage::empty())))
+            })
+            .map(|(_, arc)| arc)
     }
 
     pub async fn wait_for_result(

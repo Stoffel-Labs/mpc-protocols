@@ -1,5 +1,6 @@
 pub mod messages;
 
+use crate::common::session_store::SessionStore;
 use crate::{
     common::{
         rbc::RbcError,
@@ -17,10 +18,7 @@ use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalSerialize, SerializationError};
 use bincode::{ErrorKind, Options};
 use messages::{RanDouShaMessage, ReconstructionMessage};
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{
     oneshot::{channel, Receiver, Sender},
@@ -135,7 +133,7 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     /// Threshold of corrupted parties.
     pub threshold: usize,
     /// Storage of the node.
-    pub store: Arc<Mutex<BTreeMap<SessionId, (usize, Arc<Mutex<RanDouShaStore<F>>>)>>>,
+    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<RanDouShaStore<F>>>)>>>,
     ///Avid instance for RBC
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
@@ -165,14 +163,14 @@ where
             id,
             n_parties,
             threshold,
-            store: Arc::new(Mutex::new(BTreeMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.store.lock().await;
-        store.remove(&session_id).is_some()
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {
@@ -181,17 +179,18 @@ where
 
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
+    /// Returns `None` if the session has been retired — caller must drop the message.
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<RanDouShaStore<F>>>, RanDouShaError> {
+    ) -> Option<Arc<Mutex<RanDouShaStore<F>>>> {
         let mut storage = self.store.lock().await;
 
         // TODO: restore session limits
         // if !storage.contains_key(&session_id) {
         //     if storage.len() >= MAX_RAN_DOU_SHA_SESSIONS {
-        //         return Err(RanDouShaError::LimitError);
+        //         return None;
         //     }
         //     let per_peer_limit = MAX_RAN_DOU_SHA_SESSIONS / self.n_parties;
         //     let peer_count = storage
@@ -199,15 +198,15 @@ where
         //         .filter(|(id, _)| *id == initiator_id)
         //         .count();
         //     if peer_count >= per_peer_limit {
-        //         return Err(RanDouShaError::LimitError);
+        //         return None;
         //     }
         // }
 
-        Ok(storage
-            .entry(session_id)
-            .or_insert((initiator_id, Arc::new(Mutex::new(RanDouShaStore::empty()))))
-            .1
-            .clone())
+        storage
+            .get_or_create_with(session_id, || {
+                (initiator_id, Arc::new(Mutex::new(RanDouShaStore::empty())))
+            })
+            .map(|(_, arc)| arc)
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), RanDouShaError> {
@@ -403,7 +402,10 @@ where
         }
 
         // Save the shares of r of degree t and 2t into the storage.
-        let bind_store = self.get_or_create_store(session_id, self.id).await?;
+        let bind_store = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut store = bind_store.lock().await;
         store.batch_size = r_deg_t.len() / self.n_parties;
         store.computed_r_shares_degree_t = r_deg_t.clone();
@@ -504,7 +506,10 @@ where
                 return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
             }
         }
-        let binding = self.get_or_create_store(msg.session_id, sender_id).await?;
+        let binding = match self.get_or_create_store(msg.session_id, sender_id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut store = binding.lock().await;
         if store.received_r_shares_degree_t.is_empty() {
             store.batch_size = rec_messages.len();
@@ -654,9 +659,13 @@ where
         if !output {
             return Err(RanDouShaError::Abort);
         }
-        let binding = self
+        let binding = match self
             .get_or_create_store(msg.session_id, msg.sender_id)
-            .await?;
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut store = binding.lock().await;
 
         // push to received_ok_msg if sender doesn't exist

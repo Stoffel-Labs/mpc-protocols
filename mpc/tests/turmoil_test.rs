@@ -192,7 +192,7 @@ fn ransha_e2e_turmoil() {
 }
 
 #[test]
-fn ransha_late_message_recreates_cleared_store_turmoil() {
+fn ransha_retired_session_blocks_late_message_turmoil() {
     setup_tracing();
 
     let n_parties = 5;
@@ -254,16 +254,14 @@ fn ransha_late_message_recreates_cleared_store_turmoil() {
                 .await
                 .unwrap();
 
-            let resurrected = node
+            let still_alive = node
                 .preprocess
                 .share_gen
                 .get_or_create_store(session_id, node.id)
-                .await
-                .unwrap();
-            let resurrected = resurrected.lock().await;
-            if !resurrected.initial_shares.contains_key(&1) {
+                .await;
+            if still_alive.is_some() {
                 let _ = tx.send(Err(
-                    "late RanSha message did not recreate cleared session state".to_string(),
+                    "retired RanSha session was resurrected by late message (zombie!)".to_string(),
                 ));
                 return Ok(());
             }
@@ -279,7 +277,7 @@ fn ransha_late_message_recreates_cleared_store_turmoil() {
 }
 
 #[test]
-fn batch_recon_late_message_recreates_cleared_store_turmoil() {
+fn batch_recon_retired_session_blocks_late_message_turmoil() {
     setup_tracing();
 
     let n_parties = 5;
@@ -315,15 +313,11 @@ fn batch_recon_late_message_recreates_cleared_store_turmoil() {
 
             node.process(late_msg, network_arc).await.unwrap();
 
-            let resurrected = node
-                .get_or_create_store(session_id, node.id)
-                .await
-                .unwrap()
-                .unwrap();
-            let resurrected = resurrected.lock().await;
-            if resurrected.evals_received.len() != 1 {
+            let still_alive = node.get_or_create_store(session_id, node.id).await.unwrap();
+            if still_alive.is_some() {
                 let _ = tx.send(Err(
-                    "late BatchRecon message did not recreate cleared session state".to_string(),
+                    "retired BatchRecon session was resurrected by late message (zombie!)"
+                        .to_string(),
                 ));
                 return Ok(());
             }

@@ -1,7 +1,7 @@
 /// This file contains more common reliable broadcast protocols used in MPC.
 /// You can reuse them in your own custom MPC protocol implementations.
 use super::{rbc_store::*, utils::*, RbcError};
-use crate::common::{ProtocolSessionId, RbcWrapFn, RBC};
+use crate::common::{session_store::SessionStore, ProtocolSessionId, RbcWrapFn, RBC};
 use async_trait::async_trait;
 use bincode;
 use std::{collections::HashMap, sync::Arc};
@@ -38,7 +38,7 @@ pub struct Bracha<Id: ProtocolSessionId + 'static> {
     pub n: usize,  // Total number of parties in the network
     pub t: usize,  // Number of allowed malicious parties
     pub k: usize,  //threshold (Not really used in Bracha)
-    pub store: Arc<Mutex<HashMap<Id, (usize, Arc<Mutex<BrachaStore>>)>>>, // Stores the session state
+    pub store: Arc<Mutex<SessionStore<Id, (usize, Arc<Mutex<BrachaStore>>)>>>, // Stores the session state
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
 }
@@ -66,7 +66,7 @@ where
             n,
             t,
             k,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             output_sender,
             wrapper,
         })
@@ -94,11 +94,11 @@ where
 
     async fn clear_store(&self) {
         let mut store = self.store.lock().await;
-        store.clear();
+        store.clear_all();
     }
     async fn clear_session(&self, session_id: Id) {
         let mut store = self.store.lock().await;
-        store.remove(&session_id);
+        store.retire(session_id);
     }
     /// This initiates the Bracha protocol.
     async fn init<N: Network + Send + Sync>(
@@ -467,11 +467,10 @@ where
             //         return None;
             //     }
             // }
-            store
-                .entry(session_id)
-                .or_insert_with(|| (sender_id, Arc::new(Mutex::new(BrachaStore::default()))))
-                .1
-                .clone()
+            let (_, arc) = store.get_or_create_with(session_id, || {
+                (sender_id, Arc::new(Mutex::new(BrachaStore::default())))
+            })?;
+            arc
         };
 
         {
@@ -557,11 +556,11 @@ where
 
 #[derive(Clone)]
 pub struct Avid<Id: ProtocolSessionId> {
-    pub id: usize,                                                      //Initiators ID
-    pub n: usize,                                                       //Network size
-    pub t: usize,                                                       //No. of malicious parties
-    pub k: usize,                                                       //Threshold
-    pub store: Arc<Mutex<HashMap<Id, (usize, Arc<Mutex<AvidStore>>)>>>, // Sessionid => store
+    pub id: usize,                                                           //Initiators ID
+    pub n: usize,                                                            //Network size
+    pub t: usize, //No. of malicious parties
+    pub k: usize, //Threshold
+    pub store: Arc<Mutex<SessionStore<Id, (usize, Arc<Mutex<AvidStore>>)>>>, // Sessionid => store
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
 }
@@ -593,7 +592,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
             n,
             t,
             k,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             output_sender,
             wrapper,
         })
@@ -603,11 +602,11 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
     }
     async fn clear_store(&self) {
         let mut store = self.store.lock().await;
-        store.clear();
+        store.clear_all();
     }
     async fn clear_session(&self, session_id: Id) {
         let mut store = self.store.lock().await;
-        store.remove(&session_id);
+        store.retire(session_id);
     }
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let store = self.store.lock().await;
@@ -1129,11 +1128,10 @@ impl<Id: ProtocolSessionId> Avid<Id> {
             //         return None;
             //     }
             // }
-            store
-                .entry(session_id)
-                .or_insert_with(|| (sender_id, Arc::new(Mutex::new(AvidStore::default()))))
-                .1
-                .clone()
+            let (_, arc) = store.get_or_create_with(session_id, || {
+                (sender_id, Arc::new(Mutex::new(AvidStore::default())))
+            })?;
+            arc
         };
         {
             let store_guard = store_lock.lock().await;

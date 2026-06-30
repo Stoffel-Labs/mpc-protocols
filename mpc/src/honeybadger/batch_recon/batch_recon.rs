@@ -1,4 +1,5 @@
 use super::*;
+use crate::common::session_store::SessionStore;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde},
@@ -13,8 +14,8 @@ use crate::{
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use futures::lock::Mutex;
+use std::marker::PhantomData;
 use std::sync::Arc;
-use std::{collections::HashMap, marker::PhantomData};
 use stoffelnet::network_utils::Network;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
@@ -41,7 +42,7 @@ pub struct BatchReconNode<F: FftField> {
     pub n: usize,  // Total number of nodes/shares
     pub t: usize,
     pub degree: usize,
-    pub store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<BatchReconStore<F>>>)>>>, // Number of malicious parties
+    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<BatchReconStore<F>>>)>>>, // Number of malicious parties
     pub output_sender: Sender<SessionId>,
 }
 
@@ -54,7 +55,7 @@ impl<F: FftField> BatchReconNode<F> {
         degree: usize,
         output_sender: Sender<SessionId>,
     ) -> Result<Self, BatchReconError> {
-        let store = Arc::new(Mutex::new(HashMap::new()));
+        let store = Arc::new(Mutex::new(SessionStore::with_default_cap()));
         Ok(Self {
             id,
             n,
@@ -67,12 +68,12 @@ impl<F: FftField> BatchReconNode<F> {
 
     pub async fn clear_entire_store(&self) {
         let mut store = self.store.lock().await;
-        store.clear();
+        store.clear_all();
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.store.lock().await;
-        store.remove(&session_id).is_some()
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {
@@ -514,11 +515,12 @@ impl<F: FftField> BatchReconNode<F> {
             //     }
             // }
 
-            storage
-                .entry(session_id)
-                .or_insert_with(|| (sender_id, Arc::new(Mutex::new(BatchReconStore::empty()))))
-                .1
-                .clone()
+            match storage.get_or_create_with(session_id, || {
+                (sender_id, Arc::new(Mutex::new(BatchReconStore::empty())))
+            }) {
+                Some((_, arc)) => arc,
+                None => return Ok(None),
+            }
         };
 
         {

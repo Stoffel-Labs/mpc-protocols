@@ -1,4 +1,5 @@
 pub mod rbc;
+pub mod session_store;
 
 /// In MPC, the most fundamental underlying type is called a share.
 /// Think of a share as a piece of a secret that has been split among a set of parties.
@@ -37,6 +38,8 @@ use std::{
 };
 use stoffelnet::network_utils::{ClientId, Network, PartyId};
 use tokio::sync::mpsc::Sender;
+
+pub use session_store::{RetiredSet, SessionStore, DEFAULT_RETIRED_CAP};
 
 type DomainCacheMap = HashMap<(TypeId, usize), Box<dyn Any + Send + Sync>>;
 

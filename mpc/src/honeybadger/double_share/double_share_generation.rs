@@ -1,3 +1,4 @@
+use crate::common::session_store::SessionStore;
 use crate::{
     common::{
         share::{shamir::NonRobustShare, ShareError},
@@ -13,7 +14,7 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use itertools::izip;
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::{
     sync::Mutex,
@@ -43,7 +44,7 @@ where
     /// Threshold for the corrupted parties.
     pub threshold: usize,
     /// Storage of the party.
-    pub storage: Arc<Mutex<BTreeMap<SessionId, (usize, Arc<Mutex<DouShaStorage<F>>>)>>>,
+    pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<DouShaStorage<F>>>)>>>,
 }
 
 pub static MAX_DOUSHA_SESSIONS: usize = 256;
@@ -63,7 +64,7 @@ where
             id,
             n_parties,
             threshold,
-            storage: Arc::new(Mutex::new(BTreeMap::new())),
+            storage: Arc::new(Mutex::new(SessionStore::with_default_cap())),
         }
     }
 
@@ -73,14 +74,14 @@ where
         &mut self,
         session_id: SessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<DouShaStorage<F>>>, DouShaError> {
+    ) -> Option<Arc<Mutex<DouShaStorage<F>>>> {
         let mut storage = self.storage.lock().await;
 
         // TODO: restore session limits
         // if !storage.contains_key(&session_id) {
         //     if storage.len() >= MAX_DOUSHA_SESSIONS {
         //         warn!("DouSha session limit reached");
-        //         return Err(DouShaError::LimitError);
+        //         return None;
         //     }
         //     let per_peer_limit = MAX_DOUSHA_SESSIONS / self.n_parties;
         //     let peer_count = storage
@@ -89,21 +90,21 @@ where
         //         .count();
         //     if peer_count >= per_peer_limit {
         //         warn!("DouSha per-peer session limit reached");
-        //         return Err(DouShaError::LimitError);
+        //         return None;
         //     }
         // }
-        Ok(storage
-            .entry(session_id)
-            .or_insert((
-                initiator_id,
-                Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))),
-            ))
-            .1
-            .clone())
+        storage
+            .get_or_create_with(session_id, || {
+                (
+                    initiator_id,
+                    Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))),
+                )
+            })
+            .map(|(_, arc)| arc)
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.storage.lock().await;
-        store.remove(&session_id).is_some()
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {
@@ -207,7 +208,10 @@ where
         }
 
         // Update the state of the protocol to Initialized.
-        let storage_access = self.get_or_create_store(session_id, self.id).await?;
+        let storage_access = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut storage = storage_access.lock().await;
         storage.batch_size = batch_size;
         storage.state = ProtocolState::Initialized;
@@ -240,9 +244,13 @@ where
             }
         }
 
-        let binding = self
+        let binding = match self
             .get_or_create_store(recv_message.session_id, recv_message.sender_id)
-            .await?;
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut dousha_storage = binding.lock().await;
         if dousha_storage.share.is_empty() {
             dousha_storage.batch_size = double_shares.len();

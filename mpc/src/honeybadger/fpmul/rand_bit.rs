@@ -1,3 +1,4 @@
+use crate::common::session_store::SessionStore;
 use crate::common::utils::deser_bounded_vec;
 use crate::common::{ProtocolSessionId, RBC};
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
@@ -9,7 +10,6 @@ use crate::honeybadger::triple_gen::ShamirBeaverTriple;
 use crate::honeybadger::SessionId;
 use ark_ff::FftField;
 use itertools::izip;
-use std::collections::HashMap;
 use std::ops::{Add, Mul};
 use std::sync::Arc;
 use stoffelnet::network_utils::{Network, PartyId};
@@ -46,7 +46,7 @@ where
     /// The threshold of corrupted parties.
     pub threshold: usize,
     /// Storage for the protocol.
-    pub storage: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<RandBitStorage<F>>>)>>>,
+    pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<RandBitStorage<F>>>)>>>,
     /// Node to execute a secure multiplication.
     pub mult_node: Multiply<F, R>,
     /// Batch reconstruction node to reconstruct `a^2 mod p`.
@@ -69,7 +69,7 @@ where
             id,
             n_parties,
             threshold,
-            storage: Arc::new(Mutex::new(HashMap::new())),
+            storage: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             mult_node,
             batch_recon: batch_recon_node,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
@@ -80,10 +80,11 @@ where
         self.mult_node.clear_store(session_id).await?;
         self.batch_recon.clear_entire_store().await;
         let mut store = self.storage.lock().await;
-        store
-            .remove(&session_id)
-            .map(|_| ())
-            .ok_or(RandBitError::ClearStoreError(session_id))
+        if store.retire(session_id) {
+            Ok(())
+        } else {
+            Err(RandBitError::ClearStoreError(session_id))
+        }
     }
 
     pub async fn store_len(&self) -> usize {
@@ -94,15 +95,13 @@ where
         &self,
         session_id: SessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<RandBitStorage<F>>>, RandBitError> {
+    ) -> Option<Arc<Mutex<RandBitStorage<F>>>> {
         let mut storage = self.storage.lock().await;
 
         // TODO: restore session limits
         // if !storage.contains_key(&session_id) {
         //     if storage.len() >= MAX_RANDBIT_SESSIONS {
-        //         return Err(RandBitError::LimitError(
-        //             "Maximum number of concurrent sessions exceeded".to_string(),
-        //         ));
+        //         return None;
         //     }
         //     let per_peer_limit = MAX_RANDBIT_SESSIONS / self.n_parties;
         //     let peer_count = storage
@@ -110,16 +109,14 @@ where
         //         .filter(|(id, _)| *id == initiator_id)
         //         .count();
         //     if peer_count >= per_peer_limit {
-        //         return Err(RandBitError::LimitError(
-        //             "Per-peer session limit exceeded".to_string(),
-        //         ));
+        //         return None;
         //     }
         // }
-        Ok(storage
-            .entry(session_id)
-            .or_insert((initiator_id, Arc::new(Mutex::new(RandBitStorage::empty()))))
-            .1
-            .clone())
+        storage
+            .get_or_create_with(session_id, || {
+                (initiator_id, Arc::new(Mutex::new(RandBitStorage::empty())))
+            })
+            .map(|(_, arc)| arc)
     }
 
     pub async fn drain_batch_recon_output(&mut self) -> Result<(), RandBitError> {
@@ -173,7 +170,10 @@ where
     async fn try_finalize(&self, session_id: SessionId) -> Result<bool, RandBitError> {
         // ---- phase 1: decide + extract under lock ----
         let (a_share_array, a_square_array) = {
-            let storage_bind = self.get_or_create_storage(session_id, self.id).await?;
+            let storage_bind = match self.get_or_create_storage(session_id, self.id).await {
+                Some(s) => s,
+                None => return Ok(false),
+            };
             let storage = storage_bind.lock().await;
 
             if storage.protocol_state == ProtocolState::Finished {
@@ -220,7 +220,10 @@ where
         }
 
         // ---- phase 3: commit + send under lock (once) ----
-        let storage_bind = self.get_or_create_storage(session_id, self.id).await?;
+        let storage_bind = match self.get_or_create_storage(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(false),
+        };
         let mut storage = storage_bind.lock().await;
 
         if storage.protocol_state == ProtocolState::Finished {
@@ -260,7 +263,10 @@ where
 
         // Mark the protocol as initialized.
         {
-            let storage_bind = self.get_or_create_storage(session_id, self.id).await?;
+            let storage_bind = match self.get_or_create_storage(session_id, self.id).await {
+                Some(s) => s,
+                None => return Ok(()),
+            };
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.a_share = Some(a.clone());
@@ -314,7 +320,10 @@ where
             SessionId::pack_slot(sid.exec_id(), 0, 0),
             sid.instance_id(),
         );
-        let storage_bind = self.get_or_create_storage(session_id, self.id).await?;
+        let storage_bind = match self.get_or_create_storage(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut storage = storage_bind.lock().await;
         if storage.protocol_state == ProtocolState::Finished {
             return Ok(());
