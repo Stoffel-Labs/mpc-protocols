@@ -615,10 +615,9 @@ where
         }
 
         for session_id in &session_ids {
-            if let Err(error) = self.operations.mul.clear_store(*session_id).await {
+            if !self.operations.mul.clear_store(*session_id).await {
                 warn!(
                     ?session_id,
-                    ?error,
                     "failed to clear completed multiplication protocol state"
                 );
             }
@@ -1389,7 +1388,12 @@ where
                     None,
                     None,
                 );
-                assert!(self.preprocess.triple_gen.clear_store(*sessionid).await);
+                if !self.preprocess.triple_gen.clear_store(*sessionid).await {
+                    warn!(
+                        sessionid = ?sessionid,
+                        "failed to clear completed triple generation protocol state"
+                    );
+                }
             }
             trace_preprocessing_phase(self.id, "triples", total_triples_to_generate, phase_start);
         }
@@ -1484,7 +1488,12 @@ where
                 None,
                 None,
             );
-            assert!(self.preprocess.share_gen.clear_store(*sessionid).await);
+            if !self.preprocess.share_gen.clear_store(*sessionid).await {
+                warn!(
+                    sessionid = ?sessionid,
+                    "failed to clear completed share generation protocol state"
+                );
+            }
         }
         Ok(())
     }
@@ -1555,7 +1564,12 @@ where
                 .dou_sha
                 .wait_for_result(*sessionid, self.params.timeout)
                 .await?;
-            assert!(self.preprocess.dou_sha.clear_store(*sessionid).await);
+            if !self.preprocess.dou_sha.clear_store(*sessionid).await {
+                warn!(
+                    sessionid = ?sessionid,
+                    "failed to clear completed double share protocol state"
+                );
+            }
             all_double_shares.push(double_shares);
         }
 
@@ -1595,7 +1609,12 @@ where
                 .wait_for_result(*sessionid, self.params.timeout)
                 .await?;
             pair.extend(output);
-            assert!(self.preprocess.ran_dou_sha.clear_store(*sessionid).await);
+            if !self.preprocess.ran_dou_sha.clear_store(*sessionid).await {
+                warn!(
+                    sessionid = ?sessionid,
+                    "failed to clear completed RanDouSha protocol state"
+                );
+            }
         }
         Ok(pair)
     }
@@ -1655,13 +1674,18 @@ where
                 None,
                 None,
             );
-            assert!(
-                self.preprocess
-                    .small_field_preproc
-                    .share_gen
-                    .clear_store(sessionid)
-                    .await
-            );
+            if !self
+                .preprocess
+                .small_field_preproc
+                .share_gen
+                .clear_store(sessionid)
+                .await
+            {
+                warn!(
+                    ?sessionid,
+                    "failed to clear completed small-field share generation protocol state"
+                );
+            }
 
             if round_id == 255 {
                 ran_sha_counter = self
@@ -1774,13 +1798,18 @@ where
                 None,
                 None,
             );
-            assert!(
-                self.preprocess
-                    .small_field_preproc
-                    .triple_gen
-                    .clear_store(sessionid)
-                    .await
-            );
+            if !self
+                .preprocess
+                .small_field_preproc
+                .triple_gen
+                .clear_store(sessionid)
+                .await
+            {
+                warn!(
+                    ?sessionid,
+                    "failed to clear completed small-field triple generation protocol state"
+                );
+            }
 
             if round_id == 255 {
                 triple_counter = self
@@ -1868,13 +1897,18 @@ where
                 .wait_for_result(sessionid, self.params.timeout)
                 .await?;
             pair.extend(output);
-            assert!(
-                self.preprocess
-                    .small_field_preproc
-                    .ran_dou_sha
-                    .clear_store(sessionid)
-                    .await
-            );
+            if !self
+                .preprocess
+                .small_field_preproc
+                .ran_dou_sha
+                .clear_store(sessionid)
+                .await
+            {
+                warn!(
+                    ?sessionid,
+                    "failed to clear completed small-field RanDouSha protocol state"
+                );
+            }
 
             if round_id == 255 {
                 ran_dou_sha_counter = self
@@ -1932,13 +1966,18 @@ where
             .dou_sha
             .wait_for_result(dou_sha_session_id, self.params.timeout)
             .await?;
-        assert!(
-            self.preprocess
-                .small_field_preproc
-                .dou_sha
-                .clear_store(dou_sha_session_id)
-                .await
-        );
+        if !self
+            .preprocess
+            .small_field_preproc
+            .dou_sha
+            .clear_store(dou_sha_session_id)
+            .await
+        {
+            warn!(
+                sessionid = ?dou_sha_session_id,
+                "failed to clear completed small-field double share protocol state"
+            );
+        }
 
         Ok(dou_sha)
     }
@@ -2047,11 +2086,18 @@ where
             .await?;
         randbit_output.extend(output);
 
-        self.preprocess
+        if !self
+            .preprocess
             .small_field_preproc
             .rand_bit
             .clear_store(randbit_sessionid)
-            .await?;
+            .await
+        {
+            warn!(
+                sessionid = ?randbit_sessionid,
+                "failed to clear completed RandBit protocol state"
+            );
+        }
 
         // PRandBit share generation (big field F output via PRandBitDNode<GoldilocksField, F>).
         info!(id = self.id, "PRandbit share generation");
@@ -2078,10 +2124,17 @@ where
             .await
             .add(None, None, None, None, Some(output), None);
 
-        self.preprocess
+        if !self
+            .preprocess
             .prand_bit
             .clear_store(prandbit_sessionid)
-            .await?;
+            .await
+        {
+            warn!(
+                sessionid = ?prandbit_sessionid,
+                "failed to clear completed PRandBit protocol state"
+            );
+        }
         Ok(())
     }
 
@@ -2136,7 +2189,12 @@ where
                 .await?;
             prandint_output.extend(output);
 
-            self.preprocess.prand_bit.clear_store(sessionid).await?;
+            if !self.preprocess.prand_bit.clear_store(sessionid).await {
+                warn!(
+                    ?sessionid,
+                    "failed to clear completed PRandInt protocol state"
+                );
+            }
         }
         self.preprocessing_material.lock().await.add(
             None,

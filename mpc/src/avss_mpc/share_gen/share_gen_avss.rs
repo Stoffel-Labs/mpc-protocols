@@ -109,6 +109,21 @@ where
             .map(|(_, arc)| arc)
     }
 
+    /// Retires this session and clears every per-dealer AVSS sub-session it created.
+    pub async fn clear_store(&self, session_id: AvssSessionId) -> bool {
+        for dealer in 0..self.n_parties {
+            let avss_sessionid = AvssSessionId::new(
+                session_id.calling_protocol().unwrap(),
+                AvssSessionId::pack_slot(session_id.exec_id(), dealer as u8, session_id.round_id()),
+                session_id.instance_id(),
+            );
+            self.avss.clear_session(avss_sessionid).await;
+        }
+
+        let mut store = self.store.lock().await;
+        store.retire(session_id)
+    }
+
     pub async fn wait_for_result(
         &self,
         session_id: AvssSessionId,
@@ -166,9 +181,7 @@ where
                 && id.round_id() == session_id.round_id()
                 && id.instance_id() == session_id.instance_id()
             {
-                let mut store = self.avss.shares.lock().await;
-                let avss_share = store.remove(&id).unwrap().unwrap();
-                drop(store);
+                let avss_share = self.avss.take_share(id).await.unwrap().unwrap();
                 let binding = match self.get_or_create_store(session_id, self.id).await {
                     Some(s) => s,
                     None => return Ok(()),

@@ -98,6 +98,22 @@ where
         .map(|(_, arc)| arc)
     }
 
+    /// Retires this session and clears every per-dealer AVSS sub-session it created.
+    pub async fn clear_store(&self, session_id: AvssSessionId) -> bool {
+        let m = 2 * self.threshold + 1;
+        for dealer in 0..m {
+            let avss_sid = AvssSessionId::new(
+                session_id.calling_protocol().unwrap(),
+                AvssSessionId::pack_slot(session_id.exec_id(), dealer as u8, session_id.round_id()),
+                session_id.instance_id(),
+            );
+            self.avss.clear_session(avss_sid).await;
+        }
+
+        let mut store = self.store.lock().await;
+        store.retire(session_id)
+    }
+
     pub async fn gen_triple<N, G>(
         &mut self,
         session_id: AvssSessionId,
@@ -167,16 +183,16 @@ where
 
             let dealer = done.sub_id() as usize;
             if dealer >= m {
-                self.avss.shares.lock().await.remove(&done);
+                self.avss.take_share(done).await;
                 continue;
             }
 
-            let mut avss_map = self.avss.shares.lock().await;
-            let pieces = avss_map
-                .remove(&done)
+            let pieces = self
+                .avss
+                .take_share(done)
+                .await
                 .and_then(|x| x)
                 .ok_or(TripleGenError::MissingDealer(dealer))?;
-            drop(avss_map);
             if pieces.len() != batch {
                 return Err(TripleGenError::InvalidShareLength);
             }

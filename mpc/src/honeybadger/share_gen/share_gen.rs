@@ -144,6 +144,18 @@ where
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        let caller = session_id.calling_protocol().unwrap_or(ProtocolType::Ransha);
+        // Only parties with id < 2t broadcast the reconstruction-verification message
+        // (see the `self.id < 2 * self.threshold` guard in reconstruction_handler).
+        for party_id in 0..(2 * self.threshold) {
+            let rbc_session_id = SessionId::new(
+                caller,
+                SessionId::pack_slot(session_id.exec_id(), party_id as u8, session_id.round_id()),
+                session_id.instance_id(),
+            );
+            self.rbc.clear_session(rbc_session_id).await;
+        }
+
         let mut store = self.store.lock().await;
         store.retire(session_id)
     }

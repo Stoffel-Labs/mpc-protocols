@@ -524,10 +524,20 @@ where
             .init(session_id, x, y, beaver_triples, network)
             .await?;
 
-        self.mul_node
+        let result = self
+            .mul_node
             .wait_for_result(session_id, self.params.timeout)
             .await
-            .map_err(AvssMPCError::from)
+            .map_err(AvssMPCError::from)?;
+
+        if !self.mul_node.clear_store(session_id).await {
+            warn!(
+                ?session_id,
+                "failed to clear completed AVSS multiplication protocol state"
+            );
+        }
+
+        Ok(result)
     }
 
     /// Generates a random element.
@@ -662,6 +672,12 @@ where
                         .await
                         .add(Some(triples), None);
                 }
+                if !self.triple_gen.clear_store(sessionid).await {
+                    warn!(
+                        ?sessionid,
+                        "failed to clear completed AVSS triple generation protocol state"
+                    );
+                }
                 if round_id == 255 {
                     triple_counter = self.counters.triple_counter.get_next().await.unwrap();
                     round_id = 0;
@@ -724,6 +740,12 @@ where
                     .lock()
                     .await
                     .add(None, Some(output));
+            }
+            if !self.share_gen_avss.clear_store(sessionid).await {
+                warn!(
+                    ?sessionid,
+                    "failed to clear completed AVSS share generation protocol state"
+                );
             }
             if round_id == 255 {
                 v_ran_sha_counter = self.counters.ran_sha_avss_counter.get_next().await?;

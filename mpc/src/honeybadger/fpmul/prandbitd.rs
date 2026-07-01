@@ -57,14 +57,29 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         })
     }
 
-    pub async fn clear_store(&self, session_id: SessionId) -> Result<(), PRandError> {
-        self.batch_recon.clear_entire_store().await;
-        let mut store = self.store.lock().await;
-        if store.retire(session_id) {
-            Ok(())
-        } else {
-            Err(PRandError::ClearStoreError(session_id))
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        // Only the PRandBit path opens batch_recon sub-sessions (Phase 4 of
+        // try_advance_from_riss); PRandInt never creates any to clear.
+        if session_id.calling_protocol() == Some(ProtocolType::PRandBit) {
+            let num_chunks = {
+                let store = self.store.lock().await;
+                match store.get(&session_id) {
+                    Some((_, arc)) => arc.lock().await.batch_size.unwrap_or(0) / (self.t + 1),
+                    None => 0,
+                }
+            };
+            for i in 0..num_chunks {
+                let session_id_batch = SessionId::new(
+                    ProtocolType::PRandBit,
+                    SessionId::pack_slot(session_id.exec_id(), i as u8, 0),
+                    session_id.instance_id(),
+                );
+                self.batch_recon.clear_store(session_id_batch).await;
+            }
         }
+
+        let mut store = self.store.lock().await;
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {

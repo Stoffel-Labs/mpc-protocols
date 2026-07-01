@@ -169,6 +169,21 @@ where
         })
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        let caller = session_id
+            .calling_protocol()
+            .unwrap_or(ProtocolType::Randousha);
+        // Only parties with id in [t+1, n_parties) broadcast the reconstruction-verification
+        // message (see the `self.id >= self.threshold + 1 && self.id < self.n_parties` guard
+        // in the output handler).
+        for party_id in (self.threshold + 1)..self.n_parties {
+            let rbc_session_id = SessionId::new(
+                caller,
+                SessionId::pack_slot(session_id.exec_id(), party_id as u8, session_id.round_id()),
+                session_id.instance_id(),
+            );
+            self.rbc.clear_session(rbc_session_id).await;
+        }
+
         let mut store = self.store.lock().await;
         store.retire(session_id)
     }

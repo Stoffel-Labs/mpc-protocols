@@ -76,15 +76,34 @@ where
         })
     }
 
-    pub async fn clear_store(&self, session_id: SessionId) -> Result<(), RandBitError> {
-        self.mult_node.clear_store(session_id).await?;
-        self.batch_recon.clear_entire_store().await;
-        let mut store = self.storage.lock().await;
-        if store.retire(session_id) {
-            Ok(())
-        } else {
-            Err(RandBitError::ClearStoreError(session_id))
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        self.mult_node.clear_store(session_id).await;
+
+        // Recover how many (threshold + 1)-chunks init() handed to batch_recon, so we
+        // only clear the sessions this RandBit round actually created.
+        let num_chunks = {
+            let storage = self.storage.lock().await;
+            match storage.get(&session_id) {
+                Some((_, arc)) => {
+                    let len = arc.lock().await.a_share.as_ref().map_or(0, Vec::len);
+                    len.div_ceil(self.threshold + 1)
+                }
+                None => 0,
+            }
+        };
+        if let Some(calling_proto) = session_id.calling_protocol() {
+            for i in 0..num_chunks {
+                let session_id_batch = SessionId::new(
+                    calling_proto,
+                    SessionId::pack_slot(session_id.exec_id(), i as u8, 0),
+                    session_id.instance_id(),
+                );
+                self.batch_recon.clear_store(session_id_batch).await;
+            }
         }
+
+        let mut store = self.storage.lock().await;
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {

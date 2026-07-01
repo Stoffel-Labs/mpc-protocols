@@ -54,7 +54,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
-    pub async fn clear_store(&self, session_id: AvssSessionId) -> Result<(), MulError> {
+    pub async fn clear_store(&self, session_id: AvssSessionId) -> bool {
         for party_id in 0..self.n {
             let rbc_session_id = AvssSessionId::new(
                 session_id.calling_protocol().unwrap(),
@@ -65,11 +65,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         }
 
         let mut store = self.mult_storage.lock().await;
-        if store.retire(session_id) {
-            Ok(())
-        } else {
-            Err(MulError::ClearStoreError(session_id))
-        }
+        store.retire(session_id)
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {

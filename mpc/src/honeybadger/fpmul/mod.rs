@@ -67,8 +67,6 @@ pub enum RandBitError {
     Timeout(SessionId),
     #[error("received abort signal")]
     Abort,
-    #[error("Session id {0:?} does not exist in store")]
-    ClearStoreError(SessionId),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -156,8 +154,6 @@ pub enum PRandError {
     ResultAlreadyReceived(SessionId),
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(SessionId),
-    #[error("Session id {0:?} does not exist in store")]
-    ClearStoreError(SessionId),
     #[error("Store Limit")]
     LimitError,
     #[error("Invalid message: {0}")]
@@ -313,8 +309,6 @@ pub enum TruncPrError {
     ResultAlreadyReceived(SessionId),
     #[error("multiplication {0:?} did not complete in time")]
     Timeout(SessionId),
-    #[error("Session id {0:?} does not exist in store")]
-    ClearStoreError(SessionId),
     #[error("Store Limit")]
     LimitError,
 }
