@@ -145,14 +145,20 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         self.store.lock().await.len()
     }
 
-    pub async fn clear_store(&self, session_id: SessionId) -> Result<(), TruncPrError> {
-        self.rbc.clear_store().await;
-        let mut store = self.store.lock().await;
-        if store.retire(session_id) {
-            Ok(())
-        } else {
-            Err(TruncPrError::ClearStoreError(session_id))
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        if let Some(calling_proto) = session_id.calling_protocol() {
+            for party_id in 0..self.n {
+                let rbc_session_id = SessionId::new(
+                    calling_proto,
+                    SessionId::pack_slot(session_id.exec_id(), party_id as u8, 0),
+                    session_id.instance_id(),
+                );
+                self.rbc.clear_session(rbc_session_id).await;
+            }
         }
+
+        let mut store = self.store.lock().await;
+        store.retire(session_id)
     }
 
     pub async fn wait_for_result(

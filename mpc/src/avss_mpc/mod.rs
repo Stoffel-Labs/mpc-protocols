@@ -549,6 +549,13 @@ where
                 .wait_for_result(session_id, self.params.timeout)
                 .await?;
             output.append(&mut batch_output);
+
+            if !self.mul_node.clear_store(session_id).await {
+                warn!(
+                    ?session_id,
+                    "failed to clear completed AVSS multiplication protocol state"
+                );
+            }
         }
         Ok(output)
     }
@@ -663,6 +670,12 @@ where
                         .await
                         .add(Some(triples), None);
                 }
+                if !self.triple_gen.clear_store(sessionid).await {
+                    warn!(
+                        ?sessionid,
+                        "failed to clear completed AVSS triple generation protocol state"
+                    );
+                }
             }
         }
         Ok(())
@@ -713,6 +726,13 @@ where
                 .lock()
                 .await
                 .add(None, Some(output));
+
+            if !self.share_gen_avss.clear_store(sessionid).await {
+                warn!(
+                    ?sessionid,
+                    "failed to clear completed AVSS share generation protocol state"
+                );
+            }
             dealer_secrets_remaining -= dealer_batch_size;
         }
         Ok(())

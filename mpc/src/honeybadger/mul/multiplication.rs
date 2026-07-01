@@ -278,7 +278,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
         Ok(())
     }
-    pub async fn clear_store(&self, session_id: SessionId) -> Result<(), MulError> {
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let no_of_batch = {
             let store = self.mult_storage.lock().await;
             match store.get(&session_id) {
@@ -286,7 +286,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                     let storage = storage.1.lock().await;
                     storage.no_of_mul.unwrap_or(0) / (self.t + 1)
                 }
-                None => return Err(MulError::ClearStoreError(session_id)),
+                None => return false,
             }
         };
 
@@ -318,11 +318,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         let mut store = self.mult_storage.lock().await;
-        if store.retire(session_id) {
-            Ok(())
-        } else {
-            Err(MulError::ClearStoreError(session_id))
-        }
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {
@@ -1306,7 +1302,7 @@ pub mod tests {
         // The mul finished: `clear_store` removes the round-2 RBC sessions (a
         // no-op here since none ran) and the mult_storage entry. The queued id is
         // now stale.
-        node.clear_store(session_id).await.unwrap();
+        assert!(node.clear_store(session_id).await);
 
         // Without the fix: Err(MulError::RbcError("Session ID does not exist")).
         // With the fix: the stale output is dropped and drain succeeds.
@@ -1352,7 +1348,7 @@ pub mod tests {
         );
         stale_tx.send(stale_id).await.unwrap();
 
-        node.clear_store(session_id).await.unwrap();
+        assert!(node.clear_store(session_id).await);
 
         assert!(
             node.drain_batch_recon_output().await.is_ok(),

@@ -1,7 +1,8 @@
 use crate::common::{
     rbc::RbcError,
-    share::{feldman::FeldmanShamirShare, shamir::Shamirshare},
-    ProtocolSessionId, RbcWrapFn, RBC,
+    session_store::{RetiredSet, DEFAULT_RETIRED_CAP},
+    share::{feldman::FeldmanShamirShare, shamir::Shamirshare, ShareError},
+    ProtocolSessionId, RbcWrapFn, SecretSharingScheme, RBC,
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -166,6 +167,10 @@ where
     pub sk_i: F,
     pub pk_map: Arc<Vec<G>>,
     pub shares: Arc<Mutex<BTreeMap<Id, Option<Vec<FeldmanShamirShare<F, G>>>>>>,
+    /// Tombstones for `shares` entries already consumed (or otherwise cleared),
+    /// so a late/duplicate dealer message can't silently resurrect a session
+    /// nobody is waiting on anymore.
+    retired: Arc<Mutex<RetiredSet<Id>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<Id>>>,
     pub output_sender: Sender<Id>,
@@ -230,11 +235,30 @@ where
             sk_i,
             pk_map,
             shares: Arc::new(Mutex::new(BTreeMap::new())),
+            retired: Arc::new(Mutex::new(RetiredSet::new(DEFAULT_RETIRED_CAP))),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             output_sender,
             wrapper: avss_wrapper,
         })
+    }
+
+    /// Clears the dealer share mailbox entry and the underlying RBC broadcast
+    /// session for a single AVSS instance. Callers that derive one `Id` per
+    /// dealer must call this once per dealer to fully release a round.
+    pub async fn clear_session(&self, id: Id) {
+        self.rbc.clear_session(id).await;
+        self.shares.lock().await.remove(&id);
+        self.retired.lock().await.record(id);
+    }
+
+    /// Removes and returns a dealer's share, tombstoning the id so a late
+    /// duplicate of the same dealer message can't resurrect it after the
+    /// consumer has already moved on.
+    pub async fn take_share(&self, id: Id) -> Option<Option<Vec<FeldmanShamirShare<F, G>>>> {
+        let value = self.shares.lock().await.remove(&id);
+        self.retired.lock().await.record(id);
+        value
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), AvssError> {
@@ -375,6 +399,9 @@ where
                 return Ok(()); // ignore duplicates
             }
         };
+        if self.retired.lock().await.contains(&msg.session_id) {
+            return Ok(()); // already consumed — drop the straggler instead of resurrecting it
+        }
 
         let pk_d: G = CanonicalDeserialize::deserialize_compressed(&msg.dealer_pk[..])?;
         if pk_d.is_zero() {

@@ -15,6 +15,7 @@ use stoffelnet::network_utils::Network;
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 use tokio::time::Duration;
+use tracing::warn;
 
 #[derive(Error, Debug)]
 pub enum FPDivConstError {
@@ -95,6 +96,10 @@ where
             .trunc_node
             .wait_for_result(session_id, duration)
             .await?;
+
+        if !self.trunc_node.clear_store(session_id).await {
+            warn!(?session_id, "failed to clear completed FPDivConst truncation state");
+        }
         Ok(SecretFixedPoint::new(output))
     }
 }
