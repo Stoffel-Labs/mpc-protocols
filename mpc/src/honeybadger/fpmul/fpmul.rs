@@ -93,7 +93,10 @@ where
         let trunc_input = self.mult_node.wait_for_result(session_id, duration).await?;
 
         if !self.mult_node.clear_store(session_id).await {
-            warn!(?session_id, "failed to clear completed FPMul multiplication state");
+            warn!(
+                ?session_id,
+                "failed to clear completed FPMul multiplication state"
+            );
         }
         self.trunc_node
             .init(
@@ -113,7 +116,10 @@ where
             .await?;
 
         if !self.trunc_node.clear_store(session_id).await {
-            warn!(?session_id, "failed to clear completed FPMul truncation state");
+            warn!(
+                ?session_id,
+                "failed to clear completed FPMul truncation state"
+            );
         }
         Ok(SecretFixedPoint::new(trunc_output))
     }

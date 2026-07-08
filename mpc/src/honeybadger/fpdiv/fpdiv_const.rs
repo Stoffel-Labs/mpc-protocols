@@ -98,7 +98,10 @@ where
             .await?;
 
         if !self.trunc_node.clear_store(session_id).await {
-            warn!(?session_id, "failed to clear completed FPDivConst truncation state");
+            warn!(
+                ?session_id,
+                "failed to clear completed FPDivConst truncation state"
+            );
         }
         Ok(SecretFixedPoint::new(output))
     }
