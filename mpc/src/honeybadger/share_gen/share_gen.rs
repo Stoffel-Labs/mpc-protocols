@@ -36,6 +36,8 @@ pub struct RanShaNode<F: FftField, R: RBC> {
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
 }
 
+const MAX_SHARE_GEN_SESSIONS: usize = 1024;
+
 impl<F, R> RanShaNode<F, R>
 where
     F: FftField,
@@ -121,20 +123,21 @@ where
     ) -> Option<Arc<Mutex<RanShaStore<F>>>> {
         let mut storage = self.store.lock().await;
 
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_SHARE_GEN_SESSIONS {
-        //         return Err(RanShaError::LimitError);
-        //     }
-        //     let per_peer_limit = MAX_SHARE_GEN_SESSIONS / self.n_parties;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         return Err(RanShaError::LimitError);
-        //     }
-        // }
+        if !storage.contains_key(&session_id) {
+            if storage.len() >= MAX_SHARE_GEN_SESSIONS {
+                warn!("RanSha session limit reached");
+                return None;
+            }
+            let per_peer_limit = MAX_SHARE_GEN_SESSIONS / self.n_parties;
+            let peer_count = storage
+                .iter()
+                .filter(|(_, (id, _))| *id == initiator_id)
+                .count();
+            if peer_count >= per_peer_limit {
+                warn!("RanSha per-peer session limit reached");
+                return None;
+            }
+        }
 
         storage
             .get_or_create_with(session_id, || {
@@ -147,7 +150,9 @@ where
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
-        let caller = session_id.calling_protocol().unwrap_or(ProtocolType::Ransha);
+        let caller = session_id
+            .calling_protocol()
+            .unwrap_or(ProtocolType::Ransha);
         // Only parties with id < 2t broadcast the reconstruction-verification message
         // (see the `self.id < 2 * self.threshold` guard in reconstruction_handler).
         for party_id in 0..(2 * self.threshold) {
@@ -693,168 +698,153 @@ mod tests {
     use std::sync::Arc;
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
 
-    // TODO: restore when session limits are re-enabled
-    // #[tokio::test]
-    // #[allow(dead_code)]
-    // async fn test_sharegen_storage_limit_in_receive_shares_handler() {
-    //     let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
-    //     let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
-    //     let net = Arc::new(FakeNetwork::new(0, inner));
+    #[tokio::test]
+    async fn test_sharegen_storage_limit_in_receive_shares_handler() {
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
 
-    //     // Fill up the storage to the limit by calling receive_shares_handler with unique session IDs
-    //     let mut exec = 0u64;
-    //     let mut round = 0u8;
-    //     for _ in 0..super::MAX_SHARE_GEN_SESSIONS / 5 {
-    //         let sid = SessionId::new(
-    //             ProtocolType::Ransha,
-    //             SessionId::pack_slot(exec, 0, round),
-    //             0,
-    //         );
-    //         let share = RobustShare::new(Fr::from(1u8), 0, 1);
-    //         let mut payload = Vec::new();
-    //         share.serialize_compressed(&mut payload).unwrap();
-    //         let msg = RanShaMessage::new(
-    //             0,
-    //             RanShaMessageType::ShareMessage,
-    //             sid,
-    //             RanShaPayload::Share(payload),
-    //         );
-    //         // Ignore the result, just fill up storage
-    //         let _ = node.receive_shares_handler(msg, net.clone()).await;
+        // Fill up the per-peer limit by calling receive_shares_handler with unique session IDs
+        let per_peer_limit = super::MAX_SHARE_GEN_SESSIONS / 5;
+        for exec in 0..per_peer_limit as u64 {
+            let sid = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(exec, 0, 0), 0);
+            let share = RobustShare::new(Fr::from(1u8), 0, 1);
+            let mut payload = Vec::new();
+            share.serialize_compressed(&mut payload).unwrap();
+            let msg = RanShaMessage::new(
+                0,
+                RanShaMessageType::ShareMessage,
+                sid,
+                RanShaPayload::Share(payload),
+            );
+            // Ignore the result, just fill up storage
+            let _ = node.receive_shares_handler(msg, net.clone()).await;
+        }
+        assert_eq!(node.store_len().await, per_peer_limit);
 
-    //         // Increment exec and round to ensure unique session IDs
-    //         if round == u8::MAX {
-    //             round = 0;
-    //             exec = exec.wrapping_add(1);
-    //         } else {
-    //             round = round.wrapping_add(1);
-    //         }
-    //     }
+        // Now try to process a message that would require a new session (should be dropped)
+        let over_sid = SessionId::new(
+            ProtocolType::Ransha,
+            SessionId::pack_slot(per_peer_limit as u64, 0, 0),
+            0,
+        );
+        let share = RobustShare::new(Fr::from(1u8), 0, 1);
+        let mut payload = Vec::new();
+        share.serialize_compressed(&mut payload).unwrap();
+        let msg = RanShaMessage::new(
+            0,
+            RanShaMessageType::ShareMessage,
+            over_sid,
+            RanShaPayload::Share(payload),
+        );
 
-    //     // Now try to process a message that would require a new session (should hit the limit)
-    //     let over_sid = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(255, 0, 255), 0);
-    //     let share = RobustShare::new(Fr::from(1u8), 0, 1);
-    //     let mut payload = Vec::new();
-    //     share.serialize_compressed(&mut payload).unwrap();
-    //     let msg = RanShaMessage::new(
-    //         0,
-    //         RanShaMessageType::ShareMessage,
-    //         over_sid,
-    //         RanShaPayload::Share(payload),
-    //     );
+        let result = node.receive_shares_handler(msg, net).await;
+        assert!(
+            result.is_ok(),
+            "handler should silently drop over-limit sessions, not error"
+        );
+        assert_eq!(
+            node.store_len().await,
+            per_peer_limit,
+            "store must not grow past the per-peer limit"
+        );
+    }
 
-    //     let result = node.receive_shares_handler(msg, net).await;
-    //     assert!(
-    //         matches!(result, Err(RanShaError::LimitError)),
-    //         "Should error on exceeding storage limit"
-    //     );
-    // }
+    #[tokio::test]
+    async fn test_sharegen_storage_limit_in_reconstruction_handler() {
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
 
-    // // TODO: restore when session limits are re-enabled
-    // // #[tokio::test]
-    // #[allow(dead_code)]
-    // async fn test_sharegen_storage_limit_in_reconstruction_handler() {
-    //     let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
-    //     let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
-    //     let net = Arc::new(FakeNetwork::new(0, inner));
+        // Fill up the per-peer limit by calling reconstruction_handler with unique session IDs
+        let per_peer_limit = super::MAX_SHARE_GEN_SESSIONS / 5;
+        for exec in 0..per_peer_limit as u64 {
+            let sid = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(exec, 0, 0), 0);
+            let share = RobustShare::new(Fr::from(1u8), 0, 1);
+            let mut payload = Vec::new();
+            share.serialize_compressed(&mut payload).unwrap();
+            let msg = RanShaMessage::new(
+                0,
+                RanShaMessageType::ReconstructMessage,
+                sid,
+                RanShaPayload::Reconstruct(payload),
+            );
+            // Ignore the result, just fill up storage
+            let _ = node.reconstruction_handler(msg, net.clone()).await;
+        }
+        assert_eq!(node.store_len().await, per_peer_limit);
 
-    //     // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
-    //     let mut exec = 0u8;
-    //     let mut round = 0u8;
-    //     for _ in 0..super::MAX_SHARE_GEN_SESSIONS / 5 {
-    //         let sid = SessionId::new(
-    //             ProtocolType::Ransha,
-    //             SessionId::pack_slot24(exec, 0, round),
-    //             0,
-    //         );
-    //         let share = RobustShare::new(Fr::from(1u8), 0, 1);
-    //         let mut payload = Vec::new();
-    //         share.serialize_compressed(&mut payload).unwrap();
-    //         let msg = RanShaMessage::new(
-    //             0,
-    //             RanShaMessageType::ReconstructMessage,
-    //             sid,
-    //             RanShaPayload::Reconstruct(payload),
-    //         );
-    //         // Ignore the result, just fill up storage
-    //         let _ = node.reconstruction_handler(msg, net.clone()).await;
+        // Now try to process a message that would require a new session (should be dropped)
+        let over_sid = SessionId::new(
+            ProtocolType::Ransha,
+            SessionId::pack_slot(per_peer_limit as u64, 0, 0),
+            0,
+        );
+        let share = RobustShare::new(Fr::from(1u8), 0, 1);
+        let mut payload = Vec::new();
+        share.serialize_compressed(&mut payload).unwrap();
+        let msg = RanShaMessage::new(
+            0,
+            RanShaMessageType::ReconstructMessage,
+            over_sid,
+            RanShaPayload::Reconstruct(payload),
+        );
 
-    //         // Increment exec and round to ensure unique session IDs
-    //         if round == u8::MAX {
-    //             round = 0;
-    //             exec = exec.wrapping_add(1);
-    //         } else {
-    //             round = round.wrapping_add(1);
-    //         }
-    //     }
+        let result = node.reconstruction_handler(msg, net).await;
+        assert!(
+            result.is_ok(),
+            "handler should silently drop over-limit sessions, not error"
+        );
+        assert_eq!(
+            node.store_len().await,
+            per_peer_limit,
+            "store must not grow past the per-peer limit"
+        );
+    }
 
-    //     // Now try to process a message that would require a new session (should hit the limit)
-    //     let over_sid = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(255, 0, 255), 0);
-    //     let share = RobustShare::new(Fr::from(1u8), 0, 1);
-    //     let mut payload = Vec::new();
-    //     share.serialize_compressed(&mut payload).unwrap();
-    //     let msg = RanShaMessage::new(
-    //         0,
-    //         RanShaMessageType::ReconstructMessage,
-    //         over_sid,
-    //         RanShaPayload::Reconstruct(payload),
-    //     );
+    #[tokio::test]
+    async fn test_sharegen_storage_limit_in_output_handler() {
+        let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
 
-    //     let result = node.reconstruction_handler(msg, net).await;
-    //     assert!(
-    //         matches!(result, Err(RanShaError::LimitError)),
-    //         "Should error on exceeding storage limit"
-    //     );
-    // }
+        // Fill up the per-peer limit by calling output_handler with unique session IDs
+        let per_peer_limit = super::MAX_SHARE_GEN_SESSIONS / 5;
+        for exec in 0..per_peer_limit as u64 {
+            let sid = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(exec, 0, 0), 0);
+            let msg = RanShaMessage::new(
+                0,
+                RanShaMessageType::OutputMessage,
+                sid,
+                RanShaPayload::Output(true),
+            );
+            // Ignore the result, just fill up storage
+            let _ = node.output_handler(msg).await;
+        }
+        assert_eq!(node.store_len().await, per_peer_limit);
 
-    // // TODO: restore when session limits are re-enabled
-    // // #[tokio::test]
-    // #[allow(dead_code)]
-    // async fn test_sharegen_storage_limit_in_output_handler() {
-    //     let mut node = RanShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        // Now try to process a message that would require a new session (should be dropped)
+        let over_sid = SessionId::new(
+            ProtocolType::Ransha,
+            SessionId::pack_slot(per_peer_limit as u64, 0, 0),
+            0,
+        );
+        let msg = RanShaMessage::new(
+            0,
+            RanShaMessageType::OutputMessage,
+            over_sid,
+            RanShaPayload::Output(true),
+        );
 
-    //     // Fill up the storage to the limit by calling output_handler with unique session IDs
-    //     let mut exec = 0u8;
-    //     let mut round = 0u8;
-    //     for _ in 0..super::MAX_SHARE_GEN_SESSIONS / 5 {
-    //         let sid = SessionId::new(
-    //             ProtocolType::Ransha,
-    //             SessionId::pack_slot24(exec, 0, round),
-    //             0,
-    //         );
-    //         let msg = RanShaMessage::new(
-    //             0,
-    //             RanShaMessageType::OutputMessage,
-    //             sid,
-    //             RanShaPayload::Output(true),
-    //         );
-    //         // Ignore the result, just fill up storage
-    //         let _ = node.output_handler(msg).await;
-
-    //         // Increment exec and round to ensure unique session IDs
-    //         if round == u8::MAX {
-    //             round = 0;
-    //             exec = exec.wrapping_add(1);
-    //         } else {
-    //             round = round.wrapping_add(1);
-    //         }
-    //     }
-
-    //     // Now try to process a message that would require a new session (should hit the limit)
-    //     let over_sid = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot24(255, 0, 255), 0);
-    //     let msg = RanShaMessage::new(
-    //         0,
-    //         RanShaMessageType::OutputMessage,
-    //         over_sid,
-    //         RanShaPayload::Output(true),
-    //     );
-
-    //     let result = node.output_handler(msg).await;
-    //     assert!(
-    //         matches!(result, Err(RanShaError::LimitError)),
-    //         "Should error on exceeding storage limit"
-    //     );
-    // }
+        let result = node.output_handler(msg).await;
+        assert!(
+            result.is_ok(),
+            "handler should silently drop over-limit sessions, not error"
+        );
+        assert_eq!(
+            node.store_len().await,
+            per_peer_limit,
+            "store must not grow past the per-peer limit"
+        );
+    }
 
     #[tokio::test]
     async fn test_sharegen_receive_shares_handler_invalid_sub_id() {

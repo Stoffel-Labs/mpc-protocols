@@ -53,7 +53,7 @@ where
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
-// pub static MAX_RANDBIT_SESSIONS: usize = 256;
+const MAX_RANDBIT_SESSIONS: usize = 512;
 
 impl<F, R> RandBit<F, R>
 where
@@ -117,20 +117,19 @@ where
     ) -> Option<Arc<Mutex<RandBitStorage<F>>>> {
         let mut storage = self.storage.lock().await;
 
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_RANDBIT_SESSIONS {
-        //         return None;
-        //     }
-        //     let per_peer_limit = MAX_RANDBIT_SESSIONS / self.n_parties;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         return None;
-        //     }
-        // }
+        if !storage.contains_key(&session_id) {
+            if storage.len() >= MAX_RANDBIT_SESSIONS {
+                return None;
+            }
+            let per_peer_limit = MAX_RANDBIT_SESSIONS / self.n_parties;
+            let peer_count = storage
+                .iter()
+                .filter(|(_, (id, _))| *id == initiator_id)
+                .count();
+            if peer_count >= per_peer_limit {
+                return None;
+            }
+        }
         storage
             .get_or_create_with(session_id, || {
                 (initiator_id, Arc::new(Mutex::new(RandBitStorage::empty())))
@@ -368,38 +367,43 @@ where
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::common::rbc::rbc::Avid;
-//     use ark_bls12_381::Fr;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::rbc::rbc::Avid;
+    use ark_bls12_381::Fr;
 
-//     // TODO: restore when session limits are re-enabled
-//     // #[tokio::test]
-//     #[allow(dead_code)]
-//     async fn test_randbit_storage_limit() {
-//         let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
+    #[tokio::test]
+    async fn test_randbit_storage_limit() {
+        let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
 
-//         // Fill up storage to the per-peer limit (256 / n_parties = 51 sessions)
-//         for i in 0u8..51 {
-//             let session_id = SessionId::new(
-//                 crate::honeybadger::ProtocolType::RandBit,
-//                 SessionId::pack_slot24(i, 0, 0),
-//                 111,
-//             );
-//             let _ = node.get_or_create_storage(session_id, 0).await;
-//         }
+        // Fill up storage to the per-peer limit (MAX_RANDBIT_SESSIONS / n_parties)
+        let per_peer_limit = super::MAX_RANDBIT_SESSIONS / 5;
+        for i in 0..per_peer_limit {
+            let session_id = SessionId::new(
+                crate::honeybadger::ProtocolType::RandBit,
+                SessionId::pack_slot(i as u64, 0, 0),
+                111,
+            );
+            let _ = node.get_or_create_storage(session_id, 0).await;
+        }
+        assert_eq!(node.store_len().await, per_peer_limit);
 
-//         // The 52nd session from the same peer should fail
-//         let session_id = SessionId::new(
-//             crate::honeybadger::ProtocolType::RandBit,
-//             SessionId::pack_slot24(0, 1, 0),
-//             111,
-//         );
-//         let result = node.get_or_create_storage(session_id, 0).await;
-//         assert!(
-//             matches!(result, Err(RandBitError::LimitError(_))),
-//             "Should error on exceeding storage limit"
-//         );
-//     }
-// }
+        // One more session from the same peer should be silently rejected
+        let session_id = SessionId::new(
+            crate::honeybadger::ProtocolType::RandBit,
+            SessionId::pack_slot(per_peer_limit as u64, 0, 0),
+            111,
+        );
+        let result = node.get_or_create_storage(session_id, 0).await;
+        assert!(
+            result.is_none(),
+            "Should return None on exceeding the per-peer storage limit"
+        );
+        assert_eq!(
+            node.store_len().await,
+            per_peer_limit,
+            "store must not grow past the per-peer limit"
+        );
+    }
+}

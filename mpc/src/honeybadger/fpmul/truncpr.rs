@@ -32,7 +32,7 @@ pub struct TruncPrNode<F: PrimeField, R: RBC> {
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
-// pub static MAX_TRUNCPR_SESSIONS: usize = 256;
+const MAX_TRUNCPR_SESSIONS: usize = 1024;
 
 impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, TruncPrError> {
@@ -121,19 +121,21 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     ) -> Option<Arc<Mutex<TruncPrStore<F>>>> {
         let mut map = self.store.lock().await;
 
-        // TODO: restore session limits
-        // if !map.contains_key(&session) {
-        //     if map.len() >= MAX_TRUNCPR_SESSIONS {
-        //         warn!("TruncPr session limit reached");
-        //         return None;
-        //     }
-        //     let per_peer_limit = MAX_TRUNCPR_SESSIONS / self.n;
-        //     let peer_count = map.values().filter(|(id, _)| *id == initiator_id).count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("TruncPr per-peer session limit reached");
-        //         return None;
-        //     }
-        // }
+        if !map.contains_key(&session) {
+            if map.len() >= MAX_TRUNCPR_SESSIONS {
+                warn!("TruncPr session limit reached");
+                return None;
+            }
+            let per_peer_limit = MAX_TRUNCPR_SESSIONS / self.n;
+            let peer_count = map
+                .iter()
+                .filter(|(_, (id, _))| *id == initiator_id)
+                .count();
+            if peer_count >= per_peer_limit {
+                warn!("TruncPr per-peer session limit reached");
+                return None;
+            }
+        }
 
         map.get_or_create_with(session, || {
             (initiator_id, Arc::new(Mutex::new(TruncPrStore::empty())))

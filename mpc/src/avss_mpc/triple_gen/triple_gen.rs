@@ -21,7 +21,7 @@ use tokio::sync::{
     mpsc::{self},
     Mutex,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone, Debug)]
 pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
@@ -33,7 +33,7 @@ pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
     pub store: Arc<Mutex<SessionStore<AvssSessionId, (usize, Arc<Mutex<TripleGenStore<F, C>>>)>>>,
 }
 
-// pub static MAX_AVSS_TRIPLE_GEN_SESSIONS: usize = 256;
+const MAX_AVSS_TRIPLE_GEN_SESSIONS: usize = 256;
 
 impl<F, R, C> TripleGenNode<F, R, C>
 where
@@ -81,19 +81,21 @@ where
     ) -> Option<Arc<Mutex<TripleGenStore<F, C>>>> {
         let mut map = self.store.lock().await;
 
-        // TODO: restore session limits
-        // if !map.contains_key(&sid) {
-        //     if map.len() >= MAX_AVSS_TRIPLE_GEN_SESSIONS {
-        //         warn!("AVSS TripleGen session limit reached");
-        //         return None;
-        //     }
-        //     let per_peer_limit = MAX_AVSS_TRIPLE_GEN_SESSIONS / self.n_parties;
-        //     let peer_count = map.values().filter(|(id, _)| *id == initiator_id).count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("AVSS TripleGen per-peer session limit reached");
-        //         return None;
-        //     }
-        // }
+        if !map.contains_key(&sid) {
+            if map.len() >= MAX_AVSS_TRIPLE_GEN_SESSIONS {
+                warn!("AVSS TripleGen session limit reached");
+                return None;
+            }
+            let per_peer_limit = MAX_AVSS_TRIPLE_GEN_SESSIONS / self.n_parties;
+            let peer_count = map
+                .iter()
+                .filter(|(_, (id, _))| *id == initiator_id)
+                .count();
+            if peer_count >= per_peer_limit {
+                warn!("AVSS TripleGen per-peer session limit reached");
+                return None;
+            }
+        }
 
         map.get_or_create_with(sid, || {
             (

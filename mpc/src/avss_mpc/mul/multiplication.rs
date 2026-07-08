@@ -33,7 +33,7 @@ pub struct Multiply<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub rbc_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
 
-// pub static MAX_AVSS_MUL_SESSIONS: usize = 256;
+const MAX_AVSS_MUL_SESSIONS: usize = 256;
 
 impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Multiply<F, R, G> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
@@ -289,22 +289,21 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     ) -> Option<Arc<Mutex<MultStorage<F, G>>>> {
         let mut storage = self.mult_storage.lock().await;
 
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_AVSS_MUL_SESSIONS {
-        //         warn!("AVSS Mul session limit reached");
-        //         return None;
-        //     }
-        //     let per_peer_limit = MAX_AVSS_MUL_SESSIONS / self.n;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("AVSS Mul per-peer session limit reached");
-        //         return None;
-        //     }
-        // }
+        if !storage.contains_key(&session_id) {
+            if storage.len() >= MAX_AVSS_MUL_SESSIONS {
+                warn!("AVSS Mul session limit reached");
+                return None;
+            }
+            let per_peer_limit = MAX_AVSS_MUL_SESSIONS / self.n;
+            let peer_count = storage
+                .iter()
+                .filter(|(_, (id, _))| *id == initiator_id)
+                .count();
+            if peer_count >= per_peer_limit {
+                warn!("AVSS Mul per-peer session limit reached");
+                return None;
+            }
+        }
 
         storage
             .get_or_create_with(session_id, || {

@@ -40,7 +40,7 @@ pub struct PRandBitDNode<F: PrimeField, G: PrimeField> {
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-// pub static MAX_PRAND_SESSIONS: usize = 256;
+const MAX_PRAND_SESSIONS: usize = 512;
 
 impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     /// Creates a new PRandBitDNode with empty shares.
@@ -1016,22 +1016,21 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     ) -> Option<Arc<Mutex<PRandBitDStore<F, G>>>> {
         let mut storage = self.store.lock().await;
 
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_PRAND_SESSIONS {
-        //         warn!("PRandBitD session limit reached");
-        //         return None;
-        //     }
-        //     let per_peer_limit = MAX_PRAND_SESSIONS / self.n;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("PRandBitD per-peer session limit reached");
-        //         return None;
-        //     }
-        // }
+        if !storage.contains_key(&session_id) {
+            if storage.len() >= MAX_PRAND_SESSIONS {
+                warn!("PRandBitD session limit reached");
+                return None;
+            }
+            let per_peer_limit = MAX_PRAND_SESSIONS / self.n;
+            let peer_count = storage
+                .iter()
+                .filter(|(_, (id, _))| *id == initiator_id)
+                .count();
+            if peer_count >= per_peer_limit {
+                warn!("PRandBitD per-peer session limit reached");
+                return None;
+            }
+        }
         storage
             .get_or_create_with(session_id, || {
                 (initiator_id, Arc::new(Mutex::new(PRandBitDStore::empty())))

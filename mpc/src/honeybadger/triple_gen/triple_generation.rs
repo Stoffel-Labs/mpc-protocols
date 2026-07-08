@@ -49,7 +49,7 @@ where
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-// pub static MAX_TRIPLE_GEN_SESSIONS: usize = 1024;
+const MAX_TRIPLE_GEN_SESSIONS: usize = 2048;
 
 impl<F> TripleGenNode<F>
 where
@@ -79,24 +79,26 @@ where
     ) -> Option<Arc<Mutex<TripleGenStorage<F>>>> {
         let mut storage = self.storage.lock().await;
 
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_TRIPLE_GEN_SESSIONS {
-        //         return None;
-        //     }
-        //     let per_peer_limit = MAX_TRIPLE_GEN_SESSIONS / self.n_parties;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         return None;
-        //     }
-        // }
+        if !storage.contains_key(&session_id) {
+            if storage.len() >= MAX_TRIPLE_GEN_SESSIONS {
+                return None;
+            }
+            let per_peer_limit = MAX_TRIPLE_GEN_SESSIONS / self.n_parties;
+            let peer_count = storage
+                .iter()
+                .filter(|(_, (id, _))| *id == initiator_id)
+                .count();
+            if peer_count >= per_peer_limit {
+                return None;
+            }
+        }
 
         storage
             .get_or_create_with(session_id, || {
-                (initiator_id, Arc::new(Mutex::new(TripleGenStorage::empty())))
+                (
+                    initiator_id,
+                    Arc::new(Mutex::new(TripleGenStorage::empty())),
+                )
             })
             .map(|(_, arc)| arc)
     }

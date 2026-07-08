@@ -47,7 +47,7 @@ where
     pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<DouShaStorage<F>>>)>>>,
 }
 
-pub static MAX_DOUSHA_SESSIONS: usize = 256;
+const MAX_DOUSHA_SESSIONS: usize = 256;
 
 impl<F> DoubleShareNode<F>
 where
@@ -77,22 +77,21 @@ where
     ) -> Option<Arc<Mutex<DouShaStorage<F>>>> {
         let mut storage = self.storage.lock().await;
 
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_DOUSHA_SESSIONS {
-        //         warn!("DouSha session limit reached");
-        //         return None;
-        //     }
-        //     let per_peer_limit = MAX_DOUSHA_SESSIONS / self.n_parties;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("DouSha per-peer session limit reached");
-        //         return None;
-        //     }
-        // }
+        if !storage.contains_key(&session_id) {
+            if storage.len() >= MAX_DOUSHA_SESSIONS {
+                warn!("DouSha session limit reached");
+                return None;
+            }
+            let per_peer_limit = MAX_DOUSHA_SESSIONS / self.n_parties;
+            let peer_count = storage
+                .iter()
+                .filter(|(_, (id, _))| *id == initiator_id)
+                .count();
+            if peer_count >= per_peer_limit {
+                warn!("DouSha per-peer session limit reached");
+                return None;
+            }
+        }
         storage
             .get_or_create_with(session_id, || {
                 (

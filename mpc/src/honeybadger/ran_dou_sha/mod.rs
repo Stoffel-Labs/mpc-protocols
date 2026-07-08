@@ -142,6 +142,7 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
 }
+const MAX_RAN_DOU_SHA_SESSIONS: usize = 1024;
 
 impl<F, R> RanDouShaNode<F, R>
 where
@@ -206,20 +207,21 @@ where
     ) -> Option<Arc<Mutex<RanDouShaStore<F>>>> {
         let mut storage = self.store.lock().await;
 
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_RAN_DOU_SHA_SESSIONS {
-        //         return None;
-        //     }
-        //     let per_peer_limit = MAX_RAN_DOU_SHA_SESSIONS / self.n_parties;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         return None;
-        //     }
-        // }
+        if !storage.contains_key(&session_id) {
+            if storage.len() >= MAX_RAN_DOU_SHA_SESSIONS {
+                warn!("RanDouSha session limit reached");
+                return None;
+            }
+            let per_peer_limit = MAX_RAN_DOU_SHA_SESSIONS / self.n_parties;
+            let peer_count = storage
+                .iter()
+                .filter(|(_, (id, _))| *id == initiator_id)
+                .count();
+            if peer_count >= per_peer_limit {
+                warn!("RanDouSha per-peer session limit reached");
+                return None;
+            }
+        }
 
         storage
             .get_or_create_with(session_id, || {
@@ -742,61 +744,57 @@ mod tests {
     use std::sync::Arc;
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
 
-    // // TODO: restore when session limits are re-enabled
-    // // #[tokio::test]
-    // #[allow(dead_code)]
-    // async fn test_randousha_storage_limit_in_reconstruction_handler() {
-    //     let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
-    //     let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
-    //     let net = Arc::new(FakeNetwork::new(0, inner));
-    //     // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
-    //     let mut exec = 0u8;
-    //     let mut round = 0u8;
-    //     for _ in 0..super::MAX_RAN_DOU_SHA_SESSIONS / 5 {
-    //         let sid = SessionId::new(
-    //             ProtocolType::Randousha,
-    //             SessionId::pack_slot24(exec, 0, round),
-    //             111,
-    //         );
+    #[tokio::test]
+    async fn test_randousha_storage_limit_in_reconstruction_handler() {
+        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
 
-    //         let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
-    //         let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
-    //         let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+        // Fill up the per-peer limit by calling reconstruction_handler with unique session IDs
+        let per_peer_limit = super::MAX_RAN_DOU_SHA_SESSIONS / 5;
+        for exec in 0..per_peer_limit as u64 {
+            let sid = SessionId::new(
+                ProtocolType::Randousha,
+                SessionId::pack_slot(exec, 0, 0),
+                111,
+            );
 
-    //         let mut payload = Vec::new();
-    //         rec_msg.serialize_compressed(&mut payload).unwrap();
-    //         let msg = RanDouShaMessage::new(0, sid, RanDouShaPayload::Reconstruct(payload));
-    //         // Ignore the result, just fill up storage
-    //         let _ = node.reconstruction_handler(msg, net.clone()).await;
+            let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
+            let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
+            let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
 
-    //         // Increment exec and round to ensure unique session IDs
-    //         if round == u8::MAX {
-    //             round = 0;
-    //             exec = exec.wrapping_add(1);
-    //         } else {
-    //             round = round.wrapping_add(1);
-    //         }
-    //     }
+            let mut payload = Vec::new();
+            rec_msg.serialize_compressed(&mut payload).unwrap();
+            let msg = RanDouShaMessage::new(0, sid, RanDouShaPayload::Reconstruct(payload));
+            // Ignore the result, just fill up storage
+            let _ = node.reconstruction_handler(msg, net.clone()).await;
+        }
+        assert_eq!(node.store_len().await, per_peer_limit);
 
-    //     // Now try to process a message that would require a new session (should hit the limit)
-    //     let over_sid = SessionId::new(
-    //         ProtocolType::Randousha,
-    //         SessionId::pack_slot24(255, 0, 255),
-    //         0,
-    //     );
-    //     let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
-    //     let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
-    //     let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
-    //     let mut payload = Vec::new();
-    //     rec_msg.serialize_compressed(&mut payload).unwrap();
-    //     let msg = RanDouShaMessage::new(0, over_sid, RanDouShaPayload::Reconstruct(payload));
+        // Now try to process a message that would require a new session (should be dropped)
+        let over_sid = SessionId::new(
+            ProtocolType::Randousha,
+            SessionId::pack_slot(per_peer_limit as u64, 0, 0),
+            111,
+        );
+        let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
+        let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
+        let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+        let mut payload = Vec::new();
+        rec_msg.serialize_compressed(&mut payload).unwrap();
+        let msg = RanDouShaMessage::new(0, over_sid, RanDouShaPayload::Reconstruct(payload));
 
-    //     let result = node.reconstruction_handler(msg, net).await;
-    //     assert!(
-    //         matches!(result, Err(RanDouShaError::LimitError)),
-    //         "Should error on exceeding storage limit"
-    //     );
-    // }
+        let result = node.reconstruction_handler(msg, net).await;
+        assert!(
+            result.is_ok(),
+            "handler should silently drop over-limit sessions, not error"
+        );
+        assert_eq!(
+            node.store_len().await,
+            per_peer_limit,
+            "store must not grow past the per-peer limit"
+        );
+    }
 
     #[tokio::test]
     async fn test_randousha_handle_invalid_sub_id() {

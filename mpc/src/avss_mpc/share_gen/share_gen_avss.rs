@@ -26,7 +26,7 @@ use tokio::{
     },
     time::{timeout, Duration},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone, Debug)]
 pub struct RanShaAvssNode<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
@@ -38,7 +38,7 @@ pub struct RanShaAvssNode<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub avss_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
 
-// pub static MAX_RANSHA_AVSS_SESSIONS: usize = 256;
+const MAX_RANSHA_AVSS_SESSIONS: usize = 256;
 
 impl<F, R, C> RanShaAvssNode<F, R, C>
 where
@@ -85,22 +85,21 @@ where
     ) -> Option<Arc<Mutex<RanShaAvssStore<F, C>>>> {
         let mut storage = self.store.lock().await;
 
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_RANSHA_AVSS_SESSIONS {
-        //         warn!("RanShaAvss session limit reached");
-        //         return None;
-        //     }
-        //     let per_peer_limit = MAX_RANSHA_AVSS_SESSIONS / self.n_parties;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("RanShaAvss per-peer session limit reached");
-        //         return None;
-        //     }
-        // }
+        if !storage.contains_key(&session_id) {
+            if storage.len() >= MAX_RANSHA_AVSS_SESSIONS {
+                warn!("RanShaAvss session limit reached");
+                return None;
+            }
+            let per_peer_limit = MAX_RANSHA_AVSS_SESSIONS / self.n_parties;
+            let peer_count = storage
+                .iter()
+                .filter(|(_, (id, _))| *id == initiator_id)
+                .count();
+            if peer_count >= per_peer_limit {
+                warn!("RanShaAvss per-peer session limit reached");
+                return None;
+            }
+        }
 
         storage
             .get_or_create_with(session_id, || {
