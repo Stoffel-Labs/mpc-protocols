@@ -661,9 +661,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // once generate_riss() initialises the session.
         if store.batch_size.is_none() || store.r_t_bound.is_none() {
             const MAX_PENDING_RISS: usize = 4096;
-            if msg.r_t.len() > MAX_PENDING_RISS {
+            if store.pending_riss_messages.len() >= MAX_PENDING_RISS {
                 return Err(PRandError::InvalidMessage(
-                    "r_t too large for uninitialized session".into(),
+                    "too many pending messages for uninitialized session".into(),
                 ));
             }
             if store
