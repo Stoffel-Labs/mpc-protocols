@@ -418,7 +418,8 @@ where
 
         // Replay messages that arrived before local initialization.
         for pending_msg in pending {
-            self.reconstruction_handler(pending_msg, Arc::clone(&network)).await?;
+            self.reconstruction_handler(pending_msg, Arc::clone(&network))
+                .await?;
         }
 
         // Check if pending OK messages are sufficient to finalize immediately
