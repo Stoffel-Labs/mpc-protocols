@@ -1,11 +1,10 @@
 use crate::avss_mpc::input::{AvssInputError, AvssInputMessage};
 use crate::avss_mpc::{deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, ProtocolType};
-use crate::common::share::feldman::FeldmanShamirShare;
+use crate::common::share::{avss::verify_feldman, feldman::FeldmanShamirShare};
 use crate::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
-use ark_std::rand::rngs::OsRng;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stoffelnet::network_utils::{ClientId, Network, PartyId};
@@ -439,8 +438,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             ));
         }
 
-        // Validate degrees before randomized batch verification of the Feldman
-        // equations.
+        // Validate degrees and each Feldman equation.
         for share in &shares {
             if share.feldmanshare.degree != self.t {
                 return Err(AvssInputError::InvalidInput(format!(
@@ -449,9 +447,9 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                 )));
             }
         }
-        if !FeldmanShamirShare::verify_batch(&shares, &mut OsRng) {
+        if !shares.iter().cloned().all(verify_feldman) {
             return Err(AvssInputError::VerificationFailed(format!(
-                "Feldman batch verification failed for server {}",
+                "Feldman verification failed for server {}",
                 msg.sender_id
             )));
         }

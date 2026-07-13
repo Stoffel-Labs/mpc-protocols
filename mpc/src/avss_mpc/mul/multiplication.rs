@@ -6,13 +6,12 @@ use crate::avss_mpc::{
     deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, MAX_AVSS_BATCH_SIZE,
     MAX_MESSAGE_SIZE,
 };
-use crate::common::share::feldman::FeldmanShamirShare;
+use crate::common::share::{avss::verify_feldman, feldman::FeldmanShamirShare};
 use crate::common::{rbc::RbcError, share::ShareError, RBC};
 use crate::common::{ProtocolSessionId, SecretSharingScheme};
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
-use ark_std::rand::rngs::OsRng;
 use bincode::Options;
 use itertools::izip;
 use std::{collections::HashMap, sync::Arc};
@@ -419,7 +418,7 @@ fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
                 commitments: commitments.clone(),
             })
             .collect();
-        if !FeldmanShamirShare::verify_batch(&verification_batch, &mut OsRng) {
+        if !verification_batch.into_iter().all(verify_feldman) {
             continue;
         }
 

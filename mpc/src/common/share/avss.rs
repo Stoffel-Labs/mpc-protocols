@@ -6,7 +6,7 @@ use crate::common::{
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::{rngs::OsRng, Rng};
+use ark_std::rand::Rng;
 use bincode::{ErrorKind, Options};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -456,9 +456,7 @@ where
             shares.push(share);
         }
 
-        // The complete dealer batch is fixed before the verifier samples its
-        // random aggregation weights.
-        if !FeldmanShamirShare::verify_batch(&shares, &mut OsRng) {
+        if !shares.iter().cloned().all(verify_feldman) {
             return Err(AvssError::InvalidShare);
         }
 

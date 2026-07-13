@@ -87,51 +87,6 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> FeldmanShamirShare<F, G> {
             })
             .collect()
     }
-
-    /// Verifies a batch with one randomized aggregate multi-scalar
-    /// multiplication. Invalid batches pass with probability at most
-    /// `1 / (|F| - 1)`.
-    pub fn verify_batch<R: Rng>(shares: &[Self], rng: &mut R) -> bool {
-        if shares.is_empty() {
-            return false;
-        }
-
-        let total_commitments = shares.iter().map(|share| share.commitments.len()).sum();
-        let mut bases = Vec::with_capacity(total_commitments);
-        let mut scalars = Vec::with_capacity(total_commitments);
-        let mut combined_share = F::ZERO;
-
-        for share in shares {
-            if share.feldmanshare.id == 0
-                || share.commitments.len() != share.feldmanshare.degree + 1
-            {
-                return false;
-            }
-
-            let rho = loop {
-                let candidate = F::rand(rng);
-                if !candidate.is_zero() {
-                    break candidate;
-                }
-            };
-            combined_share += rho * share.feldmanshare.share[0];
-
-            let x = F::from(share.feldmanshare.id as u64);
-            let mut x_power = F::ONE;
-            for commitment in &share.commitments {
-                bases.push(*commitment);
-                scalars.push(rho * x_power);
-                x_power *= x;
-            }
-        }
-
-        let affine_bases = G::batch_convert_to_mul_base(&bases);
-        let rhs = match G::msm(&affine_bases, &scalars) {
-            Ok(value) => value,
-            Err(_) => return false,
-        };
-        G::generator().mul(combined_share) == rhs
-    }
 }
 
 impl<F, G> Add for FeldmanShamirShare<F, G>
@@ -368,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn test_batched_generation_and_verification_across_wire_boundary() {
+    fn test_batched_generation_verifies_each_share() {
         let mut rng = test_rng();
         let ids = sample_ids(4);
         let secrets: Vec<F> = (0..129).map(|_| F::rand(&mut rng)).collect();
@@ -388,7 +343,7 @@ mod tests {
                 .iter()
                 .map(|secret_shares| secret_shares[party_index].clone())
                 .collect();
-            assert!(FeldmanShamirShare::verify_batch(&recipient_batch, &mut rng));
+            assert!(recipient_batch.iter().all(verify_feldman_share));
         }
     }
 
@@ -411,20 +366,14 @@ mod tests {
             .collect();
 
         recipient_batch[7].feldmanshare.share[0] += F::one();
-        assert!(!FeldmanShamirShare::verify_batch(
-            &recipient_batch,
-            &mut rng
-        ));
+        assert!(!recipient_batch.iter().all(verify_feldman_share));
 
         recipient_batch = shares
             .iter()
             .map(|secret_shares| secret_shares[0].clone())
             .collect();
         recipient_batch[5].commitments[0] += G::generator();
-        assert!(!FeldmanShamirShare::verify_batch(
-            &recipient_batch,
-            &mut rng
-        ));
+        assert!(!recipient_batch.iter().all(verify_feldman_share));
     }
 
     #[test]
