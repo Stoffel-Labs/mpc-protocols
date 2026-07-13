@@ -144,8 +144,30 @@ where
         N: Network + Send + Sync,
         G: Rng + Send,
     {
+        self.init_batch(session_id, 1, rng, network).await
+    }
+
+    /// Generates `batch_size * (n - 2t)` random sharings in one AVSS round.
+    ///
+    /// Each party deals `batch_size` independent secrets in a single vectorized
+    /// AVSS message. The Vandermonde transform is then applied independently to
+    /// every vector position.
+    pub async fn init_batch<N, G>(
+        &mut self,
+        session_id: AvssSessionId,
+        batch_size: usize,
+        rng: &mut G,
+        network: Arc<N>,
+    ) -> Result<(), RanShaAvssError>
+    where
+        N: Network + Send + Sync,
+        G: Rng + Send,
+    {
         info!("Receiving init for share from {0:?}", self.id);
-        let secret = F::rand(rng);
+        if batch_size == 0 {
+            return Err(RanShaAvssError::InvalidBatchSize);
+        }
+        let secrets = (0..batch_size).map(|_| F::rand(rng)).collect();
 
         let avss_sessionid = AvssSessionId::new(
             session_id.calling_protocol().unwrap(),
@@ -153,7 +175,7 @@ where
             session_id.instance_id(),
         );
         self.avss
-            .init(vec![secret], avss_sessionid, rng, network.clone())
+            .init(secrets, avss_sessionid, rng, network.clone())
             .await?;
 
         while let Some(id) = {
@@ -174,13 +196,12 @@ where
                 if usize::from(sender_id) >= self.n_parties {
                     return Err(RanShaAvssError::InvalidPartyId);
                 }
-                ransha_storage.initial_shares.insert(
-                    sender_id.into(),
-                    avss_share
-                        .first()
-                        .ok_or(RanShaAvssError::InvalidPartyId)?
-                        .clone(),
-                );
+                if avss_share.len() != batch_size {
+                    return Err(RanShaAvssError::InvalidBatchSize);
+                }
+                ransha_storage
+                    .initial_shares
+                    .insert(sender_id.into(), avss_share);
 
                 ransha_storage.reception_tracker[sender_id as usize] = true;
                 // Check if the protocol has reached an end
@@ -189,19 +210,20 @@ where
                     .iter()
                     .all(|&received| received)
                 {
-                    let mut shares_deg_t: Vec<(usize, FeldmanShamirShare<F, C>)> = ransha_storage
-                        .initial_shares
-                        .iter()
-                        .map(|(sid, s)| (*sid, s.clone()))
-                        .collect();
+                    let mut shares_deg_t: Vec<(usize, Vec<FeldmanShamirShare<F, C>>)> =
+                        ransha_storage
+                            .initial_shares
+                            .iter()
+                            .map(|(sid, s)| (*sid, s.clone()))
+                            .collect();
                     drop(ransha_storage);
                     // sort by sender_id
                     shares_deg_t.sort_by_key(|(sid, _)| *sid);
 
                     // drop the ids, keep only shares
-                    let shares_deg_t: Vec<FeldmanShamirShare<F, C>> =
+                    let shares_deg_t: Vec<Vec<FeldmanShamirShare<F, C>>> =
                         shares_deg_t.into_iter().map(|(_, s)| s).collect();
-                    self.ransha_gen(shares_deg_t, session_id).await?;
+                    self.ransha_gen_batch(shares_deg_t, session_id).await?;
                     break;
                 }
             }
@@ -214,6 +236,18 @@ where
         shares_deg_t: Vec<FeldmanShamirShare<F, C>>,
         session_id: AvssSessionId,
     ) -> Result<(), RanShaAvssError> {
+        self.ransha_gen_batch(
+            shares_deg_t.into_iter().map(|share| vec![share]).collect(),
+            session_id,
+        )
+        .await
+    }
+
+    async fn ransha_gen_batch(
+        &mut self,
+        shares_deg_t: Vec<Vec<FeldmanShamirShare<F, C>>>,
+        session_id: AvssSessionId,
+    ) -> Result<(), RanShaAvssError> {
         info!(
             "party {:?} received shares for Random sharing generation",
             self.id
@@ -221,47 +255,57 @@ where
 
         let n = self.n_parties;
         let t = self.threshold;
-
-        let shares: Vec<ShamirShare<_, 1, _>> = shares_deg_t
-            .iter()
-            .map(|s| s.feldmanshare.clone())
-            .collect();
+        if shares_deg_t.len() != n {
+            return Err(RanShaAvssError::InvalidBatchSize);
+        }
+        let batch_size = shares_deg_t
+            .first()
+            .map(Vec::len)
+            .filter(|size| *size > 0)
+            .ok_or(RanShaAvssError::InvalidBatchSize)?;
+        if shares_deg_t.iter().any(|shares| shares.len() != batch_size) {
+            return Err(RanShaAvssError::InvalidBatchSize);
+        }
         let vandermonde_matrix = make_vandermonde(n, n - 1)?;
-        let r_deg_t = apply_vandermonde(&vandermonde_matrix, &shares)?;
 
-        let mut r_commitments: Vec<Vec<C>> = Vec::with_capacity(n);
-        for k in 0..n {
-            // commitments for output share k
-            let mut ck = vec![C::zero(); t + 1];
+        let mut computed = Vec::with_capacity(batch_size * n);
+        let mut output = Vec::with_capacity(batch_size * (n - 2 * t));
+        for batch_index in 0..batch_size {
+            let shares: Vec<ShamirShare<_, 1, _>> = shares_deg_t
+                .iter()
+                .map(|dealer_shares| dealer_shares[batch_index].feldmanshare.clone())
+                .collect();
+            let r_deg_t = apply_vandermonde(&vandermonde_matrix, &shares)?;
 
-            for i in 0..n {
-                let a_ki = vandermonde_matrix[k][i]; // field element
-                let ci = &shares_deg_t[i].commitments;
-                if ci.len() != t + 1 {
-                    return Err(RanShaAvssError::AvssError(
-                        AvssError::InvalidCommitmentLength,
-                    ));
+            for k in 0..n {
+                let mut commitments = vec![C::zero(); t + 1];
+                for i in 0..n {
+                    let dealer_commitments = &shares_deg_t[i][batch_index].commitments;
+                    if dealer_commitments.len() != t + 1 {
+                        return Err(RanShaAvssError::AvssError(
+                            AvssError::InvalidCommitmentLength,
+                        ));
+                    }
+                    for j in 0..=t {
+                        commitments[j] += dealer_commitments[j].mul(vandermonde_matrix[k][i]);
+                    }
                 }
-                for j in 0..=t {
-                    ck[j] += ci[j].mul(a_ki);
+                let share = FeldmanShamirShare {
+                    feldmanshare: r_deg_t[k].clone(),
+                    commitments,
+                };
+                if k >= 2 * t {
+                    output.push(share.clone());
                 }
+                computed.push(share);
             }
-
-            r_commitments.push(ck);
         }
 
         // Store results
         let bind_store = self.get_or_create_store(session_id, self.id).await?;
         let mut store = bind_store.lock().await;
 
-        store.computed_r_shares = (0..n)
-            .map(|k| FeldmanShamirShare {
-                feldmanshare: r_deg_t[k].clone(),
-                commitments: r_commitments[k].clone(),
-            })
-            .collect();
-
-        let output = store.computed_r_shares[2 * t..].to_vec();
+        store.computed_r_shares = computed;
         store.protocol_output = output.clone();
 
         if let Some(sender) = store.output_sender.take() {

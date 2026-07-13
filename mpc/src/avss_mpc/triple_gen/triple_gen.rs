@@ -212,7 +212,9 @@ where
                         }
                     }
 
-                    c_out.push(FeldmanShamirShare::new(c_val_j, self.id, t, c_comms_j)?);
+                    // Shamir evaluation points are 1-based throughout the AVSS
+                    // stack, while network party identifiers are 0-based.
+                    c_out.push(FeldmanShamirShare::new(c_val_j, self.id + 1, t, c_comms_j)?);
                 }
                 let triples: Vec<BeaverTriple<F, C>> = c_out
                     .iter()

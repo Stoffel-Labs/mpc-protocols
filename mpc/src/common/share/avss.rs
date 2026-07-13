@@ -1,12 +1,12 @@
 use crate::common::{
     rbc::RbcError,
-    share::{feldman::FeldmanShamirShare, shamir::Shamirshare, ShareError},
-    ProtocolSessionId, RbcWrapFn, SecretSharingScheme, RBC,
+    share::{feldman::FeldmanShamirShare, shamir::Shamirshare},
+    ProtocolSessionId, RbcWrapFn, RBC,
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::Rng;
+use ark_std::rand::{rngs::OsRng, Rng};
 use bincode::{ErrorKind, Options};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -202,6 +202,11 @@ where
         rbc_wrapper: RbcWrapFn<Id>,
         avss_wrapper: AvssWrapFn<Id>,
     ) -> Result<Self, AvssError> {
+        if id >= n_parties {
+            return Err(AvssError::InvalidInput(
+                "party id must be smaller than n_parties".into(),
+            ));
+        }
         if ids.len() != n_parties {
             return Err(AvssError::InvalidInput(
                 "ids length must equal n_parties".into(),
@@ -213,6 +218,21 @@ where
         let mut seen = std::collections::HashSet::new();
         if !ids.iter().all(|id| seen.insert(id)) {
             return Err(AvssError::InvalidInput("ids must be unique".into()));
+        }
+        if pk_map.len() != n_parties {
+            return Err(AvssError::InvalidInput(
+                "public-key map length must equal n_parties".into(),
+            ));
+        }
+        if pk_map.iter().any(|pk| pk.is_zero()) {
+            return Err(AvssError::InvalidInput(
+                "public-key map must not contain the identity".into(),
+            ));
+        }
+        if pk_map[id] != G::generator().mul(sk_i) {
+            return Err(AvssError::InvalidInput(
+                "local secret key does not match public-key map".into(),
+            ));
         }
         let (rbc_sender, rbc_receiver) = mpsc::channel(200);
         let rbc = R::new(id, n_parties, t, t + 1, rbc_sender, rbc_wrapper)?;
@@ -280,18 +300,13 @@ where
         info!("Receiving init for avss from {0:?}", self.id);
         // Generate the random polynomial of degree `degree` with `secret` as constant term
 
-        let shares: Vec<Vec<FeldmanShamirShare<F, G>>> = secrets
-            .into_iter()
-            .map(|secret| {
-                FeldmanShamirShare::compute_shares(
-                    secret,
-                    self.n_parties,
-                    self.t,
-                    Some(&self.ids),
-                    rng,
-                )
-            })
-            .collect::<Result<Vec<_>, ShareError>>()?;
+        let shares: Vec<Vec<FeldmanShamirShare<F, G>>> = FeldmanShamirShare::compute_shares_batch(
+            &secrets,
+            self.n_parties,
+            self.t,
+            Some(&self.ids),
+            rng,
+        )?;
 
         // Dealer ephemeral keypair
         let sk_d = F::rand(rng);
@@ -342,6 +357,12 @@ where
         };
 
         let bytes = bincode::serialize(&msg)?;
+        if bytes.len() as u64 > MAX_MESSAGE_SIZE {
+            return Err(AvssError::InvalidInput(format!(
+                "batched AVSS payload exceeds {} bytes",
+                MAX_MESSAGE_SIZE
+            )));
+        }
         self.rbc.init(bytes, session_id, net).await?;
 
         Ok(())
@@ -370,6 +391,19 @@ where
         };
 
         let pk_d: G = CanonicalDeserialize::deserialize_compressed(&msg.dealer_pk[..])?;
+        if pk_d.is_zero() {
+            return Err(AvssError::InvalidShare);
+        }
+        if msg.encrypted_shares.len() != self.n_parties {
+            return Err(AvssError::InvalidShareLength);
+        }
+        if msg
+            .encrypted_shares
+            .iter()
+            .any(|ciphertexts| ciphertexts.len() != msg.public_commitments.len())
+        {
+            return Err(AvssError::InvalidShareLength);
+        }
         let cts: &Vec<Vec<u8>> = msg
             .encrypted_shares
             .get(self.id)
@@ -378,6 +412,13 @@ where
         let ss = pk_d.mul(self.sk_i);
         let key = kdf_from_point(&ss);
 
+        if msg
+            .public_commitments
+            .iter()
+            .any(|commitments| commitments.len() != self.t + 1)
+        {
+            return Err(AvssError::InvalidCommitmentLength);
+        }
         let all_commitments: Vec<Vec<G>> = msg
             .public_commitments
             .iter()
@@ -412,11 +453,13 @@ where
                 commitments: commitments.clone(),
             };
 
-            if !verify_feldman(share.clone()) {
-                return Err(AvssError::InvalidShare);
-            }
-
             shares.push(share);
+        }
+
+        // The complete dealer batch is fixed before the verifier samples its
+        // random aggregation weights.
+        if !FeldmanShamirShare::verify_batch(&shares, &mut OsRng) {
+            return Err(AvssError::InvalidShare);
         }
 
         {
