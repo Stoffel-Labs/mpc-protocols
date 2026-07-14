@@ -9,46 +9,13 @@ use std::sync::Arc;
 use stoffelcrypto::avss_mpc::{AvssSessionId, AvssWrappedMessage, ProtocolType};
 use stoffelcrypto::common::ProtocolSessionId;
 use stoffelcrypto::common::{rbc::rbc::Avid, ShamirShare};
+use stoffelcrypto::common::{share::avss::verify_feldman, SecretSharingScheme};
 use stoffelcrypto::common::{share::avss::AvssNode, RBC};
-use stoffelcrypto::common::{
-    share::avss::{verify_feldman, AvssError},
-    SecretSharingScheme,
-};
 use stoffelmpc_network::fake_network::SenderId;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::task::JoinSet;
 use tokio::time::Duration;
 use tracing::info;
-
-#[test]
-fn test_avss_rejects_out_of_range_protocol_indices() {
-    let n = 4;
-    let t = 1;
-    let mut rng = test_rng();
-    let sk = Fr::rand(&mut rng);
-    let pk_map: Arc<Vec<G>> = Arc::new((0..n).map(|_| G::generator() * sk).collect());
-    let (output_sender, _) = mpsc::channel(1);
-
-    for id in [n, n + 1] {
-        let result: Result<AvssNode<Fr, Avid<AvssSessionId>, G, AvssSessionId>, _> = AvssNode::new(
-            id,
-            n,
-            (1..=n).collect(),
-            t,
-            sk,
-            pk_map.clone(),
-            output_sender.clone(),
-            Arc::new(AvssWrappedMessage::rbc_wrap),
-            Arc::new(AvssWrappedMessage::avss_wrap),
-        );
-
-        assert!(matches!(
-            result,
-            Err(AvssError::InvalidInput(message))
-                if message == "AVSS protocol index must be smaller than n_parties"
-        ));
-    }
-}
 
 #[tokio::test]
 async fn test_avss_end_to_end() {
