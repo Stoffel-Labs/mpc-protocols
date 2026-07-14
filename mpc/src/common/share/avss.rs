@@ -191,6 +191,10 @@ where
     G: CurveGroup<ScalarField = F>,
     Id: ProtocolSessionId + for<'a> Deserialize<'a> + Serialize,
 {
+    /// Creates an AVSS participant for a dense, zero-based protocol index.
+    ///
+    /// `id` is used to index the participant vectors and RBC shards; it is not
+    /// an arbitrary transport-level party identifier.
     pub fn new(
         id: PartyId,
         n_parties: usize,
@@ -204,7 +208,7 @@ where
     ) -> Result<Self, AvssError> {
         if id >= n_parties {
             return Err(AvssError::InvalidInput(
-                "party id must be smaller than n_parties".into(),
+                "AVSS protocol index must be smaller than n_parties".into(),
             ));
         }
         if ids.len() != n_parties {
