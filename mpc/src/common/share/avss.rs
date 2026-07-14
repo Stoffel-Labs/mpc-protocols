@@ -202,11 +202,6 @@ where
         rbc_wrapper: RbcWrapFn<Id>,
         avss_wrapper: AvssWrapFn<Id>,
     ) -> Result<Self, AvssError> {
-        if id >= n_parties {
-            return Err(AvssError::InvalidInput(
-                "party id must be smaller than n_parties".into(),
-            ));
-        }
         if ids.len() != n_parties {
             return Err(AvssError::InvalidInput(
                 "ids length must equal n_parties".into(),
@@ -218,21 +213,6 @@ where
         let mut seen = std::collections::HashSet::new();
         if !ids.iter().all(|id| seen.insert(id)) {
             return Err(AvssError::InvalidInput("ids must be unique".into()));
-        }
-        if pk_map.len() != n_parties {
-            return Err(AvssError::InvalidInput(
-                "public-key map length must equal n_parties".into(),
-            ));
-        }
-        if pk_map.iter().any(|pk| pk.is_zero()) {
-            return Err(AvssError::InvalidInput(
-                "public-key map must not contain the identity".into(),
-            ));
-        }
-        if pk_map[id] != G::generator().mul(sk_i) {
-            return Err(AvssError::InvalidInput(
-                "local secret key does not match public-key map".into(),
-            ));
         }
         let (rbc_sender, rbc_receiver) = mpsc::channel(200);
         let rbc = R::new(id, n_parties, t, t + 1, rbc_sender, rbc_wrapper)?;
