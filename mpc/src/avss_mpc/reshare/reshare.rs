@@ -27,7 +27,8 @@ pub struct ReshareNode {
     my_committee: Committee,
     /// Store for each execution instance of MBVA.
     ///
-    /// `Session ID -> (initiator, store)`
+    /// The structure is `Session ID => (initiator, store)` where the initiator is the ID of who
+    /// created the store.
     store: Arc<Mutex<HashMap<AvssSessionId, (usize, ReshareStore)>>>,
     /// MBVA node to execute inside the resharing protocol.
     mbva_node: MbvaNode,

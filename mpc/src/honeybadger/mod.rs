@@ -28,7 +28,9 @@ pub mod preprocessing;
 pub mod share_gen;
 
 use crate::{
+    avss_mpc::AvssSessionId,
     common::{
+        aba::{bv_bc::BvBroadcastMessage, TaggedMessage},
         math::goldilocks::GoldilocksField,
         rbc::{rbc_store::Msg, RbcError},
         types::{
@@ -2174,6 +2176,7 @@ pub enum WrappedMessage {
     Dousha(DouShaMessage),
     Output(OutputMessage),
     PRandBitD(PRandBitDMessage),
+    BvBroadcast(BvBroadcastMessage<AvssSessionId>),
 }
 
 impl WrappedMessage {

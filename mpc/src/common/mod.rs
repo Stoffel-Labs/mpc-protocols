@@ -11,6 +11,9 @@ pub mod share;
 /// Implementation of the hbACSS protocol from https://eprint.iacr.org/2021/159.
 pub mod acss;
 
+/// Implementation of Crain ABA in "Two More Algorithms for Randomized Signature-Free Asynchronous Binary Byzantine Consensus with t < n/3 and O(n^2) Messages and O(1) Round Expected Termination".
+pub mod aba;
+
 pub mod math;
 pub mod types;
 pub mod utils;
