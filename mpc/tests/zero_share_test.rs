@@ -318,17 +318,24 @@ async fn test_receive_shares_wrong_degree_rejected() {
 
 #[tokio::test]
 async fn test_zero_share_e2e_basic() {
-    zero_share_e2e(10, 3).await; // n=10, t=3: output = n-2t = 4 shares
+    zero_share_e2e(10, 3, 1).await; // n=10, t=3: output = n-2t = 4 shares
 }
 
 #[tokio::test]
 async fn test_zero_share_e2e_minimal() {
-    zero_share_e2e(7, 2).await; // n=7, t=2: smallest valid config (n=3t+1), output = 3
+    zero_share_e2e(7, 2, 1).await; // n=7, t=2: smallest valid config (n=3t+1), output = 3
+}
+
+/// batch_size > 1: one exchange must yield batch_size independent zero-sharings,
+/// each column of which is itself a valid zero-sharing.
+#[tokio::test]
+async fn test_zero_share_e2e_batched() {
+    zero_share_e2e(10, 3, 5).await;
 }
 
 /// Runs the full zero-share protocol across n honest parties and verifies that
 /// each output column reconstructs to zero.
-async fn zero_share_e2e(n: usize, t: usize) {
+async fn zero_share_e2e(n: usize, t: usize, batch_size: usize) {
     setup_tracing();
     let mut rng = test_rng();
     let session_id = SessionId::new(ProtocolType::ZeroSha, SessionId::pack_slot(1, 0, 0), 1);
@@ -340,7 +347,7 @@ async fn zero_share_e2e(n: usize, t: usize) {
 
     for i in 0..n {
         nodes[i]
-            .init(session_id, &mut rng, network[i].clone())
+            .init_batch(session_id, batch_size, &mut rng, network[i].clone())
             .await
             .unwrap();
     }
@@ -383,7 +390,7 @@ async fn zero_share_e2e(n: usize, t: usize) {
         });
     }
 
-    let expected_output_count = n - 2 * t;
+    let expected_output_count = batch_size * (n - 2 * t);
     let mut all_outputs: Vec<Vec<RobustShare<Fr>>> = Vec::with_capacity(n);
     for i in 0..n {
         let output = nodes[i]

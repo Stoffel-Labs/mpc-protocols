@@ -70,8 +70,9 @@ pub struct PreMulCOnlineStore<F: PrimeField> {
     /// Set before init by callers that need inverses (e.g. SufMulInv).
     /// When present, try_finalize_online also computes [p_j^{-1}] = [r_j] * M_j^{-1}.
     pub r_shares: Option<Vec<RobustShare<F>>>,
-    pub chunks: usize,
-    pub open: HashMap<u8, Vec<F>>,
+    /// Opened `[m_i]` values, in input order — delivered as one combined
+    /// batch-recon reveal (`init_batch_reconstruct_many`), not per-chunk.
+    pub m_vals: Option<Vec<F>>,
     pub output_sender: Option<tokio::sync::oneshot::Sender<OnlineResult<F>>>,
     pub output_receiver: Option<tokio::sync::oneshot::Receiver<OnlineResult<F>>>,
 }
@@ -83,8 +84,7 @@ impl<F: PrimeField> PreMulCOnlineStore<F> {
             state: PhaseState::Waiting,
             z_shares: None,
             r_shares: None,
-            chunks: 0,
-            open: HashMap::new(),
+            m_vals: None,
             output_sender: Some(tx),
             output_receiver: Some(rx),
         }
@@ -356,14 +356,9 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
             let output = self.batch_recon.get_store(id).await?;
             let vals: Vec<F> = CanonicalDeserialize::deserialize_compressed(output.as_slice())?;
 
-            let parent = SessionId::new(
-                id.calling_protocol()
-                    .ok_or(PreMulCError::SessionIdError(id))?,
-                SessionId::pack_slot(id.exec_id(), 0, 0),
-                id.instance_id(),
-            );
-            let chunk_idx = id.sub_id();
-            self.handle_online_batch(parent, chunk_idx, vals).await?;
+            // One combined batch-recon round now (init_batch_reconstruct_many),
+            // so `id` is already the session `init` was called with.
+            self.handle_online_batch(id, vals).await?;
         }
         Ok(())
     }
@@ -385,10 +380,6 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
         }
         assert_eq!(k % (self.t + 1), 0, "k must be a multiple of t+1");
 
-        let calling_proto = session
-            .calling_protocol()
-            .ok_or(PreMulCError::SessionIdError(session))?;
-
         self.mul
             .init(session, prep.w, a, prep.triples, Arc::clone(&network))
             .await?;
@@ -399,25 +390,19 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
             let mut s = store.lock().await;
             s.z_shares = Some(prep.z);
             s.r_shares = Some(prep.r);
-            s.chunks = k / (self.t + 1);
         }
 
-        // Open [m_i] via batch recon (round_id = 0 for online).
-        for (i, chunk) in m_shares.chunks(self.t + 1).enumerate() {
-            let batch_session = SessionId::new(
-                calling_proto,
-                SessionId::pack_slot(session.exec_id(), i as u8, 0),
-                session.instance_id(),
-            );
-            self.batch_recon
-                .init_batch_reconstruct(chunk, batch_session, Arc::clone(&network))
-                .await?;
-        }
+        // Open all [m_i] in one combined batch-recon round (round_id = 0 for
+        // online), instead of one round per (t+1)-sized chunk — round count
+        // is now independent of k.
+        self.batch_recon
+            .init_batch_reconstruct_many(&m_shares, session, Arc::clone(&network))
+            .await?;
         {
             let store = self.get_or_create_online(session).await?;
             let ready = {
                 let s = store.lock().await;
-                s.z_shares.is_some() && s.open.len() >= s.chunks
+                s.z_shares.is_some() && s.m_vals.is_some()
             };
             if ready {
                 self.try_finalize_online(session, store).await?;
@@ -429,19 +414,18 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
 
     async fn handle_online_batch(
         &mut self,
-        parent: SessionId,
-        chunk_idx: u8,
+        session: SessionId,
         vals: Vec<F>,
     ) -> Result<(), PreMulCError> {
-        let store = self.get_or_create_online(parent).await?;
+        let store = self.get_or_create_online(session).await?;
         {
             let mut s = store.lock().await;
             if s.state == PhaseState::Finished {
                 return Ok(());
             }
-            s.open.insert(chunk_idx, vals);
+            s.m_vals = Some(vals);
         }
-        self.try_finalize_online(parent, store).await?;
+        self.try_finalize_online(session, store).await?;
         Ok(())
     }
 
@@ -450,27 +434,21 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
         session: SessionId,
         store_mutex: Arc<Mutex<PreMulCOnlineStore<F>>>,
     ) -> Result<bool, PreMulCError> {
-        let (z_shares, r_shares_opt, open_map, num_chunks) = {
+        let (z_shares, r_shares_opt, m_vals) = {
             let s = store_mutex.lock().await;
             if s.state == PhaseState::Finished {
                 return Ok(true);
             }
-            if s.open.len() < s.chunks {
-                return Ok(false);
-            }
             let Some(z) = s.z_shares.clone() else {
                 return Ok(false);
             };
-            (z, s.r_shares.clone(), s.open.clone(), s.chunks)
+            let Some(m_vals) = s.m_vals.clone() else {
+                return Ok(false);
+            };
+            (z, s.r_shares.clone(), m_vals)
         };
 
-        // Assemble m_vals from chunks in order.
         let k = z_shares.len();
-        let mut m_vals: Vec<F> = Vec::with_capacity(k);
-        for i in 0..num_chunks as u8 {
-            let chunk = open_map.get(&i).ok_or(PreMulCError::Abort)?;
-            m_vals.extend_from_slice(chunk);
-        }
 
         // Prefix products M_j = m_1 * … * m_j (public).
         let mut prefix_m = Vec::with_capacity(k);

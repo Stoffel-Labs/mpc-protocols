@@ -111,42 +111,30 @@ impl<F: FftField> MulPubNode<F> {
         let batch_size = 2 * self.threshold + 1;
         let num_batches = (k + batch_size - 1) / batch_size;
 
-        for batch_idx in 0..num_batches {
-            let start = batch_idx * batch_size;
-            let end = (start + batch_size).min(k);
+        let mut all_shares: Vec<RobustShare<F>> = (0..k)
+            .map(|j| {
+                let product = a[j].share_mul(&b[j])?;
+                product + zero_shares[j].clone()
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| MulPubError::InvalidInput(e.to_string()))?;
 
-            let mut batch: Vec<RobustShare<F>> = (start..end)
-                .map(|j| {
-                    let product = a[j].share_mul(&b[j])?;
-                    product + zero_shares[j].clone()
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| MulPubError::InvalidInput(e.to_string()))?;
-
-            // Pad the last batch with 1s to reach exactly batch_size = 2t+1
-            while batch.len() < batch_size {
-                batch.push(RobustShare::new(F::one(), self.id, 2 * self.threshold));
-            }
-
-            let sub = u8::try_from(batch_idx).map_err(|_| {
-                MulPubError::InvalidInput(format!("too many batches: {batch_idx} exceeds u8"))
-            })?;
-
-            let batch_session = SessionId::new(
-                session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot(session_id.exec_id(), sub, 0),
-                session_id.instance_id(),
-            );
-            self.batch_recon
-                .init_batch_reconstruct(&batch, batch_session, Arc::clone(&network))
-                .await?;
+        // Pad the last batch with 1s to reach an exact multiple of batch_size = 2t+1
+        while all_shares.len() < num_batches * batch_size {
+            all_shares.push(RobustShare::new(F::one(), self.id, 2 * self.threshold));
         }
+
+        // One combined batch-recon round for every chunk, instead of one round
+        // per chunk — round count is now independent of k.
+        self.batch_recon
+            .init_batch_reconstruct_many(&all_shares, session_id, Arc::clone(&network))
+            .await?;
         Ok(())
     }
 
     pub async fn drain_batch_recon_output(&mut self) -> Result<(), MulPubError> {
         loop {
-            let sub_sid = {
+            let sid = {
                 let mut rx = self.batch_output.lock().await;
                 match rx.try_recv() {
                     Ok(id) => id,
@@ -157,36 +145,17 @@ impl<F: FftField> MulPubNode<F> {
                 }
             };
 
-            let poly_bytes = self.batch_recon.get_store(sub_sid).await?;
-            let coeffs: Vec<F> =
-                deser_bounded_vec(&mut poly_bytes.as_slice(), 2 * self.threshold + 1)
-                    .map_err(MulPubError::ArkSerialization)?;
-
-            if coeffs.is_empty() {
-                warn!("MulPub: empty coefficients for sub-session {sub_sid:?}");
-                continue;
-            }
-
-            let batch_idx = sub_sid.sub_id() as usize;
-            let main_sid = SessionId::new(
-                sub_sid.calling_protocol().unwrap(),
-                SessionId::pack_slot(sub_sid.exec_id(), 0, 0),
-                sub_sid.instance_id(),
-            );
-
             let storage = self
                 .store
                 .lock()
                 .await
-                .get(&main_sid)
+                .get(&sid)
                 .cloned()
-                .ok_or(MulPubError::NoSuchSession(main_sid));
+                .ok_or(MulPubError::NoSuchSession(sid));
             let bind = match storage {
                 Ok(b) => b,
                 Err(_) => {
-                    warn!(
-                        "MulPub: no main session for sub-session {sub_sid:?}; init not yet called"
-                    );
+                    warn!("MulPub: no session for {sid:?}; init not yet called");
                     continue;
                 }
             };
@@ -196,19 +165,23 @@ impl<F: FftField> MulPubNode<F> {
             }
 
             let batch_size = 2 * self.threshold + 1;
-            let start = batch_idx * batch_size;
-            let actual_size = batch_size.min(store.k.saturating_sub(start));
+            let num_batches = (store.k + batch_size - 1) / batch_size;
+            let poly_bytes = self.batch_recon.get_store(sid).await?;
+            let coeffs: Vec<F> =
+                deser_bounded_vec(&mut poly_bytes.as_slice(), num_batches * batch_size)
+                    .map_err(MulPubError::ArkSerialization)?;
 
-            for local_j in 0..actual_size {
-                store.results.insert(start + local_j, coeffs[local_j]);
+            if coeffs.len() < store.k {
+                warn!("MulPub: short coefficient vector for session {sid:?}");
+                continue;
             }
 
-            if store.results.len() == store.k {
-                let output: Vec<F> = (0..store.k).map(|i| store.results[&i]).collect();
-                store.state = MulPubState::Finished;
-                if let Some(tx) = store.output_sender.take() {
-                    tx.send(output).map_err(|_| MulPubError::SendError)?;
-                }
+            // Only the first store.k values are real; the rest is padding from
+            // completing the last chunk.
+            let output: Vec<F> = coeffs.into_iter().take(store.k).collect();
+            store.state = MulPubState::Finished;
+            if let Some(tx) = store.output_sender.take() {
+                tx.send(output).map_err(|_| MulPubError::SendError)?;
             }
         }
         Ok(())

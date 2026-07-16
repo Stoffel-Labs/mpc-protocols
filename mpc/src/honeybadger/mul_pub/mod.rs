@@ -2,7 +2,6 @@ use crate::honeybadger::{batch_recon::BatchReconError, SessionId};
 use ark_ff::FftField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
-use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
 
@@ -43,7 +42,6 @@ pub enum MulPubState {
 #[derive(Debug)]
 pub struct MulPubStore<F: FftField> {
     pub k: usize,
-    pub results: HashMap<usize, F>,
     pub state: MulPubState,
     pub output_sender: Option<Sender<Vec<F>>>,
     pub output_receiver: Option<Receiver<Vec<F>>>,
@@ -54,7 +52,6 @@ impl<F: FftField> MulPubStore<F> {
         let (output_sender, output_receiver) = channel();
         Self {
             k,
-            results: HashMap::new(),
             state: MulPubState::Running,
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),

@@ -1,6 +1,6 @@
 use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
-use ark_serialize::CanonicalSerialize;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use bincode::Options;
 use std::{collections::HashMap, sync::Arc};
@@ -13,6 +13,7 @@ use crate::honeybadger::MAX_MESSAGE_SIZE;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde, ShareError},
+        utils::deser_bounded_vec,
         ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
@@ -159,10 +160,14 @@ where
             if store.received_ok_msg.len() < 2 * self.threshold {
                 return Ok(false);
             }
-            if store.computed_r_shares.len() < self.n_parties {
+            if store.computed_r_shares.len() < store.batch_size * self.n_parties {
                 return Ok(false);
             }
-            let output = store.computed_r_shares[2 * self.threshold..].to_vec();
+            let mut output =
+                Vec::with_capacity(store.batch_size * (self.n_parties - 2 * self.threshold));
+            for shares in store.computed_r_shares.chunks_exact(self.n_parties) {
+                output.extend_from_slice(&shares[2 * self.threshold..]);
+            }
             store.state = ZeroShaState::Finished;
             store.protocol_output = output.clone();
             let sender = store.output_sender.take().unwrap();
@@ -185,20 +190,58 @@ where
         N: Network,
         G: Rng,
     {
+        self.init_batch(session_id, 1, rng, network).await
+    }
+
+    /// Generates `batch_size` independent zero-sharings in one exchange: all
+    /// `batch_size` shares destined for a given recipient are packed into a
+    /// single message, so the round count stays fixed (2 rounds total)
+    /// regardless of `batch_size` — only the payload size and local
+    /// Vandermonde computation scale with it.
+    pub async fn init_batch<N, G>(
+        &mut self,
+        session_id: SessionId,
+        batch_size: usize,
+        rng: &mut G,
+        network: Arc<N>,
+    ) -> Result<(), ZeroShaError>
+    where
+        N: Network,
+        G: Rng,
+    {
         assert_eq!(session_id.sub_id(), 0);
+        let batch_size = batch_size.max(1);
 
-        //secret is zero, degree is 2t
-        let shares_deg_2t =
-            RobustShare::compute_shares(F::zero(), self.n_parties, 2 * self.threshold, None, rng)?;
+        // secret is always zero, degree is 2t
+        let mut shares_by_recipient = vec![Vec::with_capacity(batch_size); self.n_parties];
+        for _ in 0..batch_size {
+            let shares_deg_2t = RobustShare::compute_shares(
+                F::zero(),
+                self.n_parties,
+                2 * self.threshold,
+                None,
+                rng,
+            )?;
+            for (recipient_id, share) in shares_deg_2t.into_iter().enumerate() {
+                shares_by_recipient[recipient_id].push(share);
+            }
+        }
 
-        for (recipient_id, share) in shares_deg_2t.into_iter().enumerate() {
-            let mut payload = Vec::new();
-            share.serialize_compressed(&mut payload)?;
+        for (recipient_id, shares) in shares_by_recipient.into_iter().enumerate() {
+            let payload = if batch_size == 1 {
+                let mut payload = Vec::new();
+                shares[0].serialize_compressed(&mut payload)?;
+                ZeroShaPayload::Share(payload)
+            } else {
+                let mut payload = Vec::new();
+                shares.serialize_compressed(&mut payload)?;
+                ZeroShaPayload::SharesBatch(payload)
+            };
             let msg = WrappedMessage::ZeroSha(ZeroShaMessage::new(
                 self.id,
                 ZeroShaMessageType::ShareMessage,
                 session_id,
-                ZeroShaPayload::Share(payload),
+                payload,
             ));
             network
                 .send(recipient_id, &bincode::serialize(&msg)?)
@@ -206,7 +249,9 @@ where
         }
 
         let storage_access = self.get_or_create_store(session_id).await?;
-        storage_access.lock().await.state = ZeroShaState::Initialized;
+        let mut store = storage_access.lock().await;
+        store.batch_size = batch_size;
+        store.state = ZeroShaState::Initialized;
         Ok(())
     }
 
@@ -221,26 +266,39 @@ where
         if msg.session_id.sub_id() != 0 {
             return Err(ZeroShaError::SessionIdError(msg.session_id));
         }
-        let payload = match msg.payload {
-            ZeroShaPayload::Share(s) => s,
-            _ => return Err(ZeroShaError::Abort),
-        };
         if msg.sender_id >= self.n_parties {
             return Err(ZeroShaError::InvalidPartyId);
         }
 
-        let share: ShamirShare<F, 1, Robust> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-        if share.id != self.id {
-            return Err(ShareError::IdMismatch.into());
-        }
-        // degree check uses 2t
-        if share.degree != 2 * self.threshold {
-            return Err(ShareError::DegreeMismatch.into());
+        let shares: Vec<ShamirShare<F, 1, Robust>> = match msg.payload {
+            ZeroShaPayload::Share(payload) => {
+                vec![CanonicalDeserialize::deserialize_compressed(
+                    payload.as_slice(),
+                )?]
+            }
+            ZeroShaPayload::SharesBatch(payload) => {
+                deser_bounded_vec(&mut payload.as_slice(), payload.len())?
+            }
+            _ => return Err(ZeroShaError::Abort),
+        };
+        for share in &shares {
+            if share.id != self.id {
+                return Err(ShareError::IdMismatch.into());
+            }
+            // degree check uses 2t
+            if share.degree != 2 * self.threshold {
+                return Err(ShareError::DegreeMismatch.into());
+            }
         }
 
         let binding = self.get_or_create_store(msg.session_id).await?;
         let mut store = binding.lock().await;
+
+        if store.initial_shares.is_empty() {
+            store.batch_size = shares.len();
+        } else if store.batch_size != shares.len() {
+            return Err(ZeroShaError::Abort);
+        }
 
         if store.state == ZeroShaState::FinishedInitialSharing
             || store.state == ZeroShaState::Finished
@@ -252,21 +310,28 @@ where
             return Ok(());
         }
 
-        store.initial_shares.insert(msg.sender_id, share);
+        store.initial_shares.insert(msg.sender_id, shares);
         store.reception_tracker[msg.sender_id] = true;
 
         if store.reception_tracker.iter().all(|&r| r) {
             store.state = ZeroShaState::FinishedInitialSharing;
-            let mut shares: Vec<(usize, ShamirShare<F, 1, Robust>)> = store
+            let batch_size = store.batch_size;
+            let mut shares_deg_2t: Vec<(usize, Vec<ShamirShare<F, 1, Robust>>)> = store
                 .initial_shares
                 .iter()
                 .map(|(sid, s)| (*sid, s.clone()))
                 .collect();
             drop(store);
-            shares.sort_by_key(|(sid, _)| *sid);
-            let shares: Vec<ShamirShare<F, 1, Robust>> =
-                shares.into_iter().map(|(_, s)| s).collect();
-            self.init_zerosha(shares, msg.session_id, network).await?;
+            shares_deg_2t.sort_by_key(|(sid, _)| *sid);
+
+            let mut shares_by_batch = vec![Vec::with_capacity(self.n_parties); batch_size];
+            for (_, sender_shares) in shares_deg_2t {
+                for (batch_index, share) in sender_shares.into_iter().enumerate() {
+                    shares_by_batch[batch_index].push(share);
+                }
+            }
+            self.init_zerosha_batch(shares_by_batch, msg.session_id, network)
+                .await?
         }
         Ok(())
     }
@@ -280,11 +345,28 @@ where
     where
         N: Network,
     {
+        self.init_zerosha_batch(vec![shares_deg_2t], session_id, network)
+            .await
+    }
+
+    async fn init_zerosha_batch<N>(
+        &mut self,
+        shares_by_batch: Vec<Vec<RobustShare<F>>>,
+        session_id: SessionId,
+        network: Arc<N>,
+    ) -> Result<(), ZeroShaError>
+    where
+        N: Network,
+    {
         let vandermonde_matrix = make_vandermonde(self.n_parties, self.n_parties - 1)?;
-        let r_deg_2t = apply_vandermonde(&vandermonde_matrix, &shares_deg_2t)?;
+        let mut r_deg_2t = Vec::with_capacity(shares_by_batch.len() * self.n_parties);
+        for shares_deg_2t in shares_by_batch {
+            r_deg_2t.extend(apply_vandermonde(&vandermonde_matrix, &shares_deg_2t)?);
+        }
 
         let bind_store = self.get_or_create_store(session_id).await?;
         let mut store = bind_store.lock().await;
+        store.batch_size = r_deg_2t.len() / self.n_parties;
         store.computed_r_shares = r_deg_2t.clone();
         drop(store);
 
@@ -293,14 +375,24 @@ where
         }
 
         for i in 0..2 * self.threshold {
-            let share = r_deg_2t[i].clone();
-            let mut bytes = Vec::new();
-            share.serialize_compressed(&mut bytes)?;
+            let shares: Vec<_> = r_deg_2t
+                .chunks_exact(self.n_parties)
+                .map(|batch_shares| batch_shares[i].clone())
+                .collect();
+            let payload = if shares.len() == 1 {
+                let mut bytes = Vec::new();
+                shares[0].serialize_compressed(&mut bytes)?;
+                ZeroShaPayload::Reconstruct(bytes)
+            } else {
+                let mut bytes = Vec::new();
+                shares.serialize_compressed(&mut bytes)?;
+                ZeroShaPayload::ReconstructSharesBatch(bytes)
+            };
             let message = WrappedMessage::ZeroSha(ZeroShaMessage::new(
                 self.id,
                 ZeroShaMessageType::ReconstructMessage,
                 session_id,
-                ZeroShaPayload::Reconstruct(bytes),
+                payload,
             ));
             network.send(i, &bincode::serialize(&message)?).await?;
         }
@@ -315,22 +407,29 @@ where
     where
         N: Network + Send + Sync,
     {
-        let payload = match msg.payload {
-            ZeroShaPayload::Reconstruct(s) => s,
-            _ => return Err(ZeroShaError::Abort),
-        };
         if msg.session_id.sub_id() != 0 {
             return Err(ZeroShaError::SessionIdError(msg.session_id));
         }
 
-        let share: ShamirShare<F, 1, Robust> =
-            ark_serialize::CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-        // degree is 2t
-        if share.degree != 2 * self.threshold {
-            return Err(ZeroShaError::ShareError(ShareError::DegreeMismatch));
-        }
-        if share.id != msg.sender_id {
-            return Err(ZeroShaError::ShareError(ShareError::IdMismatch));
+        let shares: Vec<ShamirShare<F, 1, Robust>> = match msg.payload {
+            ZeroShaPayload::Reconstruct(payload) => {
+                vec![CanonicalDeserialize::deserialize_compressed(
+                    payload.as_slice(),
+                )?]
+            }
+            ZeroShaPayload::ReconstructSharesBatch(payload) => {
+                deser_bounded_vec(&mut payload.as_slice(), payload.len())?
+            }
+            _ => return Err(ZeroShaError::Abort),
+        };
+        for share in &shares {
+            // degree is 2t
+            if share.degree != 2 * self.threshold {
+                return Err(ZeroShaError::ShareError(ShareError::DegreeMismatch));
+            }
+            if share.id != msg.sender_id {
+                return Err(ZeroShaError::ShareError(ShareError::IdMismatch));
+            }
         }
 
         let binding = self.get_or_create_store(msg.session_id).await?;
@@ -338,22 +437,41 @@ where
         if store.state == ZeroShaState::Finished {
             return Ok(());
         }
+        if store.received_r_shares.is_empty() {
+            store.batch_size = shares.len();
+        } else if store.batch_size != shares.len() {
+            return Err(ZeroShaError::Abort);
+        }
         store.state = ZeroShaState::Reconstruction;
-        store.received_r_shares.insert(msg.sender_id, share);
+        store.received_r_shares.insert(msg.sender_id, shares);
 
         if self.id < 2 * self.threshold && store.received_r_shares.len() >= self.n_parties {
-            let shares: Vec<ShamirShare<F, 1, Robust>> =
-                store.received_r_shares.values().cloned().collect();
+            let batch_size = store.batch_size;
+            let mut shares_by_batch =
+                vec![Vec::with_capacity(store.received_r_shares.len()); batch_size];
+            for sender_shares in store.received_r_shares.values() {
+                for (batch_index, share) in sender_shares.iter().cloned().enumerate() {
+                    shares_by_batch[batch_index].push(share);
+                }
+            }
             drop(store);
 
-            let ok: bool;
-            // recover at degree 2t AND check secret is zero
-            match RobustShare::recover_secret(&shares, self.n_parties, self.threshold) {
-                Ok(r) => {
-                    let poly = DensePolynomial::from_coefficients_slice(&r.0);
-                    ok = poly.degree() == 2 * self.threshold && r.1.is_zero();
+            let mut ok = true;
+            // recover at degree 2t AND check secret is zero, for every batch item
+            for shares in shares_by_batch {
+                match RobustShare::recover_secret(&shares, self.n_parties, self.threshold) {
+                    Ok(r) => {
+                        let poly = DensePolynomial::from_coefficients_slice(&r.0);
+                        if !(poly.degree() == 2 * self.threshold && r.1.is_zero()) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
                 }
-                Err(_) => ok = false,
             }
 
             let result = ZeroShaMessage::new(

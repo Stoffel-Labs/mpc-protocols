@@ -2,7 +2,6 @@ use crate::common::utils::deser_bounded_vec;
 use crate::common::{ProtocolSessionId, RBC};
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
 use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitStorage};
-use crate::honeybadger::mul::concat_sorted;
 use crate::honeybadger::mul::multiplication::Multiply;
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::triple_gen::ShamirBeaverTriple;
@@ -185,12 +184,9 @@ where
                 return Ok(false);
             };
 
-            let batch_size = a_share_array.len() / (self.threshold + 1);
-            if storage.output_open.len() != batch_size {
+            let Some(a_square_array) = storage.output_open.clone() else {
                 return Ok(false);
-            }
-
-            let a_square_array: Vec<F> = concat_sorted(&storage.output_open);
+            };
             (a_share_array, a_square_array)
         };
 
@@ -278,16 +274,11 @@ where
 
         tracing::info!("Multiplication at Rand_bit done: {0:?}", self.id);
 
-        for (i, chunk) in a_square_share.chunks(self.threshold + 1).enumerate() {
-            let session_id_batch = SessionId::new(
-                session_id.calling_protocol().unwrap(),
-                SessionId::pack_slot(session_id.exec_id(), i as u8, 0),
-                session_id.instance_id(),
-            );
-            self.batch_recon
-                .init_batch_reconstruct(chunk, session_id_batch, network.clone())
-                .await?;
-        }
+        // One combined batch-recon round for all chunks, instead of one round
+        // per (t+1)-sized chunk — round count is now independent of batch size.
+        self.batch_recon
+            .init_batch_reconstruct_many(&a_square_share, session_id, network.clone())
+            .await?;
 
         Ok(())
     }
@@ -302,41 +293,27 @@ where
             self.id
         );
 
-        let calling_proto = match sid.calling_protocol() {
-            Some(proto) => proto,
-            None => {
-                return Err(RandBitError::NoSuchSessionId(sid));
-            }
-        };
+        // One combined batch-recon round now, so `sid` is already the
+        // session `init` was called with.
+        let open: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), payload.len())?;
 
-        let session_id = SessionId::new(
-            calling_proto,
-            SessionId::pack_slot(sid.exec_id(), 0, 0),
-            sid.instance_id(),
-        );
-        let storage_bind = self.get_or_create_storage(session_id, self.id).await?;
+        let storage_bind = self.get_or_create_storage(sid, self.id).await?;
         let mut storage = storage_bind.lock().await;
         if storage.protocol_state == ProtocolState::Finished {
             return Ok(());
         }
-
-        let open: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), self.n_parties)?;
-        let dealer_id = sid.sub_id();
-        if storage.output_open.contains_key(&dealer_id) {
-            return Err(RandBitError::Duplicate(format!(
-                "Already received for {}",
-                dealer_id
-            )));
+        if storage.output_open.is_some() {
+            return Err(RandBitError::Duplicate("already received".to_string()));
         }
-        storage.output_open.insert(dealer_id, open);
+        storage.output_open = Some(open);
         // If not initialized, data is stored but can't finalize yet.
         // init() will check for stored data and finalize if ready.
         if storage.a_share.is_none() {
             return Ok(());
         }
         drop(storage);
-        let _done = self.try_finalize(session_id).await?;
-        return Ok(());
+        let _done = self.try_finalize(sid).await?;
+        Ok(())
     }
 }
 

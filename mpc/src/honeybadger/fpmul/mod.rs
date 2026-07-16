@@ -90,7 +90,9 @@ where
     pub protocol_output: Option<Vec<RobustShare<F>>>,
     /// Share of `a`
     pub a_share: Option<Vec<RobustShare<F>>>,
-    pub output_open: HashMap<u8, Vec<F>>,
+    /// Opened `a^2` values, in input order — delivered as one combined
+    /// batch-recon reveal (`init_batch_reconstruct_many`), not per-chunk.
+    pub output_open: Option<Vec<F>>,
     pub output_sender: Option<Sender<Vec<RobustShare<F>>>>,
     pub output_receiver: Option<Receiver<Vec<RobustShare<F>>>>,
 }
@@ -105,7 +107,7 @@ where
             protocol_state: ProtocolState::NotInitialized,
             protocol_output: None,
             a_share: None,
-            output_open: HashMap::new(),
+            output_open: None,
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
         }
@@ -208,7 +210,9 @@ pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
     pub batch_size: Option<usize>,
     /// Messages that arrived before batch_size/r_t_bound were set; reprocessed once initialized.
     pub pending_riss_messages: Vec<PRandBitDMessage>,
-    pub output_open: HashMap<u8, Vec<F>>,
+    /// Opened `[r+b]` values, in input order — delivered as one combined
+    /// batch-recon reveal (`init_batch_reconstruct_many`), not per-chunk.
+    pub output_open: Option<Vec<F>>,
     pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<BigUint>>>, // tset -> {sender -> val}
     pub r_t: HashMap<Vec<usize>, Vec<BigUint>>,
     pub no_of_tsets: Option<usize>,
@@ -234,7 +238,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
         Self {
             batch_size: None,
             pending_riss_messages: Vec::new(),
-            output_open: HashMap::new(),
+            output_open: None,
             riss_shares: HashMap::new(),
             r_t: HashMap::new(),
             no_of_tsets: None,
