@@ -19,13 +19,16 @@ pub mod double_share;
 /// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
 pub mod triple_gen;
 
+pub mod bitwise;
 pub mod fpdiv;
 pub mod fpmul;
 pub mod input;
 pub mod mul;
+pub mod mul_pub;
 pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
+pub mod zero_share;
 
 use crate::{
     common::{
@@ -956,6 +959,7 @@ where
                     .process(prand_message, net)
                     .await?;
             }
+            WrappedMessage::ZeroSha(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
         }
@@ -2174,6 +2178,7 @@ pub enum WrappedMessage {
     Dousha(DouShaMessage),
     Output(OutputMessage),
     PRandBitD(PRandBitDMessage),
+    ZeroSha(zero_share::ZeroShaMessage),
 }
 
 impl WrappedMessage {
@@ -2208,6 +2213,16 @@ pub enum ProtocolType {
     RanShaSmallField = 16,
     RanDouShaSmallField = 17,
     DouShaSmallField = 18,
+    ZeroSha = 19,
+    PreMulCOff = 20,
+    FpDiv = 21,
+    PreBitMul = 22,
+    PreBitMul1 = 23,
+    PreBitMul2 = 24,
+    SufOr = 25,
+    FpDivTrunc = 26,
+    FpDivMulA = 27,
+    FpDivMulB = 28,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -2238,6 +2253,16 @@ impl ProtocolTag for ProtocolType {
             16 => Some(Self::RanShaSmallField),
             17 => Some(Self::RanDouShaSmallField),
             18 => Some(Self::DouShaSmallField),
+            19 => Some(Self::ZeroSha),
+            20 => Some(Self::PreMulCOff),
+            21 => Some(Self::FpDiv),
+            22 => Some(Self::PreBitMul),
+            23 => Some(Self::PreBitMul1),
+            24 => Some(Self::PreBitMul2),
+            25 => Some(Self::SufOr),
+            26 => Some(Self::FpDivTrunc),
+            27 => Some(Self::FpDivMulA),
+            28 => Some(Self::FpDivMulB),
             _ => None,
         }
     }

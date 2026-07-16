@@ -304,7 +304,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 
         let session_id = SessionId::new(
             calling_proto,
-            SessionId::pack_slot(session.exec_id(), self.id as u8, 0),
+            SessionId::pack_slot(session.exec_id(), self.id as u8, session.round_id()),
             session.instance_id(),
         );
         self.rbc
@@ -324,9 +324,9 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             "TruncPr open handler"
         );
 
-        if msg.session_id.sub_id() != 0 || msg.session_id.round_id() != 0 {
+        if msg.session_id.sub_id() != 0 {
             error!(
-                "Wrong session. Sub ID or Round ID is not zero. Session ID: {:?}",
+                "Wrong session. Sub ID is not zero. Session ID: {:?}",
                 msg.session_id
             );
             return Err(TruncPrError::SessionIdError(msg.session_id));
