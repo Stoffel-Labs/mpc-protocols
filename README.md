@@ -1,16 +1,21 @@
 # 🚀 Stoffel MPC Protocols
 
-This repository provides a fully-asynchronous, robust collection of MPC (Multi-Party Computation) protocols designed to run inside the [**StoffelVM**](https://github.com/Stoffel-Labs/StoffelVM) runtime and the[ **StoffelNet**](https://github.com/Stoffel-Labs/Stoffel) networking layer. However, it can also be used independently.
+This repository provides a fully-asynchronous, robust collection of MPC (Multi-Party Computation) protocols designed to run inside the [**StoffelVM**](https://github.com/Stoffel-Labs/StoffelVM) runtime and the [**StoffelNet**](https://github.com/Stoffel-Labs/stoffel-networking) networking layer. However, it can also be used independently.
 
 The repository is designed as a **general-purpose foundation for hosting multiple MPC protocol families** that share common networking, preprocessing, and arithmetic components.
 This repository is intended to serve as a **collection of MPC protocols**, not a single fixed construction.
 
-At present, **HoneyBadgerMPC** is the only fully integrated end-to-end MPC protocol. However, the architecture is deliberately modular so that additional MPC protocols can be added over time without rewriting core components.
+At present it contains two end-to-end protocol families:
+
+- **HoneyBadgerMPC** — orchestrated by `HoneyBadgerMPCNode`
+- **AVSS-based MPC** — orchestrated by `AvssMPCNode`, built on asynchronous verifiable secret sharing with Feldman shares.
+
+The architecture is deliberately modular so that additional MPC protocols can be added over time without rewriting core components.
 
 Key design goals:
 
 - **Protocol-agnostic networking** via the `Network` trait
-- **Reusable common sub-protocols** (rbc,secret sharing,etc)
+- **Reusable common sub-protocols** (RBC, secret sharing, etc.)
 - **Shared arithmetic layers** (field, fixed-point, integer)
 - **Explicit protocol routing** via compact `SessionId`s
 
@@ -31,33 +36,57 @@ The core engine is built around the `HoneyBadgerMPCNode`, which orchestrates all
 | Preprocessing | Beaver Triple Generation | ✔ Implemented |
 | Preprocessing | Random Bit / PRandBit / PRandInt | ✔ Implemented |
 | Arithmetic | Secure Beaver Multiplication | ✔ Implemented |
-| Arithmetic | Fixed-Point Mul / DivWithConst / Trunc | ✔ Implemented |
+| Arithmetic | Fixed-Point Mul / DivWithConst / TruncPr | ✔ Implemented |
 | I/O | Distributed Input / Output (via RBC) | ✔ Implemented |
 | Reconstruction | Robust Interpolation | ✔ Implemented |
 | Reconstruction | Batch Reconstruction | ✔ Implemented |
+| Common | Reliable Broadcast (Bracha, AVID) | ✔ Implemented |
 | Complete MPC | HoneyBadgerMPC Core | ✔ Implemented |
+| Complete MPC | AVSS-based MPC (share gen, triples, mul, I/O) | ✔ Implemented |
+
+Small-field arithmetic is also supported (GF(256) and the Goldilocks field) for preprocessing material over small fields.
 
 ---
 
-### 📦 Crate Structure
+### 📦 Workspace Structure
 
-`mod.rs` exposes the following modules:
+The workspace contains two crates: **`stoffelcrypto`** (the MPC protocols, in `mpc/`) and **`stoffelmpc-network`** (test network implementations, in `network/`).
 
 ```
-robust_interpolate/       # RS-based robust interpolation (HBMPC Fig.1)
-batch_recon/              # Batch reconstruction (HBMPC Fig.2)
-ran_dou_sha/              # Random double sharing (HBMPC Fig.3)
-share_gen/                # Random share generation
-double_share/             # Basic double-share generation
-triple_gen/               # Beaver triple generator
-fpmul/                    # Fixed-point arithmetic protocols
-input/, output/           # MPC I/O protocols via RBC
-mul/                      # Secure Beaver multiplication
-preprocessing/            # Preprocessing store management
-share_gen/                # Random Shamir share generation
+mpc-protocols/
+├── Cargo.toml                  # Workspace definition
+├── mpc/                        # `stoffelcrypto` crate
+│   ├── src/
+│   │   ├── common/             # Protocol-agnostic building blocks
+│   │   │   ├── rbc/            # Reliable broadcast (Bracha, AVID)
+│   │   │   ├── share/          # Shamir, Feldman, and AVSS secret sharing
+│   │   │   ├── acss/           # Pedersen polynomial commitments
+│   │   │   ├── math/           # Extra fields (Goldilocks)
+│   │   │   └── types/          # Fixed-point and integer types
+│   │   ├── honeybadger/        # HoneyBadgerMPC protocol family
+│   │   │   ├── robust_interpolate/ # RS-based robust interpolation (HBMPC Fig.1)
+│   │   │   ├── batch_recon/    # Batch reconstruction (HBMPC Fig.2)
+│   │   │   ├── ran_dou_sha/    # Random double sharing (HBMPC Fig.3)
+│   │   │   ├── share_gen/      # Random Shamir share generation
+│   │   │   ├── double_share/   # Basic double-share generation
+│   │   │   ├── triple_gen/     # Beaver triple generator
+│   │   │   ├── mul/            # Secure Beaver multiplication
+│   │   │   ├── fpmul/          # Fixed-point mul, truncation, RandBit/PRandBitD, GF(256)
+│   │   │   ├── fpdiv/          # Fixed-point division by a public constant
+│   │   │   ├── input/, output/ # MPC I/O protocols via RBC
+│   │   │   └── preprocessing.rs # Preprocessing material store
+│   │   ├── avss_mpc/           # AVSS-based MPC protocol family
+│   │   │   └── share_gen/, triple_gen/, mul/, input/, output/
+│   │   └── ffi/                # C FFI bindings for the language SDKs
+│   ├── tests/                  # End-to-end integration tests
+│   └── benches/                # Criterion benchmarks
+└── network/                    # `stoffelmpc-network` crate
+    └── src/
+        ├── fake_network.rs     # In-memory network for deterministic tests
+        └── turmoil_network.rs  # turmoil-based network simulation
 ```
 
-All modules plug into:
+All HoneyBadger modules plug into:
 
 #### `HoneyBadgerMPCNode<F, R>`
 A node capable of:
@@ -65,6 +94,8 @@ A node capable of:
 - Performing secure arithmetic operations
 - Handling RBC-based input and output
 - Routing messages using compact `SessionId` fields
+
+The AVSS modules plug into the analogous `AvssMPCNode<F, R, G>`, which works over Feldman/AVSS shares on a curve group `G`.
 
 ### ⏱️ Offline Phase, Abort Semantics, and Timeouts
 
@@ -75,9 +106,7 @@ Typical failure conditions include:
 - Network message loss or delays
 - RBC or subprotocols failing to terminate
 
-⚠️ **Important:**  
-The preprocessing protocols **do not internally enforce timeouts**.  If a required message or share never arrives, the protocol may wait indefinitely. As a result, **timeout handling is the responsibility of the caller**. Preprocessing should always be wrapped in **external timeout logic**, with retry or abort behavior defined by the application.
-
+Node-level operations wait for subprotocol results using the **configurable timeout** in `HoneyBadgerMPCNodeOpts` (see `timeout: Duration`, adjustable via `set_timeout`). If a required message or share never arrives, the operation fails with a timeout error instead of hanging indefinitely. **Retry and abort policy remains the responsibility of the caller** — the application decides whether to restart a failed preprocessing run.
 
 ---
 
@@ -95,47 +124,84 @@ Running MPC requires:
 
 ### ▶ Minimal Example: Running a 4-Party Secure Multiplication
 
-Replace `FakeNetwork` with any `Network` implementation (FakeNetwork, StoffelNet, etc.):
+Replace `FakeNetwork` with any `Network` implementation (FakeNetwork, StoffelNet, etc.). The helpers used below (`test_setup`, `create_global_nodes`, `construct_e2e_input_mul`, `receive`) live in [`mpc/tests/utils/test_utils.rs`](mpc/tests/utils/test_utils.rs).
 
 ```rust
+use ark_bls12_381::Fr;
+use ark_ff::UniformRand;
+use ark_std::test_rng;
+use std::time::Duration;
+use stoffelcrypto::common::{rbc::rbc::Avid, MPCProtocol, SecretSharingScheme};
+use stoffelcrypto::honeybadger::{
+    robust_interpolate::robust_interpolate::RobustShare, SessionId,
+};
+use stoffelmpc_network::fake_network::FakeNetwork;
+
 #[tokio::test]
 async fn test_mul() {
-    let n = 4;
+    let n_parties = 4;
     let t = 1;
+    let no_of_multiplications = 1;
     let mut rng = test_rng();
 
-    // ---------------- Network ----------------
-    let config = FakeNetworkConfig::new(500);
-    let (network, receivers, _) = FakeNetwork::new(n, Some(vec![]), config);
-    let network: Arc<FakeNetwork> = Arc::new(network);
+    // ---------------- Network (one handle per party) ----------------
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+
+    // ---------------- Preprocessing: Beaver triples ----------------
+    let (_, triples) = construct_e2e_input_mul(n_parties, no_of_multiplications, t);
 
     // ---------------- Inputs ----------------
     let x = Fr::rand(&mut rng);
     let y = Fr::rand(&mut rng);
-
-    let xs = RobustShare::compute_shares(x, n, t, None, &mut rng).unwrap();
-    let ys = RobustShare::compute_shares(y, n, t, None, &mut rng).unwrap();
+    let xs = RobustShare::compute_shares(x, n_parties, t, None, &mut rng).unwrap();
+    let ys = RobustShare::compute_shares(y, n_parties, t, None, &mut rng).unwrap();
 
     // ---------------- Nodes ----------------
-   let nodes = create_global_nodes::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(
-        n, t, 2,   //No of beaver triples needed, 2 in this case for one multiplication
-        111, //Instance-ID
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,                       // n_triples (preprocessing target)
+        0,                       // n_random_shares
+        111,                     // instance id
+        0,                       // n_prandbit
+        0,                       // n_prandint
+        0,                       // l: fixed-point bit size
+        0,                       // k: security parameter
+        Duration::from_secs(30), // per-operation timeout
+        vec![],                  // client ids for input
     );
 
-    // ---------------- Process messages ----------------
-    receive::<Fr, Avid, RobustShare<Fr>, FakeNetwork>(receivers, nodes.clone(), network.clone());
+    // ---------------- Spawn message-processing loops ----------------
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    // ---------------- Load triples into each node's store ----------------
+    for pid in 0..n_parties {
+        nodes[pid].preprocessing_material.lock().await.add(
+            Some(triples[pid].clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
 
     // ---------------- Run MPC ----------------
-    let handles: Vec<_> = (0..n)
+    let handles: Vec<_> = (0..n_parties)
         .map(|pid| {
             let mut node = nodes[pid].clone();
-            let net = network.clone();
+            let net = network[pid].clone();
             let x = vec![xs[pid].clone()];
             let y = vec![ys[pid].clone()];
 
             tokio::spawn(async move {
                 let shares = node.mul(x, y, net).await.expect("mul failed");
-                return shares[0].clone();
+                shares[0].clone()
             })
         })
         .collect();
@@ -147,64 +213,12 @@ async fn test_mul() {
         .collect();
 
     // ---------------- Collect & Check ----------------
-
-    let (_, z) = RobustShare::recover_secret(&shares[..=2 * t], n, t).unwrap();
+    let (_, z) = RobustShare::recover_secret(&shares[..=2 * t], n_parties, t).unwrap();
     assert_eq!(z, x * y);
 }
-
-
-pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
-    n_parties: usize,
-    t: usize,
-    n_triples: usize,
-    instance_id: u32,
-) -> Vec<HoneyBadgerMPCNode<F, R>>
-where
-    N: Network + Send + Sync + 'static,
-    S: SecretSharingScheme<F>,
-    HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts>,
-{
-    let parameters =
-        HoneyBadgerMPCNodeOpts::new(n_parties, t, n_triples, 0, instance_id, 0, 0, 0, 0).unwrap();
-    (0..n_parties)
-        .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), vec![]).unwrap())
-        .collect()
-}
-
-pub fn receive<F, R, S, N>(
-    mut receivers: Vec<Receiver<Vec<u8>>>,
-    mut nodes: Vec<HoneyBadgerMPCNode<F, R>>,
-    net: Arc<N>,
-) where
-    F: PrimeField,
-    R: RBC + 'static,
-    N: Network + Send + Sync + 'static,
-    S: SecretSharingScheme<F>,
-    HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N>,
-{
-    assert_eq!(
-        receivers.len(),
-        nodes.len(),
-        "Each node must have a receiver"
-    );
-
-    for i in 0..receivers.len() {
-        let mut rx = receivers.remove(0);
-        let mut node = nodes.remove(0);
-        let net_clone = net.clone();
-
-        tokio::spawn(async move {
-            while let Some(raw_msg) = rx.recv().await {
-                if let Err(e) = node.process(raw_msg, net_clone.clone()).await {
-                    tracing::error!("Node {i} failed to process message: {e:?}");
-                }
-            }
-            tracing::info!("Receiver task for node {i} ended");
-        });
-    }
-}
 ```
-For more examples check out the tests.
+
+For more examples check out the tests (e.g. [`mpc/tests/node_test.rs`](mpc/tests/node_test.rs) for node-level end-to-end flows, and [`mpc/tests/avss_mpc_test.rs`](mpc/tests/avss_mpc_test.rs) for the AVSS-based protocol).
 
 ---
 
@@ -215,9 +229,14 @@ For more examples check out the tests.
 cargo test
 ```
 
+### Run tests for the MPC crate only:
+```bash
+cargo test -p stoffelcrypto
+```
+
 ### Run a specific test:
 ```bash
-cargo test test_session_id
+cargo test -p stoffelcrypto mul_e2e
 ```
 
 ### See logs:
@@ -225,23 +244,30 @@ cargo test test_session_id
 RUST_LOG=info cargo test -- --nocapture
 ```
 
+### Run benchmarks:
+```bash
+cargo bench -p stoffelcrypto
+```
+
 ---
 
 ### 🔌 Running Preprocessing
 
 ```rust
-let mut rng = StdRng::from_entropy();
+let mut rng = StdRng::from_rng(OsRng).unwrap();
 node.run_preprocessing(net.clone(), &mut rng).await?;
 ```
 
-This generates:
+This fills the node's preprocessing store with:
 
-- Random Shamir shares  
-- Double shares  
-- Random double shares  
-- Beaver triples  
-- PRandBit outputs  
-- PRandInt outputs  
+- Random Shamir shares (optionally over a small field)
+- Beaver triples (optionally over a small field)
+- PRandBit outputs
+- PRandInt outputs
+
+Double shares and random double shares are generated and consumed internally during triple generation.
+
+The amounts are controlled by `HoneyBadgerMPCNodeOpts` (`n_triples`, `n_random_shares`, `n_prandbit`, `n_prandint`).
 
 ---
 
