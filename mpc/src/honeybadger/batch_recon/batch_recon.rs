@@ -97,24 +97,6 @@ impl<F: FftField> BatchReconNode<F> {
         Ok(store_lock.secrets.clone().unwrap())
     }
 
-    pub async fn get_typed_store(&self, session_id: SessionId) -> Result<Vec<F>, BatchReconError> {
-        let store = self.store.lock().await;
-
-        let (_, output_arc) = store.get(&session_id).ok_or_else(|| {
-            BatchReconError::InvalidInput("Session ID does not exist".to_string())
-        })?;
-
-        let store_lock = output_arc.lock().await;
-
-        if store_lock.typed_secrets.is_none() {
-            return Err(BatchReconError::InvalidInput(
-                "Batch reconstruction has not terminated".to_string(),
-            ));
-        }
-
-        Ok(store_lock.typed_secrets.clone().unwrap())
-    }
-
     /// Initiates the batch reconstruction protocol for a given node.
     ///
     /// Each party computes its `y_j_share` for all `j` and sends it to party `P_j`.
@@ -328,7 +310,6 @@ impl<F: FftField> BatchReconNode<F> {
                             result.serialize_compressed(&mut bytes_message)?;
 
                             store.secrets = Some(bytes_message);
-                            store.typed_secrets = Some(result);
                             drop(store);
                             info!(self_id = self.id, "Secrets successfully reconstructed");
 
@@ -489,7 +470,6 @@ impl<F: FftField> BatchReconNode<F> {
                     result.serialize_compressed(&mut bytes_message)?;
 
                     store.secrets = Some(bytes_message);
-                    store.typed_secrets = Some(result);
                     drop(store);
 
                     self.output_sender

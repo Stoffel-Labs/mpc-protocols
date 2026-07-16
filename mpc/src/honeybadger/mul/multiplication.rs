@@ -257,7 +257,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                     }
                 }
             };
-            let output = match self.batch_recon.get_typed_store(id).await {
+            let output = match self.batch_recon.get_store(id).await {
                 Ok(output) => output,
                 Err(BatchReconError::InvalidInput(msg)) if msg.contains("does not exist") => {
                     warn!(
@@ -268,7 +268,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 }
                 Err(e) => return Err(e.into()),
             };
-            match self.open_mult_batch_handler(self.id, id, output).await {
+            match self.open_mult_handler(self.id, id, output).await {
                 Ok(()) => {}
                 Err(e) => {
                     return Err(e);
@@ -536,8 +536,32 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
                 &mut payload.as_slice(),
                 crate::honeybadger::max_mul_pairs_per_session(self.t),
             )?;
-            drop(storage);
-            return self.open_mult_batch_handler(sender, sid, open).await;
+            let dealer_id = sid.sub_id();
+            let (target_map, label) = if dealer_id % 2 == 0 {
+                (&mut storage.output_open_mult1, "a-x")
+            } else {
+                (&mut storage.output_open_mult2, "b-y")
+            };
+
+            // Late/duplicate batch-recon delivery: the opened values are final, so a duplicate
+            // cannot change the reconstructed result. Ignore it instead of erroring.
+            if target_map.contains_key(&dealer_id) {
+                warn!(
+                    self_id = self.id,
+                    dealer_id, "ignoring duplicate batch-recon opening in open_mult_handler"
+                );
+                return Ok(());
+            }
+
+            info!(
+                self_id = self.id,
+                "Received opened {} values for session_id: {:?} and round {:?}",
+                label,
+                session_id,
+                dealer_id
+            );
+
+            target_map.insert(dealer_id, open);
         } else if sid.round_id() == 2 {
             info!(
                 self_id = self.id,
@@ -610,89 +634,6 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         // 6.
-        let shares_mult = finalize_mul(&storage)?;
-
-        storage.protocol_state = MultProtocolState::Finished;
-        if let Some(sender) = storage.output_sender.take() {
-            let _ = sender.send(shares_mult);
-        }
-        info!("Multiplication completed at node {}", self.id);
-
-        Ok(())
-    }
-
-    async fn open_mult_batch_handler(
-        &self,
-        sender: usize,
-        sid: SessionId,
-        open: Vec<F>,
-    ) -> Result<(), MulError> {
-        let calling_proto = match sid.calling_protocol() {
-            Some(proto) => proto,
-            None => {
-                return Err(MulError::InvalidInput(format!(
-                    "Unknown calling protocol in session ID {:?}",
-                    sid
-                )));
-            }
-        };
-
-        let session_id = SessionId::new(
-            calling_proto,
-            SessionId::pack_slot(sid.exec_id(), 0, 0),
-            sid.instance_id(),
-        );
-
-        let storage_bind = self.get_or_create_mult_storage(session_id, sender).await?;
-        let mut storage = storage_bind.lock().await;
-
-        if storage.protocol_state == MultProtocolState::Finished {
-            return Ok(());
-        }
-
-        let dealer_id = sid.sub_id();
-        let (target_map, label) = if dealer_id % 2 == 0 {
-            (&mut storage.output_open_mult1, "a-x")
-        } else {
-            (&mut storage.output_open_mult2, "b-y")
-        };
-
-        // Late/duplicate batch-recon delivery: the opened values are final, so a duplicate
-        // cannot change the reconstructed result. Ignore it instead of erroring.
-        if target_map.contains_key(&dealer_id) {
-            warn!(
-                self_id = self.id,
-                dealer_id, "ignoring duplicate batch-recon opening in open_mult_handler"
-            );
-            return Ok(());
-        }
-
-        info!(
-            self_id = self.id,
-            "Received opened {} values for session_id: {:?} and round {:?}",
-            label,
-            session_id,
-            dealer_id
-        );
-
-        target_map.insert(dealer_id, open);
-
-        let Some(no_of_mul) = storage.no_of_mul else {
-            // init not called yet: buffer-only mode
-            return Ok(());
-        };
-        let no_of_batch = no_of_mul / (self.t + 1);
-
-        // With batched batch-recon, completion needs the single a-x result (dealer 0) and the
-        // single b-y result (dealer 1). When there are no full chunks, this handler should not be
-        // needed because all values come through RBC.
-        let batch_done = no_of_batch == 0
-            || (storage.output_open_mult1.contains_key(&0u8)
-                && storage.output_open_mult2.contains_key(&1u8));
-        if !batch_done || storage.openings.is_none() {
-            return Ok(());
-        }
-
         let shares_mult = finalize_mul(&storage)?;
 
         storage.protocol_state = MultProtocolState::Finished;

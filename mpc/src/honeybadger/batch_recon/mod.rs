@@ -55,7 +55,6 @@ pub struct BatchReconStore<F: FftField> {
     pub y_j: Option<RobustShare<F>>, // The interpolated y_j value for this node's index
     pub y_j_batch: Option<Vec<F>>,
     pub secrets: Option<Vec<u8>>, // The finally reconstructed original secrets (polynomial coefficients)
-    pub typed_secrets: Option<Vec<F>>,
 }
 
 impl<F: FftField> BatchReconStore<F> {
@@ -68,7 +67,6 @@ impl<F: FftField> BatchReconStore<F> {
             y_j: None,
             y_j_batch: None,
             secrets: None,
-            typed_secrets: None,
         }
     }
 }
