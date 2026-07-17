@@ -28,7 +28,7 @@ pub mod preprocessing;
 pub mod share_gen;
 
 use crate::{
-    avss_mpc::AvssSessionId,
+    avss_mpc::{self, AvssSessionId},
     common::{
         aba::{bv_bc::BvBroadcastMessage, TaggedMessage},
         math::goldilocks::GoldilocksField,
@@ -661,6 +661,30 @@ where
             .deserialize(&raw_msg)?;
 
         match wrapped {
+            WrappedMessage::BvBroadcast(msg) => {
+                if sender_id != msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+
+                if msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        msg.session_id.instance_id(),
+                    ));
+                }
+
+                match msg.session_id.calling_protocol() {
+                    Some(avss_mpc::ProtocolType::Resharing) => {
+                        todo!("call the process function on the BV-Broadcast node inside the resharing node");
+                        todo!("call drain function on the resharing node");
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in BV-Broadcast",
+                            msg.session_id
+                        );
+                    }
+                }
+            }
             WrappedMessage::Rbc(rbc_msg) => {
                 if sender_id != rbc_msg.sender_id {
                     return Err(HoneyBadgerError::InvalidPartyId);
@@ -2211,6 +2235,7 @@ pub enum ProtocolType {
     RanShaSmallField = 16,
     RanDouShaSmallField = 17,
     DouShaSmallField = 18,
+    Resharing = 19,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -2241,6 +2266,7 @@ impl ProtocolTag for ProtocolType {
             16 => Some(Self::RanShaSmallField),
             17 => Some(Self::RanDouShaSmallField),
             18 => Some(Self::DouShaSmallField),
+            19 => Some(Self::Resharing),
             _ => None,
         }
     }

@@ -771,6 +771,7 @@ pub enum ProtocolType {
     Mul = 4,
     Input = 5,
     Output = 6,
+    Resharing = 7,
 }
 
 impl ProtocolTag for ProtocolType {
