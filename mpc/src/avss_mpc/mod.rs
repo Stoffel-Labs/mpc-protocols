@@ -301,8 +301,6 @@ pub struct AvssMPCNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub id: PartyId,
     /// Preprocessing material used in the protocol execution.
     pub preprocessing_material: Arc<Mutex<AvssMPCNodePreprocMaterial<F, G>>>,
-    /// Serializes pool replenishment and reservation across cloned node handles.
-    pub preprocessing_lock: Arc<Mutex<()>>,
     // Preprocessing parameters.
     pub params: AvssMPCNodeOpts<F, G>,
     pub share_gen_avss: RanShaAvssNode<F, R, G>,
@@ -404,7 +402,6 @@ where
         Ok(Self {
             id,
             preprocessing_material: Arc::new(Mutex::new(AvssMPCNodePreprocMaterial::empty())),
-            preprocessing_lock: Arc::new(Mutex::new(())),
             params,
             share_gen_avss,
             triple_gen,
@@ -507,11 +504,6 @@ where
             ));
         }
 
-        // Cloned node handles share the preprocessing pool. Keep the availability
-        // check, replenishment, and reservation atomic with respect to each other.
-        let preprocessing_lock = self.preprocessing_lock.clone();
-        let _reservation = preprocessing_lock.lock().await;
-
         let (no_triples, _) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
@@ -530,7 +522,6 @@ where
             .lock()
             .await
             .take_triples(x.len())?;
-        drop(_reservation);
 
         let mut output = Vec::with_capacity(x.len());
         for ((x_batch, y_batch), triple_batch) in x
@@ -564,8 +555,6 @@ where
 
     /// Generates a random element.
     async fn rand(&mut self, network: Arc<N>) -> Result<FeldmanShamirShare<F, G>, Self::Error> {
-        let preprocessing_lock = self.preprocessing_lock.clone();
-        let _reservation = preprocessing_lock.lock().await;
         let no_rand = {
             let store = self.preprocessing_material.lock().await;
             store.len()
@@ -581,7 +570,6 @@ where
             .lock()
             .await
             .take_v_random_shares(1)?;
-        drop(_reservation);
         Ok(rand_value[0].clone())
     }
 }
