@@ -198,7 +198,7 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreBitLTNode<F, R> {
         // Protocol 11 line 9 (replacing Mod2D(local_product) with Mul+Mod2):
         //   [m_i] = Mul([s_i], [p_inv_{i+1}])  via Beaver triples → degree-t
         let mul_session = SessionId::new(
-            ProtocolType::PreBitMul,
+            ProtocolType::PreBitMul3,
             SessionId::pack_slot(session.exec_id(), 0, 0),
             session.instance_id(),
         );

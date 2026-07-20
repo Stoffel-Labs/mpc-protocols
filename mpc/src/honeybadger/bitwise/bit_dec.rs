@@ -105,7 +105,15 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> BitDecNode<F, R> {
         let m = k - 1;
         let prefix = self
             .pre_mod2m
-            .init(a.clone(), k, m, prep, session, Arc::clone(&network), duration)
+            .init(
+                a.clone(),
+                k,
+                m,
+                prep,
+                session,
+                Arc::clone(&network),
+                duration,
+            )
             .await?;
 
         // Step 2: extract individual bits by local arithmetic.

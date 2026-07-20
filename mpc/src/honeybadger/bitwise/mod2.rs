@@ -332,9 +332,8 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
             );
 
             if id.round_id() == 1 {
-                let share_vals: Vec<F> = CanonicalDeserialize::deserialize_compressed(
-                    payload.as_slice(),
-                )?;
+                let share_vals: Vec<F> =
+                    CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
                 let store = self.get_or_create_batch_store(parent).await?;
                 let ready = {
                     let mut s = store.lock().await;

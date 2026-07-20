@@ -11,7 +11,9 @@ use ark_ff::{BigInteger, Field, PrimeField, UniformRand};
 use ark_std::test_rng;
 use std::sync::Arc;
 use stoffelcrypto::common::RBC;
-use stoffelcrypto::common::{rbc::rbc::Avid, ProtocolSessionId, SecretSharingScheme};
+use stoffelcrypto::common::{
+    rbc::rbc::Avid, types::fixed::FixedPointPrecision, ProtocolSessionId, SecretSharingScheme,
+};
 use stoffelcrypto::honeybadger::bitwise::app_rec::AppRecNode;
 use stoffelcrypto::honeybadger::bitwise::bit_dec::BitDecNode;
 use stoffelcrypto::honeybadger::bitwise::mod2::Mod2Node;
@@ -549,9 +551,8 @@ async fn suf_or_run(bit_vals: Vec<u64>) {
 
     let prep = make_premulc_prep(k, n, t);
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<SufOrNode<Fr, Avid<SessionId>>> = (0..n)
-        .map(|id| SufOrNode::new(id, n, t).unwrap())
-        .collect();
+    let nodes: Vec<SufOrNode<Fr, Avid<SessionId>>> =
+        (0..n).map(|id| SufOrNode::new(id, n, t).unwrap()).collect();
     let _recv = spawn_sufor_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut init_set = JoinSet::new();
@@ -826,7 +827,7 @@ fn spawn_prebitlt_receiver_tasks(
                     WrappedMessage::BatchRecon(msg) => {
                         let proto = msg.session_id.calling_protocol();
                         let round = msg.session_id.round_id();
-                        if proto == Some(ProtocolType::PreBitMul) {
+                        if proto == Some(ProtocolType::PreBitMul3) {
                             node.mul
                                 .batch_recon
                                 .process(msg, net.clone())
@@ -869,7 +870,7 @@ fn spawn_prebitlt_receiver_tasks(
                     WrappedMessage::Rbc(msg) => {
                         let proto = msg.session_id.calling_protocol();
                         let round = msg.session_id.round_id();
-                        if proto == Some(ProtocolType::PreBitMul) {
+                        if proto == Some(ProtocolType::PreBitMul3) {
                             node.mul
                                 .rbc
                                 .process(msg, net.clone())
@@ -1104,7 +1105,7 @@ fn spawn_premod2m_receiver_tasks(
                             node.drain_rbc_output()
                                 .await
                                 .expect("pre_mod2m drain_rbc_output failed");
-                        } else if proto == Some(ProtocolType::PreBitMul) {
+                        } else if proto == Some(ProtocolType::PreBitMul3) {
                             node.pre_bitlt
                                 .mul
                                 .rbc
@@ -1151,7 +1152,7 @@ fn spawn_premod2m_receiver_tasks(
                     WrappedMessage::BatchRecon(msg) => {
                         let proto = msg.session_id.calling_protocol();
                         let round = msg.session_id.round_id();
-                        if proto == Some(ProtocolType::PreBitMul) {
+                        if proto == Some(ProtocolType::PreBitMul3) {
                             node.pre_bitlt
                                 .mul
                                 .batch_recon
@@ -1223,8 +1224,7 @@ async fn pre_mod2m_run(a_val: u64, k: usize, m: usize, dp_bits: usize) {
     let nodes: Vec<PreMod2mNode<Fr, Avid<SessionId>>> = (0..n)
         .map(|id| PreMod2mNode::new(id, n, t).unwrap())
         .collect();
-    let _recv =
-        spawn_premod2m_receiver_tasks(n, receivers, nodes.clone(), network.clone());
+    let _recv = spawn_premod2m_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut init_set = JoinSet::new();
     for (i, p) in prep.into_iter().enumerate() {
@@ -1319,7 +1319,7 @@ fn spawn_bitdec_receiver_tasks(
                                 .drain_rbc_output()
                                 .await
                                 .expect("pre_mod2m drain_rbc_output failed");
-                        } else if proto == Some(ProtocolType::PreBitMul) {
+                        } else if proto == Some(ProtocolType::PreBitMul3) {
                             node.pre_mod2m
                                 .pre_bitlt
                                 .mul
@@ -1372,7 +1372,7 @@ fn spawn_bitdec_receiver_tasks(
                     WrappedMessage::BatchRecon(msg) => {
                         let proto = msg.session_id.calling_protocol();
                         let round = msg.session_id.round_id();
-                        if proto == Some(ProtocolType::PreBitMul) {
+                        if proto == Some(ProtocolType::PreBitMul3) {
                             node.pre_mod2m
                                 .pre_bitlt
                                 .mul
@@ -1455,8 +1455,7 @@ async fn bit_dec_run(u_bar: i128, k: usize, dp_bits: usize) {
     let nodes: Vec<BitDecNode<Fr, Avid<SessionId>>> = (0..n)
         .map(|id| BitDecNode::new(id, n, t).unwrap())
         .collect();
-    let _recv =
-        spawn_bitdec_receiver_tasks(n, receivers, nodes.clone(), network.clone());
+    let _recv = spawn_bitdec_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut init_set = JoinSet::new();
     for (i, p) in prep.into_iter().enumerate() {
@@ -1513,15 +1512,15 @@ async fn bit_dec_most_negative() {
 
 // ── AppRec receiver ──────────────────────────────────────────────────────────
 //
-// AppRecNode composes BitDec (session reused as-is), SufOr (tag=SufOr, same
-// exec_id), and 3 sequential Multiply rounds (tags PreBitMul/PreBitMul1/
-// PreBitMul2, same exec_id) — see app_rec.rs's module docs for the exact
-// session-routing scheme. The only ambiguity is BitDec's nested PreBitLT,
-// which also tags its own Multiply `PreBitMul` but always at exec_id=0
-// (PreMod2m hardcodes exec_id=0 for its nested PreBitLT call), so it's
-// disambiguated from AppRec's own PreBitMul-tagged round by exec_id alone.
-// TruncPr's RBC reveal always lands at round=0, which nothing else uses
-// (BitDec's nested batched Mod2 only ever uses round=1 via init_batch).
+// AppRecNode composes BitDec (session reused as-is, real exec_id inherited
+// throughout — see pre_mod2m.rs), SufOr (tag=SufOr, same exec_id), and 3
+// sequential Multiply rounds (tags PreBitMul/PreBitMul1/PreBitMul2, same
+// exec_id) — see app_rec.rs's module docs for the exact session-routing
+// scheme. BitDec's nested PreBitLT has its own dedicated tag, PreBitMul3
+// (see pre_bitlt.rs), so it no longer needs exec_id to disambiguate from
+// AppRec's own PreBitMul-tagged round. TruncPr's RBC reveal always lands at
+// round=0, which nothing else uses (BitDec's nested batched Mod2 only ever
+// uses round=1 via init_batch).
 
 fn spawn_apprec_receiver_tasks(
     num_parties: usize,
@@ -1554,7 +1553,6 @@ fn spawn_apprec_receiver_tasks(
                     WrappedMessage::Rbc(msg) => {
                         let round = msg.session_id.round_id();
                         let proto = msg.session_id.calling_protocol();
-                        let exec_id = msg.session_id.exec_id();
                         if round == 4 {
                             // BitDec's own PreMod2m reveal.
                             node.bit_dec
@@ -1579,7 +1577,7 @@ fn spawn_apprec_receiver_tasks(
                                 .drain_rbc_output()
                                 .await
                                 .expect("trunc drain_rbc_output failed");
-                        } else if proto == Some(ProtocolType::PreBitMul) && exec_id == 0 {
+                        } else if proto == Some(ProtocolType::PreBitMul3) {
                             // BitDec's nested PreBitLT's own Multiply (phase 4).
                             node.bit_dec
                                 .pre_mod2m
@@ -1672,8 +1670,7 @@ fn spawn_apprec_receiver_tasks(
                     WrappedMessage::BatchRecon(msg) => {
                         let proto = msg.session_id.calling_protocol();
                         let round = msg.session_id.round_id();
-                        let exec_id = msg.session_id.exec_id();
-                        if proto == Some(ProtocolType::PreBitMul) && exec_id == 0 {
+                        if proto == Some(ProtocolType::PreBitMul3) {
                             node.bit_dec
                                 .pre_mod2m
                                 .pre_bitlt
@@ -1793,10 +1790,11 @@ async fn app_rec_run(u_bar: i128, k: usize, f: usize) {
     let t = 1;
     let dp_bits = 40;
     let duration = std::time::Duration::from_secs(10);
-    // exec_id must be nonzero: PreMod2m hardcodes exec_id=0 for BitDec's
-    // nested PreBitLT call, and AppRec's own PreBitMul-tagged round would
-    // collide with it at exec_id=0 (see app_rec.rs's session routing docs).
-    let session = SessionId::new(ProtocolType::FpDiv, SessionId::pack_slot(9, 0, 0), 42);
+    // exec_id=0 is fine here — BitDec's nested PreBitLT call has its own
+    // dedicated tag (PreBitMul3, see pre_bitlt.rs) distinct from AppRec's
+    // own PreBitMul/1/2 rounds, so there's no longer a reserved exec_id
+    // value to avoid.
+    let session = SessionId::new(ProtocolType::FpDiv, SessionId::pack_slot(0, 0, 0), 42);
 
     let b_shares = share_signed_fixed(u_bar, n, t);
     let prep = make_apprec_prep(dp_bits, k, f, n, t);
@@ -1805,19 +1803,14 @@ async fn app_rec_run(u_bar: i128, k: usize, f: usize) {
     let nodes: Vec<AppRecNode<Fr, Avid<SessionId>>> = (0..n)
         .map(|id| AppRecNode::new(id, n, t).unwrap())
         .collect();
-    let _recv =
-        spawn_apprec_receiver_tasks(n, receivers, nodes.clone(), network.clone());
+    let _recv = spawn_apprec_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut init_set = JoinSet::new();
     for (i, p) in prep.into_iter().enumerate() {
         let mut node = nodes[i].clone();
         let net = network[i].clone();
         let b = b_shares[i].clone();
-        init_set.spawn(async move {
-            node.init(b, k, f, p, session, net, duration)
-                .await
-                .unwrap()
-        });
+        init_set.spawn(async move { node.init(b, k, f, p, session, net, duration).await.unwrap() });
     }
     let mut w_shares = Vec::with_capacity(n);
     let mut z_shares = Vec::with_capacity(n);
@@ -1915,7 +1908,6 @@ fn spawn_fpdiv_receiver_tasks(
                     WrappedMessage::Rbc(msg) => {
                         let round = msg.session_id.round_id();
                         let proto = msg.session_id.calling_protocol();
-                        let exec_id = msg.session_id.exec_id();
                         if proto == Some(ProtocolType::FpDivTrunc) {
                             // FpDivNode's own Trunc calls (step 3, steps 6/7/8
                             // per iteration), isolated from each other by round_id.
@@ -1971,7 +1963,7 @@ fn spawn_fpdiv_receiver_tasks(
                                 .drain_rbc_output()
                                 .await
                                 .expect("apprec trunc drain_rbc_output failed");
-                        } else if proto == Some(ProtocolType::PreBitMul) && exec_id == 0 {
+                        } else if proto == Some(ProtocolType::PreBitMul3) {
                             // BitDec's nested PreBitLT's own Multiply (phase 4).
                             node.app_rec
                                 .bit_dec
@@ -2074,7 +2066,6 @@ fn spawn_fpdiv_receiver_tasks(
                     WrappedMessage::BatchRecon(msg) => {
                         let proto = msg.session_id.calling_protocol();
                         let round = msg.session_id.round_id();
-                        let exec_id = msg.session_id.exec_id();
                         if matches!(
                             proto,
                             Some(ProtocolType::FpDivMulA) | Some(ProtocolType::FpDivMulB)
@@ -2088,7 +2079,7 @@ fn spawn_fpdiv_receiver_tasks(
                                 .drain_batch_recon_output()
                                 .await
                                 .expect("fpdiv mul drain_batch_recon_output failed");
-                        } else if proto == Some(ProtocolType::PreBitMul) && exec_id == 0 {
+                        } else if proto == Some(ProtocolType::PreBitMul3) {
                             node.app_rec
                                 .bit_dec
                                 .pre_mod2m
@@ -2227,9 +2218,8 @@ async fn fpdiv_run(a_bar: i128, b_bar: i128, k: usize, f: usize) {
     let prep = make_fpdiv_prep(dp_bits, k, f, n, t);
 
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<FpDivNode<Fr, Avid<SessionId>>> = (0..n)
-        .map(|id| FpDivNode::new(id, n, t).unwrap())
-        .collect();
+    let nodes: Vec<FpDivNode<Fr, Avid<SessionId>>> =
+        (0..n).map(|id| FpDivNode::new(id, n, t).unwrap()).collect();
     let _recv = spawn_fpdiv_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut init_set = JoinSet::new();
@@ -2248,7 +2238,8 @@ async fn fpdiv_run(a_bar: i128, b_bar: i128, k: usize, f: usize) {
     let mut z_shares = Vec::with_capacity(n);
     while let Some(r) = init_set.join_next().await {
         let (c, z) = r.unwrap();
-        c_shares.push(c);
+        assert_eq!(*c.precision(), FixedPointPrecision::new(k, f));
+        c_shares.push(c.value().clone());
         z_shares.push(z);
     }
 

@@ -137,6 +137,7 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::PreBitMul => todo!(),
             crate::honeybadger::ProtocolType::PreBitMul1 => todo!(),
             crate::honeybadger::ProtocolType::PreBitMul2 => todo!(),
+            crate::honeybadger::ProtocolType::PreBitMul3 => todo!(),
             crate::honeybadger::ProtocolType::SufOr => todo!(),
             crate::honeybadger::ProtocolType::FpDivTrunc => todo!(),
             crate::honeybadger::ProtocolType::FpDivMulA => todo!(),

@@ -17,9 +17,21 @@
 //! `α = 2^{2f}` exactly — no rounding, unlike AppRec's `2.9142` constant.
 
 use crate::{
-    common::{ProtocolSessionId, RBC},
+    common::{
+        types::fixed::{FixedPointPrecision, SecretFixedPoint},
+        ProtocolSessionId, RBC,
+    },
     honeybadger::{
-        ProtocolType, SessionId, bitwise::{AppRecPrep, app_rec::{AppRecError, AppRecNode}}, fpdiv::fpdiv_theta, fpmul::{TruncPrError, truncpr::TruncPrNode}, mul::{MulError, multiplication::Multiply}, robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple
+        bitwise::{
+            app_rec::{AppRecError, AppRecNode},
+            AppRecPrep,
+        },
+        fpdiv::fpdiv_theta,
+        fpmul::{truncpr::TruncPrNode, TruncPrError},
+        mul::{multiplication::Multiply, MulError},
+        robust_interpolate::robust_interpolate::RobustShare,
+        triple_gen::ShamirBeaverTriple,
+        ProtocolType, SessionId,
     },
 };
 use ark_ff::{FftField, PrimeField};
@@ -47,6 +59,7 @@ pub enum FpDivError {
 }
 
 /// One refinement-loop iteration's preprocessing (steps 6-8 of Protocol 7).
+#[derive(Clone, Debug)]
 pub struct FpDivIterPrep<F: FftField> {
     /// 2 triples for Round A: `c*(α+d)` (step 6) and `d*d` (step 7).
     pub round_a_triples: Vec<ShamirBeaverTriple<F>>,
@@ -64,6 +77,7 @@ pub struct FpDivIterPrep<F: FftField> {
 }
 
 /// All preprocessing material required for one FXDiv execution.
+#[derive(Clone, Debug)]
 pub struct FpDivPrep<F: FftField> {
     /// AppRec's own preprocessing (step 2).
     pub app_rec_prep: AppRecPrep<F>,
@@ -149,7 +163,7 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> FpDivNode<F, R> {
         session: SessionId,
         network: Arc<N>,
         duration: Duration,
-    ) -> Result<(RobustShare<F>, RobustShare<F>), FpDivError> {
+    ) -> Result<(SecretFixedPoint<F, RobustShare<F>>, RobustShare<F>), FpDivError> {
         if session.calling_protocol() != Some(ProtocolType::FpDiv) {
             return Err(FpDivError::SessionIdError(session));
         }
@@ -305,6 +319,9 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> FpDivNode<F, R> {
             d = d_new;
         }
 
-        Ok((c, z))
+        Ok((
+            SecretFixedPoint::new_with_precision(c, FixedPointPrecision::new(k, f)),
+            z,
+        ))
     }
 }

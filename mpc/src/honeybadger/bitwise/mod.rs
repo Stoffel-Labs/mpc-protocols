@@ -37,7 +37,7 @@ pub struct PreMulCPrep<F: FftField> {
     pub r: Vec<RobustShare<F>>,
     pub triples: Vec<ShamirBeaverTriple<F>>,
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PRandMPrep<F: FftField> {
     pub r_double_prime: RobustShare<F>,
     pub r_prime: RobustShare<F>,
@@ -139,6 +139,7 @@ pub enum Mod2Error {
 }
 
 /// All preprocessing material required for one PreBitLT execution on k bits.
+#[derive(Clone, Debug)]
 pub struct PreBitLTPrep<F: FftField> {
     /// Preprocessing for the SufMulInv sub-protocol (one PreMulCPrep for k inputs).
     pub suf_mul_inv_prep: PreMulCPrep<F>,
@@ -170,6 +171,7 @@ pub enum PreBitLTError {
 // ── Preprocessing ──────────────────────────────────────────────────────────────
 
 /// All preprocessing for one PreMod2m execution.
+#[derive(Clone, Debug)]
 pub struct PreMod2mPrep<F: FftField> {
     /// PRandM(k, m) output: r'', r', and the m random bits {r'_j} (LSB-first).
     pub prandm: PRandMPrep<F>,
@@ -271,6 +273,7 @@ impl<F: PrimeField + FftField> PreMod2mStore<F> {
 }
 
 /// All preprocessing material required for one AppRec execution on a k-bit input.
+#[derive(Clone, Debug)]
 pub struct AppRecPrep<F: FftField> {
     /// BitDec's own preprocessing (internally PreMod2m with m = k-1).
     pub bitdec_prep: PreMod2mPrep<F>,

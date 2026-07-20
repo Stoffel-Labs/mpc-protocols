@@ -20,6 +20,21 @@ pub fn fpdiv_theta(k: usize) -> usize {
     }
 }
 
+/// Total raw preprocessing-pool consumption — `(triples, random_shares,
+/// prandbit, prandint)` — for one FXDiv(k,f) call. Used to check pool
+/// inventory before assembling an `FpDivPrep` from real preprocessing.
+///
+///Cross-checked numerically against
+/// the fully-composed version for several (k, f) pairs.
+pub fn fpdiv_prep_counts(k: usize, f: usize) -> (usize, usize, usize, usize) {
+    let num_iters = fpdiv_theta(k).saturating_sub(1);
+    let triples = 6 * k - 4 + 3 * num_iters;
+    let random_shares = 4 * k - 4;
+    let prandbit = 4 * k - f - 4 + 6 * f * num_iters;
+    let prandint = k + 2 + 3 * num_iters;
+    (triples, random_shares, prandbit, prandint)
+}
+
 pub fn fixed_point_reciprocal_scaled<F: PrimeField>(
     denom: &ClearFixedPoint<F>,
 ) -> Result<ClearFixedPoint<F>, FPDivConstError> {

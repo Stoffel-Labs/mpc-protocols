@@ -43,10 +43,18 @@ pub enum PhaseState {
 pub struct PreMulCPrepStore<F: PrimeField> {
     pub state: PhaseState,
     pub output_sender: Option<
-        tokio::sync::oneshot::Sender<(Vec<RobustShare<F>>, Vec<RobustShare<F>>, Vec<RobustShare<F>>)>,
+        tokio::sync::oneshot::Sender<(
+            Vec<RobustShare<F>>,
+            Vec<RobustShare<F>>,
+            Vec<RobustShare<F>>,
+        )>,
     >,
     pub output_receiver: Option<
-        tokio::sync::oneshot::Receiver<(Vec<RobustShare<F>>, Vec<RobustShare<F>>, Vec<RobustShare<F>>)>,
+        tokio::sync::oneshot::Receiver<(
+            Vec<RobustShare<F>>,
+            Vec<RobustShare<F>>,
+            Vec<RobustShare<F>>,
+        )>,
     >,
 }
 
@@ -145,7 +153,14 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> 
         &self,
         session: SessionId,
         duration: Duration,
-    ) -> Result<(Vec<RobustShare<F>>, Vec<RobustShare<F>>, Vec<RobustShare<F>>), PreMulCError> {
+    ) -> Result<
+        (
+            Vec<RobustShare<F>>,
+            Vec<RobustShare<F>>,
+            Vec<RobustShare<F>>,
+        ),
+        PreMulCError,
+    > {
         let rx = {
             let map = self.prep_store.lock().await;
             let inner = map
@@ -164,7 +179,7 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> 
         }
     }
 
-    /// Protocol 4.2 lines 1–8. k must be a multiple of (t+1).
+    /// Protocol 4.2 lines 1–8.
     ///
     /// Starts MulPub (u_i = r_i·s_i) and Multiply (v_i = r_{i+1}·s_i) before
     /// blocking on either, so both run in parallel via the outer message loop.
@@ -181,7 +196,9 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> 
         let k = r.len();
         assert_eq!(s.len(), k);
         assert_eq!(u_zero_shares.len(), k);
-        assert_eq!(k % (self.t + 1), 0, "k must be a multiple of t+1");
+        // No k % (t+1) == 0 requirement: both mul_pub (its own internal
+        // zero-padding, see mul_pub.rs) and mul (graceful remainder
+        // handling, see multiplication.rs) already accept any k.
         assert_eq!(
             v_triples.len(),
             k - 1,
@@ -378,12 +395,26 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
         if k == 0 {
             return Err(PreMulCError::EmptyInput);
         }
-        assert_eq!(k % (self.t + 1), 0, "k must be a multiple of t+1");
 
         self.mul
             .init(session, prep.w, a, prep.triples, Arc::clone(&network))
             .await?;
-        let m_shares = self.mul.wait_for_result(session, mul_duration).await?;
+        let mut m_shares = self.mul.wait_for_result(session, mul_duration).await?;
+
+        // The batch-recon round below needs a full (t+1)-sized chunk to
+        // reconstruct from. Pad m_shares with public zeros up
+        // to the next multiple of (t+1), appended after all real entries.
+        // Padding only ever contributes trailing terms to the
+        // prefix-product sequence computed in try_finalize_online, so
+        // every real prefix product M_j (j <= k) is unaffected. z/r stay
+        // unpadded: try_finalize_online zips them against the (now longer)
+        // prefix-product sequence, and zip naturally stops at the shorter,
+        // real-length iterator — no truncation logic needed there.
+        let batch_width = self.t + 1;
+        let pad = (batch_width - (k % batch_width)) % batch_width;
+        for _ in 0..pad {
+            m_shares.push(RobustShare::new(F::zero(), self.id, self.t));
+        }
 
         {
             let store = self.get_or_create_online(session).await?;
@@ -469,9 +500,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
         for (j, (z_j, m_j)) in z_shares.into_iter().zip(prefix_m.into_iter()).enumerate() {
             p_shares.push((z_j * m_j)?);
             if !inv_failed {
-                if let (Some(r), Some(ref mut invs)) =
-                    (r_shares_opt.as_ref(), p_inv.as_mut())
-                {
+                if let (Some(r), Some(ref mut invs)) = (r_shares_opt.as_ref(), p_inv.as_mut()) {
                     match m_j.inverse() {
                         Some(m_inv) => invs.push((r[j].clone() * m_inv)?),
                         None => inv_failed = true,

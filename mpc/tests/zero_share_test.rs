@@ -153,11 +153,7 @@ async fn test_reconstruction_handler_nonzero_caught() {
     setup_tracing();
     let n_parties = 10;
     let t = 3;
-    let session_id = SessionId::new(
-        ProtocolType::ZeroSha,
-        SessionId::pack_slot(123, 0, 0),
-        111,
-    );
+    let session_id = SessionId::new(ProtocolType::ZeroSha, SessionId::pack_slot(123, 0, 0), 111);
 
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
     let mut rng = test_rng();

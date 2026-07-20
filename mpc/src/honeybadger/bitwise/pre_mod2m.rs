@@ -409,10 +409,9 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMod2mNode<F, R> {
         // Secret input  = r'_bits[0..m-1] (the m random bits from PRandM).
         // u_j = (c'_j < r'_j) = carry-out of bit j when computing a + r'.
         //
-        // PreBitLT manages its own exec_ids; we only pass instance_id via session.
         let bitlt_session = SessionId::new(
             calling_proto,
-            SessionId::pack_slot(0, 0, 0),
+            SessionId::pack_slot(session.exec_id(), 0, 0),
             session.instance_id(),
         );
         let u_shares = self
