@@ -30,7 +30,7 @@ pub mod share_gen;
 use crate::{
     avss_mpc::{self, AvssSessionId},
     common::{
-        aba::{bv_bc::BvBroadcastMessage, TaggedMessage},
+        aba::{bv_bc::BvBroadcastMessage, sbv_bc::SbvBroadcastMessage},
         math::goldilocks::GoldilocksField,
         rbc::{rbc_store::Msg, RbcError},
         types::{
@@ -661,6 +661,30 @@ where
             .deserialize(&raw_msg)?;
 
         match wrapped {
+            WrappedMessage::SbvBroadcast(msg) => {
+                if sender_id != msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+
+                if msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        msg.session_id.instance_id(),
+                    ));
+                }
+
+                match msg.session_id.calling_protocol() {
+                    Some(avss_mpc::ProtocolType::Resharing) => {
+                        // TODO: call the process function on the BV-Broadcast node inside the resharing node
+                        // TODO: call drain function on the resharing node
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in BV-Broadcast",
+                            msg.session_id
+                        );
+                    }
+                }
+            }
             WrappedMessage::BvBroadcast(msg) => {
                 if sender_id != msg.sender_id {
                     return Err(HoneyBadgerError::InvalidPartyId);
@@ -674,8 +698,8 @@ where
 
                 match msg.session_id.calling_protocol() {
                     Some(avss_mpc::ProtocolType::Resharing) => {
-                        todo!("call the process function on the BV-Broadcast node inside the resharing node");
-                        todo!("call drain function on the resharing node");
+                        // TODO: call the process function on the BV-Broadcast node inside the resharing node
+                        // TODO: call drain function on the resharing node
                     }
                     _ => {
                         warn!(
@@ -2201,6 +2225,7 @@ pub enum WrappedMessage {
     Output(OutputMessage),
     PRandBitD(PRandBitDMessage),
     BvBroadcast(BvBroadcastMessage<AvssSessionId>),
+    SbvBroadcast(SbvBroadcastMessage<AvssSessionId>),
 }
 
 impl WrappedMessage {
@@ -2236,6 +2261,8 @@ pub enum ProtocolType {
     RanDouShaSmallField = 17,
     DouShaSmallField = 18,
     Resharing = 19,
+    BvBroadcast = 20,
+    SbvBroadcast = 21,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -2267,6 +2294,8 @@ impl ProtocolTag for ProtocolType {
             17 => Some(Self::RanDouShaSmallField),
             18 => Some(Self::DouShaSmallField),
             19 => Some(Self::Resharing),
+            20 => Some(Self::BvBroadcast),
+            21 => Some(Self::SbvBroadcast),
             _ => None,
         }
     }

@@ -78,6 +78,8 @@ pub enum ProtocolType {
     RanDouShaSmallField = 17,
     DouShaSmallField = 18,
     Resharing = 19,
+    BvBroadcast = 20,
+    SbvBroadcast = 21,
 }
 
 impl From<ProtocolType> for crate::honeybadger::ProtocolType {
@@ -105,6 +107,8 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             }
             ProtocolType::DouShaSmallField => crate::honeybadger::ProtocolType::DouShaSmallField,
             ProtocolType::Resharing => crate::honeybadger::ProtocolType::Resharing,
+            ProtocolType::BvBroadcast => crate::honeybadger::ProtocolType::BvBroadcast,
+            ProtocolType::SbvBroadcast => crate::honeybadger::ProtocolType::SbvBroadcast,
         }
     }
 }
@@ -134,6 +138,8 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             }
             crate::honeybadger::ProtocolType::DouShaSmallField => ProtocolType::DouShaSmallField,
             crate::honeybadger::ProtocolType::Resharing => ProtocolType::Resharing,
+            crate::honeybadger::ProtocolType::BvBroadcast => ProtocolType::BvBroadcast,
+            crate::honeybadger::ProtocolType::SbvBroadcast => ProtocolType::SbvBroadcast,
         }
     }
 }
