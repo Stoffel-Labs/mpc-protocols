@@ -41,6 +41,7 @@ use tokio::{
     sync::{mpsc::Receiver, Mutex},
     time::{timeout, Duration},
 };
+use tracing::warn;
 
 #[derive(Debug)]
 pub struct Mod2Store<F: PrimeField> {
@@ -340,6 +341,18 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
                     if s.state == PhaseState::Finished {
                         continue;
                     }
+                    // A malicious sender can broadcast a batch of the wrong length; reject it
+                    // here when the expected length is already known, and defensively filter
+                    // again in try_finalize_batch for shares stored before r_primes was set.
+                    if let Some(expected) = s.r_primes.as_ref().map(|r| r.len()) {
+                        if share_vals.len() != expected {
+                            warn!(
+                                "Mod2 batch {parent:?}: dropping share from party {sender} with length {} (expected {expected})",
+                                share_vals.len()
+                            );
+                            continue;
+                        }
+                    }
                     s.received_shares.entry(sender).or_insert(share_vals);
                     s.received_shares.len() >= 2 * self.t + 1
                 };
@@ -437,8 +450,29 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
             (s.received_shares.clone(), r_primes)
         };
 
-        let two = F::one() + F::one();
         let m = r_primes.len();
+        // Shares may have been stored before r_primes was known locally (see
+        // drain_rbc_output), so re-validate lengths here before indexing into them —
+        // a malformed length must never reach `vals[j]` below.
+        let shares: HashMap<usize, Vec<F>> = shares
+            .into_iter()
+            .filter(|(sender, vals)| {
+                let ok = vals.len() == m;
+                if !ok {
+                    warn!(
+                        "Mod2 batch {parent:?}: excluding share from party {sender} with length {} (expected {m})",
+                        vals.len()
+                    );
+                }
+                ok
+            })
+            .collect();
+        if shares.len() < 2 * self.t + 1 {
+            // Not enough correctly-sized shares yet; wait for more to arrive.
+            return Ok(());
+        }
+
+        let two = F::one() + F::one();
         let mut results: Vec<RobustShare<F>> = Vec::with_capacity(m);
         for (j, r_zero_prime) in r_primes.into_iter().enumerate() {
             let robust_shares: Vec<RobustShare<F>> = shares

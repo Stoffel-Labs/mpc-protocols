@@ -181,6 +181,16 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             )
         };
 
+        // share_r_plus_b is the batch_recon reconstruction output; validate its length
+        // before indexing share_r_2/share_r_p by it below.
+        if share_r_plus_b.len() != batch_size {
+            return Err(PRandError::InvalidMessage(format!(
+                "share_r_plus_b has length {} but batch_size is {}",
+                share_r_plus_b.len(),
+                batch_size
+            )));
+        }
+
         // -------- Phase 2: Compute outside lock --------
         let mut b2_vec = Vec::with_capacity(batch_size);
         let mut bp_vec = Vec::with_capacity(batch_size);

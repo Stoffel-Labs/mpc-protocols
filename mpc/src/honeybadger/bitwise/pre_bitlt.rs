@@ -161,6 +161,16 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreBitLTNode<F, R> {
             )
             .await?;
 
+        // p/p_inv are indexed by k below; validate their length now rather than
+        // trusting SufMulInv/PreMulC's batch_recon-derived output to match k.
+        if p.len() != k || p_inv.len() != k {
+            return Err(PreBitLTError::InvalidInput(format!(
+                "SufMulInv returned {} p and {} p_inv values, expected {k}",
+                p.len(),
+                p_inv.len()
+            )));
+        }
+
         // ── Phase 3: local s-computation ───────────────────────────────────────
         //
         // Protocol 11 lines 4-7 (0-indexed, paper uses 1-indexed):
