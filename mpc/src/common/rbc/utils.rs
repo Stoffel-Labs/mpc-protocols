@@ -138,18 +138,19 @@ pub fn reconstruct_payload(
 
     let mut len_bytes = [0u8; 8];
     len_bytes.copy_from_slice(&payload[0..8]);
-    let original_len = u64::from_le_bytes(len_bytes) as usize;
+    let original_len = u64::from_le_bytes(len_bytes);
 
     payload.drain(0..8);
 
-    // Validate and truncate to the original message length
-    if original_len > payload.len() {
+    // Validate in u64 space before narrowing, so the check is not
+    // architecture-dependent (usize is 32-bit on some targets, e.g. wasm32).
+    if original_len > payload.len() as u64 {
         return Err(ShardError::Config(
             "Original length exceeds payload".to_string(),
         ));
     }
     // Truncate to original message length
-    payload.truncate(original_len);
+    payload.truncate(original_len as usize);
 
     Ok(payload)
 }

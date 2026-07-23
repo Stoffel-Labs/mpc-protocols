@@ -107,8 +107,8 @@ impl<F: FftField> OutputClient<F> {
         if msg.payload.len() < 8 {
             return Err(OutputError::InvalidInput("Payload too short".to_string()));
         }
-        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap()) as usize;
-        if declared_len != self.input_len {
+        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap());
+        if declared_len != self.input_len as u64 {
             return Err(OutputError::InvalidInput(
                 "Mismatch in input and share length".to_string(),
             ));

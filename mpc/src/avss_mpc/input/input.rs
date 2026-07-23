@@ -418,9 +418,9 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                 "Payload too short".to_string(),
             ));
         }
-        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap()) as usize;
+        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap());
         let input_len = self.client_data.lock().await.inputs.len();
-        if declared_len != input_len {
+        if declared_len != input_len as u64 {
             return Err(AvssInputError::InvalidInput(
                 "Mismatch in input and share length".to_string(),
             ));

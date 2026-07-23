@@ -541,7 +541,7 @@ where
         store.state = RanShaState::Reconstruction;
         store.received_r_shares.insert(sender_id, shares);
 
-        if self.id < 2 * self.threshold && store.received_r_shares.len() >= 2 * self.threshold + 1 {
+        if self.id < 2 * self.threshold && store.received_r_shares.len() >= self.n_parties {
             let batch_size = store.batch_size;
             let mut shares_by_batch =
                 vec![Vec::with_capacity(store.received_r_shares.len()); batch_size];
