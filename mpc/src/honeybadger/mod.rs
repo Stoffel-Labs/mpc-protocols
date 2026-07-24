@@ -2675,12 +2675,13 @@ where
             .zero_sha
             .init_batch(zsha_session, batch_size, rng, network.clone())
             .await?;
-        let shares = self
+        let result = self
             .preprocess
             .zero_sha
             .wait_for_result(zsha_session, self.params.timeout)
-            .await?;
+            .await;
         self.preprocess.zero_sha.clear_store(zsha_session).await;
+        let shares = result?;
         self.preprocessing_material
             .lock()
             .await
@@ -2737,7 +2738,8 @@ where
                 SessionId::pack_slot(self.counters.premulc_off_counter.get_next().await?, 0, 0),
                 self.params.instance_id,
             );
-            self.preprocess
+            let gen_result = self
+                .preprocess
                 .premulc_offline
                 .generate_preprocessing(
                     r,
@@ -2748,19 +2750,25 @@ where
                     network.clone(),
                     self.params.timeout,
                 )
-                .await?;
+                .await;
+            if gen_result.is_err() {
+                if let Err(e) = self.preprocess.premulc_offline.clear_store(premulc_session).await {
+                    warn!("PreMulC preprocessing: failed to clear store for session {premulc_session:?}: {e:?}");
+                }
+            }
+            gen_result?;
             premulc_sessions.push(premulc_session);
         }
         for premulc_session in premulc_sessions {
-            let (w, z, r_out) = self
+            let result = self
                 .preprocess
                 .premulc_offline
                 .wait_for_preprocessing(premulc_session, self.params.timeout)
-                .await?;
-            self.preprocess
-                .premulc_offline
-                .clear_store(premulc_session)
-                .await?;
+                .await;
+            if let Err(e) = self.preprocess.premulc_offline.clear_store(premulc_session).await {
+                warn!("PreMulC preprocessing: failed to clear store for session {premulc_session:?}: {e:?}");
+            }
+            let (w, z, r_out) = result?;
             let triples = self
                 .preprocessing_material
                 .lock()

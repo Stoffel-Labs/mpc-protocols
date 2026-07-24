@@ -37,6 +37,7 @@ use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use thiserror::Error;
 use tokio::time::Duration;
+use tracing::warn;
 
 #[derive(Debug, Error)]
 pub enum AppRecError {
@@ -93,9 +94,11 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> AppRecNode<F, R> {
         self.mul
             .init(session, x, y, triples, Arc::clone(&network))
             .await?;
-        let result = self.mul.wait_for_result(session, duration).await?;
-        self.mul.clear_store(session).await?;
-        Ok(result)
+        let result = self.mul.wait_for_result(session, duration).await;
+        if let Err(e) = self.mul.clear_store(session).await {
+            warn!("AppRec: failed to clear mul store for session {session:?}: {e:?}");
+        }
+        Ok(result?)
     }
 
     /// Protocol 8 (AppRec). Returns `([w], [z])` where `w ≈ 1/b` and
@@ -275,7 +278,11 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> AppRecNode<F, R> {
                 Arc::clone(&network),
             )
             .await?;
-        let w = self.trunc.wait_for_result(trunc_session, duration).await?;
+        let trunc_result = self.trunc.wait_for_result(trunc_session, duration).await;
+        if let Err(e) = self.trunc.clear_store(trunc_session).await {
+            warn!("AppRec: failed to clear trunc store for session {trunc_session:?}: {e:?}");
+        }
+        let w = trunc_result?;
 
         Ok((w, z))
     }

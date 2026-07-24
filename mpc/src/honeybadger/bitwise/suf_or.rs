@@ -64,6 +64,7 @@ use ark_ff::PrimeField;
 use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use tokio::time::Duration;
+use tracing::warn;
 
 #[derive(Clone, Debug)]
 pub struct SufOrNode<F: PrimeField, R: RBC> {
@@ -109,10 +110,21 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> SufOrNode<F, R> {
 
         // Step 3: prefix products of reversed complements via PreMulC.
         // P'_j = c_k * c_{k-1} * ... * c_{k-j+1} = ∏_{i=k-j+1}^{k} (1-b_i)
-        self.inner
+        let init_result = self
+            .inner
             .init(complements, prep, session, network, mul_duration)
-            .await?;
-        let (mut p, _) = self.inner.wait_for_result(session, duration).await?;
+            .await;
+        if init_result.is_err() {
+            if let Err(e) = self.inner.clear_store(session).await {
+                warn!("SufOr: failed to clear store for session {session:?}: {e:?}");
+            }
+        }
+        init_result?;
+        let result = self.inner.wait_for_result(session, duration).await;
+        if let Err(e) = self.inner.clear_store(session).await {
+            warn!("SufOr: failed to clear store for session {session:?}: {e:?}");
+        }
+        let (mut p, _) = result?;
 
         // Step 4: reverse prefix products back to original index order.
         // After reversal, position j holds S_j = ∏_{i=j}^{k} (1-b_i),

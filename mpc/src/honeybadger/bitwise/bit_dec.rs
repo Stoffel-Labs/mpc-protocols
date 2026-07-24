@@ -46,6 +46,7 @@ use ark_ff::{FftField, PrimeField};
 use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use tokio::time::Duration;
+use tracing::warn;
 
 // ── Type aliases ──────────────────────────────────────────────────────────────
 /// Error type re-exported from PreMod2m.
@@ -103,7 +104,7 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> BitDecNode<F, R> {
         // Cloned here so the original share is still available for the sign
         // bit derivation below.
         let m = k - 1;
-        let prefix = self
+        let result = self
             .pre_mod2m
             .init(
                 a.clone(),
@@ -114,7 +115,11 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> BitDecNode<F, R> {
                 Arc::clone(&network),
                 duration,
             )
-            .await?;
+            .await;
+        if let Err(e) = self.pre_mod2m.clear_store(session).await {
+            warn!("BitDec: failed to clear pre_mod2m store for session {session:?}: {e:?}");
+        }
+        let prefix = result?;
 
         // Step 2: extract individual bits by local arithmetic.
         // bits[0] = prefix[0]                              (a mod 2)

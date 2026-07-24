@@ -42,6 +42,7 @@ use ark_ff::{FftField, PrimeField};
 use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use tokio::time::Duration;
+use tracing::warn;
 
 // ── Node ───────────────────────────────────────────────────────────────────────
 
@@ -221,7 +222,11 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreBitLTNode<F, R> {
                 Arc::clone(&network),
             )
             .await?;
-        let m_shares = self.mul.wait_for_result(mul_session, duration).await?;
+        let mul_result = self.mul.wait_for_result(mul_session, duration).await;
+        if let Err(e) = self.mul.clear_store(mul_session).await {
+            warn!("PreBitLT: failed to clear mul store for session {mul_session:?}: {e:?}");
+        }
+        let m_shares = mul_result?;
 
         // ── Phase 5: batched Mod2 across all k values in one round ────────────
         //
@@ -254,10 +259,11 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreBitLTNode<F, R> {
                 Arc::clone(&network),
             )
             .await?;
-        let u_shares = self
-            .mod2
-            .wait_for_batch_result(mod2_session, duration)
-            .await?;
+        let mod2_result = self.mod2.wait_for_batch_result(mod2_session, duration).await;
+        if let Err(e) = self.mod2.clear_store(mod2_session).await {
+            warn!("PreBitLT: failed to clear mod2 store for session {mod2_session:?}: {e:?}");
+        }
+        let u_shares = mod2_result?;
 
         Ok(u_shares)
     }

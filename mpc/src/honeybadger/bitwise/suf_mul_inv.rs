@@ -39,6 +39,7 @@ use ark_ff::PrimeField;
 use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use tokio::time::Duration;
+use tracing::warn;
 
 #[derive(Clone, Debug)]
 pub struct SufMulInvNode<F: PrimeField, R: RBC> {
@@ -67,11 +68,21 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> SufMulInvNode<F, R> {
 
         // inner.init stores prep.r in the online store so try_finalize_online
         // computes [p_j^{-1}] = [r_j] * M_j^{-1} alongside [p_j].
-        self.inner
+        let init_result = self
+            .inner
             .init(rev_a, prep, session, network, mul_duration)
-            .await?;
-        let (mut prefix_products, p_inv_opt) =
-            self.inner.wait_for_result(session, duration).await?;
+            .await;
+        if init_result.is_err() {
+            if let Err(e) = self.inner.clear_store(session).await {
+                warn!("SufMulInv: failed to clear store for session {session:?}: {e:?}");
+            }
+        }
+        init_result?;
+        let result = self.inner.wait_for_result(session, duration).await;
+        if let Err(e) = self.inner.clear_store(session).await {
+            warn!("SufMulInv: failed to clear store for session {session:?}: {e:?}");
+        }
+        let (mut prefix_products, p_inv_opt) = result?;
 
         let mut p_inv = p_inv_opt.ok_or(PreMulCError::Abort)?;
 

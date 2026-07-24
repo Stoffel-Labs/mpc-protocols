@@ -183,6 +183,13 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> 
     ///
     /// Starts MulPub (u_i = r_i·s_i) and Multiply (v_i = r_{i+1}·s_i) before
     /// blocking on either, so both run in parallel via the outer message loop.
+    ///
+    /// On error, callers must clear `prep_store` for `session` themselves —
+    /// the caller only learns `session` on success from a caller's own
+    /// tracking list, so an error here is the only chance to release the
+    /// slot already reserved (see module-level DoS note). On success, the
+    /// caller retrieves the result via `wait_for_preprocessing` and clears it
+    /// afterward as before.
     pub async fn generate_preprocessing<N: Network + Send + Sync + 'static>(
         &mut self,
         r: Vec<RobustShare<F>>,
@@ -383,6 +390,12 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
     /// Protocol 4.2 lines 9–12. k must be a multiple of (t+1).
     ///
     /// Drive `drain_batch_recon_output` until `wait_for_result` resolves.
+    ///
+    /// On error, callers must clear `online_store` for `session` themselves —
+    /// the caller only learns `session` on success from its own tracking, so
+    /// an error here is the only chance to release the slot already reserved
+    /// (see module-level DoS note). On success, the caller retrieves the
+    /// result via `wait_for_result` and clears it afterward as before.
     pub async fn init<N: Network + Send + Sync>(
         &mut self,
         a: Vec<RobustShare<F>>,

@@ -182,7 +182,10 @@ async fn test_reconstruction_handler_nonzero_caught() {
 
     run_rbc_joinset(nodes, receivers, network).await;
 
-    let binding = receiver_node.get_or_create_store(session_id).await.unwrap();
+    let binding = receiver_node
+        .get_or_create_store(session_id, receiver_node.id)
+        .await
+        .unwrap();
     let store = binding.lock().await;
     assert_eq!(
         store.received_r_shares.len(),
@@ -240,7 +243,10 @@ async fn test_reconstruction_handler_manipulation_caught() {
 
     run_rbc_joinset(nodes, receivers, network).await;
 
-    let binding = receiver_node.get_or_create_store(session_id).await.unwrap();
+    let binding = receiver_node
+        .get_or_create_store(session_id, receiver_node.id)
+        .await
+        .unwrap();
     let store = binding.lock().await;
     assert_eq!(store.received_r_shares.len(), n_parties);
     assert_eq!(

@@ -43,6 +43,8 @@ use tokio::{
 };
 use tracing::warn;
 
+const MAX_MOD2_SESSIONS: usize = 1024;
+
 #[derive(Debug)]
 pub struct Mod2Store<F: PrimeField> {
     pub state: PhaseState,
@@ -92,8 +94,8 @@ pub struct Mod2Node<F: PrimeField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<Mod2Store<F>>>>>>,
-    batch_store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<Mod2BatchStore<F>>>>>>,
+    store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<Mod2Store<F>>>)>>>,
+    batch_store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<Mod2BatchStore<F>>>)>>>,
     pub rbc: R,
     rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
@@ -123,28 +125,46 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
     async fn get_or_create_store(
         &self,
         session: SessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<Mod2Store<F>>>, Mod2Error> {
         let mut map = self.store.lock().await;
-        if map.len() >= 256 && !map.contains_key(&session) {
-            return Err(Mod2Error::LimitError);
+        if !map.contains_key(&session) {
+            if map.len() >= MAX_MOD2_SESSIONS {
+                return Err(Mod2Error::LimitError);
+            }
+            let per_peer_limit = MAX_MOD2_SESSIONS / self.n;
+            let peer_count = map.values().filter(|(id, _)| *id == initiator_id).count();
+            if peer_count >= per_peer_limit {
+                return Err(Mod2Error::LimitError);
+            }
         }
         Ok(map
             .entry(session)
-            .or_insert_with(|| Arc::new(Mutex::new(Mod2Store::new())))
+            .or_insert_with(|| (initiator_id, Arc::new(Mutex::new(Mod2Store::new()))))
+            .1
             .clone())
     }
 
     async fn get_or_create_batch_store(
         &self,
         session: SessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<Mod2BatchStore<F>>>, Mod2Error> {
         let mut map = self.batch_store.lock().await;
-        if map.len() >= 256 && !map.contains_key(&session) {
-            return Err(Mod2Error::LimitError);
+        if !map.contains_key(&session) {
+            if map.len() >= MAX_MOD2_SESSIONS {
+                return Err(Mod2Error::LimitError);
+            }
+            let per_peer_limit = MAX_MOD2_SESSIONS / self.n;
+            let peer_count = map.values().filter(|(id, _)| *id == initiator_id).count();
+            if peer_count >= per_peer_limit {
+                return Err(Mod2Error::LimitError);
+            }
         }
         Ok(map
             .entry(session)
-            .or_insert_with(|| Arc::new(Mutex::new(Mod2BatchStore::new())))
+            .or_insert_with(|| (initiator_id, Arc::new(Mutex::new(Mod2BatchStore::new()))))
+            .1
             .clone())
     }
 
@@ -168,10 +188,11 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
     ) -> Result<RobustShare<F>, Mod2Error> {
         let rx = {
             let map = self.store.lock().await;
-            let inner = map
+            let (_, inner) = map
                 .get(&session)
-                .ok_or(Mod2Error::NoSuchSessionId(session))?
-                .clone();
+                .ok_or(Mod2Error::NoSuchSessionId(session))?;
+            let inner = inner.clone();
+            drop(map);
             let mut s = inner.lock().await;
             s.output_receiver
                 .take()
@@ -208,8 +229,9 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
             .ok_or(Mod2Error::SessionIdError(session))?;
 
         // Pre-create the store and save r_zero_prime before any async work.
+        // Attributed to `self.id`: this party is the one creating the session.
         {
-            let store = self.get_or_create_store(session).await?;
+            let store = self.get_or_create_store(session, self.id).await?;
             let mut s = store.lock().await;
             s.r_prime = Some(prep.r_prime);
         }
@@ -229,7 +251,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
         self.rbc.init(payload, rbc_session, network).await?;
         // If n-t shares already arrived before r_prime was stored, finalize now.
         {
-            let store = self.get_or_create_store(session).await?;
+            let store = self.get_or_create_store(session, self.id).await?;
             let ready = {
                 let s = store.lock().await;
                 s.r_prime.is_some() && s.received_shares.len() >= 2 * self.t + 1
@@ -276,8 +298,9 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
             .ok_or(Mod2Error::SessionIdError(session))?;
 
         // Pre-create the store and save r_primes before any async work.
+        // Attributed to `self.id`: this party is the one creating the session.
         {
-            let store = self.get_or_create_batch_store(session).await?;
+            let store = self.get_or_create_batch_store(session, self.id).await?;
             let mut s = store.lock().await;
             s.r_primes = Some(r_primes);
         }
@@ -296,7 +319,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
         self.rbc.init(payload, rbc_session, network).await?;
         // If n-t shares already arrived before r_primes was stored, finalize now.
         {
-            let store = self.get_or_create_batch_store(session).await?;
+            let store = self.get_or_create_batch_store(session, self.id).await?;
             let ready = {
                 let s = store.lock().await;
                 s.r_primes.is_some() && s.received_shares.len() >= 2 * self.t + 1
@@ -335,7 +358,10 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
             if id.round_id() == 1 {
                 let share_vals: Vec<F> =
                     CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-                let store = self.get_or_create_batch_store(parent).await?;
+                // Attributed to `sender`: whichever party's message happens to
+                // create this entry (same heuristic as Bracha/Avid), so no
+                // single sender can flood past its own per-peer share.
+                let store = self.get_or_create_batch_store(parent, sender).await?;
                 let ready = {
                     let mut s = store.lock().await;
                     if s.state == PhaseState::Finished {
@@ -364,7 +390,8 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
 
             let share_val: F = F::deserialize_compressed(payload.as_slice())?;
 
-            let store = self.get_or_create_store(parent).await?;
+            // Attributed to `sender` — see the batch branch above for why.
+            let store = self.get_or_create_store(parent, sender).await?;
             let ready = {
                 let mut s = store.lock().await;
                 if s.state == PhaseState::Finished {
@@ -512,10 +539,11 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
     ) -> Result<Vec<RobustShare<F>>, Mod2Error> {
         let rx = {
             let map = self.batch_store.lock().await;
-            let inner = map
+            let (_, inner) = map
                 .get(&session)
-                .ok_or(Mod2Error::NoSuchSessionId(session))?
-                .clone();
+                .ok_or(Mod2Error::NoSuchSessionId(session))?;
+            let inner = inner.clone();
+            drop(map);
             let mut s = inner.lock().await;
             s.output_receiver
                 .take()

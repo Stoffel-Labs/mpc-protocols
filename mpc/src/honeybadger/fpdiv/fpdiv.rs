@@ -39,6 +39,7 @@ use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use thiserror::Error;
 use tokio::time::Duration;
+use tracing::warn;
 
 #[derive(Debug, Error)]
 pub enum FpDivError {
@@ -126,9 +127,11 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> FpDivNode<F, R> {
         self.mul
             .init(session, x, y, triples, Arc::clone(&network))
             .await?;
-        let result = self.mul.wait_for_result(session, duration).await?;
-        self.mul.clear_store(session).await?;
-        Ok(result)
+        let result = self.mul.wait_for_result(session, duration).await;
+        if let Err(e) = self.mul.clear_store(session).await {
+            warn!("FpDiv: failed to clear mul store for session {session:?}: {e:?}");
+        }
+        Ok(result?)
     }
 
     /// Runs one TruncPr call to completion and clears its store,
@@ -146,9 +149,11 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> FpDivNode<F, R> {
         self.trunc
             .init(x, k, m, r_bits, r_int, session, Arc::clone(&network))
             .await?;
-        let result = self.trunc.wait_for_result(session, duration).await?;
-        self.trunc.clear_store(session).await?;
-        Ok(result)
+        let result = self.trunc.wait_for_result(session, duration).await;
+        if let Err(e) = self.trunc.clear_store(session).await {
+            warn!("FpDiv: failed to clear trunc store for session {session:?}: {e:?}");
+        }
+        Ok(result?)
     }
 
     /// Protocol 7 (FXDiv). Returns `([c], [z])` where `c ≈ a/b` and

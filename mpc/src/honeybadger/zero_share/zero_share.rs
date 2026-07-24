@@ -31,7 +31,7 @@ pub struct ZeroShaNode<F: FftField, R: RBC> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<ZeroShaStore<F>>>>>>,
+    pub store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<ZeroShaStore<F>>>)>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
 }
@@ -110,14 +110,31 @@ where
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
+        initiator_id: usize,
     ) -> Result<Arc<Mutex<ZeroShaStore<F>>>, ZeroShaError> {
         let mut storage = self.store.lock().await;
-        if storage.len() == MAX_ZERO_SHARE_SESSIONS {
-            return Err(ZeroShaError::LimitError);
+        if !storage.contains_key(&session_id) {
+            if storage.len() >= MAX_ZERO_SHARE_SESSIONS {
+                return Err(ZeroShaError::LimitError);
+            }
+            let per_peer_limit = MAX_ZERO_SHARE_SESSIONS / self.n_parties;
+            let peer_count = storage
+                .values()
+                .filter(|(id, _)| *id == initiator_id)
+                .count();
+            if peer_count >= per_peer_limit {
+                return Err(ZeroShaError::LimitError);
+            }
         }
         Ok(storage
             .entry(session_id)
-            .or_insert(Arc::new(Mutex::new(ZeroShaStore::empty(self.n_parties))))
+            .or_insert_with(|| {
+                (
+                    initiator_id,
+                    Arc::new(Mutex::new(ZeroShaStore::empty(self.n_parties))),
+                )
+            })
+            .1
             .clone())
     }
 
@@ -133,7 +150,7 @@ where
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some(value) => value,
+                Some((_, value)) => value,
                 None => return Err(ZeroShaError::NoSuchSessionId(session_id)),
             };
             let mut inner = storage_bind.lock().await;
@@ -152,7 +169,7 @@ where
 
     async fn try_finalize(&mut self, session_id: SessionId) -> Result<bool, ZeroShaError> {
         let output = {
-            let store_bind = self.get_or_create_store(session_id).await?;
+            let store_bind = self.get_or_create_store(session_id, self.id).await?;
             let mut store = store_bind.lock().await;
             if store.state == ZeroShaState::Finished {
                 return Ok(true);
@@ -248,7 +265,7 @@ where
                 .await?;
         }
 
-        let storage_access = self.get_or_create_store(session_id).await?;
+        let storage_access = self.get_or_create_store(session_id, self.id).await?;
         let mut store = storage_access.lock().await;
         store.batch_size = batch_size;
         store.state = ZeroShaState::Initialized;
@@ -291,7 +308,12 @@ where
             }
         }
 
-        let binding = self.get_or_create_store(msg.session_id).await?;
+        // Attributed to `msg.sender_id`: whichever party's message happens to
+        // create this entry, so no single sender can flood past its own
+        // per-peer share of the cap.
+        let binding = self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await?;
         let mut store = binding.lock().await;
 
         if store.initial_shares.is_empty() {
@@ -364,7 +386,7 @@ where
             r_deg_2t.extend(apply_vandermonde(&vandermonde_matrix, &shares_deg_2t)?);
         }
 
-        let bind_store = self.get_or_create_store(session_id).await?;
+        let bind_store = self.get_or_create_store(session_id, self.id).await?;
         let mut store = bind_store.lock().await;
         store.batch_size = r_deg_2t.len() / self.n_parties;
         store.computed_r_shares = r_deg_2t.clone();
@@ -432,7 +454,10 @@ where
             }
         }
 
-        let binding = self.get_or_create_store(msg.session_id).await?;
+        // Attributed to `msg.sender_id` — see receive_shares_handler for why.
+        let binding = self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await?;
         let mut store = binding.lock().await;
         if store.state == ZeroShaState::Finished {
             return Ok(());
@@ -509,7 +534,10 @@ where
             return Err(ZeroShaError::SessionIdError(msg.session_id));
         }
 
-        let binding = self.get_or_create_store(msg.session_id).await?;
+        // Attributed to `msg.sender_id` — see receive_shares_handler for why.
+        let binding = self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await?;
         let mut store = binding.lock().await;
         if !store.received_ok_msg.contains(&msg.sender_id) {
             store.received_ok_msg.push(msg.sender_id);
