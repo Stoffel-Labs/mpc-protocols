@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod comparison_utils;
 pub mod double_share_utils;
 pub mod fpmul_utils;
 pub mod prandbitd_utils;

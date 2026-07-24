@@ -212,7 +212,7 @@ where
                         }
                     }
 
-                    c_out.push(FeldmanShamirShare::new(c_val_j, self.id, t, c_comms_j)?);
+                    c_out.push(FeldmanShamirShare::new(c_val_j, self.id + 1, t, c_comms_j)?);
                 }
                 let triples: Vec<BeaverTriple<F, C>> = c_out
                     .iter()

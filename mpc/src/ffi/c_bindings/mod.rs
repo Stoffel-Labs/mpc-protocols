@@ -131,6 +131,17 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
                 ProtocolType::RanDouShaSmallField
             }
             crate::honeybadger::ProtocolType::DouShaSmallField => ProtocolType::DouShaSmallField,
+            crate::honeybadger::ProtocolType::ZeroSha => ProtocolType::None,
+            crate::honeybadger::ProtocolType::PreMulCOff => ProtocolType::None,
+            crate::honeybadger::ProtocolType::FpDiv => ProtocolType::None,
+            crate::honeybadger::ProtocolType::PreBitMul => todo!(),
+            crate::honeybadger::ProtocolType::PreBitMul1 => todo!(),
+            crate::honeybadger::ProtocolType::PreBitMul2 => todo!(),
+            crate::honeybadger::ProtocolType::PreBitMul3 => todo!(),
+            crate::honeybadger::ProtocolType::SufOr => todo!(),
+            crate::honeybadger::ProtocolType::FpDivTrunc => todo!(),
+            crate::honeybadger::ProtocolType::FpDivMulA => todo!(),
+            crate::honeybadger::ProtocolType::FpDivMulB => todo!(),
         }
     }
 }

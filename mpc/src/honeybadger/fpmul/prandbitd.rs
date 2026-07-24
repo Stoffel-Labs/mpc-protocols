@@ -7,7 +7,6 @@ use crate::{
             f256::{build_all_f_polys_2_8, Gf256, Gf256Domain},
             PRandBitDMessage, PRandBitDStore, PRandError, PrandState,
         },
-        mul::concat_sorted,
         robust_interpolate::robust_interpolate::RobustShare,
         ProtocolType, SessionId, WrappedMessage,
     },
@@ -162,11 +161,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             }
 
             let batch_size = s.batch_size.unwrap();
-            let no_of_batches = batch_size / (self.t + 1);
 
-            if s.output_open.len() != no_of_batches {
+            let Some(share_r_plus_b) = s.output_open.clone() else {
                 return Ok(false);
-            }
+            };
 
             if s.share_r_2.is_none() || s.share_r_p.is_none() {
                 return Ok(false);
@@ -174,7 +172,6 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             if s.share_b_2.len() == batch_size {
                 return Ok(true);
             }
-            let share_r_plus_b = concat_sorted(&s.output_open);
 
             (
                 s.share_r_2.clone().unwrap(),
@@ -183,6 +180,16 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                 batch_size,
             )
         };
+
+        // share_r_plus_b is the batch_recon reconstruction output; validate its length
+        // before indexing share_r_2/share_r_p by it below.
+        if share_r_plus_b.len() != batch_size {
+            return Err(PRandError::InvalidMessage(format!(
+                "share_r_plus_b has length {} but batch_size is {}",
+                share_r_plus_b.len(),
+                batch_size
+            )));
+        }
 
         // -------- Phase 2: Compute outside lock --------
         let mut b2_vec = Vec::with_capacity(batch_size);
@@ -434,16 +441,12 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
                     .collect::<Result<_, _>>()
                     .map_err(|_| PRandError::NotSet("r+b failed".into()))?;
 
-                for (i, chunk) in share_rplusb.chunks(self.t + 1).enumerate() {
-                    let session_id_batch = SessionId::new(
-                        calling_proto,
-                        SessionId::pack_slot(session_id.exec_id(), i as u8, 0),
-                        session_id.instance_id(),
-                    );
-                    self.batch_recon
-                        .init_batch_reconstruct(chunk, session_id_batch, network.clone())
-                        .await?;
-                }
+                // One combined batch-recon round for all chunks, instead of
+                // one round per (t+1)-sized chunk — round count is now
+                // independent of batch size.
+                self.batch_recon
+                    .init_batch_reconstruct_many(&share_rplusb, session_id, network.clone())
+                    .await?;
             }
 
             let _ = self.try_finalize_bit(session_id, binding.clone()).await?;
@@ -697,38 +700,23 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     ) -> Result<(), PRandError> {
         info!(node_id = self.id, "At output handler");
 
-        let calling_proto = match sid.calling_protocol() {
-            Some(proto) => proto,
-            None => {
-                return Err(PRandError::SessionIdError(sid));
-            }
-        };
-
-        let session_id = SessionId::new(
-            calling_proto,
-            SessionId::pack_slot(sid.exec_id(), 0, 0),
-            sid.instance_id(),
-        );
-
-        let binding = self.get_or_create_store(session_id, self.id).await?;
+        // One combined batch-recon round now, so `sid` is already the
+        // session `generate_riss` was called with.
+        let binding = self.get_or_create_store(sid, self.id).await?;
         let mut store = binding.lock().await;
         if store.state == PrandState::BitFinished {
             return Ok(());
         }
 
-        // deserialize the field element from the payload
-        let share_i_list: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), self.n)?;
-        let dealer_id = sid.sub_id();
-        if store.output_open.contains_key(&dealer_id) {
-            return Err(PRandError::Duplicate(format!(
-                "Already received for {}",
-                dealer_id
-            )));
+        // deserialize the field elements from the payload
+        let share_i_list: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), payload.len())?;
+        if store.output_open.is_some() {
+            return Err(PRandError::Duplicate("already received".to_string()));
         }
-        store.output_open.insert(dealer_id, share_i_list);
+        store.output_open = Some(share_i_list);
         drop(store);
-        self.try_finalize_bit(session_id, binding.clone()).await?;
-        return Ok(());
+        self.try_finalize_bit(sid, binding.clone()).await?;
+        Ok(())
     }
 
     pub async fn get_or_create_store(

@@ -447,6 +447,15 @@ where
         net: Arc<N>,
     ) -> Result<Self::Sfix, Self::Error>;
 
+    /// Fixed-point division with a secret divisor: x / y, plus a flag
+    /// indicating whether y was zero
+    async fn div_fixed(
+        &mut self,
+        x: Self::Sfix,
+        y: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<(Self::Sfix, S), Self::Error>;
+
     /// Integer addition (int8/16/32/64)
     async fn add_int(
         &self,

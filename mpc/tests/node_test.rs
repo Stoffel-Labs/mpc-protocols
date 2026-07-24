@@ -1,3 +1,4 @@
+use crate::utils::comparison_utils::{field_to_signed_real, share_signed_fixed};
 use crate::utils::test_utils::{
     construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
     fan_in_inboxes, generate_independent_shares, initialize_global_nodes_randousha,
@@ -26,6 +27,7 @@ use stoffelcrypto::{
         ShamirShare,
     },
     honeybadger::{
+        fpdiv::fpdiv_prep_counts,
         fpmul::f256::Gf256,
         input::input::InputClient,
         ran_dou_sha::RanDouShaState,
@@ -1717,4 +1719,98 @@ async fn fpdiv_const_e2e() {
 
     // 2.75 * 2^4 = 44
     assert_eq!(rec, Fr::from(44u64));
+}
+
+/// Secret/secret fixed-point division (FpDivNode) driven end-to-end through
+/// HoneyBadgerMPCNode::div_fixed, exercising the real process() routing and
+/// real preprocessing generation — div_fixed tops up random_shares/triples/
+/// prandbit/prandint/premulc_preps via run_preprocessing itself (see
+/// preprocessing.rs's premulc_preps pool and HoneyBadgerMPCNodeOpts::
+/// set_premulc_target), no manual seeding needed.
+#[tokio::test]
+async fn fpdiv_e2e() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+
+    let k = 16;
+    let f = 4;
+    let precision = FixedPointPrecision::new(k, f);
+    // a=6.0 (96), b=2.0 (32) -> c ~= 3.0
+    let a_bar: i128 = 96;
+    let b_bar: i128 = 32;
+
+    let a_shares = share_signed_fixed(a_bar, n_parties, t);
+    let b_shares = share_signed_fixed(b_bar, n_parties, t);
+
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+
+    let (n_triples, n_random_shares, n_prandbit, n_prandint) = fpdiv_prep_counts(k, f);
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        n_triples,
+        n_random_shares,
+        333,
+        n_prandbit,
+        n_prandint,
+        0,
+        0,
+        Duration::from_secs(30),
+        vec![],
+    );
+    for node in nodes.iter_mut() {
+        node.params.set_premulc_target(2, k - 1);
+        node.params.set_zero_share_target(2 * (k - 1));
+    }
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let a = SecretFixedPoint::new_with_precision(a_shares[pid].clone(), precision);
+        let b = SecretFixedPoint::new_with_precision(b_shares[pid].clone(), precision);
+        handles.push(tokio::spawn(async move {
+            node.div_fixed(a, b, net[pid].clone())
+                .await
+                .expect("division failed")
+        }));
+    }
+
+    let outputs: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.expect("task panicked"))
+        .collect();
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let c_shares: Vec<_> = outputs
+        .iter()
+        .map(|(c, _)| {
+            assert_eq!(*c.precision(), precision);
+            c.value().clone()
+        })
+        .collect();
+    let z_shares: Vec<_> = outputs.iter().map(|(_, z)| z.clone()).collect();
+
+    let (_, c_val) =
+        RobustShare::recover_secret(&c_shares, n_parties, t).expect("interpolate c failed");
+    let (_, z_val) =
+        RobustShare::recover_secret(&z_shares, n_parties, t).expect("interpolate z failed");
+
+    assert_eq!(z_val, Fr::from(0u64), "z must be 0 for b != 0");
+    let c_real = field_to_signed_real(c_val, f);
+    let rel_err = (c_real - 3.0f64).abs() / 3.0f64;
+    assert!(
+        rel_err < 0.2,
+        "FpDiv(6.0/2.0) = {c_real}, relative error {rel_err} exceeds tolerance"
+    );
 }

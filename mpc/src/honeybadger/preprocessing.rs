@@ -1,8 +1,15 @@
 use crate::{
     common::math::goldilocks::GoldilocksField,
     honeybadger::{
-        fpmul::f256::Gf256, robust_interpolate::robust_interpolate::RobustShare,
-        triple_gen::ShamirBeaverTriple, HoneyBadgerError,
+        bitwise::{AppRecPrep, PRandMPrep, PreBitLTPrep, PreMod2mPrep, PreMulCPrep},
+        fpdiv::{
+            fpdiv::{FpDivIterPrep, FpDivPrep},
+            fpdiv_theta,
+        },
+        fpmul::f256::Gf256,
+        robust_interpolate::robust_interpolate::RobustShare,
+        triple_gen::ShamirBeaverTriple,
+        HoneyBadgerError,
     },
 };
 use ark_ff::FftField;
@@ -23,6 +30,11 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     random_shares_small_field: Vec<RobustShare<GoldilocksField>>,
     /// A pool of random Breaver triples in the Goldilocks field.
     beaver_triples_small_field: Vec<ShamirBeaverTriple<GoldilocksField>>,
+    /// A pool of PreMulC offline-phase bundles (all sized at the same
+    /// configured `premulc_pk`), topped up by `run_preprocessing`.
+    premulc_preps: Vec<PreMulCPrep<F>>,
+    /// A pool of degree-2t zero-sharings (ZeroShaNode output).
+    zero_shares: Vec<RobustShare<F>>,
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
@@ -33,6 +45,8 @@ pub struct PreprocMaterialLength {
     pub random_shr_small_field: usize,
     pub prandbit: usize,
     pub prandint: usize,
+    pub premulc: usize,
+    pub zero_shares: usize,
 }
 
 impl PreprocMaterialLength {
@@ -44,6 +58,8 @@ impl PreprocMaterialLength {
             random_shr_small_field: 0,
             prandbit: 0,
             prandint: 0,
+            premulc: 0,
+            zero_shares: 0,
         }
     }
 }
@@ -61,7 +77,40 @@ where
             prandbit_shares: Vec::new(),
             prandint_shares: Vec::new(),
             random_shares_small_field: Vec::new(),
+            premulc_preps: Vec::new(),
+            zero_shares: Vec::new(),
         }
+    }
+
+    /// Adds one PreMulC offline-phase bundle to the pool.
+    pub fn add_premulc_prep(&mut self, prep: PreMulCPrep<F>) {
+        self.premulc_preps.push(prep);
+    }
+
+    /// Takes the next queued PreMulC preprocessing bundle.
+    pub fn take_premulc_prep(&mut self) -> Result<PreMulCPrep<F>, HoneyBadgerError> {
+        if self.premulc_preps.is_empty() {
+            error!("Error trying to take PreMulC prep: there is no enough preprocessing");
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self.premulc_preps.remove(0))
+    }
+
+    /// Adds newly-generated zero-sharings to the pool.
+    pub fn add_zero_shares(&mut self, mut shares: Vec<RobustShare<F>>) {
+        self.zero_shares.append(&mut shares);
+    }
+
+    /// Take up to n zero-sharings from the preprocessing material.
+    pub fn take_zero_shares(
+        &mut self,
+        n_shares: usize,
+    ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
+        if n_shares > self.zero_shares.len() {
+            error!("Error trying to take zero shares: There is no enough preprocessing");
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self.zero_shares.drain(0..n_shares).collect())
     }
 
     /// Adds the provided new preprocessing material to the current pool.
@@ -108,6 +157,8 @@ where
             random_shr_small_field: self.random_shares_small_field.len(),
             prandbit: self.prandbit_shares.len(),
             prandint: self.prandint_shares.len(),
+            premulc: self.premulc_preps.len(),
+            zero_shares: self.zero_shares.len(),
         }
     }
 
@@ -184,6 +235,102 @@ where
         }
         Ok(self.prandint_shares.drain(0..n_prandint).collect())
     }
+
+    // ── FpDiv preprocessing assembly ──────────────────────────────────────
+
+    /// A `m`-bit PRandM bundle (a PRandInt draw plus `m` PRandBit draws,
+    /// combined via `PRandMPrep::from_prand_outputs`).
+    pub fn take_prandm_prep(&mut self, m: usize) -> Result<PRandMPrep<F>, HoneyBadgerError> {
+        let r_double_prime = self.take_prandint_shares(1)?.remove(0);
+        let r_prime_bits: Vec<RobustShare<F>> = self
+            .take_prandbit_shares(m)?
+            .into_iter()
+            .map(|(share, _)| share)
+            .collect();
+        Ok(PRandMPrep::from_prand_outputs(
+            r_double_prime,
+            r_prime_bits,
+        )?)
+    }
+
+    /// Mod2's own degenerate PRandM (m=1, no bit decomposition needed —
+    /// `r_prime` is used directly as the random bit, `r_prime_bits` stays
+    /// empty).
+    pub fn take_mod2_prandm_prep(&mut self) -> Result<PRandMPrep<F>, HoneyBadgerError> {
+        let r_double_prime = self.take_prandint_shares(1)?.remove(0);
+        let r_prime = self.take_prandbit_shares(1)?.remove(0).0;
+        Ok(PRandMPrep {
+            r_double_prime,
+            r_prime,
+            r_prime_bits: vec![],
+        })
+    }
+
+    /// Packages a full `FpDivPrep(k, f)` from the pool plus the two
+    /// already-generated PreMulC bundles (`bitdec_suf_mul_inv_prep`,
+    /// `sufor_prep` — both pk=k-1).
+    pub fn build_fpdiv_prep(
+        &mut self,
+        k: usize,
+        f: usize,
+        bitdec_suf_mul_inv_prep: PreMulCPrep<F>,
+        sufor_prep: PreMulCPrep<F>,
+    ) -> Result<FpDivPrep<F>, HoneyBadgerError> {
+        let bitdec_prandm = self.take_prandm_prep(k - 1)?;
+        let bitdec_mul_triples = self.take_beaver_triples(k - 2)?;
+        let mut bitdec_mod2_preps = Vec::with_capacity(k - 1);
+        for _ in 0..k - 1 {
+            bitdec_mod2_preps.push(self.take_mod2_prandm_prep()?);
+        }
+        let bitdec_prep = PreMod2mPrep {
+            prandm: bitdec_prandm,
+            pre_bitlt: PreBitLTPrep {
+                suf_mul_inv_prep: bitdec_suf_mul_inv_prep,
+                mul_triples: bitdec_mul_triples,
+                mod2_preps: bitdec_mod2_preps,
+            },
+        };
+
+        let apprec_trunc_prandm = self.take_prandm_prep(2 * (k - f - 1))?;
+        let app_rec_prep = AppRecPrep {
+            bitdec_prep,
+            sufor_prep,
+            xor_triples: self.take_beaver_triples(k - 1)?,
+            batch_triples: self.take_beaver_triples(2)?,
+            final_triple: self.take_beaver_triples(1)?,
+            trunc_r_bits: apprec_trunc_prandm.r_prime_bits,
+            trunc_r_int: apprec_trunc_prandm.r_double_prime,
+        };
+
+        let step3_trunc_prandm = self.take_prandm_prep(f)?;
+        let num_iters = fpdiv_theta(k).saturating_sub(1);
+        let mut iters = Vec::with_capacity(num_iters);
+        for _ in 0..num_iters {
+            let round_a_triples = self.take_beaver_triples(2)?;
+            let round_b_triple = self.take_beaver_triples(1)?;
+            let step6 = self.take_prandm_prep(2 * f)?;
+            let step7 = self.take_prandm_prep(2 * f)?;
+            let step8 = self.take_prandm_prep(2 * f)?;
+            iters.push(FpDivIterPrep {
+                round_a_triples,
+                round_b_triple,
+                step6_trunc_r_bits: step6.r_prime_bits,
+                step6_trunc_r_int: step6.r_double_prime,
+                step7_trunc_r_bits: step7.r_prime_bits,
+                step7_trunc_r_int: step7.r_double_prime,
+                step8_trunc_r_bits: step8.r_prime_bits,
+                step8_trunc_r_int: step8.r_double_prime,
+            });
+        }
+
+        Ok(FpDivPrep {
+            app_rec_prep,
+            step3_4_triples: self.take_beaver_triples(2)?,
+            step3_trunc_r_bits: step3_trunc_prandm.r_prime_bits,
+            step3_trunc_r_int: step3_trunc_prandm.r_double_prime,
+            iters,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -224,7 +371,9 @@ mod test {
                 random_shr: 1,
                 random_shr_small_field: 0,
                 prandbit: 0,
-                prandint: 0
+                prandint: 0,
+                premulc: 0,
+                zero_shares: 0
             }
         );
 
@@ -239,7 +388,9 @@ mod test {
                 random_shr: 1,
                 random_shr_small_field: 0,
                 prandbit: 0,
-                prandint: 0
+                prandint: 0,
+                premulc: 0,
+                zero_shares: 0
             }
         );
 

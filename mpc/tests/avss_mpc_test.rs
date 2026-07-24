@@ -13,8 +13,9 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use stoffelcrypto::{
     avss_mpc::{triple_gen::BeaverTriple, AvssMPCNode, AvssMPCNodeOpts, AvssSessionId},
     common::{
-        rbc::rbc::Avid, share::feldman::FeldmanShamirShare, MPCProtocol, PreprocessingMPCProtocol,
-        SecretSharingScheme, RBC,
+        rbc::rbc::Avid,
+        share::{avss::verify_feldman, feldman::FeldmanShamirShare},
+        MPCProtocol, PreprocessingMPCProtocol, SecretSharingScheme, RBC,
     },
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
@@ -485,6 +486,205 @@ async fn mul_e2e() {
         let shares_for_i = per_multiplication_shares[i][0..=t].to_vec();
         let (_, z_rec) = FeldmanShamirShare::recover_secret(&shares_for_i, n_parties, t)
             .expect("interpolate failed");
+        let expected = x_values[i] * y_values[i];
+
+        assert_eq!(z_rec, expected, "multiplication mismatch at index {}", i);
+    }
+}
+
+/// Like `mul_e2e`, but the Beaver triples come out of the real preprocessing
+/// pipeline (share-gen + triple-gen over AVSS) instead of being fabricated
+/// locally. Validates the generated triples themselves (share ids, Feldman
+/// commitments, c == a*b) before using them for multiplication.
+#[tokio::test]
+async fn mul_e2e_with_preprocessing() {
+    setup_tracing();
+    //----------------------------------------SETUP PARAMETERS----------------------------------------
+    let n_parties = 5;
+    let t = 1;
+    let mut rng = test_rng();
+    let no_of_multiplication = 2;
+    let ids: Vec<_> = (1..=n_parties).collect();
+
+    //Setup
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+
+    // Prepare inputs for multiplication
+    let mut x_values = Vec::new();
+    let mut y_values = Vec::new();
+
+    let mut x_inputs_per_node = vec![Vec::new(); n_parties];
+    let mut y_inputs_per_node = vec![Vec::new(); n_parties];
+
+    for _i in 0..no_of_multiplication {
+        let x_value = Fr::rand(&mut rng);
+        x_values.push(x_value);
+        let y_value = Fr::rand(&mut rng);
+        y_values.push(y_value);
+
+        let shares_x =
+            FeldmanShamirShare::compute_shares(x_value, n_parties, t, Some(&ids), &mut rng)
+                .unwrap();
+        let shares_y =
+            FeldmanShamirShare::compute_shares(y_value, n_parties, t, Some(&ids), &mut rng)
+                .unwrap();
+
+        for p in 0..n_parties {
+            x_inputs_per_node[p].push(shares_x[p].clone());
+            y_inputs_per_node[p].push(shares_y[p].clone());
+        }
+    }
+
+    //----------------------------------------SETUP NODES----------------------------------------
+    // create global nodes
+    let nodes = create_avss_mpc_nodes::<
+        Fr,
+        Avid<AvssSessionId>,
+        FeldmanShamirShare<Fr, G>,
+        FakeNetwork,
+        G,
+    >(
+        n_parties,
+        t,
+        0,
+        no_of_multiplication,
+        112,
+        Duration::from_secs(30),
+    );
+
+    //----------------------------------------RECIEVE----------------------------------------
+    // spawn tasks to process received messages
+    avss_mpc_receive::<Fr, Avid<AvssSessionId>, FeldmanShamirShare<Fr, G>, FakeNetwork, G>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+    );
+
+    //----------------------------------------RUN PREPROCESSING----------------------------------------
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network[pid].clone();
+        let mut rng = StdRng::from_rng(OsRng).unwrap();
+
+        let handle = tokio::spawn(async move {
+            node.run_preprocessing(net, &mut rng)
+                .await
+                .expect("Preprocessing failed");
+        });
+        handles.push(handle);
+    }
+    for r in futures::future::join_all(handles).await {
+        r.expect("preprocessing task panicked");
+    }
+
+    //----------------------------------------VALIDATE GENERATED TRIPLES----------------------------------------
+    // Take every party's triples out of the pool, check them cross-party, then
+    // put them back so mul consumes the protocol-generated preprocessing.
+    let mut per_party_triples: Vec<Vec<BeaverTriple<Fr, G>>> = Vec::with_capacity(n_parties);
+    for pid in 0..n_parties {
+        let mut store = nodes[pid].preprocessing_material.lock().await;
+        let (n_triples, _) = store.len();
+        assert!(
+            n_triples >= no_of_multiplication,
+            "party {} generated {} triples, need {}",
+            pid,
+            n_triples,
+            no_of_multiplication
+        );
+        per_party_triples.push(store.take_triples(n_triples).unwrap());
+    }
+
+    let n_generated = per_party_triples[0].len();
+    for pid in 0..n_parties {
+        assert_eq!(per_party_triples[pid].len(), n_generated);
+        for triple in &per_party_triples[pid] {
+            for share in [&triple.a, &triple.b, &triple.c] {
+                // Share ids are evaluation points, 1-indexed.
+                assert_eq!(share.feldmanshare.id, pid + 1);
+                assert!(verify_feldman(share.clone()));
+            }
+        }
+    }
+
+    for i in 0..n_generated {
+        let a_shares: Vec<_> = (0..n_parties)
+            .map(|p| per_party_triples[p][i].a.clone())
+            .collect();
+        let b_shares: Vec<_> = (0..n_parties)
+            .map(|p| per_party_triples[p][i].b.clone())
+            .collect();
+        let c_shares: Vec<_> = (0..n_parties)
+            .map(|p| per_party_triples[p][i].c.clone())
+            .collect();
+
+        let (_, a) = FeldmanShamirShare::recover_secret(&a_shares, n_parties, t).unwrap();
+        let (_, b) = FeldmanShamirShare::recover_secret(&b_shares, n_parties, t).unwrap();
+        let (_, c) = FeldmanShamirShare::recover_secret(&c_shares, n_parties, t).unwrap();
+        assert_eq!(c, a * b, "generated triple {} is not a beaver triple", i);
+    }
+
+    for pid in 0..n_parties {
+        nodes[pid]
+            .preprocessing_material
+            .lock()
+            .await
+            .add(Some(per_party_triples[pid].clone()), None);
+    }
+
+    //----------------------------------------RUN MUL----------------------------------------
+    let (fin_send, mut fin_recv) = mpsc::channel::<(usize, Vec<FeldmanShamirShare<Fr, G>>)>(100);
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network[pid].clone();
+        let fin_send = fin_send.clone();
+        let x_shares = x_inputs_per_node[pid].clone();
+        let y_shares = y_inputs_per_node[pid].clone();
+
+        let handle = tokio::spawn(async move {
+            let final_shares = node
+                .mul(x_shares.clone(), y_shares.clone(), net.clone())
+                .await
+                .expect("mul failed");
+            fin_send.send((pid, final_shares)).await.unwrap();
+        });
+        handles.push(handle);
+    }
+    drop(fin_send);
+
+    for r in futures::future::join_all(handles).await {
+        r.expect("mul task panicked");
+    }
+
+    let mut final_results = HashMap::<usize, Vec<FeldmanShamirShare<Fr, G>>>::new();
+    while let Some((id, final_shares)) = fin_recv.recv().await {
+        assert_eq!(final_shares.len(), no_of_multiplication);
+        for mul_share in &final_shares {
+            assert_eq!(mul_share.feldmanshare.degree, t);
+            assert_eq!(mul_share.feldmanshare.id, id + 1);
+        }
+        final_results.insert(id, final_shares);
+    }
+    assert_eq!(final_results.len(), n_parties);
+
+    //----------------------------------------VALIDATE VALUES----------------------------------------
+
+    let mut per_multiplication_shares: Vec<Vec<FeldmanShamirShare<Fr, G>>> =
+        vec![Vec::new(); no_of_multiplication];
+
+    for pid in 0..n_parties {
+        for i in 0..no_of_multiplication {
+            per_multiplication_shares[i].push(final_results.get(&pid).unwrap()[i].clone());
+        }
+    }
+
+    for i in 0..no_of_multiplication {
+        // Reconstruct from all parties' shares: recover_secret also rejects the
+        // result if the shares are not consistent with a degree-t polynomial.
+        let (_, z_rec) =
+            FeldmanShamirShare::recover_secret(&per_multiplication_shares[i], n_parties, t)
+                .expect("interpolate failed");
         let expected = x_values[i] * y_values[i];
 
         assert_eq!(z_rec, expected, "multiplication mismatch at index {}", i);

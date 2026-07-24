@@ -1227,7 +1227,7 @@ async fn preprocessing_stress_snapshot(
                     .as_ref()
                     .map(|shares| shares.len())
                     .unwrap_or(0),
-                store.output_open.len()
+                store.output_open.is_some() as usize
             ));
         }
         drop(rand_bit_sessions);
