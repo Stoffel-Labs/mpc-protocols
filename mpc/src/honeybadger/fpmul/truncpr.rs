@@ -1,4 +1,4 @@
-use crate::common::session_store::SessionStore;
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
@@ -13,6 +13,7 @@ use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use bincode::Options;
 use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::Network;
 use tokio::{
     sync::{
@@ -28,7 +29,7 @@ pub struct TruncPrNode<F: PrimeField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<TruncPrStore<F>>>)>>>,
+    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<TruncPrStore<F>>>)>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
@@ -119,28 +120,20 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         session: SessionId,
         initiator_id: usize,
     ) -> Option<Arc<Mutex<TruncPrStore<F>>>> {
-        let mut map = self.store.lock().await;
-
-        if !map.contains_key(&session) {
-            if map.len() >= MAX_TRUNCPR_SESSIONS {
+        match self.store.lock().await.get_or_admit(
+            session,
+            initiator_id,
+            MAX_TRUNCPR_SESSIONS,
+            MAX_TRUNCPR_SESSIONS / self.n,
+            || Arc::new(Mutex::new(TruncPrStore::empty())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
                 warn!("TruncPr session limit reached");
-                return None;
-            }
-            let per_peer_limit = MAX_TRUNCPR_SESSIONS / self.n;
-            let peer_count = map
-                .iter()
-                .filter(|(_, (id, _))| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                warn!("TruncPr per-peer session limit reached");
-                return None;
+                None
             }
         }
-
-        map.get_or_create_with(session, || {
-            (initiator_id, Arc::new(Mutex::new(TruncPrStore::empty())))
-        })
-        .map(|(_, arc)| arc)
     }
 
     pub async fn store_len(&self) -> usize {
@@ -172,7 +165,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             let storage_bind = {
                 let storage = self.store.lock().await;
                 match storage.get(&session_id) {
-                    Some((_, arc)) => arc.clone(),
+                    Some((_, _, arc)) => arc.clone(),
                     None => return Err(TruncPrError::NoSuchSessionId(session_id)),
                 }
             };

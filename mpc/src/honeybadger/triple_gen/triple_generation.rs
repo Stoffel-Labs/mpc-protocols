@@ -1,5 +1,6 @@
 use crate::common::session_store::SessionStore;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ark_ff::FftField;
 use itertools::izip;
@@ -43,7 +44,7 @@ where
     /// The upper bound of corrupt parties participating in the triple generation protocol.
     pub threshold: usize,
     /// Internal storage of the node.
-    pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<TripleGenStorage<F>>>)>>>,
+    pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<TripleGenStorage<F>>>)>>>,
     /// Batch reconstruction node used in the triple generation
     pub batch_recon_node: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
@@ -77,30 +78,17 @@ where
         session_id: SessionId,
         initiator_id: usize,
     ) -> Option<Arc<Mutex<TripleGenStorage<F>>>> {
-        let mut storage = self.storage.lock().await;
-
-        if !storage.contains_key(&session_id) {
-            if storage.len() >= MAX_TRIPLE_GEN_SESSIONS {
-                return None;
-            }
-            let per_peer_limit = MAX_TRIPLE_GEN_SESSIONS / self.n_parties;
-            let peer_count = storage
-                .iter()
-                .filter(|(_, (id, _))| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                return None;
-            }
-        }
-
-        storage
-            .get_or_create_with(session_id, || {
-                (
-                    initiator_id,
-                    Arc::new(Mutex::new(TripleGenStorage::empty())),
-                )
-            })
-            .map(|(_, arc)| arc)
+        self.storage
+            .lock()
+            .await
+            .get_or_admit(
+                session_id,
+                initiator_id,
+                MAX_TRIPLE_GEN_SESSIONS,
+                MAX_TRIPLE_GEN_SESSIONS / self.n_parties,
+                || Arc::new(Mutex::new(TripleGenStorage::empty())),
+            )
+            .ok()
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         self.batch_recon_node.clear_store(session_id).await;
@@ -143,7 +131,7 @@ where
         let output_receiver = {
             let storage = self.storage.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(TripleGenError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;

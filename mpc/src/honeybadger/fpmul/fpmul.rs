@@ -90,14 +90,12 @@ where
             )
             .await?;
 
-        let trunc_input = self.mult_node.wait_for_result(session_id, duration).await?;
+        let mult_result = self.mult_node.wait_for_result(session_id, duration).await;
 
         if !self.mult_node.clear_store(session_id).await {
-            warn!(
-                ?session_id,
-                "failed to clear completed FPMul multiplication state"
-            );
+            warn!(?session_id, "failed to clear FPMul multiplication state");
         }
+        let trunc_input = mult_result?;
         self.trunc_node
             .init(
                 trunc_input[0].clone(),
@@ -110,17 +108,11 @@ where
             )
             .await?;
 
-        let trunc_output = self
-            .trunc_node
-            .wait_for_result(session_id, duration)
-            .await?;
+        let trunc_result = self.trunc_node.wait_for_result(session_id, duration).await;
 
         if !self.trunc_node.clear_store(session_id).await {
-            warn!(
-                ?session_id,
-                "failed to clear completed FPMul truncation state"
-            );
+            warn!(?session_id, "failed to clear FPMul truncation state");
         }
-        Ok(SecretFixedPoint::new(trunc_output))
+        Ok(SecretFixedPoint::new(trunc_result?))
     }
 }

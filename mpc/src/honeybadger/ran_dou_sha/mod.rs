@@ -1,6 +1,6 @@
 pub mod messages;
 
-use crate::common::session_store::SessionStore;
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{
         rbc::RbcError,
@@ -18,7 +18,7 @@ use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalSerialize, SerializationError};
 use bincode::{ErrorKind, Options};
 use messages::{RanDouShaMessage, ReconstructionMessage};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use thiserror::Error;
 use tokio::sync::{
     oneshot::{channel, Receiver, Sender},
@@ -137,7 +137,7 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     /// Threshold of corrupted parties.
     pub threshold: usize,
     /// Storage of the node.
-    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<RanDouShaStore<F>>>)>>>,
+    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<RanDouShaStore<F>>>)>>>,
     ///Avid instance for RBC
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
@@ -205,29 +205,20 @@ where
         session_id: SessionId,
         initiator_id: usize,
     ) -> Option<Arc<Mutex<RanDouShaStore<F>>>> {
-        let mut storage = self.store.lock().await;
-
-        if !storage.contains_key(&session_id) {
-            if storage.len() >= MAX_RAN_DOU_SHA_SESSIONS {
+        match self.store.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_RAN_DOU_SHA_SESSIONS,
+            MAX_RAN_DOU_SHA_SESSIONS / self.n_parties,
+            || Arc::new(Mutex::new(RanDouShaStore::empty())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
                 warn!("RanDouSha session limit reached");
-                return None;
-            }
-            let per_peer_limit = MAX_RAN_DOU_SHA_SESSIONS / self.n_parties;
-            let peer_count = storage
-                .iter()
-                .filter(|(_, (id, _))| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                warn!("RanDouSha per-peer session limit reached");
-                return None;
+                None
             }
         }
-
-        storage
-            .get_or_create_with(session_id, || {
-                (initiator_id, Arc::new(Mutex::new(RanDouShaStore::empty())))
-            })
-            .map(|(_, arc)| arc)
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), RanDouShaError> {
@@ -288,7 +279,7 @@ where
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(RanDouShaError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;

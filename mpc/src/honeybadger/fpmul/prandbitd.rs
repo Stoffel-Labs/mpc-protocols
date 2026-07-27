@@ -1,6 +1,9 @@
 use crate::{
     common::{
-        session_store::SessionStore, share::ShareError, utils::deser_bounded_vec, ProtocolSessionId,
+        session_store::{Admission, SessionStore},
+        share::ShareError,
+        utils::deser_bounded_vec,
+        ProtocolSessionId,
     },
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
@@ -19,7 +22,7 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
 use ark_std::rand::{Rng, SeedableRng};
 use itertools::Itertools;
 use num_bigint::BigUint;
-use std::{collections::HashMap, sync::Arc, vec};
+use std::{collections::HashMap, sync::Arc, time::Instant, vec};
 use stoffelnet::network_utils::Network;
 use tokio::{
     sync::{mpsc::Receiver, Mutex},
@@ -35,7 +38,7 @@ pub struct PRandBitDNode<F: PrimeField, G: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<PRandBitDStore<F, G>>>)>>>,
+    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PRandBitDStore<F, G>>>)>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
@@ -64,7 +67,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             let num_chunks = {
                 let store = self.store.lock().await;
                 match store.get(&session_id) {
-                    Some((_, arc)) => arc.lock().await.batch_size.unwrap_or(0) / (self.t + 1),
+                    Some((_, _, arc)) => arc.lock().await.batch_size.unwrap_or(0) / (self.t + 1),
                     None => 0,
                 }
             };
@@ -118,7 +121,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(PRandError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -144,7 +147,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(PRandError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -1014,28 +1017,20 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         session_id: SessionId,
         initiator_id: usize,
     ) -> Option<Arc<Mutex<PRandBitDStore<F, G>>>> {
-        let mut storage = self.store.lock().await;
-
-        if !storage.contains_key(&session_id) {
-            if storage.len() >= MAX_PRAND_SESSIONS {
+        match self.store.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_PRAND_SESSIONS,
+            MAX_PRAND_SESSIONS / self.n,
+            || Arc::new(Mutex::new(PRandBitDStore::empty())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
                 warn!("PRandBitD session limit reached");
-                return None;
-            }
-            let per_peer_limit = MAX_PRAND_SESSIONS / self.n;
-            let peer_count = storage
-                .iter()
-                .filter(|(_, (id, _))| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                warn!("PRandBitD per-peer session limit reached");
-                return None;
+                None
             }
         }
-        storage
-            .get_or_create_with(session_id, || {
-                (initiator_id, Arc::new(Mutex::new(PRandBitDStore::empty())))
-            })
-            .map(|(_, arc)| arc)
     }
 }
 

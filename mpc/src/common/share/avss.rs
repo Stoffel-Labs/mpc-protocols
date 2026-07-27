@@ -1,6 +1,6 @@
 use crate::common::{
     rbc::RbcError,
-    session_store::{RetiredSet, DEFAULT_RETIRED_CAP},
+    session_store::{session_ttl, RetiredSet, DEFAULT_RETIRED_CAP},
     share::{feldman::FeldmanShamirShare, shamir::Shamirshare, ShareError},
     ProtocolSessionId, RbcWrapFn, SecretSharingScheme, RBC,
 };
@@ -15,7 +15,7 @@ use chacha20poly1305::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
     mpsc::{self, Receiver, Sender},
@@ -166,7 +166,7 @@ where
     pub t: usize,
     pub sk_i: F,
     pub pk_map: Arc<Vec<G>>,
-    pub shares: Arc<Mutex<BTreeMap<Id, Option<Vec<FeldmanShamirShare<F, G>>>>>>,
+    pub shares: Arc<Mutex<BTreeMap<Id, (Instant, Option<Vec<FeldmanShamirShare<F, G>>>)>>>,
     /// Tombstones for `shares` entries already consumed (or otherwise cleared),
     /// so a late/duplicate dealer message can't silently resurrect a session
     /// nobody is waiting on anymore.
@@ -256,9 +256,36 @@ where
     /// duplicate of the same dealer message can't resurrect it after the
     /// consumer has already moved on.
     pub async fn take_share(&self, id: Id) -> Option<Option<Vec<FeldmanShamirShare<F, G>>>> {
-        let value = self.shares.lock().await.remove(&id);
+        let value = self.shares.lock().await.remove(&id).map(|(_, v)| v);
         self.retired.lock().await.record(id);
         value
+    }
+
+    /// Returns `true` if `map` has room for one more entry. Entries only leave this map via
+    /// `take_share`/`clear_session`, both driven by the consuming protocol's success path — a
+    /// dealer message for a session no local caller ever finishes waiting on (timed out, or
+    /// never legitimately started) would otherwise squat here forever. If `map` is full, evicts
+    /// anything idle past the global session TTL first to reclaim room from exactly that kind
+    /// of entry before giving up.
+    async fn admit(
+        &self,
+        map: &mut BTreeMap<Id, (Instant, Option<Vec<FeldmanShamirShare<F, G>>>)>,
+    ) -> bool {
+        if map.len() >= MAX_PENDING_SESSIONS {
+            let stale: Vec<Id> = map
+                .iter()
+                .filter(|(_, (inserted_at, _))| inserted_at.elapsed() >= session_ttl())
+                .map(|(id, _)| *id)
+                .collect();
+            if !stale.is_empty() {
+                let mut retired = self.retired.lock().await;
+                for id in stale {
+                    map.remove(&id);
+                    retired.record(id);
+                }
+            }
+        }
+        map.len() < MAX_PENDING_SESSIONS
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), AvssError> {
@@ -475,14 +502,14 @@ where
 
         {
             let mut map = self.shares.lock().await;
-            if map.len() >= MAX_PENDING_SESSIONS {
+            if !self.admit(&mut map).await {
                 warn!(
                     "AVSS share cache full; dropping session {:?}",
                     msg.session_id
                 );
                 return Err(AvssError::LimitExceeded);
             }
-            map.insert(msg.session_id, Some(shares));
+            map.insert(msg.session_id, (Instant::now(), Some(shares)));
         };
 
         // A blocking `.send().await` here would stall this node's entire message-processing

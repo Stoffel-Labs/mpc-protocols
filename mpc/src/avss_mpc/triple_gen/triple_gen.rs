@@ -1,4 +1,4 @@
-use crate::common::session_store::SessionStore;
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     avss_mpc::{
         triple_gen::{BeaverTriple, TripleGenError, TripleGenStore},
@@ -16,6 +16,7 @@ use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_std::rand::Rng;
 use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
     mpsc::{self},
@@ -30,7 +31,7 @@ pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
     pub threshold: usize,
     pub avss: AvssNode<F, R, C, AvssSessionId>,
     pub avss_output: Arc<Mutex<mpsc::Receiver<AvssSessionId>>>,
-    pub store: Arc<Mutex<SessionStore<AvssSessionId, (usize, Arc<Mutex<TripleGenStore<F, C>>>)>>>,
+    pub store: Arc<Mutex<SessionStore<AvssSessionId, (usize, Instant, Arc<Mutex<TripleGenStore<F, C>>>)>>>,
 }
 
 const MAX_AVSS_TRIPLE_GEN_SESSIONS: usize = 256;
@@ -79,31 +80,20 @@ where
         sid: AvssSessionId,
         initiator_id: usize,
     ) -> Option<Arc<Mutex<TripleGenStore<F, C>>>> {
-        let mut map = self.store.lock().await;
-
-        if !map.contains_key(&sid) {
-            if map.len() >= MAX_AVSS_TRIPLE_GEN_SESSIONS {
+        match self.store.lock().await.get_or_admit(
+            sid,
+            initiator_id,
+            MAX_AVSS_TRIPLE_GEN_SESSIONS,
+            MAX_AVSS_TRIPLE_GEN_SESSIONS / self.n_parties,
+            || Arc::new(Mutex::new(TripleGenStore::empty(2 * self.threshold + 1))),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
                 warn!("AVSS TripleGen session limit reached");
-                return None;
-            }
-            let per_peer_limit = MAX_AVSS_TRIPLE_GEN_SESSIONS / self.n_parties;
-            let peer_count = map
-                .iter()
-                .filter(|(_, (id, _))| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                warn!("AVSS TripleGen per-peer session limit reached");
-                return None;
+                None
             }
         }
-
-        map.get_or_create_with(sid, || {
-            (
-                initiator_id,
-                Arc::new(Mutex::new(TripleGenStore::empty(2 * self.threshold + 1))),
-            )
-        })
-        .map(|(_, arc)| arc)
     }
 
     /// Retires this session and clears every per-dealer AVSS sub-session it created.

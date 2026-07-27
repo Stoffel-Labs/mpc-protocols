@@ -6,7 +6,7 @@ use crate::avss_mpc::{
     deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, MAX_AVSS_BATCH_SIZE,
     MAX_MESSAGE_SIZE,
 };
-use crate::common::session_store::SessionStore;
+use crate::common::session_store::{Admission, SessionStore};
 use crate::common::share::feldman::FeldmanShamirShare;
 use crate::common::{rbc::RbcError, share::ShareError, RBC};
 use crate::common::{ProtocolSessionId, SecretSharingScheme};
@@ -16,6 +16,7 @@ use ark_serialize::CanonicalSerialize;
 use bincode::Options;
 use itertools::izip;
 use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, Mutex};
@@ -28,7 +29,7 @@ pub struct Multiply<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub n: usize,
     pub t: usize,
     pub mult_storage:
-        Arc<Mutex<SessionStore<AvssSessionId, (usize, Arc<Mutex<MultStorage<F, G>>>)>>>,
+        Arc<Mutex<SessionStore<AvssSessionId, (usize, Instant, Arc<Mutex<MultStorage<F, G>>>)>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
@@ -287,29 +288,20 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         session_id: AvssSessionId,
         initiator_id: usize,
     ) -> Option<Arc<Mutex<MultStorage<F, G>>>> {
-        let mut storage = self.mult_storage.lock().await;
-
-        if !storage.contains_key(&session_id) {
-            if storage.len() >= MAX_AVSS_MUL_SESSIONS {
+        match self.mult_storage.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_AVSS_MUL_SESSIONS,
+            MAX_AVSS_MUL_SESSIONS / self.n,
+            || Arc::new(Mutex::new(MultStorage::empty())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
                 warn!("AVSS Mul session limit reached");
-                return None;
-            }
-            let per_peer_limit = MAX_AVSS_MUL_SESSIONS / self.n;
-            let peer_count = storage
-                .iter()
-                .filter(|(_, (id, _))| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                warn!("AVSS Mul per-peer session limit reached");
-                return None;
+                None
             }
         }
-
-        storage
-            .get_or_create_with(session_id, || {
-                (initiator_id, Arc::new(Mutex::new(MultStorage::empty())))
-            })
-            .map(|(_, arc)| arc)
     }
 
     pub async fn wait_for_result(
@@ -322,7 +314,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         let output_receiver = {
             let mult_storage = self.mult_storage.lock().await;
             let storage_bind = match mult_storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(MulError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;

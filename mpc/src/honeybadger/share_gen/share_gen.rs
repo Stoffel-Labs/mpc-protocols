@@ -1,10 +1,11 @@
-use crate::common::session_store::SessionStore;
+use crate::common::session_store::{Admission, SessionStore};
 use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use bincode::Options;
 use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
@@ -31,7 +32,7 @@ pub struct RanShaNode<F: FftField, R: RBC> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<RanShaStore<F>>>)>>>,
+    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<RanShaStore<F>>>)>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
 }
@@ -121,32 +122,20 @@ where
         session_id: SessionId,
         initiator_id: usize,
     ) -> Option<Arc<Mutex<RanShaStore<F>>>> {
-        let mut storage = self.store.lock().await;
-
-        if !storage.contains_key(&session_id) {
-            if storage.len() >= MAX_SHARE_GEN_SESSIONS {
+        match self.store.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_SHARE_GEN_SESSIONS,
+            MAX_SHARE_GEN_SESSIONS / self.n_parties,
+            || Arc::new(Mutex::new(RanShaStore::empty(self.n_parties))),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
                 warn!("RanSha session limit reached");
-                return None;
-            }
-            let per_peer_limit = MAX_SHARE_GEN_SESSIONS / self.n_parties;
-            let peer_count = storage
-                .iter()
-                .filter(|(_, (id, _))| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                warn!("RanSha per-peer session limit reached");
-                return None;
+                None
             }
         }
-
-        storage
-            .get_or_create_with(session_id, || {
-                (
-                    initiator_id,
-                    Arc::new(Mutex::new(RanShaStore::empty(self.n_parties))),
-                )
-            })
-            .map(|(_, arc)| arc)
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
@@ -180,7 +169,7 @@ where
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(RanShaError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;

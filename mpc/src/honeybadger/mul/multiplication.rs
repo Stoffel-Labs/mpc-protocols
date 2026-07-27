@@ -1,4 +1,4 @@
-use crate::common::session_store::SessionStore;
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{
         rbc::RbcError, share::ShareError, utils::deser_bounded_vec, ProtocolSessionId,
@@ -23,6 +23,7 @@ use std::{
     collections::HashMap,
     ops::{Mul, Sub},
     sync::Arc,
+    time::Instant,
 };
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
@@ -144,7 +145,7 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub mult_storage: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<MultStorage<F>>>)>>>,
+    pub mult_storage: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<MultStorage<F>>>)>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
     pub rbc: R,
@@ -283,7 +284,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             let store = self.mult_storage.lock().await;
             match store.get(&session_id) {
                 Some(storage) => {
-                    let storage = storage.1.lock().await;
+                    let storage = storage.2.lock().await;
                     storage.no_of_mul.unwrap_or(0) / (self.t + 1)
                 }
                 None => return false,
@@ -654,29 +655,20 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         session_id: SessionId,
         initiator_id: usize,
     ) -> Option<Arc<Mutex<MultStorage<F>>>> {
-        let mut storage = self.mult_storage.lock().await;
-
-        if !storage.contains_key(&session_id) {
-            if storage.len() >= MAX_MUL_SESSIONS {
+        match self.mult_storage.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_MUL_SESSIONS,
+            MAX_MUL_SESSIONS / self.n,
+            || Arc::new(Mutex::new(MultStorage::empty())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
                 warn!("Mul session limit reached");
-                return None;
-            }
-            let per_peer_limit = MAX_MUL_SESSIONS / self.n;
-            let peer_count = storage
-                .iter()
-                .filter(|(_, (id, _))| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                warn!("Mul per-peer session limit reached");
-                return None;
+                None
             }
         }
-
-        storage
-            .get_or_create_with(session_id, || {
-                (initiator_id, Arc::new(Mutex::new(MultStorage::empty())))
-            })
-            .map(|(_, arc)| arc)
     }
 
     pub async fn wait_for_result(
@@ -689,7 +681,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         let output_receiver = {
             let mult_storage = self.mult_storage.lock().await;
             let storage_bind = match mult_storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(MulError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;

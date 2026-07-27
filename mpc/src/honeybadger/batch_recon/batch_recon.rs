@@ -1,5 +1,5 @@
 use super::*;
-use crate::common::session_store::SessionStore;
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde},
@@ -17,6 +17,7 @@ use futures::lock::Mutex;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::Network;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
@@ -63,7 +64,7 @@ pub struct BatchReconNode<F: FftField> {
     pub n: usize,  // Total number of nodes/shares
     pub t: usize,
     pub degree: usize,
-    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<BatchReconStore<F>>>)>>>, // Number of malicious parties
+    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<BatchReconStore<F>>>)>>>, // Number of malicious parties
     pub output_sender: Sender<SessionId>,
 }
 
@@ -104,7 +105,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, BatchReconError> {
         let store = self.store.lock().await;
 
-        let (_, output_arc) = store.get(&session_id).ok_or_else(|| {
+        let (_, _, output_arc) = store.get(&session_id).ok_or_else(|| {
             BatchReconError::InvalidInput("Session ID does not exist".to_string())
         })?;
 
@@ -228,7 +229,7 @@ impl<F: FftField> BatchReconNode<F> {
 
                 // Lock the session store to update the session state.
                 let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await?
+                    self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
@@ -301,7 +302,7 @@ impl<F: FftField> BatchReconNode<F> {
 
                 // Lock the session store to update the session state.
                 let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await?
+                    self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
@@ -368,7 +369,7 @@ impl<F: FftField> BatchReconNode<F> {
                 }
 
                 let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await?
+                    self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
@@ -447,7 +448,7 @@ impl<F: FftField> BatchReconNode<F> {
                 }
 
                 let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await?
+                    self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
@@ -513,33 +514,30 @@ impl<F: FftField> BatchReconNode<F> {
         &self,
         session_id: SessionId,
         sender_id: usize,
-    ) -> Result<Option<Arc<Mutex<BatchReconStore<F>>>>, BatchReconError> {
+    ) -> Option<Arc<Mutex<BatchReconStore<F>>>> {
         let store_lock = {
             let mut storage = self.store.lock().await;
-
-            if !storage.contains_key(&session_id) {
-                if storage.len() >= MAX_BATCH_RECON_SESSIONS {
-                    return Err(BatchReconError::InvalidInput(
-                        "Session limit reached".into(),
-                    ));
+            let admitted = storage.get_or_admit(
+                session_id,
+                sender_id,
+                MAX_BATCH_RECON_SESSIONS,
+                MAX_BATCH_RECON_SESSIONS / self.n,
+                || Arc::new(Mutex::new(BatchReconStore::empty())),
+            );
+            match admitted {
+                Admission::Got(arc) => arc,
+                // Both a retired session and a cap-rejected new one are late/over-quota
+                // stragglers either way — drop them quietly and let the caller's existing
+                // "no store" fallback handle it, same as an already-terminated session below.
+                Admission::Retired => return None,
+                Admission::Rejected => {
+                    warn!(
+                        self_id = self.id,
+                        ?session_id,
+                        "batch-recon session limit reached, dropping message"
+                    );
+                    return None;
                 }
-                let per_peer_limit = MAX_BATCH_RECON_SESSIONS / self.n;
-                let peer_count = storage
-                    .iter()
-                    .filter(|(_, (id, _))| *id == sender_id)
-                    .count();
-                if peer_count >= per_peer_limit {
-                    return Err(BatchReconError::InvalidInput(
-                        "Per-peer session limit reached".into(),
-                    ));
-                }
-            }
-
-            match storage.get_or_create_with(session_id, || {
-                (sender_id, Arc::new(Mutex::new(BatchReconStore::empty())))
-            }) {
-                Some((_, arc)) => arc,
-                None => return Ok(None),
             }
         };
 
@@ -555,11 +553,11 @@ impl<F: FftField> BatchReconNode<F> {
                     ?session_id,
                     "dropping late message for already-terminated batch-recon session"
                 );
-                return Ok(None);
+                return None;
             }
         }
 
-        Ok(Some(store_lock))
+        Some(store_lock)
     }
 }
 

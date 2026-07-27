@@ -2,11 +2,13 @@
 /// You can reuse them in your own custom MPC protocol implementations.
 use super::{rbc_store::*, utils::*, RbcError};
 use crate::common::{
-    rbc::MAX_PAYLOAD_SIZE, session_store::SessionStore, ProtocolSessionId, RbcWrapFn, RBC,
+    rbc::MAX_PAYLOAD_SIZE,
+    session_store::{Admission, SessionStore},
+    ProtocolSessionId, RbcWrapFn, RBC,
 };
 use async_trait::async_trait;
 use bincode;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use stoffelnet::network_utils::Network;
 use threshold_crypto::{
     serde_impl::SerdeSecret, PublicKeySet, SecretKeySet, SecretKeyShare, SignatureShare,
@@ -40,7 +42,7 @@ pub struct Bracha<Id: ProtocolSessionId + 'static> {
     pub n: usize,  // Total number of parties in the network
     pub t: usize,  // Number of allowed malicious parties
     pub k: usize,  //threshold (Not really used in Bracha)
-    pub store: Arc<Mutex<SessionStore<Id, (usize, Arc<Mutex<BrachaStore>>)>>>, // Stores the session state
+    pub store: Arc<Mutex<SessionStore<Id, (usize, Instant, Arc<Mutex<BrachaStore>>)>>>, // Stores the session state
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
 }
@@ -81,7 +83,7 @@ where
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let store = self.store.lock().await;
 
-        let (_, arc) = store
+        let (_, _, arc) = store
             .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
@@ -448,8 +450,17 @@ where
     ) -> Option<Arc<Mutex<BrachaStore>>> {
         let store_lock = {
             let mut store = self.store.lock().await;
-            if !store.contains_key(&session_id) {
-                if store.len() >= MAX_RBC_SESSIONS {
+            let admitted = store.get_or_admit(
+                session_id,
+                sender_id,
+                MAX_RBC_SESSIONS,
+                MAX_RBC_SESSIONS / self.n,
+                || Arc::new(Mutex::new(BrachaStore::default())),
+            );
+            match admitted {
+                Admission::Got(arc) => arc,
+                Admission::Retired => return None,
+                Admission::Rejected => {
                     warn!(
                         id = self.id,
                         session_id = session_id.as_u128(),
@@ -457,21 +468,7 @@ where
                     );
                     return None;
                 }
-                let per_peer_limit = MAX_RBC_SESSIONS / self.n;
-                let peer_count = store.iter().filter(|(_, (id, _))| *id == sender_id).count();
-                if peer_count >= per_peer_limit {
-                    warn!(
-                        id = self.id,
-                        session_id = session_id.as_u128(),
-                        "Bracha per-peer session limit reached, dropping message"
-                    );
-                    return None;
-                }
             }
-            let (_, arc) = store.get_or_create_with(session_id, || {
-                (sender_id, Arc::new(Mutex::new(BrachaStore::default())))
-            })?;
-            arc
         };
 
         {
@@ -557,11 +554,11 @@ where
 
 #[derive(Clone)]
 pub struct Avid<Id: ProtocolSessionId> {
-    pub id: usize,                                                           //Initiators ID
-    pub n: usize,                                                            //Network size
-    pub t: usize, //No. of malicious parties
-    pub k: usize, //Threshold
-    pub store: Arc<Mutex<SessionStore<Id, (usize, Arc<Mutex<AvidStore>>)>>>, // Sessionid => store
+    pub id: usize, //Initiators ID
+    pub n: usize,  //Network size
+    pub t: usize,  //No. of malicious parties
+    pub k: usize,  //Threshold
+    pub store: Arc<Mutex<SessionStore<Id, (usize, Instant, Arc<Mutex<AvidStore>>)>>>, // Sessionid => store
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
 }
@@ -612,7 +609,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
     async fn get_store(&self, session_id: Id) -> Result<Vec<u8>, RbcError> {
         let store = self.store.lock().await;
 
-        let (_, arc) = store
+        let (_, _, arc) = store
             .get(&session_id)
             .ok_or_else(|| RbcError::Internal("Session ID does not exist".to_string()))?;
 
@@ -741,7 +738,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         // Read-only dedup check: if the session already exists and echo was sent, skip.
         {
             let store = self.store.lock().await;
-            if let Some((_, session_store)) = store.get(&msg.session_id) {
+            if let Some((_, _, session_store)) = store.get(&msg.session_id) {
                 let session = session_store.lock().await;
                 if session.ended || session.echo {
                     return Ok(());
@@ -827,7 +824,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         // Read-only dedup check: if the session already exists and this sender's echo was seen, skip.
         {
             let store = self.store.lock().await;
-            if let Some((_, session_store)) = store.get(&msg.session_id) {
+            if let Some((_, _, session_store)) = store.get(&msg.session_id) {
                 let session = session_store.lock().await;
                 if session.ended || session.has_echo(msg.sender_id) {
                     return Ok(());
@@ -919,7 +916,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         // Read-only dedup check: if the session already exists and this sender's ready was seen, skip.
         {
             let store = self.store.lock().await;
-            if let Some((_, session_store)) = store.get(&msg.session_id) {
+            if let Some((_, _, session_store)) = store.get(&msg.session_id) {
                 let session = session_store.lock().await;
                 if session.ended || session.has_ready(msg.sender_id) {
                     return Ok(());
@@ -1115,8 +1112,17 @@ impl<Id: ProtocolSessionId> Avid<Id> {
     ) -> Option<Arc<Mutex<AvidStore>>> {
         let store_lock = {
             let mut store = self.store.lock().await;
-            if !store.contains_key(&session_id) {
-                if store.len() >= MAX_RBC_SESSIONS {
+            let admitted = store.get_or_admit(
+                session_id,
+                sender_id,
+                MAX_RBC_SESSIONS,
+                MAX_RBC_SESSIONS / self.n,
+                || Arc::new(Mutex::new(AvidStore::default())),
+            );
+            match admitted {
+                Admission::Got(arc) => arc,
+                Admission::Retired => return None,
+                Admission::Rejected => {
                     warn!(
                         id = self.id,
                         session_id = session_id.as_u128(),
@@ -1124,21 +1130,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                     );
                     return None;
                 }
-                let per_peer_limit = MAX_RBC_SESSIONS / self.n;
-                let peer_count = store.iter().filter(|(_, (id, _))| *id == sender_id).count();
-                if peer_count >= per_peer_limit {
-                    warn!(
-                        id = self.id,
-                        session_id = session_id.as_u128(),
-                        "Avid per-peer session limit reached, dropping message"
-                    );
-                    return None;
-                }
             }
-            let (_, arc) = store.get_or_create_with(session_id, || {
-                (sender_id, Arc::new(Mutex::new(AvidStore::default())))
-            })?;
-            arc
         };
         {
             let store_guard = store_lock.lock().await;

@@ -1,4 +1,4 @@
-use crate::common::session_store::SessionStore;
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{
         share::{shamir::NonRobustShare, ShareError},
@@ -15,6 +15,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use itertools::izip;
 use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::{
     sync::Mutex,
@@ -44,7 +45,7 @@ where
     /// Threshold for the corrupted parties.
     pub threshold: usize,
     /// Storage of the party.
-    pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<DouShaStorage<F>>>)>>>,
+    pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<DouShaStorage<F>>>)>>>,
 }
 
 const MAX_DOUSHA_SESSIONS: usize = 256;
@@ -75,31 +76,20 @@ where
         session_id: SessionId,
         initiator_id: usize,
     ) -> Option<Arc<Mutex<DouShaStorage<F>>>> {
-        let mut storage = self.storage.lock().await;
-
-        if !storage.contains_key(&session_id) {
-            if storage.len() >= MAX_DOUSHA_SESSIONS {
+        match self.storage.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_DOUSHA_SESSIONS,
+            MAX_DOUSHA_SESSIONS / self.n_parties,
+            || Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
                 warn!("DouSha session limit reached");
-                return None;
-            }
-            let per_peer_limit = MAX_DOUSHA_SESSIONS / self.n_parties;
-            let peer_count = storage
-                .iter()
-                .filter(|(_, (id, _))| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                warn!("DouSha per-peer session limit reached");
-                return None;
+                None
             }
         }
-        storage
-            .get_or_create_with(session_id, || {
-                (
-                    initiator_id,
-                    Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))),
-                )
-            })
-            .map(|(_, arc)| arc)
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.storage.lock().await;
@@ -118,7 +108,7 @@ where
         let output_receiver = {
             let storage = self.storage.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(DouShaError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;

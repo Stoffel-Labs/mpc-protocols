@@ -604,14 +604,20 @@ where
         }
 
         // Collect each session's result as it completes (all sessions' rounds overlap here).
+        // Every session is cleared regardless of outcome — a timed-out session must not be
+        // left dangling in the store just because an earlier `?` would have skipped over it.
+        let mut first_err = None;
         for session_id in &session_ids {
-            let mut chunk_result = self
+            match self
                 .operations
                 .mul
                 .wait_for_result(*session_id, self.params.timeout)
                 .await
-                .map_err(HoneyBadgerError::from)?;
-            result.append(&mut chunk_result);
+            {
+                Ok(mut chunk_result) => result.append(&mut chunk_result),
+                Err(e) if first_err.is_none() => first_err = Some(HoneyBadgerError::from(e)),
+                Err(_) => {}
+            }
         }
 
         for session_id in &session_ids {
@@ -621,6 +627,10 @@ where
                     "failed to clear completed multiplication protocol state"
                 );
             }
+        }
+
+        if let Some(e) = first_err {
+            return Err(e);
         }
 
         Ok(result)
@@ -1397,25 +1407,25 @@ where
 
             // Phase 2 — collect each result as it completes (all sessions' rounds overlap here).
             for (sessionid, _, _) in &sessions {
-                let triples = self
+                let result = self
                     .preprocess
                     .triple_gen
                     .wait_for_result(*sessionid, self.params.timeout)
-                    .await?;
+                    .await;
+                if !self.preprocess.triple_gen.clear_store(*sessionid).await {
+                    warn!(
+                        sessionid = ?sessionid,
+                        "failed to clear triple generation protocol state"
+                    );
+                }
                 self.preprocessing_material.lock().await.add(
-                    Some(triples),
+                    Some(result?),
                     None,
                     None,
                     None,
                     None,
                     None,
                 );
-                if !self.preprocess.triple_gen.clear_store(*sessionid).await {
-                    warn!(
-                        sessionid = ?sessionid,
-                        "failed to clear completed triple generation protocol state"
-                    );
-                }
             }
             trace_preprocessing_phase(self.id, "triples", total_triples_to_generate, phase_start);
         }
@@ -1497,11 +1507,21 @@ where
 
         // Phase 2 — collect each result as it completes (sessions' rounds overlap here).
         for (sessionid, _) in &sessions {
-            let output = self
+            // Clear the store whether wait_for_result succeeds or times out — otherwise a
+            // session that never completes (e.g. a Byzantine peer withholding shares) leaks
+            // its slot in the SessionStore forever, since nothing else ever retires it.
+            let result = self
                 .preprocess
                 .share_gen
                 .wait_for_result(*sessionid, self.params.timeout)
-                .await?;
+                .await;
+            if !self.preprocess.share_gen.clear_store(*sessionid).await {
+                warn!(
+                    sessionid = ?sessionid,
+                    "failed to clear share generation protocol state"
+                );
+            }
+            let output = result?;
             self.preprocessing_material.lock().await.add(
                 None,
                 None,
@@ -1510,12 +1530,6 @@ where
                 None,
                 None,
             );
-            if !self.preprocess.share_gen.clear_store(*sessionid).await {
-                warn!(
-                    sessionid = ?sessionid,
-                    "failed to clear completed share generation protocol state"
-                );
-            }
         }
         Ok(())
     }
@@ -1581,18 +1595,19 @@ where
         let mut all_double_shares: Vec<Vec<DoubleShamirShare<F>>> =
             Vec::with_capacity(sessions.len());
         for (sessionid, _) in &sessions {
-            let double_shares = self
+            // Clear regardless of outcome — a timed-out session must not linger forever.
+            let result = self
                 .preprocess
                 .dou_sha
                 .wait_for_result(*sessionid, self.params.timeout)
-                .await?;
+                .await;
             if !self.preprocess.dou_sha.clear_store(*sessionid).await {
                 warn!(
                     sessionid = ?sessionid,
-                    "failed to clear completed double share protocol state"
+                    "failed to clear double share protocol state"
                 );
             }
-            all_double_shares.push(double_shares);
+            all_double_shares.push(result?);
         }
 
         // Phase 2 — RanDouSha for every session, pipelined, each fed by its own DoubleShare output.
@@ -1625,18 +1640,19 @@ where
         }
         // 2b: collect every RanDouSha output (rounds overlap here), in session order.
         for sessionid in &rds_sessions {
-            let output = self
+            // Clear regardless of outcome — a timed-out session must not linger forever.
+            let result = self
                 .preprocess
                 .ran_dou_sha
                 .wait_for_result(*sessionid, self.params.timeout)
-                .await?;
-            pair.extend(output);
+                .await;
             if !self.preprocess.ran_dou_sha.clear_store(*sessionid).await {
                 warn!(
                     sessionid = ?sessionid,
-                    "failed to clear completed RanDouSha protocol state"
+                    "failed to clear RanDouSha protocol state"
                 );
             }
+            pair.extend(result?);
         }
         Ok(pair)
     }
@@ -1681,21 +1697,12 @@ where
                 .init_batch(sessionid, batch_size, rng, network.clone())
                 .await?;
 
-            let output = self
+            let result = self
                 .preprocess
                 .small_field_preproc
                 .share_gen
                 .wait_for_result(sessionid, self.params.timeout)
-                .await?;
-
-            self.preprocessing_material.lock().await.add(
-                None,
-                None,
-                None,
-                Some(output),
-                None,
-                None,
-            );
+                .await;
             if !self
                 .preprocess
                 .small_field_preproc
@@ -1705,9 +1712,18 @@ where
             {
                 warn!(
                     ?sessionid,
-                    "failed to clear completed small-field share generation protocol state"
+                    "failed to clear small-field share generation protocol state"
                 );
             }
+
+            self.preprocessing_material.lock().await.add(
+                None,
+                None,
+                None,
+                Some(result?),
+                None,
+                None,
+            );
 
             if round_id == 255 {
                 ran_sha_counter = self
@@ -1806,20 +1822,12 @@ where
                 )
                 .await?;
 
-            let triples = self
+            let result = self
                 .preprocess
                 .small_field_preproc
                 .triple_gen
                 .wait_for_result(sessionid, self.params.timeout)
-                .await?;
-            self.preprocessing_material.lock().await.add(
-                None,
-                Some(triples),
-                None,
-                None,
-                None,
-                None,
-            );
+                .await;
             if !self
                 .preprocess
                 .small_field_preproc
@@ -1829,9 +1837,17 @@ where
             {
                 warn!(
                     ?sessionid,
-                    "failed to clear completed small-field triple generation protocol state"
+                    "failed to clear small-field triple generation protocol state"
                 );
             }
+            self.preprocessing_material.lock().await.add(
+                None,
+                Some(result?),
+                None,
+                None,
+                None,
+                None,
+            );
 
             if round_id == 255 {
                 triple_counter = self
@@ -1912,13 +1928,12 @@ where
                 )
                 .await?;
 
-            let output = self
+            let result = self
                 .preprocess
                 .small_field_preproc
                 .ran_dou_sha
                 .wait_for_result(sessionid, self.params.timeout)
-                .await?;
-            pair.extend(output);
+                .await;
             if !self
                 .preprocess
                 .small_field_preproc
@@ -1928,9 +1943,10 @@ where
             {
                 warn!(
                     ?sessionid,
-                    "failed to clear completed small-field RanDouSha protocol state"
+                    "failed to clear small-field RanDouSha protocol state"
                 );
             }
+            pair.extend(result?);
 
             if round_id == 255 {
                 ran_dou_sha_counter = self
@@ -1982,12 +1998,12 @@ where
             .init_batch(dou_sha_session_id, batch_size, rng, network.clone())
             .await?;
 
-        let dou_sha = self
+        let result = self
             .preprocess
             .small_field_preproc
             .dou_sha
             .wait_for_result(dou_sha_session_id, self.params.timeout)
-            .await?;
+            .await;
         if !self
             .preprocess
             .small_field_preproc
@@ -1997,11 +2013,11 @@ where
         {
             warn!(
                 sessionid = ?dou_sha_session_id,
-                "failed to clear completed small-field double share protocol state"
+                "failed to clear small-field double share protocol state"
             );
         }
 
-        Ok(dou_sha)
+        Ok(result?)
     }
 
     /// Generate PRandBit shares using the Goldilocks small-field pipeline.
@@ -2100,13 +2116,12 @@ where
             )
             .await?;
 
-        let output = self
+        let result = self
             .preprocess
             .small_field_preproc
             .rand_bit
             .wait_for_result(randbit_sessionid, self.params.timeout)
-            .await?;
-        randbit_output.extend(output);
+            .await;
 
         if !self
             .preprocess
@@ -2117,9 +2132,10 @@ where
         {
             warn!(
                 sessionid = ?randbit_sessionid,
-                "failed to clear completed RandBit protocol state"
+                "failed to clear RandBit protocol state"
             );
         }
+        randbit_output.extend(result?);
 
         // PRandBit share generation (big field F output via PRandBitDNode<GoldilocksField, F>).
         info!(id = self.id, "PRandbit share generation");
@@ -2135,16 +2151,11 @@ where
             )
             .await?;
 
-        let output = self
+        let result = self
             .preprocess
             .prand_bit
             .wait_for_bit_result(prandbit_sessionid, self.params.timeout)
-            .await?;
-
-        self.preprocessing_material
-            .lock()
-            .await
-            .add(None, None, None, None, Some(output), None);
+            .await;
 
         if !self
             .preprocess
@@ -2154,9 +2165,15 @@ where
         {
             warn!(
                 sessionid = ?prandbit_sessionid,
-                "failed to clear completed PRandBit protocol state"
+                "failed to clear PRandBit protocol state"
             );
         }
+
+        self.preprocessing_material
+            .lock()
+            .await
+            .add(None, None, None, None, Some(result?), None);
+
         Ok(())
     }
 
@@ -2204,19 +2221,16 @@ where
                 )
                 .await?;
 
-            let output = self
+            let result = self
                 .preprocess
                 .prand_bit
                 .wait_for_int_result(sessionid, self.params.timeout)
-                .await?;
-            prandint_output.extend(output);
+                .await;
 
             if !self.preprocess.prand_bit.clear_store(sessionid).await {
-                warn!(
-                    ?sessionid,
-                    "failed to clear completed PRandInt protocol state"
-                );
+                warn!(?sessionid, "failed to clear PRandInt protocol state");
             }
+            prandint_output.extend(result?);
         }
         self.preprocessing_material.lock().await.add(
             None,

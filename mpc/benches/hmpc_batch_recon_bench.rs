@@ -59,7 +59,6 @@ async fn run_batch_recon(n_parties: usize, t: usize, n_secrets: usize) {
             let session_store = node
                 .get_or_create_store(session_id, node.id)
                 .await
-                .unwrap()
                 .unwrap();
 
             while {

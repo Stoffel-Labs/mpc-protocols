@@ -544,11 +544,10 @@ where
                     network.clone(),
                 )
                 .await?;
-            let mut batch_output = self
+            let batch_result = self
                 .mul_node
                 .wait_for_result(session_id, self.params.timeout)
-                .await?;
-            output.append(&mut batch_output);
+                .await;
 
             if !self.mul_node.clear_store(session_id).await {
                 warn!(
@@ -556,6 +555,9 @@ where
                     "failed to clear completed AVSS multiplication protocol state"
                 );
             }
+
+            let mut batch_output = batch_result?;
+            output.append(&mut batch_output);
         }
         Ok(output)
     }
@@ -656,10 +658,17 @@ where
                     AvssSessionId::pack_slot(triple_counter, 0, 0),
                     self.params.instance_id,
                 );
-                let triples = self
+                let result = self
                     .triple_gen
                     .gen_triple(sessionid, a.to_vec(), b.to_vec(), rng, network.clone())
-                    .await?;
+                    .await;
+
+                if !self.triple_gen.clear_store(sessionid).await {
+                    warn!(
+                        ?sessionid,
+                        "failed to clear AVSS triple generation protocol state"
+                    );
+                }
 
                 // ------------------------
                 // Step 4. Collect triples
@@ -668,13 +677,7 @@ where
                     self.preprocessing_material
                         .lock()
                         .await
-                        .add(Some(triples), None);
-                }
-                if !self.triple_gen.clear_store(sessionid).await {
-                    warn!(
-                        ?sessionid,
-                        "failed to clear completed AVSS triple generation protocol state"
-                    );
+                        .add(Some(result?), None);
                 }
             }
         }
@@ -718,14 +721,10 @@ where
             self.share_gen_avss
                 .init_batch(sessionid, dealer_batch_size, rng, network.clone())
                 .await?;
-            let output = self
+            let result = self
                 .share_gen_avss
                 .wait_for_result(sessionid, self.params.timeout)
-                .await?;
-            self.preprocessing_material
-                .lock()
-                .await
-                .add(None, Some(output));
+                .await;
 
             if !self.share_gen_avss.clear_store(sessionid).await {
                 warn!(
@@ -733,6 +732,12 @@ where
                     "failed to clear completed AVSS share generation protocol state"
                 );
             }
+
+            self.preprocessing_material
+                .lock()
+                .await
+                .add(None, Some(result?));
+
             dealer_secrets_remaining -= dealer_batch_size;
         }
         Ok(())

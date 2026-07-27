@@ -12,6 +12,7 @@ use ark_ff::FftField;
 use itertools::izip;
 use std::ops::{Add, Mul};
 use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
@@ -46,7 +47,7 @@ where
     /// The threshold of corrupted parties.
     pub threshold: usize,
     /// Storage for the protocol.
-    pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Arc<Mutex<RandBitStorage<F>>>)>>>,
+    pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<RandBitStorage<F>>>)>>>,
     /// Node to execute a secure multiplication.
     pub mult_node: Multiply<F, R>,
     /// Batch reconstruction node to reconstruct `a^2 mod p`.
@@ -84,7 +85,7 @@ where
         let num_chunks = {
             let storage = self.storage.lock().await;
             match storage.get(&session_id) {
-                Some((_, arc)) => {
+                Some((_, _, arc)) => {
                     let len = arc.lock().await.a_share.as_ref().map_or(0, Vec::len);
                     len.div_ceil(self.threshold + 1)
                 }
@@ -115,26 +116,17 @@ where
         session_id: SessionId,
         initiator_id: usize,
     ) -> Option<Arc<Mutex<RandBitStorage<F>>>> {
-        let mut storage = self.storage.lock().await;
-
-        if !storage.contains_key(&session_id) {
-            if storage.len() >= MAX_RANDBIT_SESSIONS {
-                return None;
-            }
-            let per_peer_limit = MAX_RANDBIT_SESSIONS / self.n_parties;
-            let peer_count = storage
-                .iter()
-                .filter(|(_, (id, _))| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                return None;
-            }
-        }
-        storage
-            .get_or_create_with(session_id, || {
-                (initiator_id, Arc::new(Mutex::new(RandBitStorage::empty())))
-            })
-            .map(|(_, arc)| arc)
+        self.storage
+            .lock()
+            .await
+            .get_or_admit(
+                session_id,
+                initiator_id,
+                MAX_RANDBIT_SESSIONS,
+                MAX_RANDBIT_SESSIONS / self.n_parties,
+                || Arc::new(Mutex::new(RandBitStorage::empty())),
+            )
+            .ok()
     }
 
     pub async fn drain_batch_recon_output(&mut self) -> Result<(), RandBitError> {
@@ -168,7 +160,7 @@ where
         let output_receiver = {
             let storage = self.storage.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(RandBitError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;

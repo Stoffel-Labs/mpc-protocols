@@ -1,4 +1,4 @@
-use crate::common::session_store::SessionStore;
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     avss_mpc::{
         share_gen::{RanShaAvssError, RanShaAvssStore},
@@ -18,6 +18,7 @@ use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_std::rand::Rng;
 use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::{
     sync::{
@@ -33,7 +34,8 @@ pub struct RanShaAvssNode<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub store: Arc<Mutex<SessionStore<AvssSessionId, (usize, Arc<Mutex<RanShaAvssStore<F, G>>>)>>>,
+    pub store:
+        Arc<Mutex<SessionStore<AvssSessionId, (usize, Instant, Arc<Mutex<RanShaAvssStore<F, G>>>)>>>,
     pub avss: AvssNode<F, R, G, AvssSessionId>,
     pub avss_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
@@ -83,32 +85,20 @@ where
         session_id: AvssSessionId,
         initiator_id: usize,
     ) -> Option<Arc<Mutex<RanShaAvssStore<F, C>>>> {
-        let mut storage = self.store.lock().await;
-
-        if !storage.contains_key(&session_id) {
-            if storage.len() >= MAX_RANSHA_AVSS_SESSIONS {
+        match self.store.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_RANSHA_AVSS_SESSIONS,
+            MAX_RANSHA_AVSS_SESSIONS / self.n_parties,
+            || Arc::new(Mutex::new(RanShaAvssStore::empty(self.n_parties))),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
                 warn!("RanShaAvss session limit reached");
-                return None;
-            }
-            let per_peer_limit = MAX_RANSHA_AVSS_SESSIONS / self.n_parties;
-            let peer_count = storage
-                .iter()
-                .filter(|(_, (id, _))| *id == initiator_id)
-                .count();
-            if peer_count >= per_peer_limit {
-                warn!("RanShaAvss per-peer session limit reached");
-                return None;
+                None
             }
         }
-
-        storage
-            .get_or_create_with(session_id, || {
-                (
-                    initiator_id,
-                    Arc::new(Mutex::new(RanShaAvssStore::empty(self.n_parties))),
-                )
-            })
-            .map(|(_, arc)| arc)
     }
 
     /// Retires this session and clears every per-dealer AVSS sub-session it created.
@@ -134,7 +124,7 @@ where
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(RanShaAvssError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;

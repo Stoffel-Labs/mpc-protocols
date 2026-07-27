@@ -299,7 +299,7 @@ fn batch_recon_retired_session_blocks_late_message_turmoil() {
             let (network, _rx) = TurmoilNetwork::new(SenderId::Node(0), inner).await;
             let network_arc = Arc::new(network);
 
-            node.get_or_create_store(session_id, node.id).await.unwrap();
+            node.get_or_create_store(session_id, node.id).await;
             if !node.clear_store(session_id).await {
                 let _ = tx.send(Err(
                     "expected initial BatchRecon store to be cleared".to_string()
@@ -313,7 +313,7 @@ fn batch_recon_retired_session_blocks_late_message_turmoil() {
 
             node.process(late_msg, network_arc).await.unwrap();
 
-            let still_alive = node.get_or_create_store(session_id, node.id).await.unwrap();
+            let still_alive = node.get_or_create_store(session_id, node.id).await;
             if still_alive.is_some() {
                 let _ = tx.send(Err(
                     "retired BatchRecon session was resurrected by late message (zombie!)"
@@ -1206,7 +1206,7 @@ async fn preprocessing_stress_snapshot(
             rand_bit_sessions.len()
         ));
         for (session_id, store) in rand_bit_sessions.iter().take(8) {
-            let store = store.1.lock().await;
+            let store = store.2.lock().await;
             out.push_str(&format!(
                 "  rand_bit {:?} state={:?} a_len={} output_len={} openings={}\n",
                 session_id,
@@ -1253,7 +1253,7 @@ async fn preprocessing_stress_snapshot(
             rand_bit_mul_sessions.len()
         ));
         for (session_id, store) in rand_bit_mul_sessions.iter().take(8) {
-            let store = store.1.lock().await;
+            let store = store.2.lock().await;
             out.push_str(&format!(
                 "  rand_bit.mul {:?} state={:?} no_of_mul={:?} inputs=({}, {}) received_shares={} openings={} open_mult1={} open_mult2={}\n",
                 session_id,
@@ -1309,7 +1309,7 @@ async fn preprocessing_stress_snapshot(
         let mut total_evals = 0usize;
         let mut total_reveals = 0usize;
         for (session_id, store) in rand_bit_mul_batch_sessions.iter() {
-            let store = store.1.lock().await;
+            let store = store.2.lock().await;
             min_sub_id = min_sub_id.min(session_id.sub_id());
             max_sub_id = max_sub_id.max(session_id.sub_id());
             if store.y_j.is_some() {
@@ -1341,7 +1341,7 @@ async fn preprocessing_stress_snapshot(
             total_reveals
         ));
         for (session_id, store) in rand_bit_mul_batch_sessions.iter().take(8) {
-            let store = store.1.lock().await;
+            let store = store.2.lock().await;
             out.push_str(&format!(
                 "  rand_bit.mul.batch {:?} evals={} reveals={} batch_evals={} batch_reveals={} y_j={} y_j_batch_len={} secrets_len={}\n",
                 session_id,
@@ -1370,7 +1370,7 @@ async fn preprocessing_stress_snapshot(
         let mut total_evals = 0usize;
         let mut total_reveals = 0usize;
         for (_, store) in rand_bit_batch_sessions.iter() {
-            let store = store.1.lock().await;
+            let store = store.2.lock().await;
             if store.y_j.is_some() {
                 y_j_count += 1;
             }
@@ -1394,7 +1394,7 @@ async fn preprocessing_stress_snapshot(
             total_reveals
         ));
         for (session_id, store) in rand_bit_batch_sessions.iter().take(8) {
-            let store = store.1.lock().await;
+            let store = store.2.lock().await;
             out.push_str(&format!(
                 "  rand_bit.batch {:?} evals={} reveals={} batch_evals={} batch_reveals={} y_j={} y_j_batch_len={} secrets_len={}\n",
                 session_id,
@@ -3329,7 +3329,6 @@ fn batch_reconstruction_with_partition(hold_nodes: Vec<usize>, n_parties: usize,
                                     let Some(store) = node
                                         .get_or_create_store(session_id, node.id)
                                         .await
-                                        .unwrap()
                                     else {
                                         continue;
                                     };

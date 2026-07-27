@@ -164,11 +164,7 @@ mod tests {
                     Err(e) => warn!(id =i,error = ?e,"Sending failure"),
                 }
                 // Lock the session store to update the session state.
-                let session_store = node
-                    .get_or_create_store(session_id, node.id)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let session_store = node.get_or_create_store(session_id, node.id).await.unwrap();
 
                 while {
                     let s = session_store.lock().await;
@@ -272,7 +268,6 @@ mod tests {
         let session_store = victim
             .get_or_create_store(session_id, victim.id)
             .await
-            .unwrap()
             .unwrap();
         let store = session_store.lock().await;
         assert_eq!(

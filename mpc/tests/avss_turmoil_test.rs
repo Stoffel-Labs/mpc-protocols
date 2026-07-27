@@ -152,6 +152,7 @@ fn avss_e2e() {
                     let share = map
                         .get(&session_id)
                         .expect("missing AVSS output")
+                        .1
                         .as_ref()
                         .expect("empty share");
 

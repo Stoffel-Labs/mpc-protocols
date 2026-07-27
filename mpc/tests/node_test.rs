@@ -952,7 +952,7 @@ async fn test_rand_bit() {
             .lock()
             .await
             .get(&session_id)
-            .map(|(_, arc)| arc.clone());
+            .map(|(_, _, arc)| arc.clone());
         if let Some(store) = store {
             let store_lock = store.lock().await;
             let protocol_output = store_lock.protocol_output.clone();
