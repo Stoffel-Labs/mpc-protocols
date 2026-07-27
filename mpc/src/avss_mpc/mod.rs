@@ -840,6 +840,10 @@ impl ProtocolSessionId for AvssSessionId {
         (self.0 >> 32) & ((1u128 << 80) - 1)
     }
 
+    fn dealer_id(self) -> u8 {
+        self.sub_id()
+    }
+
     fn instance_id(self) -> u32 {
         self.0 as u32
     }

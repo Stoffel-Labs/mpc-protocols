@@ -511,6 +511,9 @@ pub trait ProtocolSessionId:
     /// Protocol-defined 80-bit field (round | sub | exec).
     fn slot(self) -> u128;
 
+    /// The dealer/initiator identifier for this session.
+    fn dealer_id(self) -> u8;
+
     /* ---------- raw access ---------- */
     fn as_u128(self) -> u128;
 

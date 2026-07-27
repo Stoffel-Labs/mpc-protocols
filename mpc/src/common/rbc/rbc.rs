@@ -191,7 +191,7 @@ where
 
         // Lock the session store to update the session state.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.sender_id)
+            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
             .await
         {
             Some(s) => s,
@@ -246,7 +246,7 @@ where
         let mut broadcast_echo: Option<Msg<Id>> = None;
         // Lock the session store to update the session state.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.sender_id)
+            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
             .await
         {
             Some(s) => s,
@@ -345,7 +345,7 @@ where
 
         // Lock the session store to update the session state.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.sender_id)
+            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
             .await
         {
             Some(s) => s,
@@ -770,7 +770,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         }
         // Safe to allocate session state now that the proof is valid.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.sender_id)
+            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
             .await
         {
             Some(s) => s,
@@ -865,7 +865,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         }
         // Safe to allocate session state now that the proof is valid.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.sender_id)
+            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
             .await
         {
             Some(s) => s,
@@ -957,7 +957,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         }
         // Safe to allocate session state now that the proof is valid.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.sender_id)
+            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
             .await
         {
             Some(s) => s,
@@ -2203,7 +2203,9 @@ impl<Id: ProtocolSessionId + 'static> ACS<Id> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::honeybadger::{SessionId, WrappedMessage};
+    use crate::honeybadger::{ProtocolType, SessionId, WrappedMessage};
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+
     fn default_hb_rbc_wrap(msg: Msg<SessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = WrappedMessage::Rbc(msg);
         Ok(bincode::serialize(&wrapped)?)
@@ -2319,5 +2321,47 @@ mod tests {
 
         let avid = Avid::new(3, 3, 0, 2, s.clone(), Arc::new(default_hb_rbc_wrap));
         assert!(avid.is_ok(), "Expected valid parameters for Avid");
+    }
+
+    /// Regression test: an ECHO is not a dealer message, so it isn't checked against
+    /// `session_id.sub_id()` at the dispatch layer — a relay forwarding an honest dealer's
+    /// broadcast can be the first message this node ever sees for a session. Session quota must
+    /// still be attributed to the dealer encoded in the session ID, not to whichever peer
+    /// happened to relay that first message, or a Byzantine dealer can burn an innocent relay's
+    /// per-peer quota by only reaching this node indirectly through relays.
+    #[tokio::test]
+    async fn test_bracha_echo_first_attributes_quota_to_dealer_not_relay() {
+        let (s, _) = mpsc::channel(256);
+        let bracha = Bracha::new(0, 4, 1, 2, s, Arc::new(default_hb_rbc_wrap)).unwrap();
+
+        let dealer_id: u8 = 3;
+        let relay_id: usize = 2;
+        let session_id = SessionId::new(
+            ProtocolType::Ransha,
+            SessionId::pack_slot(0, dealer_id, 0),
+            0,
+        );
+
+        // A single ECHO from an honest relay — not enough to cross the re-broadcast threshold,
+        // so no network I/O actually happens; this is the first message this node has seen for
+        // the session at all.
+        let msg = Msg::new(
+            relay_id,
+            session_id,
+            0,
+            b"payload".to_vec(),
+            vec![],
+            GenericMsgType::Bracha(MsgType::Echo),
+        );
+        let inner = FakeInnerNetwork::new(4, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
+        bracha.echo_handler(msg, net).await.unwrap();
+
+        let store = bracha.store.lock().await;
+        let (_, (attributed_to, _, _)) = store.iter().next().expect("session should exist");
+        assert_eq!(
+            *attributed_to, dealer_id as usize,
+            "quota must be attributed to the dealer (session_id.sub_id()), not the relay that delivered the first message"
+        );
     }
 }
