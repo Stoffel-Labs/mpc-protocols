@@ -928,8 +928,9 @@ mod tests {
 
         // Attacker (party 4) sends a much larger batch than the real session will use, before
         // this node has locally initialized the session at all.
-        let oversized: Vec<RobustShare<Fr>> =
-            (0..10).map(|_| RobustShare::new(Fr::from(1u8), 0, 1)).collect();
+        let oversized: Vec<RobustShare<Fr>> = (0..10)
+            .map(|_| RobustShare::new(Fr::from(1u8), 0, 1))
+            .collect();
         let mut payload = Vec::new();
         oversized.serialize_compressed(&mut payload).unwrap();
         let attacker_msg = RanShaMessage::new(
@@ -953,8 +954,9 @@ mod tests {
         // All 5 parties (including party 4 again, this time correctly sized) report their real
         // shares. Aggregating these must not panic.
         for sender in 0..5usize {
-            let shares: Vec<RobustShare<Fr>> =
-                (0..2).map(|_| RobustShare::new(Fr::from(1u8), 0, 1)).collect();
+            let shares: Vec<RobustShare<Fr>> = (0..2)
+                .map(|_| RobustShare::new(Fr::from(1u8), 0, 1))
+                .collect();
             let mut payload = Vec::new();
             shares.serialize_compressed(&mut payload).unwrap();
             let msg = RanShaMessage::new(

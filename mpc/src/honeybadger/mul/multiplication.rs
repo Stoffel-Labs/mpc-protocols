@@ -145,7 +145,8 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub mult_storage: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<MultStorage<F>>>)>>>,
+    pub mult_storage:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<MultStorage<F>>>)>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
     pub rbc: R,

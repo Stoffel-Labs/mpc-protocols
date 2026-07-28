@@ -668,8 +668,12 @@ mod tests {
     fn insert_shard_accepts_same_root_from_multiple_senders() {
         let mut store = AvidStore::new();
         let root = vec![1u8; 32];
-        store.insert_shard(root.clone(), 0, vec![0u8; 10], 2).unwrap();
-        store.insert_shard(root.clone(), 1, vec![0u8; 10], 2).unwrap();
+        store
+            .insert_shard(root.clone(), 0, vec![0u8; 10], 2)
+            .unwrap();
+        store
+            .insert_shard(root.clone(), 1, vec![0u8; 10], 2)
+            .unwrap();
         assert_eq!(store.shards.get(&root).unwrap().len(), 2);
     }
 
@@ -684,7 +688,9 @@ mod tests {
         let root_a = vec![1u8; 32];
         let root_b = vec![2u8; 32];
 
-        store.insert_shard(root_a.clone(), 0, vec![0u8; 10], 2).unwrap();
+        store
+            .insert_shard(root_a.clone(), 0, vec![0u8; 10], 2)
+            .unwrap();
         let result = store.insert_shard(root_b.clone(), 1, vec![0u8; 10], 2);
 
         assert!(result.is_err(), "mismatched root must be rejected");

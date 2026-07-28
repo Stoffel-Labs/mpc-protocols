@@ -3326,9 +3326,8 @@ fn batch_reconstruction_with_partition(hold_nodes: Vec<usize>, n_parties: usize,
                                         break;
                                     }
 
-                                    let Some(store) = node
-                                        .get_or_create_store(session_id, node.id)
-                                        .await
+                                    let Some(store) =
+                                        node.get_or_create_store(session_id, node.id).await
                                     else {
                                         continue;
                                     };

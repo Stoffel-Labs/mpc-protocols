@@ -47,7 +47,8 @@ where
     /// The threshold of corrupted parties.
     pub threshold: usize,
     /// Storage for the protocol.
-    pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<RandBitStorage<F>>>)>>>,
+    pub storage:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<RandBitStorage<F>>>)>>>,
     /// Node to execute a secure multiplication.
     pub mult_node: Multiply<F, R>,
     /// Batch reconstruction node to reconstruct `a^2 mod p`.

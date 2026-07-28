@@ -45,7 +45,8 @@ where
     /// Threshold for the corrupted parties.
     pub threshold: usize,
     /// Storage of the party.
-    pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<DouShaStorage<F>>>)>>>,
+    pub storage:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<DouShaStorage<F>>>)>>>,
 }
 
 const MAX_DOUSHA_SESSIONS: usize = 256;

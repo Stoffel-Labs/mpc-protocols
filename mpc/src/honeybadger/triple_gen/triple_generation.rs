@@ -44,7 +44,8 @@ where
     /// The upper bound of corrupt parties participating in the triple generation protocol.
     pub threshold: usize,
     /// Internal storage of the node.
-    pub storage: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<TripleGenStorage<F>>>)>>>,
+    pub storage:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<TripleGenStorage<F>>>)>>>,
     /// Batch reconstruction node used in the triple generation
     pub batch_recon_node: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,

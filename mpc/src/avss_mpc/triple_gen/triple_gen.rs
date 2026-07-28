@@ -31,7 +31,8 @@ pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
     pub threshold: usize,
     pub avss: AvssNode<F, R, C, AvssSessionId>,
     pub avss_output: Arc<Mutex<mpsc::Receiver<AvssSessionId>>>,
-    pub store: Arc<Mutex<SessionStore<AvssSessionId, (usize, Instant, Arc<Mutex<TripleGenStore<F, C>>>)>>>,
+    pub store:
+        Arc<Mutex<SessionStore<AvssSessionId, (usize, Instant, Arc<Mutex<TripleGenStore<F, C>>>)>>>,
 }
 
 const MAX_AVSS_TRIPLE_GEN_SESSIONS: usize = 256;

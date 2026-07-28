@@ -142,8 +142,7 @@ async fn test_avss_rejected_session_clears_rbc_store() {
 
     let n = 4;
     let t = 1;
-    let session_id =
-        AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot(0, 0, 0), 222);
+    let session_id = AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot(0, 0, 0), 222);
     let mut rng = test_rng();
 
     let (network, mut recv, _, _) = test_setup(n, vec![]);
@@ -297,11 +296,21 @@ async fn test_avss_full_output_channel_does_not_block() {
         .collect();
 
     nodes[0]
-        .init(vec![Fr::from(50)], session_id_1, &mut rng, network[0].clone())
+        .init(
+            vec![Fr::from(50)],
+            session_id_1,
+            &mut rng,
+            network[0].clone(),
+        )
         .await
         .unwrap();
     nodes[0]
-        .init(vec![Fr::from(60)], session_id_2, &mut rng, network[0].clone())
+        .init(
+            vec![Fr::from(60)],
+            session_id_2,
+            &mut rng,
+            network[0].clone(),
+        )
         .await
         .unwrap();
 

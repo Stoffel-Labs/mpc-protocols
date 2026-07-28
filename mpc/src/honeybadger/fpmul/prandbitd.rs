@@ -38,7 +38,8 @@ pub struct PRandBitDNode<F: PrimeField, G: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PRandBitDStore<F, G>>>)>>>,
+    pub store:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PRandBitDStore<F, G>>>)>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }

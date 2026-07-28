@@ -64,7 +64,8 @@ pub struct BatchReconNode<F: FftField> {
     pub n: usize,  // Total number of nodes/shares
     pub t: usize,
     pub degree: usize,
-    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<BatchReconStore<F>>>)>>>, // Number of malicious parties
+    pub store:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<BatchReconStore<F>>>)>>>, // Number of malicious parties
     pub output_sender: Sender<SessionId>,
 }
 
@@ -228,8 +229,7 @@ impl<F: FftField> BatchReconNode<F> {
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
                 // Lock the session store to update the session state.
-                let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await
+                let Some(session_store) = self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
@@ -301,8 +301,7 @@ impl<F: FftField> BatchReconNode<F> {
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
                 // Lock the session store to update the session state.
-                let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await
+                let Some(session_store) = self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
@@ -368,8 +367,7 @@ impl<F: FftField> BatchReconNode<F> {
                     ));
                 }
 
-                let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await
+                let Some(session_store) = self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
@@ -447,8 +445,7 @@ impl<F: FftField> BatchReconNode<F> {
                     ));
                 }
 
-                let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await
+                let Some(session_store) = self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };

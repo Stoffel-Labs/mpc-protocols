@@ -34,8 +34,9 @@ pub struct RanShaAvssNode<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub store:
-        Arc<Mutex<SessionStore<AvssSessionId, (usize, Instant, Arc<Mutex<RanShaAvssStore<F, G>>>)>>>,
+    pub store: Arc<
+        Mutex<SessionStore<AvssSessionId, (usize, Instant, Arc<Mutex<RanShaAvssStore<F, G>>>)>>,
+    >,
     pub avss: AvssNode<F, R, G, AvssSessionId>,
     pub avss_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
