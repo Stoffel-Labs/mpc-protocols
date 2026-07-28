@@ -809,4 +809,89 @@ mod tests {
             _ => panic!("Expected SessionIdError for invalid sub_id"),
         }
     }
+
+    /// Regression test for a remote panic, mirroring RanSha's: a Byzantine peer sending an
+    /// oversized `ReconstructBatch` for a session *before* this node's own `init_batch` runs
+    /// used to provisionally set `batch_size` from the attacker's message length. `init_batch`
+    /// would then overwrite `batch_size` back to the real value without clearing the attacker's
+    /// oversized entry, so once enough parties had reported, the aggregation loop indexed a
+    /// real-`batch_size`-sized array using the attacker's oversized entry's length — an
+    /// out-of-bounds panic. `init_batch` must now discard any mismatched pre-existing entries.
+    #[tokio::test]
+    async fn test_randousha_early_oversized_batch_does_not_panic() {
+        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        // Keep the receiver ends alive — init_batch actually sends reconstruction messages in
+        // this test, and a dropped receiver would make those sends fail.
+        let (inner, _inboxes, _) = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10));
+        let net = Arc::new(FakeNetwork::new(0, inner));
+        let session_id = SessionId::new(ProtocolType::Randousha, SessionId::pack_slot(0, 0, 0), 0);
+
+        // Attacker (party 4) sends a much larger reconstruction batch than the real session
+        // will use, before this node has locally initialized the session at all.
+        let oversized_payloads: Vec<Vec<u8>> = (0..10)
+            .map(|_| {
+                let share_deg_t = NonRobustShare::new(Fr::from(0u8), 4, 1);
+                let share_deg_2t = NonRobustShare::new(Fr::from(0u8), 4, 2);
+                let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+                let mut payload = Vec::new();
+                rec_msg.serialize_compressed(&mut payload).unwrap();
+                payload
+            })
+            .collect();
+        let attacker_msg = RanDouShaMessage::new(
+            4,
+            session_id,
+            RanDouShaPayload::ReconstructBatch(oversized_payloads),
+        );
+        node.reconstruction_handler(attacker_msg, net.clone())
+            .await
+            .unwrap();
+
+        // Local node now legitimately initializes the session with the real, much smaller
+        // batch size (2) — this must discard the attacker's oversized entry.
+        let batch_size = 2;
+        let shares_deg_t_by_batch: Vec<Vec<NonRobustShare<Fr>>> = (0..batch_size)
+            .map(|_| {
+                (0..5)
+                    .map(|_| NonRobustShare::new(Fr::from(0u8), 0, 1))
+                    .collect()
+            })
+            .collect();
+        let shares_deg_2t_by_batch: Vec<Vec<NonRobustShare<Fr>>> = (0..batch_size)
+            .map(|_| {
+                (0..5)
+                    .map(|_| NonRobustShare::new(Fr::from(0u8), 0, 2))
+                    .collect()
+            })
+            .collect();
+        node.init_batch(
+            shares_deg_t_by_batch,
+            shares_deg_2t_by_batch,
+            session_id,
+            net.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Enough parties (including party 4 again, this time correctly sized) report their
+        // real reconstruction shares. Aggregating these must not panic.
+        for sender in 0..4usize {
+            let payloads: Vec<Vec<u8>> = (0..batch_size)
+                .map(|_| {
+                    let share_deg_t = NonRobustShare::new(Fr::from(0u8), sender, 1);
+                    let share_deg_2t = NonRobustShare::new(Fr::from(0u8), sender, 2);
+                    let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+                    let mut payload = Vec::new();
+                    rec_msg.serialize_compressed(&mut payload).unwrap();
+                    payload
+                })
+                .collect();
+            let msg = RanDouShaMessage::new(
+                sender,
+                session_id,
+                RanDouShaPayload::ReconstructBatch(payloads),
+            );
+            node.reconstruction_handler(msg, net.clone()).await.unwrap();
+        }
+    }
 }

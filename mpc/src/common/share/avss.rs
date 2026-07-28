@@ -507,6 +507,12 @@ where
                     "AVSS share cache full; dropping session {:?}",
                     msg.session_id
                 );
+                // The RBC layer already completed and is holding the raw payload for
+                // this session in its own store. Since this layer is rejecting it,
+                // nobody will ever call `take_share`/`clear_session` to release that
+                // memory, so drop it here instead of leaving it for RBC's own (much
+                // larger) cap/TTL to eventually reclaim.
+                self.rbc.clear_session(msg.session_id).await;
                 return Err(AvssError::LimitExceeded);
             }
             map.insert(msg.session_id, (Instant::now(), Some(shares)));
