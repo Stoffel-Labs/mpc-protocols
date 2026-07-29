@@ -3,9 +3,10 @@ use crate::avss_mpc::mul::{
 };
 use crate::avss_mpc::triple_gen::BeaverTriple;
 use crate::avss_mpc::{
-    deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, MAX_MESSAGE_SIZE,
+    deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, MAX_AVSS_BATCH_SIZE,
+    MAX_MESSAGE_SIZE,
 };
-use crate::common::share::feldman::FeldmanShamirShare;
+use crate::common::share::{avss::verify_feldman, feldman::FeldmanShamirShare};
 use crate::common::{rbc::RbcError, share::ShareError, RBC};
 use crate::common::{ProtocolSessionId, SecretSharingScheme};
 use ark_ec::CurveGroup;
@@ -174,6 +175,11 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         let reconst_message = ReconstructionMessage::new(a_sub_x.to_vec(), b_sub_y.to_vec());
         let mut bytes_rec_message = Vec::new();
         reconst_message.serialize_compressed(&mut bytes_rec_message)?;
+        if bytes_rec_message.len() as u64 > MAX_MESSAGE_SIZE {
+            return Err(MulError::InvalidInput(
+                "batched multiplication opening exceeds the message-size limit".to_string(),
+            ));
+        }
 
         let rbc_sessionid = AvssSessionId::new(
             session_id.calling_protocol().unwrap(),
@@ -220,8 +226,13 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             ));
         }
         let mut r = msg.payload.as_slice();
-        let a_sub_x = deser_bounded_feldman_vec::<F, G>(&mut r, self.n, self.t + 1)?;
-        let b_sub_y = deser_bounded_feldman_vec::<F, G>(&mut r, self.n, self.t + 1)?;
+        let a_sub_x = deser_bounded_feldman_vec::<F, G>(&mut r, MAX_AVSS_BATCH_SIZE, self.t + 1)?;
+        let b_sub_y = deser_bounded_feldman_vec::<F, G>(&mut r, MAX_AVSS_BATCH_SIZE, self.t + 1)?;
+        if !r.is_empty() || a_sub_x.len() != b_sub_y.len() {
+            return Err(MulError::InvalidInput(
+                "malformed batched multiplication opening".to_string(),
+            ));
+        }
         let open_message = ReconstructionMessage { a_sub_x, b_sub_y };
 
         for share in open_message
@@ -238,6 +249,12 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             if share.feldmanshare.id == 0 || share.feldmanshare.id > self.n {
                 return Err(MulError::InvalidInput(format!(
                     "Share id {} out of valid range from sender {}",
+                    share.feldmanshare.id, msg.sender
+                )));
+            }
+            if share.feldmanshare.id != msg.sender + 1 {
+                return Err(MulError::InvalidInput(format!(
+                    "Share id {} does not match authenticated sender {}",
                     share.feldmanshare.id, msg.sender
                 )));
             }
@@ -366,23 +383,6 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     }
 }
 
-fn verify_share_against_commitments<F: FftField, G: CurveGroup<ScalarField = F>>(
-    share: &FeldmanShamirShare<F, G>,
-    expected_commitments: &[G],
-) -> bool {
-    if expected_commitments.len() != share.feldmanshare.degree + 1 {
-        return false;
-    }
-    let x = F::from(share.feldmanshare.id as u64);
-    let mut rhs = G::zero();
-    let mut pow = F::one();
-    for c in expected_commitments {
-        rhs += c.mul(pow);
-        pow *= x;
-    }
-    G::generator().mul(share.feldmanshare.share[0]) == rhs
-}
-
 fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
     storage: &mut MultStorage<F, G>,
     t: usize,
@@ -409,11 +409,16 @@ fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
             warn!("Did not receive the right number of shares to reconstruct");
             continue;
         }
-        let valid = (0..no_of_mul).all(|i| {
-            verify_share_against_commitments(&a[i], &expected_a[i])
-                && verify_share_against_commitments(&b[i], &expected_b[i])
-        });
-        if !valid {
+        let verification_batch: Vec<_> = a
+            .iter()
+            .zip(expected_a)
+            .chain(b.iter().zip(expected_b))
+            .map(|(share, commitments)| FeldmanShamirShare {
+                feldmanshare: share.feldmanshare.clone(),
+                commitments: commitments.clone(),
+            })
+            .collect();
+        if !verification_batch.into_iter().all(verify_feldman) {
             continue;
         }
 

@@ -1,7 +1,6 @@
 use crate::avss_mpc::output::{AvssOutputError, AvssOutputMessage};
 use crate::avss_mpc::{deser_bounded_feldman_vec, AvssWrappedMessage};
-use crate::common::share::avss::verify_feldman;
-use crate::common::share::feldman::FeldmanShamirShare;
+use crate::common::share::{avss::verify_feldman, feldman::FeldmanShamirShare};
 use crate::common::SecretSharingScheme;
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -124,7 +123,7 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
             ));
         }
 
-        // 2. Verify Feldman commitments and degree
+        // 2. Validate degrees and each Feldman commitment equation.
         for share in &shares {
             if share.feldmanshare.degree != self.t {
                 return Err(AvssOutputError::InvalidInput(format!(
@@ -132,12 +131,12 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
                     msg.sender_id
                 )));
             }
-            if !verify_feldman(share.clone()) {
-                return Err(AvssOutputError::VerificationFailed(format!(
-                    "Feldman verification failed for share from server {}",
-                    msg.sender_id
-                )));
-            }
+        }
+        if !shares.iter().cloned().all(verify_feldman) {
+            return Err(AvssOutputError::VerificationFailed(format!(
+                "Feldman verification failed for server {}",
+                msg.sender_id
+            )));
         }
 
         let mut already_recvd = false;

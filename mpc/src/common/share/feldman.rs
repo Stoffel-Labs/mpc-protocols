@@ -30,8 +30,62 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> FeldmanShamirShare<F, G> {
         }
         Ok(FeldmanShamirShare {
             feldmanshare: shamirshare,
-            commitments: commitments,
+            commitments,
         })
+    }
+
+    /// Shares independent secrets and computes all commitments using one
+    /// fixed-base batch multiplication. Output is secret-major.
+    pub fn compute_shares_batch<R: Rng>(
+        secrets: &[F],
+        n: usize,
+        degree: usize,
+        ids: Option<&[usize]>,
+        rng: &mut R,
+    ) -> Result<Vec<Vec<Self>>, ShareError> {
+        let id_list = ids.ok_or(ShareError::InvalidInput)?;
+        if id_list.len() != n || id_list.len() < degree + 1 {
+            return Err(ShareError::InsufficientShares);
+        }
+        if id_list.iter().any(|&id| F::from(id as u64) == F::ZERO) {
+            return Err(ShareError::InvalidInput);
+        }
+        let mut seen = HashSet::new();
+        if !id_list.iter().all(|id| seen.insert(id)) {
+            return Err(ShareError::InvalidInput);
+        }
+        if secrets.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut polynomials = Vec::with_capacity(secrets.len());
+        let mut coefficients = Vec::with_capacity(secrets.len() * (degree + 1));
+        for secret in secrets {
+            let mut polynomial = DensePolynomial::rand(degree, rng);
+            polynomial[0] = *secret;
+            coefficients.extend_from_slice(&polynomial.coeffs);
+            polynomials.push(polynomial);
+        }
+
+        let commitment_bases = G::generator().batch_mul(&coefficients);
+        let commitments: Vec<Vec<G>> = commitment_bases
+            .chunks(degree + 1)
+            .map(|chunk| chunk.iter().copied().map(Into::into).collect())
+            .collect();
+
+        polynomials
+            .iter()
+            .zip(commitments)
+            .map(|(polynomial, commitments)| {
+                id_list
+                    .iter()
+                    .map(|id| {
+                        let value = polynomial.evaluate(&F::from(*id as u64));
+                        Self::new(value, *id, degree, commitments.clone())
+                    })
+                    .collect()
+            })
+            .collect()
     }
 }
 
@@ -163,53 +217,14 @@ where
 
     fn compute_shares(
         secret: Self::SecretType,
-        _n: usize,
+        n: usize,
         degree: usize,
         ids: Option<&[usize]>,
         rng: &mut impl Rng,
     ) -> Result<Vec<Self>, Self::Error> {
-        let id_list = match ids {
-            Some(ids) => ids,
-            None => return Err(ShareError::InvalidInput),
-        };
-
-        // Enough IDs to construct a degree-d polynomial
-        if id_list.len() < degree + 1 {
-            return Err(ShareError::InsufficientShares);
-        }
-
-        // All IDs map to non-zero field elements
-        if id_list.iter().any(|&id| F::from(id as u64) == F::ZERO) {
-            return Err(ShareError::InvalidInput);
-        }
-
-        // All IDs are unique
-        let mut seen = HashSet::new();
-        if !id_list.iter().all(|id| seen.insert(id)) {
-            return Err(ShareError::InvalidInput);
-        }
-
-        // Generate the random polynomial of degree `degree` with `secret` as constant term
-        let mut poly = DensePolynomial::rand(degree, rng);
-        poly[0] = secret;
-
-        let commitments: Vec<_> = poly
-            .coeffs
-            .iter()
-            .map(|a_j| G::generator().mul(a_j))
-            .collect();
-
-        // Evaluate the polynomial at each `id`
-        let shares: Vec<_> = id_list
-            .iter()
-            .map(|id| {
-                let x = F::from(*id as u64);
-                let y = poly.evaluate(&x);
-                FeldmanShamirShare::new(y, *id, degree, commitments.clone())
-            })
-            .collect::<Result<Vec<_>, ShareError>>()?;
-
-        Ok(shares)
+        Self::compute_shares_batch(&[secret], n, degree, ids, rng)?
+            .pop()
+            .ok_or(ShareError::InvalidInput)
     }
 
     fn recover_secret(
@@ -305,6 +320,60 @@ mod tests {
         for s in &shares {
             assert!(verify_feldman_share(s));
         }
+    }
+
+    #[test]
+    fn test_batched_generation_verifies_each_share() {
+        let mut rng = test_rng();
+        let ids = sample_ids(4);
+        let secrets: Vec<F> = (0..129).map(|_| F::rand(&mut rng)).collect();
+
+        let shares = FeldmanShamirShare::<F, G>::compute_shares_batch(
+            &secrets,
+            ids.len(),
+            1,
+            Some(&ids),
+            &mut rng,
+        )
+        .unwrap();
+
+        assert_eq!(shares.len(), secrets.len());
+        for party_index in 0..ids.len() {
+            let recipient_batch: Vec<_> = shares
+                .iter()
+                .map(|secret_shares| secret_shares[party_index].clone())
+                .collect();
+            assert!(recipient_batch.iter().all(verify_feldman_share));
+        }
+    }
+
+    #[test]
+    fn test_batched_verification_rejects_corruption() {
+        let mut rng = test_rng();
+        let ids = sample_ids(4);
+        let secrets: Vec<F> = (0..16).map(|_| F::rand(&mut rng)).collect();
+        let shares = FeldmanShamirShare::<F, G>::compute_shares_batch(
+            &secrets,
+            ids.len(),
+            1,
+            Some(&ids),
+            &mut rng,
+        )
+        .unwrap();
+        let mut recipient_batch: Vec<_> = shares
+            .iter()
+            .map(|secret_shares| secret_shares[0].clone())
+            .collect();
+
+        recipient_batch[7].feldmanshare.share[0] += F::one();
+        assert!(!recipient_batch.iter().all(verify_feldman_share));
+
+        recipient_batch = shares
+            .iter()
+            .map(|secret_shares| secret_shares[0].clone())
+            .collect();
+        recipient_batch[5].commitments[0] += G::generator();
+        assert!(!recipient_batch.iter().all(verify_feldman_share));
     }
 
     #[test]

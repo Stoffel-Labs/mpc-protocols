@@ -1,7 +1,7 @@
 use crate::common::{
     rbc::RbcError,
-    share::{feldman::FeldmanShamirShare, shamir::Shamirshare, ShareError},
-    ProtocolSessionId, RbcWrapFn, SecretSharingScheme, RBC,
+    share::{feldman::FeldmanShamirShare, shamir::Shamirshare},
+    ProtocolSessionId, RbcWrapFn, RBC,
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -280,18 +280,13 @@ where
         info!("Receiving init for avss from {0:?}", self.id);
         // Generate the random polynomial of degree `degree` with `secret` as constant term
 
-        let shares: Vec<Vec<FeldmanShamirShare<F, G>>> = secrets
-            .into_iter()
-            .map(|secret| {
-                FeldmanShamirShare::compute_shares(
-                    secret,
-                    self.n_parties,
-                    self.t,
-                    Some(&self.ids),
-                    rng,
-                )
-            })
-            .collect::<Result<Vec<_>, ShareError>>()?;
+        let shares: Vec<Vec<FeldmanShamirShare<F, G>>> = FeldmanShamirShare::compute_shares_batch(
+            &secrets,
+            self.n_parties,
+            self.t,
+            Some(&self.ids),
+            rng,
+        )?;
 
         // Dealer ephemeral keypair
         let sk_d = F::rand(rng);
@@ -342,6 +337,12 @@ where
         };
 
         let bytes = bincode::serialize(&msg)?;
+        if bytes.len() as u64 > MAX_MESSAGE_SIZE {
+            return Err(AvssError::InvalidInput(format!(
+                "batched AVSS payload exceeds {} bytes",
+                MAX_MESSAGE_SIZE
+            )));
+        }
         self.rbc.init(bytes, session_id, net).await?;
 
         Ok(())
@@ -370,6 +371,19 @@ where
         };
 
         let pk_d: G = CanonicalDeserialize::deserialize_compressed(&msg.dealer_pk[..])?;
+        if pk_d.is_zero() {
+            return Err(AvssError::InvalidShare);
+        }
+        if msg.encrypted_shares.len() != self.n_parties {
+            return Err(AvssError::InvalidShareLength);
+        }
+        if msg
+            .encrypted_shares
+            .iter()
+            .any(|ciphertexts| ciphertexts.len() != msg.public_commitments.len())
+        {
+            return Err(AvssError::InvalidShareLength);
+        }
         let cts: &Vec<Vec<u8>> = msg
             .encrypted_shares
             .get(self.id)
@@ -378,6 +392,13 @@ where
         let ss = pk_d.mul(self.sk_i);
         let key = kdf_from_point(&ss);
 
+        if msg
+            .public_commitments
+            .iter()
+            .any(|commitments| commitments.len() != self.t + 1)
+        {
+            return Err(AvssError::InvalidCommitmentLength);
+        }
         let all_commitments: Vec<Vec<G>> = msg
             .public_commitments
             .iter()
@@ -412,11 +433,11 @@ where
                 commitments: commitments.clone(),
             };
 
-            if !verify_feldman(share.clone()) {
-                return Err(AvssError::InvalidShare);
-            }
-
             shares.push(share);
+        }
+
+        if !shares.iter().cloned().all(verify_feldman) {
+            return Err(AvssError::InvalidShare);
         }
 
         {
