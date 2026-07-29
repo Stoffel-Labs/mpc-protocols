@@ -260,7 +260,13 @@ pub struct CrainAbaStore {
     /// One channel per round rather than one per session: the loop waits on each round in turn, and
     /// a shared channel would let round `r + 1`'s view overwrite `r`'s before the loop observed it.
     view_1_tx: HashMap<usize, watch::Sender<ViewState>>,
-    decision: Decision,
+    /// Latching channel carrying the session's decision, written at line 12.
+    ///
+    /// A `watch` fits because the value is written at most once and never revised: `decide(v) if
+    /// not yet done` keeps a later round from overwriting it, and by Lemma 9 a later round could
+    /// only produce the same `v` anyway. Retaining the value is also what lets a consumer subscribe
+    /// after the fact without racing the decision.
+    decision_tx: watch::Sender<Decision>,
 }
 
 impl CrainAbaStore {
@@ -271,8 +277,13 @@ impl CrainAbaStore {
             view: HashMap::new(),
             recv_aux_set: HashMap::new(),
             view_1_tx: HashMap::new(),
-            decision: Decision::Pending,
+            decision_tx: watch::Sender::new(Decision::Pending),
         }
+    }
+
+    /// The decision taken so far, if any.
+    fn decision(&self) -> Decision {
+        *self.decision_tx.borrow()
     }
 
     /// Returns the `view[r, 1]` channel for `round`, creating it on first use.
@@ -358,11 +369,44 @@ impl CrainAba<AvssSessionId> {
             .await
             .lock()
             .await
-            .decision
+            .decision()
+    }
+
+    /// Returns a receiver that fires the moment `decide()` runs at line 12.
+    ///
+    /// This is the delivery point a protocol built on top of ABA should use, in preference to
+    /// [`Self::init`]'s return value. The two are a full round apart: the decision is final as soon
+    /// as line 12 records it, but `init` returns only once the trailing round of the Termination
+    /// section below has finished, which costs an `AUXSET` round and two SBV-Broadcasts. A consumer
+    /// that gates further work on the decision — such as the "once `n - t` instances output 1, feed
+    /// 0 to the rest" step of an agreement-on-a-common-subset construction — would otherwise stall
+    /// every downstream instance by that round for no protocol reason.
+    ///
+    /// The `init` future must still be driven to completion after this fires. Dropping it once the
+    /// decision arrives skips the trailing round, and the parties waiting on this one's `AUXSET`
+    /// and `SBV_broadcast` messages for that round can then hang. Spawn `init` and keep its handle
+    /// alive; do not `select!` it against this receiver and drop the loser.
+    ///
+    /// Safe to call at any point: `watch` retains the current value, so a caller that subscribes
+    /// after the decision still sees it.
+    pub async fn subscribe_to_decision(
+        &self,
+        session_id: AvssSessionId,
+    ) -> watch::Receiver<Decision> {
+        self.get_or_create_store(session_id)
+            .await
+            .lock()
+            .await
+            .decision_tx
+            .subscribe()
     }
 
     /// Runs `propose(v)` for `session_id`: line 01 followed by the loop of lines 02 to 15,
     /// returning the decided value.
+    ///
+    /// Callers that need the decision as early as possible should take
+    /// [`Self::subscribe_to_decision`] instead of waiting on this future, and keep driving it in
+    /// the background; see that method for why, and for what breaks if the future is dropped.
     ///
     /// # Termination
     ///
@@ -401,7 +445,7 @@ impl CrainAba<AvssSessionId> {
                 (
                     store_guard.round,
                     store_guard.est,
-                    matches!(store_guard.decision, Decision::Ready(_)),
+                    matches!(store_guard.decision(), Decision::Ready(_)),
                 )
             };
 
@@ -521,8 +565,8 @@ impl CrainAba<AvssSessionId> {
                 // "decide(v) if not yet done": a later round may re-enter line 12 with the same
                 // value, and by Lemma 9 it can only be the same value, but the decision is still
                 // recorded once.
-                if let (Some(w), Decision::Pending) = (decided, store_guard.decision) {
-                    store_guard.decision = Decision::Ready(w);
+                if let (Some(w), Decision::Pending) = (decided, store_guard.decision()) {
+                    store_guard.decision_tx.send_replace(Decision::Ready(w));
                 }
             }
 
@@ -531,7 +575,7 @@ impl CrainAba<AvssSessionId> {
             }
         }
 
-        let decision = store.lock().await.decision;
+        let decision = store.lock().await.decision();
         match decision {
             Decision::Ready(w) => Ok(w),
             Decision::Pending => Err(CrainAbaError::NoDecision),
