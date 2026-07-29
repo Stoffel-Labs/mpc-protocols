@@ -28,9 +28,7 @@ pub mod preprocessing;
 pub mod share_gen;
 
 use crate::{
-    avss_mpc::{self, AvssSessionId},
     common::{
-        aba::{bv_bc::BvBroadcastMessage, sbv_bc::SbvBroadcastMessage},
         math::goldilocks::GoldilocksField,
         rbc::{rbc_store::Msg, RbcError},
         types::{
@@ -661,54 +659,6 @@ where
             .deserialize(&raw_msg)?;
 
         match wrapped {
-            WrappedMessage::SbvBroadcast(msg) => {
-                if sender_id != msg.sender_id {
-                    return Err(HoneyBadgerError::InvalidPartyId);
-                }
-
-                if msg.session_id.instance_id() != self.params.instance_id {
-                    return Err(HoneyBadgerError::InstanceIdError(
-                        msg.session_id.instance_id(),
-                    ));
-                }
-
-                match msg.session_id.calling_protocol() {
-                    Some(avss_mpc::ProtocolType::Resharing) => {
-                        // TODO: call the process function on the BV-Broadcast node inside the resharing node
-                        // TODO: call drain function on the resharing node
-                    }
-                    _ => {
-                        warn!(
-                            "Unknown protocol ID in session ID: {:?} in BV-Broadcast",
-                            msg.session_id
-                        );
-                    }
-                }
-            }
-            WrappedMessage::BvBroadcast(msg) => {
-                if sender_id != msg.sender_id {
-                    return Err(HoneyBadgerError::InvalidPartyId);
-                }
-
-                if msg.session_id.instance_id() != self.params.instance_id {
-                    return Err(HoneyBadgerError::InstanceIdError(
-                        msg.session_id.instance_id(),
-                    ));
-                }
-
-                match msg.session_id.calling_protocol() {
-                    Some(avss_mpc::ProtocolType::Resharing) => {
-                        // TODO: call the process function on the BV-Broadcast node inside the resharing node
-                        // TODO: call drain function on the resharing node
-                    }
-                    _ => {
-                        warn!(
-                            "Unknown protocol ID in session ID: {:?} in BV-Broadcast",
-                            msg.session_id
-                        );
-                    }
-                }
-            }
             WrappedMessage::Rbc(rbc_msg) => {
                 if sender_id != rbc_msg.sender_id {
                     return Err(HoneyBadgerError::InvalidPartyId);
@@ -2224,8 +2174,6 @@ pub enum WrappedMessage {
     Dousha(DouShaMessage),
     Output(OutputMessage),
     PRandBitD(PRandBitDMessage),
-    BvBroadcast(BvBroadcastMessage<AvssSessionId>),
-    SbvBroadcast(SbvBroadcastMessage<AvssSessionId>),
 }
 
 impl WrappedMessage {

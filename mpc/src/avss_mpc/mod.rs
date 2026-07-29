@@ -13,6 +13,7 @@ use crate::{
         triple_gen::{triple_gen::TripleGenNode, BeaverTriple, TripleGenError},
     },
     common::{
+        aba::{bv_bc::BvBroadcastMessage, sbv_bc::SbvBroadcastMessage, CrainAbaMessage},
         rbc::{rbc_store::Msg, RbcError},
         share::{
             avss::{AvssError, AvssMessage},
@@ -421,6 +422,9 @@ where
             .with_limit(MAX_MESSAGE_SIZE)
             .deserialize(&raw_msg)?;
         match wrapped {
+            AvssWrappedMessage::BvBroadcast(_) => todo!(),
+            AvssWrappedMessage::SbvBroadcast(_) => todo!(),
+            AvssWrappedMessage::CrainAba(_) => todo!(),
             AvssWrappedMessage::Rbc(rbc_msg) => {
                 if sender_id != rbc_msg.sender_id {
                     return Err(AvssMPCError::InvalidPartyId);
@@ -745,6 +749,9 @@ pub enum AvssWrappedMessage {
     Mul(MultMessage),
     Input(AvssInputMessage),
     Output(AvssOutputMessage),
+    BvBroadcast(BvBroadcastMessage<AvssSessionId>),
+    SbvBroadcast(SbvBroadcastMessage<AvssSessionId>),
+    CrainAba(CrainAbaMessage<AvssSessionId>),
 }
 
 impl AvssWrappedMessage {

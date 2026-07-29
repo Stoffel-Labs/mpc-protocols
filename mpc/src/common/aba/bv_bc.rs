@@ -48,7 +48,10 @@ use serde::{Deserialize, Serialize};
 use stoffelnet::network_utils::{Network, NetworkError};
 use tokio::sync::{watch, Mutex};
 
-use crate::{avss_mpc::AvssSessionId, common::aba::TaggedMessage, honeybadger::WrappedMessage};
+use crate::{
+    avss_mpc::{AvssSessionId, AvssWrappedMessage},
+    common::aba::{BinValue, Tag, TaggedMessage},
+};
 
 /// Errors that can arise while running BV-Broadcast.
 #[derive(thiserror::Error, Debug)]
@@ -74,26 +77,28 @@ pub struct BvBroadcastMessage<I> {
     /// ID of the sending party. The thresholds count *distinct senders* of a value, not messages,
     /// so this is what makes a repeated `BVAL` from one party count only once.
     pub sender_id: usize,
-    /// Session this broadcast instance belongs to. Each session carries its own `bin_values`.
+    /// Session this broadcast instance belongs to.
     pub session_id: I,
-    /// Round of the enclosing ABA being served. Crain's ABA runs one BV-Broadcast per round.
-    pub round_id: usize,
+    /// Distinguishes concurrent BV-Broadcast instances within one session — what §2.1 calls the
+    /// instance's TAG. A caller that runs the abstraction more than once per session gives each run
+    /// its own value, and `(session_id, tag)` is what keys the per-instance state.
+    pub tag: Tag,
     /// The broadcast bit. Always [`TaggedMessage::Binary`] for BV-Broadcast.
     pub payload: TaggedMessage,
 }
 
 impl BvBroadcastMessage<AvssSessionId> {
-    /// Creates a `BVAL` message for the given session and round.
+    /// Creates a `BVAL` message for the instance `(session_id, tag)`.
     pub fn new(
         sender_id: usize,
         session_id: AvssSessionId,
-        round_id: usize,
+        tag: Tag,
         payload: TaggedMessage,
     ) -> Self {
         Self {
             sender_id,
             session_id,
-            round_id,
+            tag,
             payload,
         }
     }
@@ -105,18 +110,18 @@ struct BvBroadcastStore {
     /// Whether this party has already echoed a bit at step 6, implementing the paper's "if haven't
     /// done already" guard. The first coordinate signals if the party has already sent a 0, the
     /// second coordinate signals if the party has already sent a 1.
-    bit_sent: (bool, bool),
+    bit_sent: (bool, bool, bool),
     /// Whether the instance has finished, after which incoming messages are ignored.
     protocol_ended: bool,
     /// The `(sender_id, value)` pairs seen so far, from which both thresholds are counted. Storing
     /// the sender alongside the value is what makes those counts range over *different* parties, as
     /// steps 5 and 7 require: a malicious party repeating the same `BVAL` collapses into a single
     /// pair, and so cannot inflate the count for a value on its own.
-    recv_bin_values: HashSet<(usize, u8)>,
-    bin_values_tx: watch::Sender<HashSet<u8>>,
+    recv_bin_values: HashSet<(usize, BinValue)>,
+    bin_values_tx: watch::Sender<HashSet<BinValue>>,
 }
 
-/// A party running BV-Broadcast, able to serve many concurrent sessions.
+/// A party running BV-Broadcast, able to serve many concurrent instances.
 pub struct BvBroadcast<I> {
     /// ID of this party.
     id: usize,
@@ -124,8 +129,10 @@ pub struct BvBroadcast<I> {
     n_parties: usize,
     /// Maximum number of Byzantine parties tolerated, `t`. The protocol assumes `n >= 3t + 1`.
     threshold: usize,
-    /// State per session. The `usize` is the ID of the party whose message opened the session.
-    store: Arc<Mutex<HashMap<I, Arc<Mutex<BvBroadcastStore>>>>>,
+    /// State per instance, keyed by `(session_id, tag)`. Both components are needed: keying on the
+    /// session alone would merge every instance a caller runs within it into a single `bin_values`,
+    /// which for Crain's ABA means every round and both stages sharing one set.
+    store: Arc<Mutex<HashMap<(I, Tag), Arc<Mutex<BvBroadcastStore>>>>>,
 }
 
 /// Wraps a `BVAL` message and serializes it for the wire, so the receiving AVSS node's dispatcher
@@ -133,22 +140,23 @@ pub struct BvBroadcast<I> {
 fn encode_message_bv_broadcast_avss(
     m: BvBroadcastMessage<AvssSessionId>,
 ) -> Result<Vec<u8>, BvBroadcastError> {
-    let wrapped = WrappedMessage::BvBroadcast(m);
+    let wrapped = AvssWrappedMessage::BvBroadcast(m);
     let bytes = bincode::serialize(&wrapped)?;
     Ok(bytes)
 }
 
 impl BvBroadcast<AvssSessionId> {
-    /// Returns a receiver watching `bin_values` for `session_id`, creating the session state if this
-    /// is the first thing to touch it.
+    /// Returns a receiver watching `bin_values` for the instance `(session_id, tag)`, creating its
+    /// state if this is the first thing to touch it.
     ///
     /// Safe to call at any point: `watch` retains the current value, so a late subscriber sees
     /// everything already accumulated, and an early one sees the set fill as `BVAL` messages arrive.
     pub async fn subscribe_to_bin_values(
         &self,
         session_id: AvssSessionId,
-    ) -> watch::Receiver<HashSet<u8>> {
-        self.get_or_create_store(session_id)
+        tag: Tag,
+    ) -> watch::Receiver<HashSet<BinValue>> {
+        self.get_or_create_store(session_id, tag)
             .await
             .lock()
             .await
@@ -167,13 +175,16 @@ impl BvBroadcast<AvssSessionId> {
         }
     }
 
-    /// Returns the state for `session_id`, creating it on first use and recording `sender_id` as the
-    /// party that opened the session.
-    async fn get_or_create_store(&self, session_id: AvssSessionId) -> Arc<Mutex<BvBroadcastStore>> {
+    /// Returns the state for the instance `(session_id, tag)`, creating it on first use.
+    async fn get_or_create_store(
+        &self,
+        session_id: AvssSessionId,
+        tag: Tag,
+    ) -> Arc<Mutex<BvBroadcastStore>> {
         let store_lock = {
             let mut store = self.store.lock().await;
             store
-                .entry(session_id)
+                .entry((session_id, tag))
                 .or_insert_with(|| Arc::new(Mutex::new(BvBroadcastStore::default())))
                 .clone()
         };
@@ -181,8 +192,8 @@ impl BvBroadcast<AvssSessionId> {
         store_lock
     }
 
-    /// Starts BV-Broadcast for `session_id` with input bit `v`, sending `BVAL(v)` to every party
-    /// (step 2) and returning a receiver watching `bin_values` (step 3).
+    /// Starts BV-Broadcast for the instance `(session_id, tag)` with input bit `v`, sending
+    /// `BVAL(v)` to every party (step 2) and returning a receiver watching `bin_values` (step 3).
     ///
     /// As in the paper, this returns before the protocol has finished: the set behind the receiver
     /// has not necessarily reached its final value, and is typically still empty here. Callers wait
@@ -195,10 +206,10 @@ impl BvBroadcast<AvssSessionId> {
     pub async fn init<N>(
         &self,
         session_id: AvssSessionId,
-        round_id: usize,
-        v: u8,
+        tag: Tag,
+        v: BinValue,
         network: Arc<N>,
-    ) -> Result<watch::Receiver<HashSet<u8>>, BvBroadcastError>
+    ) -> Result<watch::Receiver<HashSet<BinValue>>, BvBroadcastError>
     where
         N: Network + Send + Sync,
     {
@@ -206,13 +217,13 @@ impl BvBroadcast<AvssSessionId> {
             let enc_bit = encode_message_bv_broadcast_avss(BvBroadcastMessage::new(
                 self.id,
                 session_id,
-                round_id,
+                tag,
                 TaggedMessage::Binary(v),
             ))?;
             network.send(pid, &enc_bit).await?;
         }
 
-        Ok(self.subscribe_to_bin_values(session_id).await)
+        Ok(self.subscribe_to_bin_values(session_id, tag).await)
     }
 
     /// Handles an incoming `BVAL` message (steps 4 to 8): records the sender against the value, then
@@ -244,12 +255,13 @@ impl BvBroadcast<AvssSessionId> {
 
         // Extracts the bit received
         let recv_bit = match message.payload {
-            TaggedMessage::Binary(0) => 0,
-            TaggedMessage::Binary(1) => 1,
+            TaggedMessage::Binary(v) => v,
             _ => return Err(BvBroadcastError::UnknownMessageType(message.payload)),
         };
 
-        let store = self.get_or_create_store(message.session_id).await;
+        let store = self
+            .get_or_create_store(message.session_id, message.tag)
+            .await;
         {
             let guard = store.lock().await;
             if guard.protocol_ended {
@@ -270,19 +282,25 @@ impl BvBroadcast<AvssSessionId> {
                     .count();
 
                 // If the bit was already sent, then we dont send it anymore and just return.
-                let sent_bit_guard = if recv_bit == 0 {
-                    store_guard.bit_sent.0
-                } else {
-                    store_guard.bit_sent.1
+                let sent_bit_guard = match recv_bit {
+                    BinValue::Zero => store_guard.bit_sent.0,
+                    BinValue::One => store_guard.bit_sent.1,
+                    BinValue::Empty => store_guard.bit_sent.2,
                 };
 
                 let should_broadcast = n_recv_v >= self.threshold + 1 && !sent_bit_guard;
 
                 if should_broadcast {
-                    if recv_bit == 0 {
-                        store_guard.bit_sent.0 = true;
-                    } else {
-                        store_guard.bit_sent.1 = true;
+                    match recv_bit {
+                        BinValue::Zero => {
+                            store_guard.bit_sent.0 = true;
+                        }
+                        BinValue::One => {
+                            store_guard.bit_sent.1 = true;
+                        }
+                        BinValue::Empty => {
+                            store_guard.bit_sent.2 = true;
+                        }
                     }
                 }
 
@@ -300,7 +318,7 @@ impl BvBroadcast<AvssSessionId> {
                 let enc_bit = encode_message_bv_broadcast_avss(BvBroadcastMessage::new(
                     self.id,
                     message.session_id,
-                    message.round_id,
+                    message.tag,
                     TaggedMessage::Binary(recv_v),
                 ))?;
                 network.broadcast(&enc_bit).await?;

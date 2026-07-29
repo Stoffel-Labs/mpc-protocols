@@ -51,22 +51,27 @@ use std::{
     sync::Arc,
 };
 
+use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use stoffelnet::network_utils::{Network, NetworkError, PartyId};
-use tokio::sync::{mpsc::Sender, watch::error::RecvError, Mutex};
+use tokio::sync::{
+    watch::{self, error::RecvError},
+    Mutex,
+};
 
 use crate::{
-    avss_mpc::AvssSessionId,
+    avss_mpc::{AvssSessionId, AvssWrappedMessage},
     common::aba::{
         bv_bc::{BvBroadcast, BvBroadcastError},
-        TaggedMessage,
+        BinValue, Tag, TaggedMessage,
     },
-    honeybadger::WrappedMessage,
 };
 
 /// Errors that can arise while running SBV-Broadcast.
 #[derive(thiserror::Error, Debug)]
 pub enum SbvBroadcastError {
+    #[error("error while serializing the object into bytes: {0:?}")]
+    SerializationError(#[from] Box<ErrorKind>),
     /// The network failed while broadcasting an `AUX` message.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
@@ -99,26 +104,28 @@ pub struct SbvBroadcastMessage<I> {
     /// ID of the sending party. Step 4's quorum counts *distinct parties*, so this is what keeps a
     /// party that sends both `AUX(0)` and `AUX(1)` from counting twice.
     pub sender_id: usize,
-    /// Session this broadcast instance belongs to. Each session carries its own `bin_values`.
+    /// Session this broadcast instance belongs to.
     pub session_id: I,
-    /// Round of the enclosing ABA being served. Crain's ABA runs two SBV-Broadcasts per round.
-    pub round_id: usize,
+    /// Distinguishes concurrent SBV-Broadcast instances within one session — what §2.1 calls the
+    /// instance's TAG. It is forwarded unchanged to the [`BvBroadcast`] underneath, so the two
+    /// layers of one instance share it, and `(session_id, tag)` is what keys the per-instance state.
+    pub tag: Tag,
     /// The broadcast value. Always [`TaggedMessage::Aux`] for SBV-Broadcast.
     pub payload: TaggedMessage,
 }
 
 impl SbvBroadcastMessage<AvssSessionId> {
-    /// Creates an `AUX` message for the given session and round.
+    /// Creates an `AUX` message for the instance `(session_id, tag)`.
     pub fn new(
         sender_id: usize,
         session_id: AvssSessionId,
-        round_id: usize,
+        tag: Tag,
         payload: TaggedMessage,
     ) -> Self {
         Self {
             sender_id,
             session_id,
-            round_id,
+            tag,
             payload,
         }
     }
@@ -128,13 +135,13 @@ impl SbvBroadcastMessage<AvssSessionId> {
 /// can route it back to SBV-Broadcast.
 fn encode_message_sbv_broadcast_avss(
     m: SbvBroadcastMessage<AvssSessionId>,
-) -> Result<Vec<u8>, BvBroadcastError> {
-    let wrapped = WrappedMessage::SbvBroadcast(m);
+) -> Result<Vec<u8>, SbvBroadcastError> {
+    let wrapped = AvssWrappedMessage::SbvBroadcast(m);
     let bytes = bincode::serialize(&wrapped)?;
     Ok(bytes)
 }
 
-/// A party running SBV-Broadcast, able to serve many concurrent sessions.
+/// A party running SBV-Broadcast, able to serve many concurrent instances.
 pub struct SbvBroadcast<I> {
     /// ID of this party.
     id: usize,
@@ -143,16 +150,15 @@ pub struct SbvBroadcast<I> {
     /// Maximum number of Byzantine parties tolerated, `t`. The protocol assumes `n >= 3t + 1`.
     threshold: usize,
     /// The BV-Broadcast layer beneath this one, providing step 1.
-    bv_broadcast: BvBroadcast<I>,
-    /// State per session.
-    store: Arc<Mutex<HashMap<AvssSessionId, Arc<Mutex<SbvStorage>>>>>,
-    /// Where the step 5 result is delivered, once per session.
-    output_sender: Sender<Result<SbvOutput, SbvBroadcastError>>,
+    pub bv_broadcast: BvBroadcast<I>,
+    /// State per instance, keyed by `(session_id, tag)` for the same reason as
+    /// [`BvBroadcast`]'s store: one session may run many instances of the abstraction.
+    store: Arc<Mutex<HashMap<(AvssSessionId, Tag), Arc<Mutex<SbvStorage>>>>>,
 }
 
 /// Whether step 4's condition holds yet.
 #[derive(Clone)]
-enum ProtocolOutputState {
+pub enum ProtocolOutputState {
     /// No `view` satisfies step 4 yet. More `AUX` messages, or a larger `bin_values`, may change
     /// that, so the condition is re-checked on both.
     Pending,
@@ -163,14 +169,14 @@ enum ProtocolOutputState {
 /// The `(view, bin_values)` pair returned by step 5.
 #[derive(Clone)]
 pub struct SbvOutput {
-    /// Session this output belongs to.
-    pub session_id: AvssSessionId,
+    /// Instance within that session this output belongs to. Every instance reports on one shared
+    /// channel, and a caller running several of them per session — as Crain's ABA does — needs both
+    /// this and `session_id` to tell whose result just arrived.
+    pub tag: Tag,
     /// The values of step 4: a subset of `bin_values` witnessed by `AUX` messages from `n - t`
     /// distinct parties. A set rather than a list, because the ABA layer above tests it for set
     /// equality (`view = {w}`, `view = {v, bottom}`).
-    pub view: HashSet<u8>,
-    /// The `bin_values` this `view` was drawn from, as of the moment the condition held.
-    pub bin_values: HashSet<u8>,
+    pub view: HashSet<BinValue>,
 }
 
 /// State of a single SBV-Broadcast instance, i.e. of one session.
@@ -182,7 +188,8 @@ pub struct SbvStorage {
     /// The `(sender_id, value)` pairs from received `AUX` messages. Pairing the value with its
     /// sender is what lets step 4 count *distinct parties*: a party legitimately sends one `AUX` per
     /// element of its `bin_values`, so counting messages would overcount the quorum.
-    recv_aux: HashSet<(PartyId, u8)>,
+    recv_aux: HashSet<(PartyId, BinValue)>,
+    output_tx: watch::Sender<ProtocolOutputState>,
 }
 
 impl SbvStorage {
@@ -191,37 +198,49 @@ impl SbvStorage {
         Self {
             output_sent: false,
             recv_aux: HashSet::new(),
+            output_tx: watch::Sender::new(ProtocolOutputState::Pending),
         }
     }
 }
 
 impl SbvBroadcast<AvssSessionId> {
+    pub async fn subscribe_to_output(
+        &self,
+        session_id: AvssSessionId,
+        tag: Tag,
+    ) -> watch::Receiver<ProtocolOutputState> {
+        self.get_or_create_store(session_id, tag)
+            .await
+            .lock()
+            .await
+            .output_tx
+            .subscribe()
+    }
+
     /// Creates an SBV-Broadcast party with ID `id`, among `n_parties` parties tolerating `threshold`
     /// Byzantine ones, delivering each session's step 5 result on `output_tx`.
     ///
     /// This also creates the [`BvBroadcast`] instance underneath, which shares the same parameters.
-    pub fn new(
-        id: usize,
-        n_parties: usize,
-        threshold: usize,
-        output_tx: Sender<Result<SbvOutput, SbvBroadcastError>>,
-    ) -> Self {
+    pub fn new(id: usize, n_parties: usize, threshold: usize) -> Self {
         Self {
             id,
             n_parties,
             threshold,
             bv_broadcast: BvBroadcast::new(id, n_parties, threshold),
             store: Arc::new(Mutex::new(HashMap::new())),
-            output_sender: output_tx,
         }
     }
 
-    /// Returns the state for `session_id`, creating it on first use.
-    async fn get_or_create_store(&self, session_id: AvssSessionId) -> Arc<Mutex<SbvStorage>> {
+    /// Returns the state for the instance `(session_id, tag)`, creating it on first use.
+    async fn get_or_create_store(
+        &self,
+        session_id: AvssSessionId,
+        tag: Tag,
+    ) -> Arc<Mutex<SbvStorage>> {
         let store_lock = {
             let mut store = self.store.lock().await;
             store
-                .entry(session_id)
+                .entry((session_id, tag))
                 .or_insert_with(|| Arc::new(Mutex::new(SbvStorage::empty())))
                 .clone()
         };
@@ -229,9 +248,9 @@ impl SbvBroadcast<AvssSessionId> {
         store_lock
     }
 
-    /// Starts SBV-Broadcast for `session_id` with input `v`, covering steps 1 to 3: it runs
-    /// BV-Broadcast, waits for `bin_values` to become non-empty, and broadcasts one `AUX(w)` per
-    /// value in it.
+    /// Starts SBV-Broadcast for the instance `(session_id, tag)` with input `v`, covering steps 1
+    /// to 3: it runs BV-Broadcast, waits for `bin_values` to become non-empty, and broadcasts one
+    /// `AUX(w)` per value in it.
     ///
     /// Returns as soon as the `AUX` messages are away. Step 4 is not waited on here — the result
     /// arrives later on `output_sender`, emitted by whichever of the two checkers sees the condition
@@ -246,10 +265,10 @@ impl SbvBroadcast<AvssSessionId> {
     /// the [`Ref`](tokio::sync::watch::Ref) across an `.await` would keep a read lock on the channel
     /// and block BV-Broadcast's writes, deadlocking outright on a single-threaded runtime.
     pub async fn init<N>(
-        &mut self,
+        &self,
         session_id: AvssSessionId,
-        round_id: usize,
-        v: u8,
+        tag: Tag,
+        v: BinValue,
         network: Arc<N>,
     ) -> Result<(), SbvBroadcastError>
     where
@@ -257,7 +276,7 @@ impl SbvBroadcast<AvssSessionId> {
     {
         let mut bin_values_watcher = self
             .bv_broadcast
-            .init(session_id, round_id, v, network.clone())
+            .init(session_id, tag, v, network.clone())
             .await?;
         bin_values_watcher
             .wait_for(|bin_set| !bin_set.is_empty())
@@ -265,12 +284,8 @@ impl SbvBroadcast<AvssSessionId> {
         {
             let bin_values = bin_values_watcher.borrow().clone();
             for element in bin_values {
-                let message = SbvBroadcastMessage::new(
-                    self.id,
-                    session_id,
-                    round_id,
-                    TaggedMessage::Aux(element),
-                );
+                let message =
+                    SbvBroadcastMessage::new(self.id, session_id, tag, TaggedMessage::Aux(element));
                 let enc_message = encode_message_sbv_broadcast_avss(message)?;
                 network.broadcast(&enc_message).await?;
             }
@@ -278,34 +293,33 @@ impl SbvBroadcast<AvssSessionId> {
 
         // Starts a task to check if bin_values change and it meets the condition to
         tokio::spawn({
-            let storage = self.get_or_create_store(session_id).await.clone();
-            let output_tx = self.output_sender.clone();
+            let storage = self.get_or_create_store(session_id, tag).await.clone();
             let n_parties = self.n_parties;
             let threshold = self.threshold;
             async move {
                 while let Ok(()) = bin_values_watcher.changed().await {
                     let bin_values = bin_values_watcher.borrow().clone();
-                    let check_result = check_bin_value_match(
-                        n_parties,
-                        threshold,
-                        session_id,
-                        bin_values,
-                        storage.clone(),
-                    )
-                    .await;
-
+                    let check_result = {
+                        let storage_guard = storage.lock().await;
+                        check_bin_value_match(
+                            n_parties,
+                            threshold,
+                            tag,
+                            bin_values,
+                            &storage_guard.recv_aux,
+                        )
+                    };
                     match check_result {
-                        Ok(ProtocolOutputState::Ready(output)) => {
+                        ProtocolOutputState::Ready(output) => {
                             if check_if_output_sent_and_update(storage.clone()).await {
-                                let _ = output_tx.send(Ok(output)).await;
+                                storage
+                                    .lock()
+                                    .await
+                                    .output_tx
+                                    .send_replace(ProtocolOutputState::Ready(output));
                             }
                         }
-                        Err(e) => {
-                            if check_if_output_sent_and_update(storage.clone()).await {
-                                let _ = output_tx.send(Err(e)).await;
-                            }
-                        }
-                        Ok(ProtocolOutputState::Pending) => {}
+                        ProtocolOutputState::Pending => {}
                     }
                 }
             }
@@ -338,12 +352,11 @@ impl SbvBroadcast<AvssSessionId> {
 
         // Extracts the bit received
         let recv_bit = match message.payload {
-            TaggedMessage::Aux(0) => 0,
-            TaggedMessage::Aux(1) => 1,
+            TaggedMessage::Aux(v) => v,
             _ => return Err(SbvBroadcastError::UnknownMessageType(message.payload)),
         };
 
-        let storage = self.get_or_create_store(session_id).await;
+        let storage = self.get_or_create_store(session_id, message.tag).await;
         storage
             .lock()
             .await
@@ -352,31 +365,32 @@ impl SbvBroadcast<AvssSessionId> {
 
         let bin_values = self
             .bv_broadcast
-            .subscribe_to_bin_values(session_id)
+            .subscribe_to_bin_values(session_id, message.tag)
             .await
             .borrow()
             .clone();
 
-        match check_bin_value_match(
-            self.n_parties,
-            self.threshold,
-            session_id,
-            bin_values,
-            storage.clone(),
-        )
-        .await
-        {
-            Ok(ProtocolOutputState::Ready(output)) => {
-                if check_if_output_sent_and_update(storage).await {
-                    let _ = self.output_sender.send(Ok(output.clone())).await;
+        let check_result = {
+            let storage_guard = storage.lock().await;
+            check_bin_value_match(
+                self.n_parties,
+                self.threshold,
+                message.tag,
+                bin_values,
+                &storage_guard.recv_aux,
+            )
+        };
+        match check_result {
+            ProtocolOutputState::Ready(output) => {
+                if check_if_output_sent_and_update(storage.clone()).await {
+                    storage
+                        .lock()
+                        .await
+                        .output_tx
+                        .send_replace(ProtocolOutputState::Ready(output));
                 }
             }
-            Ok(ProtocolOutputState::Pending) => {}
-            Err(e) => {
-                if check_if_output_sent_and_update(storage).await {
-                    let _ = self.output_sender.send(Err(e)).await;
-                }
-            }
+            ProtocolOutputState::Pending => {}
         }
 
         Ok(())
@@ -423,17 +437,15 @@ async fn check_if_output_sent_and_update(store: Arc<Mutex<SbvStorage>>) -> bool 
 ///   projected onto their senders and **counted as a set**. Counting pairs would overcount, since a
 ///   party sends one `AUX` per element of its `bin_values` and so contributes two pairs whenever
 ///   that set is `{0, 1}`.
-async fn check_bin_value_match(
+fn check_bin_value_match(
     n_parties: usize,
     threshold: usize,
-    session_id: AvssSessionId,
-    bin_values: HashSet<u8>,
-    storage: Arc<Mutex<SbvStorage>>,
-) -> Result<ProtocolOutputState, SbvBroadcastError> {
-    let potential_view = storage.lock().await.recv_aux.clone();
-
+    tag: Tag,
+    bin_values: HashSet<BinValue>,
+    potential_view: &HashSet<(usize, BinValue)>,
+) -> ProtocolOutputState {
     // Compute the AUX received elements that are in bin_values.
-    let matches_in_view: HashSet<(usize, u8)> = potential_view
+    let matches_in_view: HashSet<(usize, BinValue)> = potential_view
         .iter()
         .filter(|(_, value)| bin_values.contains(value))
         .copied()
@@ -451,14 +463,8 @@ async fn check_bin_value_match(
             .map(|(_, value)| value)
             .copied()
             .collect();
-        let out_bin_values = bin_values.into_iter().collect();
-        let output = ProtocolOutputState::Ready(SbvOutput {
-            session_id,
-            view,
-            bin_values: out_bin_values,
-        });
-        Ok(output)
+        ProtocolOutputState::Ready(SbvOutput { tag, view })
     } else {
-        Ok(ProtocolOutputState::Pending)
+        ProtocolOutputState::Pending
     }
 }
