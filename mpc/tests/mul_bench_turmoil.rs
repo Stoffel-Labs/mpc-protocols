@@ -95,7 +95,6 @@ fn run_config(n: usize, t: usize, n_muls: usize, lat: Option<(u64, u64)>) {
                     None,
                     None,
                     None,
-                    None,
                 );
             }
         });

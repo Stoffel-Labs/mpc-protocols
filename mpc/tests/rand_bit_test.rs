@@ -3,7 +3,6 @@ use crate::utils::test_utils::{setup_tracing, test_setup};
 use ark_ff::{AdditiveGroup, Field};
 use std::time::Duration;
 use stoffelcrypto::common::math::goldilocks::GoldilocksField;
-use stoffelcrypto::common::rbc::rbc::Avid;
 use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelcrypto::honeybadger::fpmul::rand_bit::RandBit;
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -27,12 +26,12 @@ async fn rand_bit_with_small_field_e2e() {
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);
 
     // === Create RandBit nodes ===
-    let nodes: Vec<RandBit<GoldilocksField, Avid<SessionId>>> = (0..num_parties)
+    let nodes: Vec<RandBit<GoldilocksField>> = (0..num_parties)
         .map(|i| RandBit::new(i, num_parties, threshold).unwrap())
         .collect();
 
     // === Create protocol inputs ===
-    let (a_shares, mult_triples) =
+    let (a_shares, zero_shares) =
         create_rand_bit_input::<GoldilocksField>(num_parties, threshold, batch_size);
 
     // === Spawn receiver tasks ===
@@ -44,12 +43,12 @@ async fn rand_bit_with_small_field_e2e() {
         let id = node.id;
         set.spawn({
             let a_share = a_shares[id].clone();
-            let mult_triple = mult_triples[id].clone();
+            let zero_share = zero_shares[id].clone();
             let session_id = session_id.clone();
             let network = network[id].clone();
             let mut node = node.clone();
             async move {
-                node.init(a_share, mult_triple, session_id, duration, network)
+                node.init(a_share, zero_share, session_id, duration, network)
                     .await
                     .unwrap()
             }
@@ -67,10 +66,7 @@ async fn rand_bit_with_small_field_e2e() {
     let mut all_outputs = Vec::new();
 
     for node in &nodes {
-        let store = node
-            .get_or_create_storage(session_id, node.id)
-            .await
-            .unwrap();
+        let store = node.get_or_create_storage(session_id).await.unwrap();
         let id = node.id;
         let s = store.lock().await;
 

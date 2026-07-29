@@ -28,38 +28,43 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     prandint_shares: Vec<RobustShare<F>>,
     /// A pool of random shares in the Goldilocks field for rand bit generation.
     random_shares_small_field: Vec<RobustShare<GoldilocksField>>,
-    /// A pool of random Breaver triples in the Goldilocks field.
-    beaver_triples_small_field: Vec<ShamirBeaverTriple<GoldilocksField>>,
     /// A pool of PreMulC offline-phase bundles (all sized at the same
     /// configured `premulc_pk`), topped up by `run_preprocessing`.
     premulc_preps: Vec<PreMulCPrep<F>>,
     /// A pool of degree-2t zero-sharings (ZeroShaNode output).
     zero_shares: Vec<RobustShare<F>>,
+    /// A pool of degree-2t zero-sharings in the Goldilocks field, feeding
+    /// RandBit's MulPub-based reveal of `a^2`.
+    zero_shares_small_field: Vec<RobustShare<GoldilocksField>>,
+    /// A pool of ([r], [r^-1]) pairs (RandInvPairNode output)
+    rand_inv_pairs: Vec<(RobustShare<F>, RobustShare<F>)>,
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
 pub struct PreprocMaterialLength {
     pub beaver_triples: usize,
-    pub beaver_triples_small_field: usize,
     pub random_shr: usize,
     pub random_shr_small_field: usize,
     pub prandbit: usize,
     pub prandint: usize,
     pub premulc: usize,
     pub zero_shares: usize,
+    pub zero_shares_small_field: usize,
+    pub rand_inv_pairs: usize,
 }
 
 impl PreprocMaterialLength {
     pub fn zero() -> Self {
         Self {
             beaver_triples: 0,
-            beaver_triples_small_field: 0,
             random_shr: 0,
             random_shr_small_field: 0,
             prandbit: 0,
             prandint: 0,
             premulc: 0,
             zero_shares: 0,
+            zero_shares_small_field: 0,
+            rand_inv_pairs: 0,
         }
     }
 }
@@ -73,12 +78,13 @@ where
         Self {
             random_shares: Vec::new(),
             beaver_triples: Vec::new(),
-            beaver_triples_small_field: Vec::new(),
             prandbit_shares: Vec::new(),
             prandint_shares: Vec::new(),
             random_shares_small_field: Vec::new(),
             premulc_preps: Vec::new(),
             zero_shares: Vec::new(),
+            zero_shares_small_field: Vec::new(),
+            rand_inv_pairs: Vec::new(),
         }
     }
 
@@ -94,6 +100,33 @@ where
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
         Ok(self.premulc_preps.remove(0))
+    }
+
+    /// How many pooled PreMulC bundles are sized at exactly `pk`.
+    pub fn premulc_len_sized(&self, pk: usize) -> usize {
+        self.premulc_preps.iter().filter(|p| p.w.len() == pk).count()
+    }
+
+    /// Takes the next queued PreMulC bundle whose `pk` is exactly `pk`,
+    /// discarding any stale-sized ones ahead of it.
+    ///
+    /// Bundles are generated at whatever `params.premulc_pk` was configured at
+    /// the time, so a pool shared between operations of different widths (an
+    /// `FpDiv(k=16)` leaving pk=15 bundles behind, then an `LTZ(k=8)` wanting
+    /// pk=7) would otherwise silently hand out a mis-sized bundle.
+    pub fn take_premulc_prep_sized(&mut self, pk: usize) -> Result<PreMulCPrep<F>, HoneyBadgerError> {
+        match self.premulc_preps.iter().position(|p| p.w.len() == pk) {
+            Some(idx) => {
+                // Anything queued ahead of it was built for a different width
+                // and can never be consumed at this one.
+                self.premulc_preps.drain(0..idx);
+                Ok(self.premulc_preps.remove(0))
+            }
+            None => {
+                error!("Error trying to take PreMulC prep of size {pk}: there is no enough preprocessing");
+                Err(HoneyBadgerError::NotEnoughPreprocessing)
+            }
+        }
     }
 
     /// Adds newly-generated zero-sharings to the pool.
@@ -113,11 +146,46 @@ where
         Ok(self.zero_shares.drain(0..n_shares).collect())
     }
 
+    /// Adds newly-generated small-field zero-sharings to the pool.
+    pub fn add_zero_shares_small_field(&mut self, mut shares: Vec<RobustShare<GoldilocksField>>) {
+        self.zero_shares_small_field.append(&mut shares);
+    }
+
+    /// Take up to n small-field zero-sharings from the preprocessing material.
+    pub fn take_zero_shares_small_field(
+        &mut self,
+        n_shares: usize,
+    ) -> Result<Vec<RobustShare<GoldilocksField>>, HoneyBadgerError> {
+        if n_shares > self.zero_shares_small_field.len() {
+            error!(
+                "Error trying to take small-field zero shares: There is no enough preprocessing"
+            );
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self.zero_shares_small_field.drain(0..n_shares).collect())
+    }
+
+    /// Adds newly-generated ([r], [r^-1]) pairs to the pool.
+    pub fn add_rand_inv_pairs(&mut self, mut pairs: Vec<(RobustShare<F>, RobustShare<F>)>) {
+        self.rand_inv_pairs.append(&mut pairs);
+    }
+
+    /// Take up to n ([r], [r^-1]) pairs from the preprocessing material.
+    pub fn take_rand_inv_pairs(
+        &mut self,
+        n_pairs: usize,
+    ) -> Result<Vec<(RobustShare<F>, RobustShare<F>)>, HoneyBadgerError> {
+        if n_pairs > self.rand_inv_pairs.len() {
+            error!("Error trying to take random inverse pairs: There is no enough preprocessing");
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self.rand_inv_pairs.drain(0..n_pairs).collect())
+    }
+
     /// Adds the provided new preprocessing material to the current pool.
     pub fn add(
         &mut self,
         mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
-        mut triples_small_field: Option<Vec<ShamirBeaverTriple<GoldilocksField>>>,
         mut random_shares: Option<Vec<RobustShare<F>>>,
         mut random_shares_small_field: Option<Vec<RobustShare<GoldilocksField>>>,
         mut prandbit_shares: Option<Vec<(RobustShare<F>, Gf256)>>,
@@ -125,10 +193,6 @@ where
     ) {
         if let Some(pairs) = &mut triples {
             self.beaver_triples.append(pairs);
-        }
-
-        if let Some(triples) = &mut triples_small_field {
-            self.beaver_triples_small_field.append(triples);
         }
 
         if let Some(shares) = &mut random_shares_small_field {
@@ -152,13 +216,14 @@ where
     pub fn length(&self) -> PreprocMaterialLength {
         PreprocMaterialLength {
             beaver_triples: self.beaver_triples.len(),
-            beaver_triples_small_field: self.beaver_triples_small_field.len(),
             random_shr: self.random_shares.len(),
             random_shr_small_field: self.random_shares_small_field.len(),
             prandbit: self.prandbit_shares.len(),
             prandint: self.prandint_shares.len(),
             premulc: self.premulc_preps.len(),
             zero_shares: self.zero_shares.len(),
+            zero_shares_small_field: self.zero_shares_small_field.len(),
+            rand_inv_pairs: self.rand_inv_pairs.len(),
         }
     }
 
@@ -172,23 +237,6 @@ where
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
         Ok(self.beaver_triples.drain(0..n_triples).collect())
-    }
-
-    pub fn take_beaver_triples_small_field(
-        &mut self,
-        n_triples: usize,
-    ) -> Result<Vec<ShamirBeaverTriple<GoldilocksField>>, HoneyBadgerError> {
-        let current_beaver_triples = self.beaver_triples_small_field.len();
-        if n_triples > current_beaver_triples {
-            error!(
-                "Error trying to take triples in the small field: There is no enough preprocessing. Current Beaver triples: {current_beaver_triples}, Needed Beaver triples: {n_triples}"
-            );
-            return Err(HoneyBadgerError::NotEnoughPreprocessing);
-        }
-        Ok(self
-            .beaver_triples_small_field
-            .drain(0..n_triples)
-            .collect())
     }
 
     /// Take up to n random shares from the preprocessing material.
@@ -266,6 +314,31 @@ where
         })
     }
 
+    /// A `PreMod2mPrep` for `PreMod2m(k, m)`: the PRandM(k, m) reveal mask plus
+    /// the inner PreBitLT material (which operates on `m`-bit inputs, so it
+    /// needs `m-1` triples and `m` degenerate Mod2 PRandM bundles).
+    /// `suf_mul_inv_prep` must already be sized at pk = m.
+    pub fn build_premod2m_prep(
+        &mut self,
+        m: usize,
+        suf_mul_inv_prep: PreMulCPrep<F>,
+    ) -> Result<PreMod2mPrep<F>, HoneyBadgerError> {
+        let prandm = self.take_prandm_prep(m)?;
+        let mul_triples = self.take_beaver_triples(m - 1)?;
+        let mut mod2_preps = Vec::with_capacity(m);
+        for _ in 0..m {
+            mod2_preps.push(self.take_mod2_prandm_prep()?);
+        }
+        Ok(PreMod2mPrep {
+            prandm,
+            pre_bitlt: PreBitLTPrep {
+                suf_mul_inv_prep,
+                mul_triples,
+                mod2_preps,
+            },
+        })
+    }
+
     /// Packages a full `FpDivPrep(k, f)` from the pool plus the two
     /// already-generated PreMulC bundles (`bitdec_suf_mul_inv_prep`,
     /// `sufor_prep` — both pk=k-1).
@@ -276,20 +349,7 @@ where
         bitdec_suf_mul_inv_prep: PreMulCPrep<F>,
         sufor_prep: PreMulCPrep<F>,
     ) -> Result<FpDivPrep<F>, HoneyBadgerError> {
-        let bitdec_prandm = self.take_prandm_prep(k - 1)?;
-        let bitdec_mul_triples = self.take_beaver_triples(k - 2)?;
-        let mut bitdec_mod2_preps = Vec::with_capacity(k - 1);
-        for _ in 0..k - 1 {
-            bitdec_mod2_preps.push(self.take_mod2_prandm_prep()?);
-        }
-        let bitdec_prep = PreMod2mPrep {
-            prandm: bitdec_prandm,
-            pre_bitlt: PreBitLTPrep {
-                suf_mul_inv_prep: bitdec_suf_mul_inv_prep,
-                mul_triples: bitdec_mul_triples,
-                mod2_preps: bitdec_mod2_preps,
-            },
-        };
+        let bitdec_prep = self.build_premod2m_prep(k - 1, bitdec_suf_mul_inv_prep)?;
 
         let apprec_trunc_prandm = self.take_prandm_prep(2 * (k - f - 1))?;
         let app_rec_prep = AppRecPrep {
@@ -356,7 +416,6 @@ mod test {
 
         cache.add(
             Some(vec![triple.clone(), triple.clone()]),
-            None,
             Some(vec![share.clone()]),
             None,
             None,
@@ -367,13 +426,14 @@ mod test {
             cache.length(),
             PreprocMaterialLength {
                 beaver_triples: 2,
-                beaver_triples_small_field: 0,
                 random_shr: 1,
                 random_shr_small_field: 0,
                 prandbit: 0,
                 prandint: 0,
                 premulc: 0,
-                zero_shares: 0
+                zero_shares: 0,
+                zero_shares_small_field: 0,
+                rand_inv_pairs: 0
             }
         );
 
@@ -384,13 +444,14 @@ mod test {
             cache.length(),
             PreprocMaterialLength {
                 beaver_triples: 1,
-                beaver_triples_small_field: 0,
                 random_shr: 1,
                 random_shr_small_field: 0,
                 prandbit: 0,
                 prandint: 0,
                 premulc: 0,
-                zero_shares: 0
+                zero_shares: 0,
+                zero_shares_small_field: 0,
+                rand_inv_pairs: 0
             }
         );
 

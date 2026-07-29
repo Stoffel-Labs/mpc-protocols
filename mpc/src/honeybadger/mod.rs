@@ -20,6 +20,7 @@ pub mod double_share;
 pub mod triple_gen;
 
 pub mod bitwise;
+pub mod comparison;
 pub mod fpdiv;
 pub mod fpmul;
 pub mod input;
@@ -27,6 +28,7 @@ pub mod mul;
 pub mod mul_pub;
 pub mod output;
 pub mod preprocessing;
+pub mod rand_inv_pair;
 pub mod share_gen;
 pub mod zero_share;
 
@@ -45,7 +47,11 @@ use crate::{
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
         bitwise::{
-            pre_mulc::PreMulCOfflineNode, Mod2Error, PreMod2mError, PreMulCError, PreMulCPrep,
+            kor_cs::KOrCSPrep, pre_mulc::PreMulCOfflineNode, KOrCLError, KOrCSError, Mod2Error,
+            PreMod2mError, PreMulCError, PreMulCPrep,
+        },
+        comparison::{
+            eqz::EQZNode, eqz_prep_counts, ltz::LTZNode, ltz_prep_counts, EQZError, LTZError,
         },
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
         fpdiv::fpdiv::{FpDivError, FpDivNode},
@@ -69,6 +75,10 @@ use crate::{
         },
         preprocessing::HoneyBadgerMPCNodePreprocMaterial,
         ran_dou_sha::messages::RanDouShaMessage,
+        rand_inv_pair::{
+            rand_inv_pair::{RandInvPairNode, RandInvPairPrep},
+            RandInvPairError,
+        },
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
         triple_gen::TripleGenError,
@@ -169,6 +179,16 @@ pub enum HoneyBadgerError {
     Mod2Error(#[from] Mod2Error),
     #[error("error in PreMulC: {0:?}")]
     PreMulCError(#[from] PreMulCError),
+    #[error("error in LTZ: {0:?}")]
+    LTZError(#[from] LTZError),
+    #[error("error in EQZ: {0:?}")]
+    EQZError(#[from] EQZError),
+    #[error("error in RandInvPair: {0:?}")]
+    RandInvPairError(#[from] RandInvPairError),
+    #[error("error in KOrCS: {0:?}")]
+    KOrCSError(#[from] KOrCSError),
+    #[error("error in KOrCL: {0:?}")]
+    KOrCLError(#[from] KOrCLError),
     #[error("error in ZeroSha: {0:?}")]
     ZeroShaError(#[from] ZeroShaError),
     #[error("error in MulPub: {0:?}")]
@@ -293,7 +313,7 @@ where
         let prandint = len.prandint;
         format!(
             "material=(triples:{triples},random:{random_shares},prandbit:{prandbit},prandint:{prandint}) \
-             stores=(share_gen:{},dou_sha:{},ran_dou_sha:{},triple:{},triple_batch_recon:{},mul:{},rand_bit:{},rand_bit_mul:{},rand_bit_batch_recon:{},prand_bit:{},prand_bit_batch_recon:{},fpmul_mul:{},fpmul_trunc:{})",
+             stores=(share_gen:{},dou_sha:{},ran_dou_sha:{},triple:{},triple_batch_recon:{},mul:{},rand_bit:{},rand_bit_mul_pub_batch_recon:{},prand_bit:{},prand_bit_batch_recon:{},fpmul_mul:{},fpmul_trunc:{})",
             self.preprocess.share_gen.store_len().await,
             self.preprocess.dou_sha.store_len().await,
             self.preprocess.ran_dou_sha.store_len().await,
@@ -301,8 +321,7 @@ where
             self.preprocess.triple_gen.batch_recon_node.store_len().await,
             self.operations.mul.store_len().await,
             self.preprocess.small_field_preproc.rand_bit.store_len().await,
-            self.preprocess.small_field_preproc.rand_bit.mult_node.store_len().await,
-            self.preprocess.small_field_preproc.rand_bit.batch_recon.store_len().await,
+            self.preprocess.small_field_preproc.rand_bit.mul_pub.batch_recon.store_len().await,
             self.preprocess.prand_bit.store_len().await,
             self.preprocess.prand_bit.batch_recon.store_len().await,
             self.type_ops.fpmul.mult_node.store_len().await,
@@ -321,6 +340,8 @@ pub struct TypeOperations<F: PrimeField, R: RBC> {
     pub fpmul: FPMulNode<F, R>,
     pub fpdiv_const: FPDivConstNode<F, R>,
     pub fpdiv: FpDivNode<F, R>,
+    pub ltz: LTZNode<F, R>,
+    pub eqz: EQZNode<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -340,6 +361,8 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     /// (w, z, r) from fresh random shares,
     /// zero-sharings, and Beaver triples.
     pub premulc_offline: PreMulCOfflineNode<F, R>,
+    /// Produces the ([r], [r^-1]) pairs consumed by EQZ's KOrCS.
+    pub rand_inv_pair: RandInvPairNode<F>,
     /// Nodes for small field (Goldilocks) preprocessing.
     pub small_field_preproc: PreprocNodesSmallField<R>,
 }
@@ -348,10 +371,9 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
 #[derive(Clone, Debug)]
 pub struct PreprocNodesSmallField<R: RBC> {
     pub share_gen: RanShaNode<GoldilocksField, R>,
-    pub triple_gen: TripleGenNode<GoldilocksField>,
-    pub rand_bit: RandBit<GoldilocksField, R>,
-    pub ran_dou_sha: RanDouShaNode<GoldilocksField, R>,
-    pub dou_sha: DoubleShareNode<GoldilocksField>,
+    pub rand_bit: RandBit<GoldilocksField>,
+    /// Feeds RandBit's MulPub-based reveal of `a^2`.
+    pub zero_sha: ZeroShaNode<GoldilocksField, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -401,12 +423,13 @@ pub struct SubProtocolCounters {
     pub fpdiv_counter: SubProtocolCounter,
     pub zero_sha_counter: SubProtocolCounter,
     pub premulc_off_counter: SubProtocolCounter,
+    pub ltz_counter: SubProtocolCounter,
+    pub eqz_counter: SubProtocolCounter,
+    pub rand_inv_pair_counter: SubProtocolCounter,
     // Small field (Goldilocks) counters.
     pub ran_sha_small_field_counter: SubProtocolCounter,
-    pub triple_small_field_counter: SubProtocolCounter,
     pub rand_bit_small_field_counter: SubProtocolCounter,
-    pub dou_sha_small_field_counter: SubProtocolCounter,
-    pub ran_dou_sha_small_field_counter: SubProtocolCounter,
+    pub zero_sha_small_field_counter: SubProtocolCounter,
 }
 
 impl SubProtocolCounters {
@@ -426,11 +449,12 @@ impl SubProtocolCounters {
             fpdiv_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             zero_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             premulc_off_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            ltz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            eqz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            rand_inv_pair_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             ran_sha_small_field_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            triple_small_field_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             rand_bit_small_field_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            dou_sha_small_field_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            ran_dou_sha_small_field_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            zero_sha_small_field_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -471,6 +495,11 @@ pub struct HoneyBadgerMPCNodeOpts {
     /// Target number of ready degree-2t zero-sharings to keep in the pool,
     /// topped up by `run_preprocessing`
     pub n_zero_shares: usize,
+    /// Target number of ready ([r], [r^-1]) pairs to keep in the pool
+    /// 0 (the default) means they are never generated by
+    /// `run_preprocessing`. Each pair draws 2 random shares and 1 zero
+    /// sharing, so `n_random_shares`/`n_zero_shares` must cover those too.
+    pub n_rand_inv_pairs: usize,
 }
 
 impl HoneyBadgerMPCNodeOpts {
@@ -507,6 +536,7 @@ impl HoneyBadgerMPCNodeOpts {
             l,
             timeout,
             n_premulc: 0,
+            n_rand_inv_pairs: 0,
             premulc_pk: 0,
             n_zero_shares: 0,
         })
@@ -527,6 +557,11 @@ impl HoneyBadgerMPCNodeOpts {
     /// it only draws from this pool and never generates zero shares itself.
     pub fn set_zero_share_target(&mut self, n_zero_shares: usize) {
         self.n_zero_shares = n_zero_shares;
+    }
+    /// Configures `run_preprocessing` to keep `n_rand_inv_pairs` ([r], [r^-1])
+    /// pairs ready for EQZ's KOrCS.
+    pub fn set_rand_inv_pair_target(&mut self, n_rand_inv_pairs: usize) {
+        self.n_rand_inv_pairs = n_rand_inv_pairs;
     }
 }
 
@@ -561,6 +596,9 @@ where
         let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold)?;
         let fpdiv_const_node = FPDivConstNode::new(id, params.n_parties, params.threshold)?;
         let fpdiv_node = FpDivNode::new(id, params.n_parties, params.threshold)?;
+        let ltz_node = LTZNode::new(id, params.n_parties, params.threshold)?;
+        let eqz_node = EQZNode::new(id, params.n_parties, params.threshold)?;
+        let rand_inv_pair_node = RandInvPairNode::new(id, params.n_parties, params.threshold)?;
         let zero_sha_node =
             ZeroShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
         let premulc_offline_node = PreMulCOfflineNode::new(id, params.n_parties, params.threshold)?;
@@ -568,21 +606,16 @@ where
         let output = OutputServer::new(id, params.n_parties)?;
 
         // Small field (Goldilocks) nodes.
-        let triple_gen_small_field_node =
-            TripleGenNode::new(id, params.n_parties, params.threshold)?;
         let share_gen_small_field =
             RanShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
         let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold)?;
-        let ran_dou_sha_small_field =
-            RanDouShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
-        let dousha_node_small_field = DoubleShareNode::new(id, params.n_parties, params.threshold);
+        let zero_sha_small_field_node =
+            ZeroShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
         let small_field_preproc = PreprocNodesSmallField {
-            triple_gen: triple_gen_small_field_node,
             rand_bit: rand_bit_node,
             share_gen: share_gen_small_field,
-            ran_dou_sha: ran_dou_sha_small_field,
-            dou_sha: dousha_node_small_field,
+            zero_sha: zero_sha_small_field_node,
         };
 
         Ok(Self {
@@ -600,6 +633,7 @@ where
                 prand_bit: prand_bit_node,
                 zero_sha: zero_sha_node,
                 premulc_offline: premulc_offline_node,
+                rand_inv_pair: rand_inv_pair_node,
                 small_field_preproc,
             },
             operations: Operation { mul: mul_node },
@@ -607,6 +641,8 @@ where
                 fpmul: fpmul_node,
                 fpdiv_const: fpdiv_const_node,
                 fpdiv: fpdiv_node,
+                ltz: ltz_node,
+                eqz: eqz_node,
             },
             output,
             counters: SubProtocolCounters::new(),
@@ -761,19 +797,6 @@ where
                             .await?;
                         self.preprocess.ran_dou_sha.drain_rbc_output().await?;
                     }
-                    Some(ProtocolType::RanDouShaSmallField) => {
-                        self.preprocess
-                            .small_field_preproc
-                            .ran_dou_sha
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.preprocess
-                            .small_field_preproc
-                            .ran_dou_sha
-                            .drain_rbc_output()
-                            .await?;
-                    }
                     Some(ProtocolType::Ransha) => {
                         self.preprocess.share_gen.rbc.process(rbc_msg, net).await?;
                         self.preprocess.share_gen.drain_rbc_output().await?;
@@ -799,18 +822,16 @@ where
                         self.operations.mul.rbc.process(rbc_msg, net).await?;
                         self.operations.mul.drain_rbc_output().await?;
                     }
-                    Some(ProtocolType::RandBit) => {
+                    Some(ProtocolType::ZeroShaSmallField) => {
                         self.preprocess
                             .small_field_preproc
-                            .rand_bit
-                            .mult_node
+                            .zero_sha
                             .rbc
                             .process(rbc_msg, net)
                             .await?;
                         self.preprocess
                             .small_field_preproc
-                            .rand_bit
-                            .mult_node
+                            .zero_sha
                             .drain_rbc_output()
                             .await?;
                     }
@@ -872,6 +893,106 @@ where
                     Some(ProtocolType::FpDivMulA) | Some(ProtocolType::FpDivMulB) => {
                         self.type_ops.fpdiv.mul.rbc.process(rbc_msg, net).await?;
                         self.type_ops.fpdiv.mul.drain_rbc_output().await?;
+                    }
+                    Some(ProtocolType::LTZBitMul) => {
+                        self.type_ops
+                            .ltz
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mul
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?;
+                        self.type_ops
+                            .ltz
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mul
+                            .drain_rbc_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::LTZ) => {
+                        // Mirrors the FpDiv arm below, one level shallower:
+                        // LTZ drives PreMod2m directly rather than via
+                        // AppRec/BitDec.
+                        let round = rbc_msg.session_id.round_id();
+                        if round == 4 {
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .rbc
+                                .process(rbc_msg, net)
+                                .await?;
+                            self.type_ops.ltz.pre_mod2m.drain_rbc_output().await?;
+                        } else if round == 2 {
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .mul
+                                .rbc
+                                .process(rbc_msg, net)
+                                .await?;
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .mul
+                                .drain_rbc_output()
+                                .await?;
+                        } else if round == 0 || round == 1 {
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .mod2
+                                .rbc
+                                .process(rbc_msg, net)
+                                .await?;
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .mod2
+                                .drain_rbc_output()
+                                .await?;
+                        } else {
+                            warn!("unexpected LTZ Rbc round_id {round}");
+                        }
+                    }
+                    Some(ProtocolType::KOr1) | Some(ProtocolType::KOr2) => {
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?;
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .drain_rbc_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::EQZ) => {
+                        // round 0 = EQZ's own masking reveal, round 1 = KOrCL's.
+                        let round = rbc_msg.session_id.round_id();
+                        if round == 0 {
+                            self.type_ops.eqz.rbc.process(rbc_msg, net).await?;
+                            self.type_ops.eqz.drain_rbc_output().await?;
+                        } else if round == 1 {
+                            self.type_ops.eqz.kor_cl.rbc.process(rbc_msg, net).await?;
+                            self.type_ops.eqz.kor_cl.drain_rbc_output().await?;
+                        } else {
+                            warn!("unexpected EQZ Rbc round_id {round}");
+                        }
                     }
                     Some(ProtocolType::PreBitMul3) => {
                         self.type_ops
@@ -1039,15 +1160,7 @@ where
                         ds_msg.session_id.instance_id(),
                     ));
                 }
-                if let Some(ProtocolType::DouShaSmallField) = ds_msg.session_id.calling_protocol() {
-                    self.preprocess
-                        .small_field_preproc
-                        .dou_sha
-                        .process(ds_msg)
-                        .await?;
-                } else {
-                    self.preprocess.dou_sha.process(ds_msg).await?;
-                }
+                self.preprocess.dou_sha.process(ds_msg).await?;
             }
             WrappedMessage::RanDouSha(rds_msg) => {
                 if sender_id != rds_msg.sender_id {
@@ -1058,17 +1171,7 @@ where
                         rds_msg.session_id.instance_id(),
                     ));
                 }
-                if let Some(ProtocolType::RanDouShaSmallField) =
-                    rds_msg.session_id.calling_protocol()
-                {
-                    self.preprocess
-                        .small_field_preproc
-                        .ran_dou_sha
-                        .process(rds_msg, net)
-                        .await?;
-                } else {
-                    self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
-                }
+                self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
             }
             WrappedMessage::BatchRecon(batch_msg) => {
                 if sender_id != batch_msg.sender_id {
@@ -1099,47 +1202,20 @@ where
                             .drain_batch_recon_output()
                             .await?
                     }
-                    Some(ProtocolType::TripleSmallField) => {
+                    Some(ProtocolType::RandBit) => {
                         self.preprocess
                             .small_field_preproc
-                            .triple_gen
-                            .batch_recon_node
+                            .rand_bit
+                            .mul_pub
+                            .batch_recon
                             .process(batch_msg, net)
                             .await?;
                         self.preprocess
                             .small_field_preproc
-                            .triple_gen
+                            .rand_bit
+                            .mul_pub
                             .drain_batch_recon_output()
-                            .await?
-                    }
-                    Some(ProtocolType::RandBit) => {
-                        if batch_msg.session_id.round_id() == 0 {
-                            self.preprocess
-                                .small_field_preproc
-                                .rand_bit
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess
-                                .small_field_preproc
-                                .rand_bit
-                                .drain_batch_recon_output()
-                                .await?;
-                        } else {
-                            self.preprocess
-                                .small_field_preproc
-                                .rand_bit
-                                .mult_node
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess
-                                .small_field_preproc
-                                .rand_bit
-                                .mult_node
-                                .drain_batch_recon_output()
-                                .await?;
-                        }
+                            .await?;
                     }
                     Some(ProtocolType::PRandBit) => {
                         self.preprocess
@@ -1216,6 +1292,116 @@ where
                             .pre_mod2m
                             .pre_bitlt
                             .mul
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::LTZBitMul) => {
+                        self.type_ops
+                            .ltz
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .ltz
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mul
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::LTZ) => {
+                        // round 0 = SufMulInv's own reveal, round 1 = its
+                        // inner Multiply's — mirrors the FpDiv arm below.
+                        let round = batch_msg.session_id.round_id();
+                        if round == 0 {
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .batch_recon
+                                .process(batch_msg, net)
+                                .await?;
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .drain_batch_recon_output()
+                                .await?;
+                        } else if round == 1 {
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .mul
+                                .batch_recon
+                                .process(batch_msg, net)
+                                .await?;
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .mul
+                                .drain_batch_recon_output()
+                                .await?;
+                        } else {
+                            warn!("unexpected LTZ BatchRecon round_id {round}");
+                        }
+                    }
+                    Some(ProtocolType::KOr1) | Some(ProtocolType::KOr2) => {
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::EQZ) => {
+                        // KOrCS's own d_j openings (its Multiply rounds carry
+                        // the KOr1/KOr2 tags handled above).
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::RandInvPair) => {
+                        self.preprocess
+                            .rand_inv_pair
+                            .mul_pub
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.preprocess
+                            .rand_inv_pair
+                            .mul_pub
                             .drain_batch_recon_output()
                             .await?;
                     }
@@ -1356,7 +1542,15 @@ where
                         zs_msg.session_id.instance_id(),
                     ));
                 }
-                self.preprocess.zero_sha.process(zs_msg, net).await?;
+                if zs_msg.session_id.calling_protocol() == Some(ProtocolType::ZeroShaSmallField) {
+                    self.preprocess
+                        .small_field_preproc
+                        .zero_sha
+                        .process(zs_msg, net)
+                        .await?;
+                } else {
+                    self.preprocess.zero_sha.process(zs_msg, net).await?;
+                }
             }
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
@@ -1691,6 +1885,225 @@ where
             .collect();
         Ok(output)
     }
+    /// x<0 Integer comparison (int8/16/32/64)
+    async fn ltz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        if k < 3 {
+            return Err(HoneyBadgerError::LTZError(LTZError::InvalidInput(format!(
+                "k must be >= 3 (got {k}); PreMod2m requires m = k-1 >= 2"
+            ))));
+        }
+        // LTZ runs PreMod2m(a, k, m = k-1); its inner PreBitLT operates on m bits.
+        let m = k - 1;
+        let (triples_needed, prandbit_needed, prandint_needed) = ltz_prep_counts(k);
+
+        // Size the top-up from this call's actual operand width rather than
+        // from pre-set config: `run_preprocessing` only fills pools to the
+        // `params.n_*` targets, so leaving them short here yields
+        // NotEnoughPreprocessing later even though the top-up "succeeded".
+        // Deriving from `k` per call is also what lets one node serve mixed
+        // widths (int8 and int64) — a single stored bit-length cannot.
+        //
+        // PreMulC(pk = m) is the dominant extra draw: its offline phase takes
+        // (pk-1) + pk triples, 2*pk random shares and pk zero-sharings before
+        // LTZ itself draws anything. `premulc_pk` must equal m exactly, since
+        // `build_premod2m_prep` hands the pooled bundle to SufMulInv on m bits.
+        let pk = m;
+        self.params.n_triples = self.params.n_triples.max(triples_needed + 2 * pk - 1);
+        self.params.n_random_shares = self.params.n_random_shares.max(3 * pk);
+        self.params.n_prandbit = self.params.n_prandbit.max(prandbit_needed);
+        self.params.n_prandint = self.params.n_prandint.max(prandint_needed);
+        self.params.n_zero_shares = self.params.n_zero_shares.max(pk);
+        if self.params.premulc_pk != pk {
+            // A pooled bundle sized for some other width is unusable here;
+            // drop the stale target and regenerate at this call's pk.
+            self.params.set_premulc_target(1, pk);
+        } else {
+            self.params.n_premulc = self.params.n_premulc.max(1);
+        }
+
+        let mut rng = StdRng::from_rng(OsRng).unwrap();
+        let short = {
+            let store = self.preprocessing_material.lock().await;
+            let len = store.length();
+            len.beaver_triples < triples_needed
+                || len.prandbit < prandbit_needed
+                || len.prandint < prandint_needed
+                || store.premulc_len_sized(pk) < 1
+        };
+        if short {
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        let prep = {
+            let mut store = self.preprocessing_material.lock().await;
+            let suf_mul_inv_prep = store.take_premulc_prep_sized(pk)?;
+            store.build_premod2m_prep(m, suf_mul_inv_prep)?
+        };
+
+        let session = SessionId::new(
+            ProtocolType::LTZ,
+            SessionId::pack_slot(self.counters.ltz_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        let result_share = self
+            .type_ops
+            .ltz
+            .run(
+                x.share().clone(),
+                k,
+                prep,
+                session,
+                net,
+                self.params.timeout,
+            )
+            .await?;
+
+        Ok(SecretInt::new(result_share, k))
+    }
+    async fn gtz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        let neg_x = (x * ClearInt::new(-F::one(), k))?;
+        self.ltz_int(neg_x, net).await
+    }
+
+    async fn lez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        let neg_x = (x * ClearInt::new(-F::one(), k))?;
+        let ltz = self.ltz_int(neg_x, net).await?;
+        let k2 = ltz.bit_length();
+        let neg_ltz = (ltz * ClearInt::new(-F::one(), k2))?;
+        Ok((neg_ltz + ClearInt::new(F::one(), k2))?)
+    }
+
+    async fn gez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int(x, net).await?;
+        let k = ltz.bit_length();
+        let neg_ltz = (ltz * ClearInt::new(-F::one(), k))?;
+        Ok((neg_ltz + ClearInt::new(F::one(), k))?)
+    }
+
+    async fn lt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.ltz_int((a - b)?, net).await
+    }
+
+    async fn gt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.ltz_int((b - a)?, net).await
+    }
+
+    async fn le_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int((b - a)?, net).await?;
+        let k = ltz.bit_length();
+        Ok(((ltz * ClearInt::new(-F::one(), k))? + ClearInt::new(F::one(), k))?)
+    }
+
+    async fn ge_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int((a - b)?, net).await?;
+        let k = ltz.bit_length();
+        Ok(((ltz * ClearInt::new(-F::one(), k))? + ClearInt::new(F::one(), k))?)
+    }
+    async fn eqz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        if k == 0 {
+            return Err(HoneyBadgerError::EQZError(EQZError::LengthError));
+        }
+        let m = (k as u32).ilog2() as usize + 1;
+        let (triples_needed, prandbit_needed, prandint_needed, pairs_needed) = eqz_prep_counts(k);
+
+        // Sized from this call's operand width — see the note in `ltz_int`.
+        // EQZ needs no PreMulC bundle; its extra draw is `pairs_needed`
+        // ([r],[r^-1]) pairs, each costing 2 random shares and 1 zero-sharing.
+        self.params.n_triples = self.params.n_triples.max(triples_needed);
+        self.params.n_random_shares = self.params.n_random_shares.max(2 * pairs_needed);
+        self.params.n_prandbit = self.params.n_prandbit.max(prandbit_needed);
+        self.params.n_prandint = self.params.n_prandint.max(prandint_needed);
+        self.params.n_zero_shares = self.params.n_zero_shares.max(pairs_needed);
+        self.params.n_rand_inv_pairs = self.params.n_rand_inv_pairs.max(pairs_needed);
+
+        let mut rng = StdRng::from_rng(OsRng).unwrap();
+        let short = {
+            let store = self.preprocessing_material.lock().await;
+            let len = store.length();
+            len.beaver_triples < triples_needed
+                || len.prandbit < prandbit_needed
+                || len.prandint < prandint_needed
+                || len.rand_inv_pairs < pairs_needed
+        };
+        if short {
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        let (eqz_prandm, kor_cl_prandm, kor_cs_prep) = {
+            let mut store = self.preprocessing_material.lock().await;
+            let rand_inv_pairs = store.take_rand_inv_pairs(m)?;
+            let triples_round1 = store.take_beaver_triples(m.saturating_sub(1))?;
+            let triples_round2 = store.take_beaver_triples(m)?;
+            let eqz_prandm = store.take_prandm_prep(k)?;
+            let kor_cl_prandm = store.take_prandm_prep(m)?;
+            (
+                eqz_prandm,
+                kor_cl_prandm,
+                KOrCSPrep {
+                    rand_inv_pairs,
+                    triples_round1,
+                    triples_round2,
+                },
+            )
+        };
+
+        let session = SessionId::new(
+            ProtocolType::EQZ,
+            SessionId::pack_slot(self.counters.eqz_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        let result_share = self
+            .type_ops
+            .eqz
+            .run(
+                x.share().clone(),
+                k,
+                eqz_prandm,
+                kor_cl_prandm,
+                kor_cs_prep,
+                session,
+                net,
+                self.params.timeout,
+            )
+            .await?;
+
+        Ok(SecretInt::new(result_share, k))
+    }
+
+    async fn eq_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.eqz_int((a - b)?, net).await
+    }
 }
 
 #[async_trait]
@@ -1851,14 +2264,10 @@ where
                     .triple_gen
                     .wait_for_result(*sessionid, self.params.timeout)
                     .await?;
-                self.preprocessing_material.lock().await.add(
-                    Some(triples),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
+                self.preprocessing_material
+                    .lock()
+                    .await
+                    .add(Some(triples), None, None, None, None);
                 assert!(self.preprocess.triple_gen.clear_store(*sessionid).await);
             }
             trace_preprocessing_phase(self.id, "triples", total_triples_to_generate, phase_start);
@@ -1900,6 +2309,20 @@ where
         self.ensure_premulc_shares(network.clone()).await?;
         trace_preprocessing_phase(self.id, "premulc", self.params.n_premulc, phase_start);
         info!("PreMulC prep generation done");
+
+        // ------------------------
+        // Step 9. Generate ([r], [r^-1]) pairs for EQZ's KOrCS
+        // ------------------------
+        let phase_start = Instant::now();
+        self.ensure_rand_inv_pairs(network.clone(), self.params.n_rand_inv_pairs)
+            .await?;
+        trace_preprocessing_phase(
+            self.id,
+            "rand_inv_pairs",
+            self.params.n_rand_inv_pairs,
+            phase_start,
+        );
+        info!("RandInvPair generation done");
 
         Ok(())
     }
@@ -1968,14 +2391,10 @@ where
                 .share_gen
                 .wait_for_result(*sessionid, self.params.timeout)
                 .await?;
-            self.preprocessing_material.lock().await.add(
-                None,
-                None,
-                Some(output),
-                None,
-                None,
-                None,
-            );
+            self.preprocessing_material
+                .lock()
+                .await
+                .add(None, Some(output), None, None, None);
             assert!(self.preprocess.share_gen.clear_store(*sessionid).await);
         }
         Ok(())
@@ -2139,14 +2558,10 @@ where
                 .wait_for_result(sessionid, self.params.timeout)
                 .await?;
 
-            self.preprocessing_material.lock().await.add(
-                None,
-                None,
-                None,
-                Some(output),
-                None,
-                None,
-            );
+            self.preprocessing_material
+                .lock()
+                .await
+                .add(None, None, Some(output), None, None);
             assert!(
                 self.preprocess
                     .small_field_preproc
@@ -2178,268 +2593,11 @@ where
         Ok(())
     }
 
-    /// Ensure we have enough Beaver triples in the small (Goldilocks) field.
-    async fn ensure_beaver_triples_small_field<G, N>(
-        &mut self,
-        network: Arc<N>,
-        rng: &mut G,
-        needed: usize,
-    ) -> Result<(), HoneyBadgerError>
-    where
-        N: Network + Send + Sync + 'static,
-        G: Rng + Send,
-    {
-        // Take existing number of small field triples.
-        let current_triples = {
-            let guard = self.preprocessing_material.lock().await;
-            guard.length().beaver_triples_small_field
-        };
-
-        let missing_triples = needed.saturating_sub(current_triples);
-        if missing_triples == 0 {
-            return Ok(());
-        }
-
-        // Each triple group produces (2t + 1) triples.
-        let group_size = 2 * self.params.threshold + 1;
-        let total_triples_to_generate =
-            ((missing_triples + group_size - 1) / group_size) * group_size;
-
-        // SAFETY: The required small-field random shares are ensured before calling this.
-        let random_shares_a = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares_small_field(total_triples_to_generate)?;
-        let random_shares_b = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares_small_field(total_triples_to_generate)?;
-
-        // Ensure and take RanDouSha pairs in the small field.
-        let ran_dou_sha_pair = self
-            .ensure_ran_dou_sha_pair_small_field(network.clone(), rng, total_triples_to_generate)
-            .await?;
-
-        let mut triple_counter = self.counters.triple_small_field_counter.get_next().await?;
-
-        let mut round_id = 0u8;
-        let mut group_index = 0;
-        let total_groups = total_triples_to_generate / group_size;
-        let max_batch_groups = triple_batch_groups_limit();
-
-        while group_index < total_groups {
-            let batch_groups = (total_groups - group_index).min(max_batch_groups);
-            let share_start = group_index * group_size;
-            let share_end = share_start + batch_groups * group_size;
-
-            let sessionid = SessionId::new(
-                ProtocolType::TripleSmallField,
-                SessionId::pack_slot(triple_counter, 0, round_id),
-                self.params.instance_id,
-            );
-
-            self.preprocess
-                .small_field_preproc
-                .triple_gen
-                .init_batch(
-                    random_shares_a[share_start..share_end].to_vec(),
-                    random_shares_b[share_start..share_end].to_vec(),
-                    ran_dou_sha_pair[share_start..share_end].to_vec(),
-                    sessionid,
-                    network.clone(),
-                )
-                .await?;
-
-            let triples = self
-                .preprocess
-                .small_field_preproc
-                .triple_gen
-                .wait_for_result(sessionid, self.params.timeout)
-                .await?;
-            self.preprocessing_material.lock().await.add(
-                None,
-                Some(triples),
-                None,
-                None,
-                None,
-                None,
-            );
-            assert!(
-                self.preprocess
-                    .small_field_preproc
-                    .triple_gen
-                    .clear_store(sessionid)
-                    .await
-            );
-
-            if round_id == 255 {
-                triple_counter = self
-                    .counters
-                    .triple_small_field_counter
-                    .get_next()
-                    .await
-                    .unwrap();
-                round_id = 0;
-            } else {
-                round_id += 1;
-            }
-            group_index += batch_groups;
-        }
-
-        Ok(())
-    }
-
-    /// Ensure we have a RanDouSha pair available in the Goldilocks field.
-    async fn ensure_ran_dou_sha_pair_small_field<G, N>(
-        &mut self,
-        network: Arc<N>,
-        rng: &mut G,
-        needed: usize,
-    ) -> Result<Vec<DoubleShamirShare<GoldilocksField>>, HoneyBadgerError>
-    where
-        N: Network + Send + Sync + 'static,
-        G: Rng + Send,
-    {
-        let mut pair = Vec::new();
-
-        // Each batched column produces (t + 1) double shares.
-        let output_per_column = self.params.threshold + 1;
-        let columns_needed = (needed + output_per_column - 1) / output_per_column;
-        let max_columns_per_run = ran_dou_sha_batch_columns_limit();
-        let run = (columns_needed + max_columns_per_run - 1) / max_columns_per_run;
-        let mut round_id = 0u8;
-        let mut ran_dou_sha_counter = self
-            .counters
-            .ran_dou_sha_small_field_counter
-            .get_next()
-            .await?;
-
-        for i in 0..run {
-            let columns_remaining = columns_needed - i * max_columns_per_run;
-            let batch_size = columns_remaining.min(max_columns_per_run);
-            let sessionid = SessionId::new(
-                ProtocolType::RanDouShaSmallField,
-                SessionId::pack_slot(ran_dou_sha_counter, 0, round_id),
-                self.params.instance_id,
-            );
-
-            let double_shares = self
-                .ensure_double_shares_small_field(sessionid, batch_size, network.clone(), rng)
-                .await?;
-
-            let mut shares_deg_t_by_batch = Vec::with_capacity(batch_size);
-            let mut shares_deg_2t_by_batch = Vec::with_capacity(batch_size);
-            for double_share_batch in double_shares.chunks_exact(self.params.n_parties) {
-                let (shares_deg_t, shares_deg_2t) = double_share_batch
-                    .iter()
-                    .cloned()
-                    .map(|d| (d.degree_t, d.degree_2t))
-                    .unzip();
-                shares_deg_t_by_batch.push(shares_deg_t);
-                shares_deg_2t_by_batch.push(shares_deg_2t);
-            }
-
-            // Run RanDouSha in the small field.
-            self.preprocess
-                .small_field_preproc
-                .ran_dou_sha
-                .init_batch(
-                    shares_deg_t_by_batch,
-                    shares_deg_2t_by_batch,
-                    sessionid,
-                    network.clone(),
-                )
-                .await?;
-
-            let output = self
-                .preprocess
-                .small_field_preproc
-                .ran_dou_sha
-                .wait_for_result(sessionid, self.params.timeout)
-                .await?;
-            pair.extend(output);
-            assert!(
-                self.preprocess
-                    .small_field_preproc
-                    .ran_dou_sha
-                    .clear_store(sessionid)
-                    .await
-            );
-
-            if round_id == 255 {
-                ran_dou_sha_counter = self
-                    .counters
-                    .ran_dou_sha_small_field_counter
-                    .get_next()
-                    .await
-                    .unwrap();
-                round_id = 0;
-            } else {
-                round_id += 1;
-            }
-        }
-        // Clear RBC store
-        self.preprocess
-            .small_field_preproc
-            .ran_dou_sha
-            .rbc
-            .clear_store()
-            .await;
-        Ok(pair)
-    }
-
-    /// Ensure we have double shares available in the small (Goldilocks) field.
-    async fn ensure_double_shares_small_field<G, N>(
-        &mut self,
-        sessionid: SessionId,
-        batch_size: usize,
-        network: Arc<N>,
-        rng: &mut G,
-    ) -> Result<Vec<DoubleShamirShare<GoldilocksField>>, HoneyBadgerError>
-    where
-        N: Network + Send + Sync + 'static,
-        G: Rng + Send,
-    {
-        let dou_sha_session_id = SessionId::new(
-            ProtocolType::DouShaSmallField,
-            SessionId::pack_slot(
-                sessionid.exec_id(),
-                sessionid.sub_id(),
-                sessionid.round_id(),
-            ),
-            self.params.instance_id,
-        );
-
-        self.preprocess
-            .small_field_preproc
-            .dou_sha
-            .init_batch(dou_sha_session_id, batch_size, rng, network.clone())
-            .await?;
-
-        let dou_sha = self
-            .preprocess
-            .small_field_preproc
-            .dou_sha
-            .wait_for_result(dou_sha_session_id, self.params.timeout)
-            .await?;
-        assert!(
-            self.preprocess
-                .small_field_preproc
-                .dou_sha
-                .clear_store(dou_sha_session_id)
-                .await
-        );
-
-        Ok(dou_sha)
-    }
-
     /// Generate PRandBit shares using the Goldilocks small-field pipeline.
     ///
-    /// Following dev's design: small-field random shares + small-field Beaver triples feed
-    /// `RandBit` (in the Goldilocks field), whose output feeds `PRandBitDNode` to produce
-    /// the final `(RobustShare<F>, Gf256)` prandbit shares used by fixed-point truncation.
+    /// Following dev's design: small-field random shares + small-field zero-sharings feed
+    /// `RandBit` (in the Goldilocks field, via MulPub), whose output feeds `PRandBitDNode` to
+    /// produce the final `(RobustShare<F>, Gf256)` prandbit shares used by fixed-point truncation.
     async fn ensure_prandbit_shares<N, G>(
         &mut self,
         rng: &mut G,
@@ -2482,40 +2640,24 @@ where
             self.params.instance_id,
         );
 
-        // Ensure small-field random shares: one for each randbit, plus 2 per small-field triple.
-        let current_triples = {
-            let guard = self.preprocessing_material.lock().await;
-            guard.length().beaver_triples_small_field
-        };
-        let missing_triples = total_randbit_to_generate.saturating_sub(current_triples);
-        let group_size = 2 * self.params.threshold + 1;
-        let total_triples_to_generate =
-            ((missing_triples + group_size - 1) / group_size) * group_size;
-        let random_shares_for_triples = 2 * total_triples_to_generate;
-
-        self.ensure_random_shares_small_field(
-            network.clone(),
-            rng,
-            total_randbit_to_generate + random_shares_for_triples,
-        )
-        .await?;
-
         // One small-field random share per randbit.
+        self.ensure_random_shares_small_field(network.clone(), rng, total_randbit_to_generate)
+            .await?;
         let random_shares_a = self
             .preprocessing_material
             .lock()
             .await
             .take_random_shares_small_field(total_randbit_to_generate)?;
 
-        // Ensure small-field Beaver triples (one per randbit).
-        self.ensure_beaver_triples_small_field(network.clone(), rng, total_randbit_to_generate)
+        // One small-field degree-2t zero-sharing per randbit, feeding RandBit's
+        // MulPub-based reveal of `a^2`.
+        self.ensure_zero_shares_small_field(network.clone(), rng, total_randbit_to_generate)
             .await?;
-
-        let beaver_triples = self
+        let zero_shares = self
             .preprocessing_material
             .lock()
             .await
-            .take_beaver_triples_small_field(total_randbit_to_generate)?;
+            .take_zero_shares_small_field(total_randbit_to_generate)?;
 
         // Run RandBit in the small field. The current branch has no batched RandBit API, so run
         // it single-shot (matching dev's reference) over the whole batch.
@@ -2524,7 +2666,7 @@ where
             .rand_bit
             .init(
                 random_shares_a,
-                beaver_triples,
+                zero_shares,
                 randbit_sessionid,
                 self.params.timeout,
                 network.clone(),
@@ -2568,7 +2710,7 @@ where
         self.preprocessing_material
             .lock()
             .await
-            .add(None, None, None, None, Some(output), None);
+            .add(None, None, None, Some(output), None);
 
         self.preprocess
             .prand_bit
@@ -2630,14 +2772,10 @@ where
 
             self.preprocess.prand_bit.clear_store(sessionid).await?;
         }
-        self.preprocessing_material.lock().await.add(
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(prandint_output),
-        );
+        self.preprocessing_material
+            .lock()
+            .await
+            .add(None, None, None, None, Some(prandint_output));
         Ok(())
     }
 
@@ -2686,6 +2824,132 @@ where
             .lock()
             .await
             .add_zero_shares(shares);
+        Ok(())
+    }
+
+    /// Small-field (Goldilocks) counterpart of `ensure_zero_shares`, feeding
+    /// RandBit's MulPub-based reveal of `a^2`.
+    async fn ensure_zero_shares_small_field<G, N>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+        target: usize,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        G: Rng + Send,
+        N: Network + Send + Sync + 'static,
+    {
+        let no_have = {
+            let store = self.preprocessing_material.lock().await;
+            store.length().zero_shares_small_field
+        };
+        if no_have >= target {
+            return Ok(());
+        }
+        let missing = target - no_have;
+        let out_per_call = self.params.n_parties - 2 * self.params.threshold;
+        let batch_size = missing.div_ceil(out_per_call);
+        let zsha_session = SessionId::new(
+            ProtocolType::ZeroShaSmallField,
+            SessionId::pack_slot(
+                self.counters
+                    .zero_sha_small_field_counter
+                    .get_next()
+                    .await?,
+                0,
+                0,
+            ),
+            self.params.instance_id,
+        );
+        self.preprocess
+            .small_field_preproc
+            .zero_sha
+            .init_batch(zsha_session, batch_size, rng, network.clone())
+            .await?;
+        let result = self
+            .preprocess
+            .small_field_preproc
+            .zero_sha
+            .wait_for_result(zsha_session, self.params.timeout)
+            .await;
+        self.preprocess
+            .small_field_preproc
+            .zero_sha
+            .clear_store(zsha_session)
+            .await;
+        let shares = result?;
+        self.preprocessing_material
+            .lock()
+            .await
+            .add_zero_shares_small_field(shares);
+        Ok(())
+    }
+
+    /// Ensure the `rand_inv_pairs` pool has `target` ([r], [r^-1]) pairs ready,
+    /// generating the shortfall via RandInvPairNode (one MulPub round).
+    async fn ensure_rand_inv_pairs<N>(
+        &mut self,
+        network: Arc<N>,
+        target: usize,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
+        let no_have = {
+            let store = self.preprocessing_material.lock().await;
+            store.length().rand_inv_pairs
+        };
+        if no_have >= target {
+            return Ok(());
+        }
+        let missing = target - no_have;
+
+        // Each pair consumes two fresh random shares (r, r') and one zero-sharing
+        // to mask the MulPub reveal of r·r'.
+        let r_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(missing)?;
+        let r_prime_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(missing)?;
+        let zero_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_zero_shares(missing)?;
+
+        let session = SessionId::new(
+            ProtocolType::RandInvPair,
+            SessionId::pack_slot(self.counters.rand_inv_pair_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+        self.preprocess
+            .rand_inv_pair
+            .run(
+                RandInvPairPrep {
+                    r_shares,
+                    r_prime_shares,
+                    zero_shares,
+                },
+                session,
+                network,
+                self.params.timeout,
+            )
+            .await?;
+        let pairs = self
+            .preprocess
+            .rand_inv_pair
+            .wait_for_result(session, self.params.timeout)
+            .await?;
+        self.preprocess.rand_inv_pair.clear_store(session).await;
+        self.preprocessing_material
+            .lock()
+            .await
+            .add_rand_inv_pairs(pairs);
         Ok(())
     }
 
@@ -2752,7 +3016,12 @@ where
                 )
                 .await;
             if gen_result.is_err() {
-                if let Err(e) = self.preprocess.premulc_offline.clear_store(premulc_session).await {
+                if let Err(e) = self
+                    .preprocess
+                    .premulc_offline
+                    .clear_store(premulc_session)
+                    .await
+                {
                     warn!("PreMulC preprocessing: failed to clear store for session {premulc_session:?}: {e:?}");
                 }
             }
@@ -2765,7 +3034,12 @@ where
                 .premulc_offline
                 .wait_for_preprocessing(premulc_session, self.params.timeout)
                 .await;
-            if let Err(e) = self.preprocess.premulc_offline.clear_store(premulc_session).await {
+            if let Err(e) = self
+                .preprocess
+                .premulc_offline
+                .clear_store(premulc_session)
+                .await
+            {
                 warn!("PreMulC preprocessing: failed to clear store for session {premulc_session:?}: {e:?}");
             }
             let (w, z, r_out) = result?;
@@ -2843,22 +3117,43 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
-    // Small field (Goldilocks) sub-protocols. Encoding matches dev's reference layout.
-    TripleSmallField = 15,
-    RanShaSmallField = 16,
-    RanDouShaSmallField = 17,
-    DouShaSmallField = 18,
-    ZeroSha = 19,
-    PreMulCOff = 20,
-    FpDiv = 21,
-    PreBitMul = 22,
-    PreBitMul1 = 23,
-    PreBitMul2 = 24,
-    PreBitMul3 = 25,
-    SufOr = 26,
-    FpDivTrunc = 27,
-    FpDivMulA = 28,
-    FpDivMulB = 29,
+    /// Small field (Goldilocks) sub-protocol.
+    RanShaSmallField = 15,
+    ZeroSha = 16,
+    PreMulCOff = 17,
+    FpDiv = 18,
+    PreBitMul = 19,
+    PreBitMul1 = 20,
+    PreBitMul2 = 21,
+    PreBitMul3 = 22,
+    SufOr = 23,
+    FpDivTrunc = 24,
+    FpDivMulA = 25,
+    FpDivMulB = 26,
+    /// KOrCS's own Round 1 Multiply ([tmp_j] = [r_{j-1}^{-1}]·[a]).
+    KOr1 = 27,
+    /// KOrCS's own Round 2 Multiply ([d_j] = [tmp_j]·[r_j]).
+    KOr2 = 28,
+    /// EQZ's own top-level tag. Unlike FpDiv/PreMod2m, EQZ's dependency
+    /// chain (KOrCL, KOrCS) reconstructs its parent-session tag dynamically
+    /// from the incoming message rather than hardcoding one, so EQZ is free
+    /// to use its own dedicated tag instead of reusing FpDiv.
+    EQZ = 29,
+    /// LTZ's own top-level tag. Now that PreMod2mNode::drain_rbc_output
+    /// reads its parent-session tag dynamically instead of hardcoding
+    /// FpDiv, LTZ (built on PreMod2m) can use its own tag too.
+    LTZ = 30,
+    /// Small-field (Goldilocks) ZeroSha, mirroring RanShaSmallField —
+    /// feeds RandBit's MulPub-based reveal of `a^2`.
+    ZeroShaSmallField = 31,
+    /// RandInvPair's own preprocessing tag: generates the ([r], [r^-1]) pairs
+    /// KOrCS consumes, via a single MulPub reveal.
+    RandInvPair = 32,
+    /// PreBitLT's Phase-4 Multiply when reached via LTZ rather than FpDiv.
+    /// PreBitLT keys this round on a standalone tag (not the parent's), so
+    /// LTZ and FpDiv would otherwise collide at the same exec_id — both
+    /// counters start at 0. See `PreBitLTNode::init`.
+    LTZBitMul = 33,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -2885,21 +3180,25 @@ impl ProtocolTag for ProtocolType {
             12 => Some(Self::FpMul),
             13 => Some(Self::Trunc),
             14 => Some(Self::FpDivConst),
-            15 => Some(Self::TripleSmallField),
-            16 => Some(Self::RanShaSmallField),
-            17 => Some(Self::RanDouShaSmallField),
-            18 => Some(Self::DouShaSmallField),
-            19 => Some(Self::ZeroSha),
-            20 => Some(Self::PreMulCOff),
-            21 => Some(Self::FpDiv),
-            22 => Some(Self::PreBitMul),
-            23 => Some(Self::PreBitMul1),
-            24 => Some(Self::PreBitMul2),
-            25 => Some(Self::PreBitMul3),
-            26 => Some(Self::SufOr),
-            27 => Some(Self::FpDivTrunc),
-            28 => Some(Self::FpDivMulA),
-            29 => Some(Self::FpDivMulB),
+            15 => Some(Self::RanShaSmallField),
+            16 => Some(Self::ZeroSha),
+            17 => Some(Self::PreMulCOff),
+            18 => Some(Self::FpDiv),
+            19 => Some(Self::PreBitMul),
+            20 => Some(Self::PreBitMul1),
+            21 => Some(Self::PreBitMul2),
+            22 => Some(Self::PreBitMul3),
+            23 => Some(Self::SufOr),
+            24 => Some(Self::FpDivTrunc),
+            25 => Some(Self::FpDivMulA),
+            26 => Some(Self::FpDivMulB),
+            27 => Some(Self::KOr1),
+            28 => Some(Self::KOr2),
+            29 => Some(Self::EQZ),
+            30 => Some(Self::LTZ),
+            31 => Some(Self::ZeroShaSmallField),
+            32 => Some(Self::RandInvPair),
+            33 => Some(Self::LTZBitMul),
             _ => None,
         }
     }

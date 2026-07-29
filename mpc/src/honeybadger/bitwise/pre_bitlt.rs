@@ -208,8 +208,15 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreBitLTNode<F, R> {
         //
         // Protocol 11 line 9 (replacing Mod2D(local_product) with Mul+Mod2):
         //   [m_i] = Mul([s_i], [p_inv_{i+1}])  via Beaver triples → degree-t
+        // This round is keyed on a standalone tag rather than the caller's, so
+        // it needs one tag per top-level caller — FpDiv and LTZ both start
+        // their exec_id counters at 0 and would otherwise share a session.
+        let mul_tag = match session.calling_protocol() {
+            Some(ProtocolType::LTZ) => ProtocolType::LTZBitMul,
+            _ => ProtocolType::PreBitMul3,
+        };
         let mul_session = SessionId::new(
-            ProtocolType::PreBitMul3,
+            mul_tag,
             SessionId::pack_slot(session.exec_id(), 0, 0),
             session.instance_id(),
         );

@@ -4,7 +4,7 @@ use ark_std::rand::Rng;
 use ark_std::test_rng;
 use stoffelcrypto::common::SecretSharingScheme;
 use stoffelcrypto::honeybadger::bitwise::{
-    AppRecPrep, PRandMPrep, PreBitLTPrep, PreMod2mPrep, PreMulCPrep,
+    kor_cs::KOrCSPrep, AppRecPrep, PRandMPrep, PreBitLTPrep, PreMod2mPrep, PreMulCPrep,
 };
 use stoffelcrypto::honeybadger::fpdiv::fpdiv::{FpDivIterPrep, FpDivPrep};
 use stoffelcrypto::honeybadger::fpdiv::fpdiv_theta;
@@ -124,6 +124,34 @@ pub fn make_premulc_prep(pk: usize, n: usize, t: usize) -> Vec<PreMulCPrep<Fr>> 
             z: z_pp[i].clone(),
             r: r_pp[i].clone(),
             triples: triples[i].clone(),
+        })
+        .collect()
+}
+
+pub fn make_kor_cs_prep(m: usize, n: usize, t: usize) -> Vec<KOrCSPrep<Fr>> {
+    let mut rng = test_rng();
+    let mut pairs_per_party: Vec<Vec<(RobustShare<Fr>, RobustShare<Fr>)>> = vec![vec![]; n];
+    for _ in 0..m {
+        let r = loop {
+            let v = Fr::rand(&mut rng);
+            if v != Fr::ZERO {
+                break v;
+            }
+        };
+        let r_inv = r.inverse().unwrap();
+        let sr = share_value(r, n, t);
+        let sr_inv = share_value(r_inv, n, t);
+        for p in 0..n {
+            pairs_per_party[p].push((sr[p].clone(), sr_inv[p].clone()));
+        }
+    }
+    let triples1 = make_triples(n, t, m.saturating_sub(1));
+    let triples2 = make_triples(n, t, m);
+    (0..n)
+        .map(|i| KOrCSPrep {
+            rand_inv_pairs: pairs_per_party[i].clone(),
+            triples_round1: if m > 1 { triples1[i].clone() } else { vec![] },
+            triples_round2: triples2[i].clone(),
         })
         .collect()
 }

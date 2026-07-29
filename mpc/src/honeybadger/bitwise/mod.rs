@@ -20,6 +20,8 @@ use thiserror::Error;
 
 pub mod app_rec;
 pub mod bit_dec;
+pub mod kor_cl;
+pub mod kor_cs;
 pub mod mod2;
 pub mod pre_bitlt;
 pub mod pre_mod2m;
@@ -211,6 +213,68 @@ pub enum PreMod2mError {
     Abort,
     #[error("clear store: {0:?}")]
     ClearStoreError(SessionId),
+}
+
+#[derive(Debug, Error)]
+pub enum KOrCSError {
+    #[error("mul error: {0}")]
+    MulError(#[from] MulError),
+    #[error("batch recon error: {0}")]
+    BatchReconError(#[from] BatchReconError),
+    #[error("share error: {0}")]
+    ShareError(#[from] ShareError),
+    #[error("serialization: {0}")]
+    SerializationError(#[from] SerializationError),
+    #[error("bad session id: {0:?}")]
+    SessionIdError(SessionId),
+    #[error("no session: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("send error: {0:?}")]
+    SendError(SessionId),
+    #[error("receive error: {0:?}")]
+    ReceiveError(SessionId),
+    #[error("timeout: {0:?}")]
+    Timeout(SessionId),
+    #[error("session limit")]
+    LimitError,
+    #[error("wrong input length")]
+    LengthError,
+    #[error("abort")]
+    Abort,
+}
+
+#[derive(Debug, Error)]
+pub enum KOrCLError {
+    #[error("rbc error: {0}")]
+    RbcError(#[from] RbcError),
+    #[error("share error: {0}")]
+    ShareError(#[from] ShareError),
+    #[error("kor_cs error: {0}")]
+    KOrCSError(#[from] KOrCSError),
+    #[error("serialization: {0}")]
+    SerializationError(#[from] SerializationError),
+    #[error("no session: {0:?}")]
+    NoSuchSessionId(SessionId),
+    #[error("already received: {0:?}")]
+    ResultAlreadyReceived(SessionId),
+    #[error("send error: {0:?}")]
+    SendError(SessionId),
+    #[error("receive error: {0:?}")]
+    ReceiveError(SessionId),
+    #[error("timeout: {0:?}")]
+    Timeout(SessionId),
+    #[error("bad session id: {0:?}")]
+    SessionIdError(SessionId),
+    #[error("session limit")]
+    LimitError,
+    #[error("clear store: {0:?}")]
+    ClearStoreError(SessionId),
+    #[error("abort")]
+    Abort,
+    #[error("wrong input length")]
+    LengthError,
 }
 
 // ── Reveal store ───────────────────────────────────────────────────────────────

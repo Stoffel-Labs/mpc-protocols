@@ -51,6 +51,7 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerLimitError,
     HoneyBadgerInstanceIdError,
     HoneyBadgerShareError,
+    HoneyBadgerComparisonError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -83,6 +84,11 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             | HoneyBadgerError::PreMulCError(_)
             | HoneyBadgerError::ZeroShaError(_)
             | HoneyBadgerError::MulPubError(_) => Self::HoneyBadgerFpDivError,
+            HoneyBadgerError::LTZError(_)
+            | HoneyBadgerError::EQZError(_)
+            | HoneyBadgerError::RandInvPairError(_)
+            | HoneyBadgerError::KOrCSError(_)
+            | HoneyBadgerError::KOrCLError(_) => Self::HoneyBadgerComparisonError,
             HoneyBadgerError::TypeError(_) => Self::HoneyBadgerTypesError,
             HoneyBadgerError::LimitError => Self::HoneyBadgerLimitError,
             HoneyBadgerError::InstanceIdError(_) => Self::HoneyBadgerInstanceIdError,

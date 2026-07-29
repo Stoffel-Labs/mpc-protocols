@@ -22,7 +22,7 @@ use crate::{
             ZeroShaError, ZeroShaMessage, ZeroShaMessageType, ZeroShaPayload, ZeroShaState,
             ZeroShaStore,
         },
-        ProtocolType, SessionId, WrappedMessage,
+        SessionId, WrappedMessage,
     },
 };
 
@@ -506,8 +506,13 @@ where
                 ZeroShaPayload::Output(ok),
             );
             let bytes = bincode::serialize(&result)?;
+            // Tag read dynamically from the caller's own session (not hardcoded
+            // to ZeroSha) so the small-field instance's OK-vote broadcast routes
+            // back to the small-field node instead of the big-field one.
             let session_id = SessionId::new(
-                ProtocolType::ZeroSha,
+                msg.session_id
+                    .calling_protocol()
+                    .ok_or(ZeroShaError::SessionIdError(msg.session_id))?,
                 SessionId::pack_slot(
                     msg.session_id.exec_id(),
                     self.id as u8,

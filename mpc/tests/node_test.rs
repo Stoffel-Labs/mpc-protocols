@@ -516,7 +516,6 @@ async fn mul_e2e() {
             None,
             None,
             None,
-            None,
         );
     }
 
@@ -863,20 +862,21 @@ async fn test_rand_bit() {
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
-    // The construction of triples is same as that of mul.
     // RandBit operates in the small (Goldilocks) field, so the input shares and
-    // Beaver triples must be over `GoldilocksField`.
-    let (_, per_party_triples) =
-        construct_e2e_input_mul::<GoldilocksField>(n_parties, no_of_rand_bits, t);
-
+    // zero-sharings (feeding MulPub's reveal of `a^2`) must be over `GoldilocksField`.
     // assumes each party holds shares of some secrets
     let mut a = Vec::new();
     let mut shares_a = Vec::new();
+    let mut shares_zero = Vec::new();
     for _ in 0..no_of_rand_bits {
         let a_value = GoldilocksField::rand(&mut rng);
         a.push(a_value);
         let shares = RobustShare::compute_shares(a_value, n_parties, t, None, &mut rng).unwrap();
         shares_a.push(shares);
+        let zero_shares =
+            RobustShare::compute_shares(GoldilocksField::ZERO, n_parties, 2 * t, None, &mut rng)
+                .unwrap();
+        shares_zero.push(zero_shares);
     }
 
     //----------------------------------------SETUP NODES----------------------------------------
@@ -913,19 +913,19 @@ async fn test_rand_bit() {
 
         // Prepare the input shares for this party
         let mut a_value = Vec::new();
+        let mut zero_value = Vec::new();
         for i in 0..no_of_rand_bits {
             a_value.push(shares_a[i][pid].clone());
+            zero_value.push(shares_zero[i][pid].clone());
         }
         assert!(a_value.len() == no_of_rand_bits);
-
-        let mult_triple = per_party_triples[pid].clone().clone();
 
         let handle = tokio::spawn(async move {
             {
                 prand_bit_node
                     .init(
                         a_value,
-                        mult_triple,
+                        zero_value,
                         session_id,
                         Duration::from_secs(30),
                         net.clone(),
@@ -954,7 +954,7 @@ async fn test_rand_bit() {
             .lock()
             .await
             .get(&session_id)
-            .map(|(_, arc)| arc.clone());
+            .cloned();
         if let Some(store) = store {
             let store_lock = store.lock().await;
             let protocol_output = store_lock.protocol_output.clone();
@@ -1061,7 +1061,6 @@ async fn fpmul_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             Some(triple[pid].clone()),
-            None,
             None,
             None,
             Some(r_bits[pid].clone()),
@@ -1675,7 +1674,6 @@ async fn fpdiv_const_e2e() {
             None, // No Beaver triple needed
             None,
             None,
-            None,
             Some(r_bits[pid].clone()),      // PRandBit[]
             Some(vec![r_int[pid].clone()]), // PRandInt[]
         );
@@ -1813,4 +1811,206 @@ async fn fpdiv_e2e() {
         rel_err < 0.2,
         "FpDiv(6.0/2.0) = {c_real}, relative error {rel_err} exceeds tolerance"
     );
+}
+
+//----------------------------------------COMPARISON----------------------------------------
+
+/// Drives one `ltz_int` call through the real preprocessing path and checks
+/// the reconstructed result is 1 for negative inputs, 0 otherwise.
+async fn ltz_int_e2e_run(u_bar: i128, k: usize) {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+
+    let a_shares = share_signed_fixed(u_bar, n_parties, t);
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+
+    // Deliberately created with every preprocessing target at 0: `ltz_int`
+    // sizes its own top-up from the operand's bit length, so a caller that
+    // configures nothing must still work.
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        333,
+        0,
+        0,
+        0,
+        0,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let a = SecretInt::new(a_shares[pid].clone(), k);
+        handles.push(tokio::spawn(async move {
+            node.ltz_int(a, net[pid].clone()).await.expect("ltz failed")
+        }));
+    }
+
+    let outputs: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.expect("task panicked"))
+        .collect();
+
+    let shares: Vec<_> = outputs.iter().map(|s| s.share().clone()).collect();
+    let (_, val) = RobustShare::recover_secret(&shares, n_parties, t).expect("interpolate failed");
+    let expected = if u_bar < 0 {
+        Fr::from(1u64)
+    } else {
+        Fr::from(0u64)
+    };
+    assert_eq!(val, expected, "ltz_int({u_bar}, k={k})");
+}
+
+#[tokio::test]
+async fn ltz_int_e2e_negative() {
+    ltz_int_e2e_run(-5, 8).await;
+}
+
+#[tokio::test]
+async fn ltz_int_e2e_positive() {
+    ltz_int_e2e_run(5, 8).await;
+}
+
+#[tokio::test]
+async fn ltz_int_e2e_zero() {
+    ltz_int_e2e_run(0, 8).await;
+}
+
+/// Drives one `eqz_int` call through the real preprocessing path and checks
+/// the reconstructed result is 1 for zero, 0 otherwise.
+async fn eqz_int_e2e_run(a_val: u64, k: usize) {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+
+    let a_shares = share_signed_fixed(a_val as i128, n_parties, t);
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+
+    // As in `ltz_int_e2e_run`: every target starts at 0, `eqz_int` sizes its
+    // own top-up.
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        333,
+        0,
+        0,
+        0,
+        0,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let a = SecretInt::new(a_shares[pid].clone(), k);
+        handles.push(tokio::spawn(async move {
+            node.eqz_int(a, net[pid].clone()).await.expect("eqz failed")
+        }));
+    }
+
+    let outputs: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.expect("task panicked"))
+        .collect();
+
+    let shares: Vec<_> = outputs.iter().map(|s| s.share().clone()).collect();
+    let (_, val) = RobustShare::recover_secret(&shares, n_parties, t).expect("interpolate failed");
+    let expected = if a_val == 0 {
+        Fr::from(1u64)
+    } else {
+        Fr::from(0u64)
+    };
+    assert_eq!(val, expected, "eqz_int({a_val}, k={k})");
+}
+
+#[tokio::test]
+async fn eqz_int_e2e_zero() {
+    eqz_int_e2e_run(0, 8).await;
+}
+
+#[tokio::test]
+async fn eqz_int_e2e_nonzero() {
+    eqz_int_e2e_run(42, 8).await;
+}
+
+/// Two LTZ calls at different bit widths on the same node. This is the case a
+/// single stored `ltz_bit_len` config cannot express: the first call pools a
+/// PreMulC bundle at pk=7, the second needs pk=15, so the stale bundle must be
+/// discarded rather than silently handed to SufMulInv at the wrong width.
+#[tokio::test]
+async fn ltz_int_e2e_mixed_widths() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        333,
+        0,
+        0,
+        0,
+        0,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    // (value, bit width, expected LTZ result)
+    for (u_bar, k, expected) in [(-5i128, 8usize, 1u64), (-300i128, 16usize, 1u64), (7i128, 8usize, 0u64)] {
+        let a_shares = share_signed_fixed(u_bar, n_parties, t);
+        let mut handles = Vec::new();
+        for pid in 0..n_parties {
+            let mut node = nodes[pid].clone();
+            let net = network.clone();
+            let a = SecretInt::new(a_shares[pid].clone(), k);
+            handles.push(tokio::spawn(async move {
+                node.ltz_int(a, net[pid].clone()).await.expect("ltz failed")
+            }));
+        }
+        let outputs: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.expect("task panicked"))
+            .collect();
+        let shares: Vec<_> = outputs.iter().map(|s| s.share().clone()).collect();
+        let (_, val) =
+            RobustShare::recover_secret(&shares, n_parties, t).expect("interpolate failed");
+        assert_eq!(val, Fr::from(expected), "ltz_int({u_bar}, k={k})");
+    }
 }

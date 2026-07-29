@@ -32,7 +32,7 @@ use crate::{
             PreMod2mStore,
         },
         robust_interpolate::robust_interpolate::RobustShare,
-        ProtocolType, SessionId, WrappedMessage,
+        SessionId, WrappedMessage,
     },
 };
 
@@ -141,8 +141,13 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMod2mNode<F, R> {
 
             // Recover the parent session (sub_id=0, round_id=0) from this
             // broadcaster's RBC session (sub_id=party_id, round_id=0).
+            // Tag read dynamically from the incoming message (not hardcoded
+            // to FpDiv) so any caller's own tag round-trips correctly — the
+            // wire session in `init` above already carries the caller's
+            // real `calling_protocol()`, this just has to match it back.
             let parent = SessionId::new(
-                ProtocolType::FpDiv,
+                id.calling_protocol()
+                    .ok_or(PreMod2mError::SessionIdError(id))?,
                 SessionId::pack_slot(id.exec_id(), 0, 0),
                 id.instance_id(),
             );

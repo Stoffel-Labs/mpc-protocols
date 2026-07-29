@@ -3,7 +3,7 @@ use crate::{
     honeybadger::{
         batch_recon::BatchReconError,
         fpmul::f256::{Gf256, Gf256Error},
-        mul::MulError,
+        mul_pub::MulPubError,
         robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId,
     },
@@ -29,8 +29,6 @@ pub mod truncpr;
 pub enum RandBitError {
     #[error("incompatible treshold ({0:}) and number of parties {1:}")]
     IncompatibleNumberOfParties(usize, usize),
-    #[error("the square multiplication was not completed successfuly")]
-    SquareMult(#[from] MulError),
     #[error("the square is zero")]
     ZeroSquare,
     #[error("the square root does not exist")]
@@ -43,8 +41,8 @@ pub enum RandBitError {
     Duplicate(String),
     #[error("waiting for more openings")]
     WaitForOk,
-    #[error("error in batch reconstruction: {0:?}")]
-    BatchRecError(#[from] BatchReconError),
+    #[error("mul_pub error: {0}")]
+    MulPubError(MulPubError),
     #[error("error during deserialization: {0:?}")]
     SerializationError(#[from] SerializationError),
     #[error("error operating with the shares: {0:?}")]
@@ -88,11 +86,6 @@ where
     /// Output of the protocol. If the protocol is not finished yet, `protocol_output` will be
     /// [`None`].
     pub protocol_output: Option<Vec<RobustShare<F>>>,
-    /// Share of `a`
-    pub a_share: Option<Vec<RobustShare<F>>>,
-    /// Opened `a^2` values, in input order — delivered as one combined
-    /// batch-recon reveal (`init_batch_reconstruct_many`), not per-chunk.
-    pub output_open: Option<Vec<F>>,
     pub output_sender: Option<Sender<Vec<RobustShare<F>>>>,
     pub output_receiver: Option<Receiver<Vec<RobustShare<F>>>>,
 }
@@ -106,8 +99,6 @@ where
         Self {
             protocol_state: ProtocolState::NotInitialized,
             protocol_output: None,
-            a_share: None,
-            output_open: None,
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
         }

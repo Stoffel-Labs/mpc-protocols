@@ -73,10 +73,7 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
-    TripleSmallField = 15,
-    RanShaSmallField = 16,
-    RanDouShaSmallField = 17,
-    DouShaSmallField = 18,
+    RanShaSmallField = 15,
 }
 
 impl From<ProtocolType> for crate::honeybadger::ProtocolType {
@@ -97,12 +94,7 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             ProtocolType::FpMul => crate::honeybadger::ProtocolType::FpMul,
             ProtocolType::Trunc => crate::honeybadger::ProtocolType::Trunc,
             ProtocolType::FpDivConst => crate::honeybadger::ProtocolType::FpDivConst,
-            ProtocolType::TripleSmallField => crate::honeybadger::ProtocolType::TripleSmallField,
             ProtocolType::RanShaSmallField => crate::honeybadger::ProtocolType::RanShaSmallField,
-            ProtocolType::RanDouShaSmallField => {
-                crate::honeybadger::ProtocolType::RanDouShaSmallField
-            }
-            ProtocolType::DouShaSmallField => crate::honeybadger::ProtocolType::DouShaSmallField,
         }
     }
 }
@@ -125,12 +117,7 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::FpMul => ProtocolType::FpMul,
             crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
             crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
-            crate::honeybadger::ProtocolType::TripleSmallField => ProtocolType::TripleSmallField,
             crate::honeybadger::ProtocolType::RanShaSmallField => ProtocolType::RanShaSmallField,
-            crate::honeybadger::ProtocolType::RanDouShaSmallField => {
-                ProtocolType::RanDouShaSmallField
-            }
-            crate::honeybadger::ProtocolType::DouShaSmallField => ProtocolType::DouShaSmallField,
             crate::honeybadger::ProtocolType::ZeroSha => ProtocolType::None,
             crate::honeybadger::ProtocolType::PreMulCOff => ProtocolType::None,
             crate::honeybadger::ProtocolType::FpDiv => ProtocolType::None,
@@ -142,6 +129,13 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::FpDivTrunc => todo!(),
             crate::honeybadger::ProtocolType::FpDivMulA => todo!(),
             crate::honeybadger::ProtocolType::FpDivMulB => todo!(),
+            crate::honeybadger::ProtocolType::KOr1 => todo!(),
+            crate::honeybadger::ProtocolType::KOr2 => todo!(),
+            crate::honeybadger::ProtocolType::EQZ => todo!(),
+            crate::honeybadger::ProtocolType::LTZ => todo!(),
+            crate::honeybadger::ProtocolType::ZeroShaSmallField => todo!(),
+            crate::honeybadger::ProtocolType::RandInvPair => todo!(),
+            crate::honeybadger::ProtocolType::LTZBitMul => todo!(),
         }
     }
 }
