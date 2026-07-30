@@ -64,11 +64,7 @@ fn ransha_e2e_turmoil() {
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        0,
-        0,
         111,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(30),
@@ -203,11 +199,7 @@ fn ransha_late_message_recreates_cleared_store_turmoil() {
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        0,
-        0,
         111,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(30),
@@ -358,11 +350,7 @@ fn test_input_protocol_e2e_turmoil() {
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n,
         t,
-        0,
-        0,
         111,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(30),
@@ -592,19 +580,22 @@ fn preprocessing_e2e_turmoil(
     let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
     let barrier = Arc::new(tokio::sync::Barrier::new(n_parties));
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        no_of_triples,
-        no_of_randomshares,
         instance_id,
-        n_prandbit,
-        n_prandint,
         l,
         k,
         Duration::from_secs(30),
         vec![],
     );
+    for node in nodes.iter_mut() {
+        // Measures raw generation, runs no operations — see `extra_demand`.
+        node.params.extra_demand.triples = no_of_triples;
+        node.params.extra_demand.random_shares = no_of_randomshares;
+        node.params.extra_demand.prandbit = n_prandbit;
+        node.params.extra_demand.prandint = n_prandint;
+    }
 
     for id in 0..n_parties {
         let inner = inner.clone();
@@ -802,19 +793,20 @@ fn honeybadger_402m_random_shares_5_nodes_t1_turmoil() {
     let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
     let barrier = Arc::new(Barrier::new(n_parties));
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        0,
-        n_random_shares,
         instance_id,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(120),
         vec![],
     );
+    // Deliberately unreasonable ask: this stress test exists to find where
+    // generation breaks down, so it requests the material directly.
+    for node in nodes.iter_mut() {
+        node.params.extra_demand.random_shares = n_random_shares;
+    }
 
     for id in 0..n_parties {
         let inner = inner.clone();
@@ -1012,19 +1004,23 @@ fn run_preprocessing_stress_turmoil(
     let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
     let barrier = Arc::new(Barrier::new(n_parties));
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        n_triples,
-        n_random_shares,
         instance_id,
-        n_prandbit,
-        n_prandint,
         8,
         4,
         Duration::from_secs(120),
         vec![],
     );
+    // A generation stress test: it asks for raw material and asserts how much
+    // came out, so it declares demand directly rather than via operations.
+    for node in nodes.iter_mut() {
+        node.params.extra_demand.triples = n_triples;
+        node.params.extra_demand.random_shares = n_random_shares;
+        node.params.extra_demand.prandbit = n_prandbit;
+        node.params.extra_demand.prandint = n_prandint;
+    }
 
     for id in 0..n_parties {
         let inner = inner.clone();
@@ -1335,11 +1331,7 @@ fn honeybadger_sequential_mul_1000_turmoil() {
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        0,
-        0,
         111,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(120),
@@ -1540,7 +1532,6 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
 
     let n_parties = 4;
     let t = 1;
-    let no_of_triples = 2 * t + 1;
     let input_client_id: ClientId = 100;
     let output_client_id: ClientId = 200;
     let client_ids = vec![input_client_id, output_client_id];
@@ -1559,19 +1550,19 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
     let barrier_input_done = Arc::new(tokio::sync::Barrier::new(n_parties + 1)); // nodes + input client
     let barrier_mul_done = Arc::new(tokio::sync::Barrier::new(n_parties));
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        no_of_triples,
-        2,
         111,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(30),
         vec![input_client_id],
     );
+    for node in nodes.iter_mut() {
+        node.params.add_mul_ops(no_of_multiplications);
+        node.params.add_rand_ops(2);
+    }
 
     let clients = create_clients::<Fr, Avid<SessionId>>(
         client_ids.clone(),
@@ -1961,11 +1952,7 @@ fn randousha_e2e_turmoil() {
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        0,
-        0,
         111,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(30),
@@ -2163,11 +2150,7 @@ fn mul_e2e_without_preprocessing_turmoil() {
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        0,
-        0,
         111,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(30),
@@ -2355,10 +2338,6 @@ fn fpmul_e2e_with_preprocessing(
     let k = 16; // total bitlength
     let m = 4; // fractional bits to truncate
     let mut rng = test_rng();
-    let n_triples = 1 + m; // 1 (fpmul) + m(no of random bits)
-    let n_random_shares = m; // no of random bits
-    let n_prandbit = m;
-    let n_prandint = 1;
     let bound_l = 8;
     let security_k = 4;
     let precision = FixedPointPrecision::new(k, m);
@@ -2389,19 +2368,18 @@ fn fpmul_e2e_with_preprocessing(
         ));
     }
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        n_triples,
-        n_random_shares,
         111,
-        n_prandbit,
-        n_prandint,
         bound_l,
         security_k,
         Duration::from_secs(300),
         vec![],
     );
+    for node in nodes.iter_mut() {
+        node.params.add_fpmul_ops(m, 1);
+    }
 
     let barrier_net = Arc::new(Barrier::new(n_parties));
 
@@ -2650,11 +2628,7 @@ fn fpdiv_const_e2e(
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        0,
-        0,
         222,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(30),
@@ -2897,11 +2871,7 @@ fn ransha_e2e_turmoil_with_hold(
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        0,
-        0,
         111,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(30),

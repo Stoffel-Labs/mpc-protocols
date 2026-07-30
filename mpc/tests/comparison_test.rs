@@ -1,8 +1,8 @@
 pub mod utils;
 
 use crate::utils::comparison_utils::{
-    collect_result_shares, make_kor_cs_prep, make_premod2m_prep, make_prandm_prep, share_signed_fixed,
-    share_value,
+    collect_result_shares, make_kor_cs_prep, make_prandm_prep, make_premod2m_prep,
+    share_signed_fixed, share_value,
 };
 use crate::utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 use ark_bls12_381::Fr;
@@ -12,9 +12,9 @@ use std::sync::Arc;
 use stoffelcrypto::common::{rbc::rbc::Avid, ProtocolSessionId, SecretSharingScheme, RBC};
 use stoffelcrypto::honeybadger::bitwise::kor_cl::KOrCLNode;
 use stoffelcrypto::honeybadger::bitwise::kor_cs::KOrCSNode;
-use stoffelcrypto::honeybadger::rand_inv_pair::rand_inv_pair::{RandInvPairNode, RandInvPairPrep};
 use stoffelcrypto::honeybadger::comparison::eqz::EQZNode;
 use stoffelcrypto::honeybadger::comparison::ltz::LTZNode;
+use stoffelcrypto::honeybadger::rand_inv_pair::rand_inv_pair::{RandInvPairNode, RandInvPairPrep};
 use stoffelcrypto::honeybadger::{
     robust_interpolate::robust_interpolate::RobustShare, ProtocolType, SessionId, WrappedMessage,
 };
@@ -196,9 +196,8 @@ async fn ltz_run(u_bar: i128, k: usize, dp_bits: usize) {
     let prep = make_premod2m_prep(dp_bits, k - 1, n, t);
 
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<LTZNode<Fr, Avid<SessionId>>> = (0..n)
-        .map(|id| LTZNode::new(id, n, t).unwrap())
-        .collect();
+    let nodes: Vec<LTZNode<Fr, Avid<SessionId>>> =
+        (0..n).map(|id| LTZNode::new(id, n, t).unwrap()).collect();
     let _recv = spawn_ltz_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut init_set = JoinSet::new();
@@ -214,7 +213,11 @@ async fn ltz_run(u_bar: i128, k: usize, dp_bits: usize) {
     }
 
     let (_, s) = RobustShare::recover_secret(&s_shares, n, t).unwrap();
-    let expected = if u_bar < 0 { Fr::from(1u64) } else { Fr::from(0u64) };
+    let expected = if u_bar < 0 {
+        Fr::from(1u64)
+    } else {
+        Fr::from(0u64)
+    };
     assert_eq!(s, expected, "ltz mismatch: u_bar={u_bar}, k={k}");
 }
 

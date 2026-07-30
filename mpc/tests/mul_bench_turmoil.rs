@@ -73,11 +73,7 @@ fn run_config(n: usize, t: usize, n_muls: usize, lat: Option<(u64, u64)>) {
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n,
         t,
-        0,
-        0,
         111,
-        0,
-        0,
         0,
         0,
         std::time::Duration::from_secs(120),

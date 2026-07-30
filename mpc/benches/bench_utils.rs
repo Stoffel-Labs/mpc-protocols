@@ -61,19 +61,13 @@ pub fn create_nodes(
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(60));
 
-    let opts = HoneyBadgerMPCNodeOpts::new(
-        n_parties,
-        t,
-        n_triples,
-        n_shares,
-        instance_id,
-        n_prandbit,
-        n_prandint,
-        8,
-        4,
-        timeout,
-    )
-    .unwrap();
+    let mut opts = HoneyBadgerMPCNodeOpts::new(n_parties, t, instance_id, 8, 4, timeout).unwrap();
+    // Benches measure raw generation throughput rather than running declared
+    // operations, so they ask for material directly.
+    opts.extra_demand.triples = n_triples;
+    opts.extra_demand.random_shares = n_shares;
+    opts.extra_demand.prandbit = n_prandbit;
+    opts.extra_demand.prandint = n_prandint;
 
     (0..n_parties)
         .map(|id| {

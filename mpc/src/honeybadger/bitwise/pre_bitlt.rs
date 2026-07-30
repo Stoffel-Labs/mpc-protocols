@@ -266,7 +266,10 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreBitLTNode<F, R> {
                 Arc::clone(&network),
             )
             .await?;
-        let mod2_result = self.mod2.wait_for_batch_result(mod2_session, duration).await;
+        let mod2_result = self
+            .mod2
+            .wait_for_batch_result(mod2_session, duration)
+            .await;
         if let Err(e) = self.mod2.clear_store(mod2_session).await {
             warn!("PreBitLT: failed to clear mod2 store for session {mod2_session:?}: {e:?}");
         }

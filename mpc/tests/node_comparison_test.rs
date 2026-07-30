@@ -25,23 +25,27 @@ const T: usize = 1;
 
 type Node = HoneyBadgerMPCNode<Fr, Avid<SessionId>>;
 
-/// Builds nodes with every preprocessing target at 0 — the comparison ops
-/// self-size, so a caller that configures nothing must still work.
+/// Builds nodes whose only preprocessing configuration is the **declared
+/// workload**: one LTZ and one EQZ at width `K`. Every raw pool size is derived
+/// from that by `run_preprocessing`, so no test hand-computes triple/random-
+/// share counts. Each case below builds fresh nodes and runs a single op, and
+/// the derived ops (`lt`/`gt`/`le`/`ge`/`gtz`/`lez`/`gez`, `eq`) each cost
+/// exactly one LTZ or one EQZ.
 fn make_nodes() -> (Vec<Node>, Vec<Arc<FakeNetwork>>) {
     let (network, receivers, _, _) = test_setup(N_PARTIES, vec![]);
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         N_PARTIES,
         T,
-        0,
-        0,
         333,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(30),
         vec![],
     );
+    for node in nodes.iter_mut() {
+        node.params.add_ltz_ops(K, 1);
+        node.params.add_eqz_ops(K, 1);
+    }
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         receivers,
         nodes.clone(),

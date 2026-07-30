@@ -487,11 +487,7 @@ pub fn receive<F, R, S, N>(
 pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     n_parties: usize,
     t: usize,
-    n_triples: usize,
-    n_random_shares: usize,
     instance_id: u32,
-    n_prandbit: usize,
-    n_prandint: usize,
     l: usize,
     k: usize,
     timeout: Duration,
@@ -502,19 +498,7 @@ where
     S: SecretSharingScheme<F>,
     HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts>,
 {
-    let parameters = HoneyBadgerMPCNodeOpts::new(
-        n_parties,
-        t,
-        n_triples,
-        n_random_shares,
-        instance_id,
-        n_prandbit,
-        n_prandint,
-        l,
-        k,
-        timeout,
-    )
-    .unwrap();
+    let parameters = HoneyBadgerMPCNodeOpts::new(n_parties, t, instance_id, l, k, timeout).unwrap();
     (0..n_parties)
         .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), input_ids.clone()).unwrap())
         .collect()

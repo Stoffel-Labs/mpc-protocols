@@ -39,6 +39,13 @@ pub struct PreMulCPrep<F: FftField> {
     pub r: Vec<RobustShare<F>>,
     pub triples: Vec<ShamirBeaverTriple<F>>,
 }
+
+impl<F: FftField> PreMulCPrep<F> {
+    /// The bundle's width — the number of correlated elements it covers.
+    pub fn pk(&self) -> usize {
+        self.w.len()
+    }
+}
 #[derive(Clone, Debug)]
 pub struct PRandMPrep<F: FftField> {
     pub r_double_prime: RobustShare<F>,

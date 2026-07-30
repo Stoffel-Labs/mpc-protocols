@@ -52,11 +52,7 @@ async fn test_reconstruct_handler_incorrect_share() {
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
-        0,
-        0,
         111,
-        0,
-        0,
         0,
         0,
         Duration::from_secs(30),

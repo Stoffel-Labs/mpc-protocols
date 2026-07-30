@@ -13,7 +13,229 @@ use crate::{
     },
 };
 use ark_ff::FftField;
+use std::collections::BTreeMap;
 use tracing::error;
+
+/// Raw preprocessing material that a batch of planned online operations will
+/// consume.
+///
+/// HoneyBadger is preprocessing-based: material is generated in bulk offline
+/// and only *drawn* online. Sizing it by hand is awkward because operations
+/// consume two layers at once — the flat pools directly, and *derived* material
+/// (PreMulC bundles, ([r],[r^-1]) pairs) whose own generation draws from those
+/// same pools. Every `demand_for_*` constructor reports the **total** across
+/// both layers, so `run_preprocessing` sizes the offline phase in one pass and
+/// callers never redo the arithmetic.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreprocDemand {
+    pub triples: usize,
+    pub random_shares: usize,
+    pub prandbit: usize,
+    pub prandint: usize,
+    pub zero_shares: usize,
+    pub rand_inv_pairs: usize,
+    /// PreMulC bundles keyed by the `pk` they must be generated at. A bundle is
+    /// only usable at the width it was built for, and one node can serve several
+    /// widths at once (LTZ at k=8 wants pk=7 while FpDiv at k=15 wants pk=14),
+    /// so this is a map rather than a single (count, size) pair.
+    pub premulc: BTreeMap<usize, usize>,
+}
+
+impl PreprocDemand {
+    /// Folds in `count` PreMulC bundles at `pk`, including their generation
+    /// cost: `ensure_premulc_shares` draws `(pk-1) + pk` triples, `2*pk` random
+    /// shares and `pk` zero-sharings per bundle.
+    pub fn add_premulc(&mut self, pk: usize, count: usize) {
+        if pk == 0 || count == 0 {
+            return;
+        }
+        *self.premulc.entry(pk).or_default() += count;
+        self.triples += count * (2 * pk - 1);
+        self.random_shares += count * 2 * pk;
+        self.zero_shares += count * pk;
+    }
+
+    /// Folds in `count` ([r], [r^-1]) pairs, including their generation cost:
+    /// each pair reveals one product via MulPub, drawing 2 random shares and 1
+    /// degree-2t zero-sharing.
+    pub fn add_rand_inv_pairs(&mut self, count: usize) {
+        self.rand_inv_pairs += count;
+        self.random_shares += 2 * count;
+        self.zero_shares += count;
+    }
+
+    /// Accumulates another demand (pools add, PreMulC bundles merge per `pk`).
+    pub fn add(&mut self, other: &PreprocDemand) {
+        self.triples += other.triples;
+        self.random_shares += other.random_shares;
+        self.prandbit += other.prandbit;
+        self.prandint += other.prandint;
+        self.zero_shares += other.zero_shares;
+        self.rand_inv_pairs += other.rand_inv_pairs;
+        for (&pk, &count) in &other.premulc {
+            *self.premulc.entry(pk).or_default() += count;
+        }
+    }
+
+    /// How many triples and random shares must actually be generated, given
+    /// what is already pooled.
+    ///
+    /// The other pools are simple shortfalls that each `ensure_*` computes for
+    /// itself, but these two are coupled and need care:
+    ///
+    /// * triples come out of TripleGen in whole groups of `2t+1`, so a shortfall
+    ///   is rounded up to a group boundary;
+    /// * generating a triple *itself* consumes 2 random shares, so that cost is
+    ///   added on top of the random-share shortfall
+    ///
+    /// Returns `(0, 0)` when both pools are already satisfied.
+    pub fn to_generate(&self, have: &PreprocMaterialLength, threshold: usize) -> GenerationPlan {
+        let group_size = 2 * threshold + 1;
+
+        let triples = if have.beaver_triples >= self.triples {
+            0
+        } else {
+            (self.triples - have.beaver_triples).div_ceil(group_size) * group_size
+        };
+
+        let random_shortfall = self.random_shares.saturating_sub(have.random_shr);
+        let random_shares = random_shortfall + 2 * triples;
+
+        GenerationPlan {
+            triples,
+            random_shares,
+        }
+    }
+
+    /// This demand repeated `n` times (`n` executions of the same operation).
+    pub fn scaled(&self, n: usize) -> PreprocDemand {
+        PreprocDemand {
+            triples: self.triples * n,
+            random_shares: self.random_shares * n,
+            prandbit: self.prandbit * n,
+            prandint: self.prandint * n,
+            zero_shares: self.zero_shares * n,
+            rand_inv_pairs: self.rand_inv_pairs * n,
+            premulc: self.premulc.iter().map(|(&pk, &c)| (pk, c * n)).collect(),
+        }
+    }
+}
+
+/// The amounts `run_preprocessing` must actually generate for the two coupled
+/// pools, after accounting for what is already held. See
+/// [`PreprocDemand::to_generate`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GenerationPlan {
+    /// Rounded up to a whole number of `2t+1` TripleGen groups.
+    pub triples: usize,
+    /// Shortfall plus the 2 shares each generated triple consumes.
+    pub random_shares: usize,
+}
+
+impl GenerationPlan {
+    /// Nothing to do — both pools already cover the demand.
+    pub fn is_empty(&self) -> bool {
+        self.triples == 0 && self.random_shares == 0
+    }
+}
+
+/// Total demand of `count` secure multiplications (`mul`, and each element of a
+/// `mul_int` batch): one Beaver triple apiece.
+///
+/// The random shares triple *generation* consumes are not counted here —
+/// `run_preprocessing` already adds `2` per generated triple on top of whatever
+/// the pools are asked for.
+pub fn demand_for_mul(count: usize) -> PreprocDemand {
+    PreprocDemand {
+        triples: count,
+        ..Default::default()
+    }
+}
+
+/// Total demand of one `mul_fixed` at fractional precision `f`: one triple for
+/// the product plus a TruncPr mask (`f` PRandBit draws and one PRandInt).
+pub fn demand_for_fpmul(f: usize) -> PreprocDemand {
+    PreprocDemand {
+        triples: 1,
+        prandbit: f,
+        prandint: 1,
+        ..Default::default()
+    }
+}
+
+/// Total demand of one `div_with_const_fixed` at fractional precision `f`: a
+/// TruncPr mask only, since the divisor is public.
+pub fn demand_for_fpdiv_const(f: usize) -> PreprocDemand {
+    PreprocDemand {
+        prandbit: f,
+        prandint: 1,
+        ..Default::default()
+    }
+}
+
+/// Total demand of `count` random-share draws (`rand`, and input masks): one
+/// pooled random share apiece.
+pub fn demand_for_rand(count: usize) -> PreprocDemand {
+    PreprocDemand {
+        random_shares: count,
+        ..Default::default()
+    }
+}
+
+/// Total demand of one `ltz_int` at bit width `k`.
+///
+/// LTZ runs PreMod2m(a, k, m = k-1); its inner PreBitLT needs one PreMulC
+/// bundle at `pk = m`.
+pub fn demand_for_ltz(k: usize) -> PreprocDemand {
+    let (triples, prandbit, prandint) = crate::honeybadger::comparison::ltz_prep_counts(k);
+    let mut d = PreprocDemand {
+        triples,
+        prandbit,
+        prandint,
+        ..Default::default()
+    };
+    d.add_premulc(k - 1, 1);
+    d
+}
+
+/// Total demand of one `eqz_int` at bit width `k`.
+///
+/// EQZ needs no PreMulC bundle; its derived material is the `m` ([r],[r^-1])
+/// pairs KOrCS consumes, where `m = floor(log2(k)) + 1`.
+pub fn demand_for_eqz(k: usize) -> PreprocDemand {
+    let (triples, prandbit, prandint, pairs) = crate::honeybadger::comparison::eqz_prep_counts(k);
+    let mut d = PreprocDemand {
+        triples,
+        prandbit,
+        prandint,
+        ..Default::default()
+    };
+    d.add_rand_inv_pairs(pairs);
+    d
+}
+
+/// Total demand of one `div_fixed` at precision `(k, f)`.
+///
+/// Note `fpdiv_prep_counts` differs in contract from the LTZ/EQZ counterparts:
+/// its `triples`/`random_shares` **already include** what generating FpDiv's two
+/// PreMulC bundles costs. So the bundles are recorded here without re-adding
+/// that cost — only the zero-sharings, which it does not cover.
+pub fn demand_for_fpdiv(k: usize, f: usize) -> PreprocDemand {
+    let (triples, random_shares, prandbit, prandint) =
+        crate::honeybadger::fpdiv::fpdiv_prep_counts(k, f);
+    let pk = k - 1;
+    let mut premulc = BTreeMap::new();
+    premulc.insert(pk, 2);
+    PreprocDemand {
+        triples,
+        random_shares,
+        prandbit,
+        prandint,
+        zero_shares: 2 * pk,
+        rand_inv_pairs: 0,
+        premulc,
+    }
+}
 
 /// Preprocessing material for the HoneyBadgerMPCNode protocol.
 #[derive(Clone, Debug)]
@@ -30,7 +252,7 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     random_shares_small_field: Vec<RobustShare<GoldilocksField>>,
     /// A pool of PreMulC offline-phase bundles (all sized at the same
     /// configured `premulc_pk`), topped up by `run_preprocessing`.
-    premulc_preps: Vec<PreMulCPrep<F>>,
+    premulc_preps: BTreeMap<usize, Vec<PreMulCPrep<F>>>,
     /// A pool of degree-2t zero-sharings (ZeroShaNode output).
     zero_shares: Vec<RobustShare<F>>,
     /// A pool of degree-2t zero-sharings in the Goldilocks field, feeding
@@ -81,49 +303,57 @@ where
             prandbit_shares: Vec::new(),
             prandint_shares: Vec::new(),
             random_shares_small_field: Vec::new(),
-            premulc_preps: Vec::new(),
+            premulc_preps: BTreeMap::new(),
             zero_shares: Vec::new(),
             zero_shares_small_field: Vec::new(),
             rand_inv_pairs: Vec::new(),
         }
     }
 
-    /// Adds one PreMulC offline-phase bundle to the pool.
+    /// Files a freshly generated bundle under its own width.
     pub fn add_premulc_prep(&mut self, prep: PreMulCPrep<F>) {
-        self.premulc_preps.push(prep);
+        self.premulc_preps.entry(prep.pk()).or_default().push(prep);
     }
 
-    /// Takes the next queued PreMulC preprocessing bundle.
-    pub fn take_premulc_prep(&mut self) -> Result<PreMulCPrep<F>, HoneyBadgerError> {
-        if self.premulc_preps.is_empty() {
-            error!("Error trying to take PreMulC prep: there is no enough preprocessing");
-            return Err(HoneyBadgerError::NotEnoughPreprocessing);
-        }
-        Ok(self.premulc_preps.remove(0))
+    /// How many bundles are ready at exactly `pk`.
+    pub fn premulc_len(&self, pk: usize) -> usize {
+        self.premulc_preps.get(&pk).map_or(0, Vec::len)
     }
 
-    /// How many pooled PreMulC bundles are sized at exactly `pk`.
-    pub fn premulc_len_sized(&self, pk: usize) -> usize {
-        self.premulc_preps.iter().filter(|p| p.w.len() == pk).count()
+    /// Bundles ready across every width. Reporting only — a consumer can never
+    /// draw from a bucket other than its own.
+    pub fn premulc_len_total(&self) -> usize {
+        self.premulc_preps.values().map(Vec::len).sum()
     }
 
-    /// Takes the next queued PreMulC bundle whose `pk` is exactly `pk`,
-    /// discarding any stale-sized ones ahead of it.
+    /// Widths currently held, with their counts.
+    pub fn premulc_widths(&self) -> Vec<(usize, usize)> {
+        self.premulc_preps
+            .iter()
+            .map(|(&pk, v)| (pk, v.len()))
+            .collect()
+    }
+
+    /// Takes one bundle of width exactly `pk`.
     ///
-    /// Bundles are generated at whatever `params.premulc_pk` was configured at
-    /// the time, so a pool shared between operations of different widths (an
-    /// `FpDiv(k=16)` leaving pk=15 bundles behind, then an `LTZ(k=8)` wanting
-    /// pk=7) would otherwise silently hand out a mis-sized bundle.
-    pub fn take_premulc_prep_sized(&mut self, pk: usize) -> Result<PreMulCPrep<F>, HoneyBadgerError> {
-        match self.premulc_preps.iter().position(|p| p.w.len() == pk) {
-            Some(idx) => {
-                // Anything queued ahead of it was built for a different width
-                // and can never be consumed at this one.
-                self.premulc_preps.drain(0..idx);
-                Ok(self.premulc_preps.remove(0))
+    /// Bundles of other widths are left untouched. The pool is bucketed by
+    /// width precisely so that a node alternating between (say) FpDiv at pk=15
+    /// and LTZ on an int8 at pk=7 keeps both stocks intact, rather than
+    /// discarding whichever width it is not currently asking for.
+    pub fn take_premulc_prep(&mut self, pk: usize) -> Result<PreMulCPrep<F>, HoneyBadgerError> {
+        match self.premulc_preps.get_mut(&pk) {
+            Some(bucket) if !bucket.is_empty() => {
+                let prep = bucket.remove(0);
+                if bucket.is_empty() {
+                    self.premulc_preps.remove(&pk);
+                }
+                Ok(prep)
             }
-            None => {
-                error!("Error trying to take PreMulC prep of size {pk}: there is no enough preprocessing");
+            _ => {
+                error!(
+                    "Error trying to take a PreMulC bundle of width {pk}: none ready (widths held: {:?})",
+                    self.premulc_widths()
+                );
                 Err(HoneyBadgerError::NotEnoughPreprocessing)
             }
         }
@@ -220,7 +450,7 @@ where
             random_shr_small_field: self.random_shares_small_field.len(),
             prandbit: self.prandbit_shares.len(),
             prandint: self.prandint_shares.len(),
-            premulc: self.premulc_preps.len(),
+            premulc: self.premulc_len_total(),
             zero_shares: self.zero_shares.len(),
             zero_shares_small_field: self.zero_shares_small_field.len(),
             rand_inv_pairs: self.rand_inv_pairs.len(),
@@ -401,6 +631,44 @@ mod test {
         robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple,
     };
     use ark_bn254::Fr;
+
+    #[test]
+    fn to_generate_rounds_triples_and_adds_two_shares_each() {
+        let t = 1;
+        let group = 2 * t + 1; // 3
+        let mut have = PreprocMaterialLength::zero();
+
+        // 7 triples wanted, none held -> round 7 up to 9 (3 groups of 3),
+        // and 9 generated triples pull 2 random shares each.
+        let d = PreprocDemand {
+            triples: 7,
+            ..Default::default()
+        };
+        let plan = d.to_generate(&have, t);
+        assert_eq!(plan.triples, 9);
+        assert_eq!(plan.triples % group, 0);
+        assert_eq!(plan.random_shares, 18);
+
+        // Direct random-share demand is added on top of the per-triple cost.
+        let d = PreprocDemand {
+            triples: 7,
+            random_shares: 4,
+            ..Default::default()
+        };
+        assert_eq!(d.to_generate(&have, t).random_shares, 4 + 18);
+
+        // Already-held material offsets the shortfall.
+        have.beaver_triples = 9;
+        have.random_shr = 4;
+        let plan = d.to_generate(&have, t);
+        assert!(plan.is_empty(), "satisfied demand should generate nothing");
+
+        // Held triples but a random-share gap: no triples, no per-triple cost.
+        have.random_shr = 1;
+        let plan = d.to_generate(&have, t);
+        assert_eq!(plan.triples, 0);
+        assert_eq!(plan.random_shares, 3);
+    }
 
     #[tokio::test]
     async fn test_preproc_material_add_and_take() {
