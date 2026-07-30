@@ -23,7 +23,11 @@ use tokio::sync::{
 use tracing::{info, warn};
 
 const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
-const MAX_PENDING_SESSIONS: usize = 512;
+/// Upper bound on unconsumed AVSS sessions. Callers constructing an `AvssNode`'s
+/// `output_sender`/`output_receiver` pair must size that channel to at least this capacity —
+/// see `AvssNode::process`, which relies on the channel never blocking as long as this cap
+/// hasn't been exceeded.
+pub const MAX_PENDING_SESSIONS: usize = 512;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AvssError {
@@ -47,8 +51,6 @@ pub enum AvssError {
     Network(#[from] stoffelnet::network_utils::NetworkError),
     #[error("share error")]
     ShareError(#[from] crate::common::share::ShareError),
-    #[error("send error")]
-    SendError,
     #[error("Channel closed")]
     Abort,
     #[error("Invalid input: {0}")]
@@ -86,8 +88,12 @@ where
 
 pub fn verify_feldman<F: FftField, G: CurveGroup<ScalarField = F>>(
     share: FeldmanShamirShare<F, G>,
+    expected_id: usize,
 ) -> bool {
     if share.commitments.len() != share.feldmanshare.degree + 1 {
+        return false;
+    }
+    if share.feldmanshare.id != expected_id {
         return false;
     }
     let x = F::from(share.feldmanshare.id as u64);
@@ -433,11 +439,11 @@ where
                 commitments: commitments.clone(),
             };
 
-            shares.push(share);
-        }
+            if !verify_feldman(share.clone(), self.ids[self.id]) {
+                return Err(AvssError::InvalidShare);
+            }
 
-        if !shares.iter().cloned().all(verify_feldman) {
-            return Err(AvssError::InvalidShare);
+            shares.push(share);
         }
 
         {
@@ -452,10 +458,29 @@ where
             map.insert(msg.session_id, Some(shares));
         };
 
-        self.output_sender
-            .send(msg.session_id)
-            .await
-            .map_err(|_| AvssError::SendError)?;
+        // A blocking `.send().await` here would stall this node's entire message-processing
+        // loop (not just AVSS) whenever the output channel fills up — e.g. an attacker sending
+        // sessions the consumer isn't currently draining (it's only active during specific
+        // protocol phases). `try_send` never blocks: on a full channel we drop the
+        // notification and log it. The verified share is already cached above regardless, so
+        // this only risks that one session's notification going unseen (bounded by the channel
+        // capacity, which callers size to `MAX_PENDING_SESSIONS`) rather than an unbounded
+        // node-wide hang.
+        match self.output_sender.try_send(msg.session_id) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    session_id = msg.session_id.as_u128(),
+                    "AVSS output channel full; dropping notification for cached session"
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                warn!(
+                    session_id = msg.session_id.as_u128(),
+                    "AVSS output receiver dropped; discarding notification"
+                );
+            }
+        }
         Ok(())
     }
 }

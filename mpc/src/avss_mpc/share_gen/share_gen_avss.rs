@@ -6,7 +6,7 @@ use crate::{
     common::{
         share::{
             apply_vandermonde,
-            avss::{AvssError, AvssNode},
+            avss::{AvssError, AvssNode, MAX_PENDING_SESSIONS},
             feldman::FeldmanShamirShare,
             make_vandermonde,
         },
@@ -52,7 +52,10 @@ where
         sk_i: F,
         pk_map: Arc<Vec<C>>,
     ) -> Result<Self, RanShaAvssError> {
-        let (avss_sender, avss_receiver) = mpsc::channel(128);
+        // Must be >= MAX_PENDING_SESSIONS: AvssNode::process uses try_send and drops
+        // notifications on a full channel rather than blocking, so a smaller capacity here
+        // would silently lose notifications well before the session cache itself is full.
+        let (avss_sender, avss_receiver) = mpsc::channel(MAX_PENDING_SESSIONS);
         let avss = AvssNode::new(
             id,
             n_parties,

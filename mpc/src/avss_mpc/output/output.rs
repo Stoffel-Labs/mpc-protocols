@@ -107,8 +107,8 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
                 "Payload too short".to_string(),
             ));
         }
-        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap()) as usize;
-        if declared_len != self.input_len {
+        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap());
+        if declared_len != self.input_len as u64 {
             return Err(AvssOutputError::InvalidInput(
                 "Declared input length does not match expected".to_string(),
             ));
@@ -131,12 +131,12 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
                     msg.sender_id
                 )));
             }
-        }
-        if !shares.iter().cloned().all(verify_feldman) {
-            return Err(AvssOutputError::VerificationFailed(format!(
-                "Feldman verification failed for server {}",
-                msg.sender_id
-            )));
+            if !verify_feldman(share.clone(), msg.sender_id + 1) {
+                return Err(AvssOutputError::VerificationFailed(format!(
+                    "Feldman verification failed for share from server {}",
+                    msg.sender_id
+                )));
+            }
         }
 
         let mut already_recvd = false;

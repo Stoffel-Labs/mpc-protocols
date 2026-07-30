@@ -6,7 +6,7 @@ use crate::avss_mpc::{
     deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, MAX_AVSS_BATCH_SIZE,
     MAX_MESSAGE_SIZE,
 };
-use crate::common::share::{avss::verify_feldman, feldman::FeldmanShamirShare};
+use crate::common::share::feldman::FeldmanShamirShare;
 use crate::common::{rbc::RbcError, share::ShareError, RBC};
 use crate::common::{ProtocolSessionId, SecretSharingScheme};
 use ark_ec::CurveGroup;
@@ -383,6 +383,27 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     }
 }
 
+fn verify_share_against_commitments<F: FftField, G: CurveGroup<ScalarField = F>>(
+    share: &FeldmanShamirShare<F, G>,
+    expected_commitments: &[G],
+    expected_id: usize,
+) -> bool {
+    if expected_commitments.len() != share.feldmanshare.degree + 1 {
+        return false;
+    }
+    if share.feldmanshare.id != expected_id {
+        return false;
+    }
+    let x = F::from(share.feldmanshare.id as u64);
+    let mut rhs = G::zero();
+    let mut pow = F::one();
+    for c in expected_commitments {
+        rhs += c.mul(pow);
+        pow *= x;
+    }
+    G::generator().mul(share.feldmanshare.share[0]) == rhs
+}
+
 fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
     storage: &mut MultStorage<F, G>,
     t: usize,
@@ -404,21 +425,16 @@ fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
     let mut a_shares = vec![vec![]; no_of_mul];
     let mut b_shares = vec![vec![]; no_of_mul];
 
-    for (_, (a, b)) in storage.received_shares.iter() {
+    for (sender_id, (a, b)) in storage.received_shares.iter() {
         if a.len() != no_of_mul || b.len() != no_of_mul {
             warn!("Did not receive the right number of shares to reconstruct");
             continue;
         }
-        let verification_batch: Vec<_> = a
-            .iter()
-            .zip(expected_a)
-            .chain(b.iter().zip(expected_b))
-            .map(|(share, commitments)| FeldmanShamirShare {
-                feldmanshare: share.feldmanshare.clone(),
-                commitments: commitments.clone(),
-            })
-            .collect();
-        if !verification_batch.into_iter().all(verify_feldman) {
+        let valid = (0..no_of_mul).all(|i| {
+            verify_share_against_commitments(&a[i], &expected_a[i], *sender_id + 1)
+                && verify_share_against_commitments(&b[i], &expected_b[i], *sender_id + 1)
+        });
+        if !valid {
             continue;
         }
 

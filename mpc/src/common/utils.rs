@@ -8,10 +8,11 @@ pub fn deser_bounded_vec<T: CanonicalDeserialize>(
         return Err(SerializationError::InvalidData);
     }
     let (head, tail) = r.split_at(8);
-    let len = u64::from_le_bytes(head.try_into().unwrap()) as usize;
-    if len > max {
+    let len = u64::from_le_bytes(head.try_into().unwrap());
+    if len > max as u64 {
         return Err(SerializationError::InvalidData);
     }
+    let len = len as usize;
     *r = tail;
     let mut values = Vec::new();
     for _ in 0..len {

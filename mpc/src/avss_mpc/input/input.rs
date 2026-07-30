@@ -418,9 +418,9 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                 "Payload too short".to_string(),
             ));
         }
-        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap()) as usize;
+        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap());
         let input_len = self.client_data.lock().await.inputs.len();
-        if declared_len != input_len {
+        if declared_len != input_len as u64 {
             return Err(AvssInputError::InvalidInput(
                 "Mismatch in input and share length".to_string(),
             ));
@@ -446,12 +446,12 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                     msg.sender_id
                 )));
             }
-        }
-        if !shares.iter().cloned().all(verify_feldman) {
-            return Err(AvssInputError::VerificationFailed(format!(
-                "Feldman verification failed for server {}",
-                msg.sender_id
-            )));
+            if !verify_feldman(share.clone(), msg.sender_id + 1) {
+                return Err(AvssInputError::VerificationFailed(format!(
+                    "Feldman verification failed for share from server {}",
+                    msg.sender_id
+                )));
+            }
         }
 
         // happens if less than `n` messages were sufficient for reconstruction

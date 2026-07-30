@@ -4,7 +4,10 @@ use crate::{
         AvssSessionId, AvssWrappedMessage,
     },
     common::{
-        share::{avss::AvssNode, feldman::FeldmanShamirShare},
+        share::{
+            avss::{AvssNode, MAX_PENDING_SESSIONS},
+            feldman::FeldmanShamirShare,
+        },
         ProtocolSessionId, RBC,
     },
 };
@@ -44,7 +47,10 @@ where
         sk_i: F,
         pk_map: Arc<Vec<C>>,
     ) -> Result<Self, TripleGenError> {
-        let (tx, rx) = mpsc::channel(256);
+        // Must be >= MAX_PENDING_SESSIONS: AvssNode::process uses try_send and drops
+        // notifications on a full channel rather than blocking, so a smaller capacity here
+        // would silently lose notifications well before the session cache itself is full.
+        let (tx, rx) = mpsc::channel(MAX_PENDING_SESSIONS);
         let avss = AvssNode::new(
             id,
             n_parties,

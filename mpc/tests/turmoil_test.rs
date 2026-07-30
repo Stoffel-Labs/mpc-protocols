@@ -261,7 +261,16 @@ fn ransha_late_message_recreates_cleared_store_turmoil() {
                 .await
                 .unwrap();
             let resurrected = resurrected.lock().await;
-            if !resurrected.initial_shares.contains_key(&1) {
+            // After the fix for state-poisoning, share messages that arrive before local
+            // init_batch has run are queued in pending_share_messages rather than being
+            // written directly to initial_shares. A late message after store clear is
+            // not dropped — it waits in the pending queue for a future init_batch.
+            let found = resurrected.initial_shares.contains_key(&1)
+                || resurrected
+                    .pending_share_messages
+                    .iter()
+                    .any(|m| m.sender_id == 1);
+            if !found {
                 let _ = tx.send(Err(
                     "late RanSha message did not recreate cleared session state".to_string(),
                 ));
@@ -2286,7 +2295,7 @@ fn mul_e2e_without_preprocessing_turmoil() {
         111,
         0,
         0,
-        0,
+        28,
         0,
         Duration::from_secs(30),
         vec![],
@@ -2478,7 +2487,7 @@ fn fpmul_e2e_with_preprocessing(
     let n_random_shares = m; // no of random bits
     let n_prandbit = m;
     let n_prandint = 1;
-    let bound_l = 8;
+    let bound_l = 28;
     let security_k = 4;
     let precision = FixedPointPrecision::new(k, m);
 
@@ -3022,7 +3031,7 @@ fn ransha_e2e_turmoil_with_hold(
         111,
         0,
         0,
-        0,
+        28,
         0,
         Duration::from_secs(30),
         vec![],

@@ -862,10 +862,11 @@ where
         return Err(SerializationError::InvalidData);
     }
     let (head, tail) = r.split_at(8);
-    let len = u64::from_le_bytes(head.try_into().unwrap()) as usize;
-    if len > max_outer {
+    let len = u64::from_le_bytes(head.try_into().unwrap());
+    if len > max_outer as u64 {
         return Err(SerializationError::InvalidData);
     }
+    let len = len as usize;
     *r = tail;
     (0..len)
         .map(|_| {
