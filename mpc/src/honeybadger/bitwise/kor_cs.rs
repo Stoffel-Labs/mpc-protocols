@@ -49,10 +49,12 @@ pub struct KOrCSPrep<F: FftField> {
 struct KOrCSStore<F: PrimeField> {
     state: PhaseState,
     k: usize,
-    n_chunks: usize,
+    /// Padded length of the opened vector — `pk`, a multiple of `t+1`.
+    pk: usize,
     r_shares: Vec<RobustShare<F>>,
     alpha: Vec<F>,
-    open: HashMap<u8, Vec<F>>,
+    /// All `pk` opened `d_j` values, delivered as one combined batch-recon reveal
+    open: Option<Vec<F>>,
     output_sender: Option<tokio::sync::oneshot::Sender<RobustShare<F>>>,
     output_receiver: Option<tokio::sync::oneshot::Receiver<RobustShare<F>>>,
 }
@@ -63,10 +65,10 @@ impl<F: PrimeField> KOrCSStore<F> {
         Self {
             state: PhaseState::Waiting,
             k: 0,
-            n_chunks: 0,
+            pk: 0,
             r_shares: Vec::new(),
             alpha: Vec::new(),
-            open: HashMap::new(),
+            open: None,
             output_sender: Some(tx),
             output_receiver: Some(rx),
         }
@@ -142,25 +144,19 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> KOrCSNode<F, R> {
                 SessionId::pack_slot(id.exec_id(), 0, 0),
                 id.instance_id(),
             );
-            let chunk_idx = id.sub_id();
-            self.handle_chunk(parent, chunk_idx, vals).await?;
+            self.handle_open(parent, vals).await?;
         }
         Ok(())
     }
 
-    async fn handle_chunk(
-        &mut self,
-        parent: SessionId,
-        chunk_idx: u8,
-        vals: Vec<F>,
-    ) -> Result<(), KOrCSError> {
+    async fn handle_open(&mut self, parent: SessionId, vals: Vec<F>) -> Result<(), KOrCSError> {
         let store = self.get_or_create_store(parent).await?;
         {
             let mut s = store.lock().await;
             if s.state == PhaseState::Finished {
                 return Ok(());
             }
-            s.open.insert(chunk_idx, vals);
+            s.open = Some(vals);
         }
         self.try_finalize(parent, store).await
     }
@@ -170,7 +166,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> KOrCSNode<F, R> {
         session: SessionId,
         store_mutex: Arc<Mutex<KOrCSStore<F>>>,
     ) -> Result<(), KOrCSError> {
-        let (r_shares, alpha, open_map, n_chunks, k) = {
+        let (r_shares, alpha, opened, k) = {
             let s = store_mutex.lock().await;
             if s.state == PhaseState::Finished {
                 return Ok(());
@@ -178,26 +174,17 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> KOrCSNode<F, R> {
             if s.r_shares.is_empty() {
                 return Ok(());
             }
-            if s.open.len() < s.n_chunks {
+            let Some(opened) = s.open.clone() else {
                 return Ok(());
+            };
+            if opened.len() < s.k {
+                return Err(KOrCSError::Abort);
             }
-            (
-                s.r_shares.clone(),
-                s.alpha.clone(),
-                s.open.clone(),
-                s.n_chunks,
-                s.k,
-            )
+            (s.r_shares.clone(), s.alpha.clone(), opened, s.k)
         };
 
-        // Assemble opened c_j values in chunk order.
-        let mut c_vals: Vec<F> = Vec::new();
-        for i in 0..n_chunks as u8 {
-            let chunk = open_map.get(&i).ok_or(KOrCSError::Abort)?;
-            c_vals.extend_from_slice(chunk);
-        }
-        // Trim to k (padded chunks may have extra values).
-        let c_vals = &c_vals[..k];
+        // Trim the padding added to reach a whole number of (t+1) chunks.
+        let c_vals = &opened[..k];
 
         // Prefix products D_j = c_1 · c_2 · … · c_j.
         let mut prefix = Vec::with_capacity(k);
@@ -379,7 +366,6 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> KOrCSNode<F, R> {
         while padded_d.len() < pk {
             padded_d.push(one_share.clone());
         }
-        let n_chunks = pk / (self.t + 1);
 
         // Setup per-session store before initiating batch recon.
         let alpha = Self::lagrange_coeffs(k);
@@ -387,7 +373,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> KOrCSNode<F, R> {
             let store = self.get_or_create_store(session).await?;
             let mut s = store.lock().await;
             s.k = k;
-            s.n_chunks = n_chunks;
+            s.pk = pk;
             s.r_shares = r_inv_shares; // D_j · [r_j^{-1}] in try_finalize
             s.alpha = alpha;
         }
@@ -397,21 +383,19 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> KOrCSNode<F, R> {
             .calling_protocol()
             .ok_or(KOrCSError::SessionIdError(session))?;
 
-        for (i, chunk) in padded_d.chunks(self.t + 1).enumerate() {
-            let batch_session = SessionId::new(
-                calling_proto,
-                SessionId::pack_slot(session.exec_id(), i as u8, 0),
-                session.instance_id(),
-            );
-            self.batch_recon
-                .init_batch_reconstruct(chunk, batch_session, Arc::clone(&network))
-                .await?;
-        }
+        let batch_session = SessionId::new(
+            calling_proto,
+            SessionId::pack_slot(session.exec_id(), 0, 0),
+            session.instance_id(),
+        );
+        self.batch_recon
+            .init_batch_reconstruct_many(&padded_d, batch_session, Arc::clone(&network))
+            .await?;
         {
             let store = self.get_or_create_store(session).await?;
             let ready = {
                 let s = store.lock().await;
-                !s.r_shares.is_empty() && s.open.len() >= s.n_chunks
+                !s.r_shares.is_empty() && s.open.is_some()
             };
             if ready {
                 self.try_finalize(session, store).await?;
