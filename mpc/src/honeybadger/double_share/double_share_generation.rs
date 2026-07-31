@@ -1,3 +1,4 @@
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{
         share::{shamir::NonRobustShare, ShareError},
@@ -13,7 +14,8 @@ use ark_ff::FftField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use itertools::izip;
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::{
     sync::Mutex,
@@ -43,10 +45,11 @@ where
     /// Threshold for the corrupted parties.
     pub threshold: usize,
     /// Storage of the party.
-    pub storage: Arc<Mutex<BTreeMap<SessionId, (usize, Arc<Mutex<DouShaStorage<F>>>)>>>,
+    pub storage:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<DouShaStorage<F>>>)>>>,
 }
 
-pub static MAX_DOUSHA_SESSIONS: usize = 256;
+const MAX_DOUSHA_SESSIONS: usize = 256;
 
 impl<F> DoubleShareNode<F>
 where
@@ -63,7 +66,7 @@ where
             id,
             n_parties,
             threshold,
-            storage: Arc::new(Mutex::new(BTreeMap::new())),
+            storage: Arc::new(Mutex::new(SessionStore::with_default_cap())),
         }
     }
 
@@ -73,37 +76,25 @@ where
         &mut self,
         session_id: SessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<DouShaStorage<F>>>, DouShaError> {
-        let mut storage = self.storage.lock().await;
-
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_DOUSHA_SESSIONS {
-        //         warn!("DouSha session limit reached");
-        //         return Err(DouShaError::LimitError);
-        //     }
-        //     let per_peer_limit = MAX_DOUSHA_SESSIONS / self.n_parties;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("DouSha per-peer session limit reached");
-        //         return Err(DouShaError::LimitError);
-        //     }
-        // }
-        Ok(storage
-            .entry(session_id)
-            .or_insert((
-                initiator_id,
-                Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))),
-            ))
-            .1
-            .clone())
+    ) -> Option<Arc<Mutex<DouShaStorage<F>>>> {
+        match self.storage.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_DOUSHA_SESSIONS,
+            MAX_DOUSHA_SESSIONS / self.n_parties,
+            || Arc::new(Mutex::new(DouShaStorage::empty(self.n_parties))),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("DouSha session limit reached");
+                None
+            }
+        }
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.storage.lock().await;
-        store.remove(&session_id).is_some()
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {
@@ -118,7 +109,7 @@ where
         let output_receiver = {
             let storage = self.storage.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(DouShaError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -207,7 +198,10 @@ where
         }
 
         // Update the state of the protocol to Initialized.
-        let storage_access = self.get_or_create_store(session_id, self.id).await?;
+        let storage_access = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let pending = {
             let mut storage = storage_access.lock().await;
             storage.batch_size = batch_size;
@@ -215,11 +209,19 @@ where
             std::mem::take(&mut storage.pending_messages)
         };
 
-        // Replay messages that arrived before local initialization.
+        // Replay messages that arrived before local initialization. A parked message that
+        // fails validation on replay is the sender's fault, not ours — log and drop it. A
+        // blanket `?` here would let a single Byzantine peer abort our own initialization by
+        // parking one oversized batch before we started.
         for msg in pending {
-            self.receive_double_shares_handler(msg).await?;
+            let sender_id = msg.sender_id;
+            if let Err(e) = self.receive_double_shares_handler(msg).await {
+                warn!(
+                    session_id = session_id.as_u128(),
+                    "dropping invalid pre-init double share from party {sender_id}: {e:?}"
+                );
+            }
         }
-
         Ok(())
     }
 
@@ -230,14 +232,37 @@ where
         // Get (or create) the session store before any deserialization so we can
         // queue the raw message when local initialization hasn't run yet.
         // session_id and sender_id are Copy so recv_message is not consumed here.
-        let binding = self
+        let binding = match self
             .get_or_create_store(recv_message.session_id, recv_message.sender_id)
-            .await?;
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
         {
             let mut dousha_storage = binding.lock().await;
             if dousha_storage.state == ProtocolState::NotInitialized {
                 // batch_size is not yet locally known; park the message and return.
                 // init_batch will drain and replay these once the trusted value is set.
+                //
+                // Bound the queue at one parked message per peer. The length check is not
+                // redundant with the per-sender check: `sender_id` is only validated against
+                // `n_parties` further down, after this point, so a peer forging distinct ids
+                // could otherwise grow this vector without limit before ever being rejected.
+                if dousha_storage.pending_messages.len() >= self.n_parties
+                    || dousha_storage
+                        .pending_messages
+                        .iter()
+                        .any(|m| m.sender_id == recv_message.sender_id)
+                {
+                    warn!(
+                        session_id = recv_message.session_id.as_u128(),
+                        "pending double-share queue full or already holds a message from party {}; dropping",
+                        recv_message.sender_id
+                    );
+                    return Ok(());
+                }
                 dousha_storage.pending_messages.push(recv_message);
                 return Ok(());
             }

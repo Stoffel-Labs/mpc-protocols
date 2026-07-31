@@ -1,3 +1,4 @@
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     avss_mpc::{
         share_gen::{RanShaAvssError, RanShaAvssStore},
@@ -16,7 +17,8 @@ use crate::{
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_std::rand::Rng;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::{
     sync::{
@@ -25,19 +27,21 @@ use tokio::{
     },
     time::{timeout, Duration},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone, Debug)]
 pub struct RanShaAvssNode<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub store: Arc<Mutex<HashMap<AvssSessionId, (usize, Arc<Mutex<RanShaAvssStore<F, G>>>)>>>,
+    pub store: Arc<
+        Mutex<SessionStore<AvssSessionId, (usize, Instant, Arc<Mutex<RanShaAvssStore<F, G>>>)>>,
+    >,
     pub avss: AvssNode<F, R, G, AvssSessionId>,
     pub avss_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
 
-// pub static MAX_RANSHA_AVSS_SESSIONS: usize = 256;
+const MAX_RANSHA_AVSS_SESSIONS: usize = 256;
 
 impl<F, R, C> RanShaAvssNode<F, R, C>
 where
@@ -71,7 +75,7 @@ where
             id,
             n_parties,
             threshold,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             avss,
             avss_output: Arc::new(Mutex::new(avss_receiver)),
         })
@@ -81,34 +85,36 @@ where
         &mut self,
         session_id: AvssSessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<RanShaAvssStore<F, C>>>, RanShaAvssError> {
-        let mut storage = self.store.lock().await;
+    ) -> Option<Arc<Mutex<RanShaAvssStore<F, C>>>> {
+        match self.store.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_RANSHA_AVSS_SESSIONS,
+            MAX_RANSHA_AVSS_SESSIONS / self.n_parties,
+            || Arc::new(Mutex::new(RanShaAvssStore::empty(self.n_parties))),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("RanShaAvss session limit reached");
+                None
+            }
+        }
+    }
 
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_RANSHA_AVSS_SESSIONS {
-        //         warn!("RanShaAvss session limit reached");
-        //         return Err(RanShaAvssError::LimitError);
-        //     }
-        //     let per_peer_limit = MAX_RANSHA_AVSS_SESSIONS / self.n_parties;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("RanShaAvss per-peer session limit reached");
-        //         return Err(RanShaAvssError::LimitError);
-        //     }
-        // }
+    /// Retires this session and clears every per-dealer AVSS sub-session it created.
+    pub async fn clear_store(&self, session_id: AvssSessionId) -> bool {
+        for dealer in 0..self.n_parties {
+            let avss_sessionid = AvssSessionId::new(
+                session_id.calling_protocol().unwrap(),
+                AvssSessionId::pack_slot(session_id.exec_id(), dealer as u8, session_id.round_id()),
+                session_id.instance_id(),
+            );
+            self.avss.clear_session(avss_sessionid).await;
+        }
 
-        Ok(storage
-            .entry(session_id)
-            .or_insert((
-                initiator_id,
-                Arc::new(Mutex::new(RanShaAvssStore::empty(self.n_parties))),
-            ))
-            .1
-            .clone())
+        let mut store = self.store.lock().await;
+        store.retire(session_id)
     }
 
     pub async fn wait_for_result(
@@ -119,7 +125,7 @@ where
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(RanShaAvssError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -190,10 +196,11 @@ where
                 && id.round_id() == session_id.round_id()
                 && id.instance_id() == session_id.instance_id()
             {
-                let mut store = self.avss.shares.lock().await;
-                let avss_share = store.remove(&id).unwrap().unwrap();
-                drop(store);
-                let binding = self.get_or_create_store(session_id, self.id).await?;
+                let avss_share = self.avss.take_share(id).await.unwrap().unwrap();
+                let binding = match self.get_or_create_store(session_id, self.id).await {
+                    Some(s) => s,
+                    None => return Ok(()),
+                };
                 let mut ransha_storage = binding.lock().await;
                 let sender_id = id.sub_id();
                 if usize::from(sender_id) >= self.n_parties {
@@ -305,7 +312,10 @@ where
         }
 
         // Store results
-        let bind_store = self.get_or_create_store(session_id, self.id).await?;
+        let bind_store = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut store = bind_store.lock().await;
 
         store.computed_r_shares = computed;

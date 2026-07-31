@@ -1,5 +1,6 @@
 use crate::common::{
     rbc::RbcError,
+    session_store::{session_ttl, RetiredSet, DEFAULT_RETIRED_CAP},
     share::{feldman::FeldmanShamirShare, shamir::Shamirshare},
     ProtocolSessionId, RbcWrapFn, RBC,
 };
@@ -14,7 +15,7 @@ use chacha20poly1305::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
     mpsc::{self, Receiver, Sender},
@@ -28,6 +29,19 @@ const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 /// see `AvssNode::process`, which relies on the channel never blocking as long as this cap
 /// hasn't been exceeded.
 pub const MAX_PENDING_SESSIONS: usize = 512;
+
+/// Upper bound on the number of secrets a single AVSS dealing may carry.
+///
+/// `AvssMessage::public_commitments` is otherwise only constrained relative to the per-party
+/// ciphertext count, never absolutely, and each entry costs `t + 1` point decompressions to
+/// decode — so without this a peer could turn one wire-sized message into an arbitrary number
+/// of elliptic-curve square roots.
+///
+/// This is the primitive's own limit. Consumers that chunk their dealings (see
+/// `avss_mpc::MAX_AVSS_BATCH_SIZE`) must keep their chunk size at or below it; that
+/// relationship is enforced by a static assertion at the consumer, so the two cannot drift
+/// apart into silently-rejected honest dealings.
+pub const MAX_DEAL_BATCH: usize = 128;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AvssError {
@@ -165,7 +179,11 @@ where
     pub t: usize,
     pub sk_i: F,
     pub pk_map: Arc<Vec<G>>,
-    pub shares: Arc<Mutex<BTreeMap<Id, Option<Vec<FeldmanShamirShare<F, G>>>>>>,
+    pub shares: Arc<Mutex<BTreeMap<Id, (Instant, Option<Vec<FeldmanShamirShare<F, G>>>)>>>,
+    /// Tombstones for `shares` entries already consumed (or otherwise cleared),
+    /// so a late/duplicate dealer message can't silently resurrect a session
+    /// nobody is waiting on anymore.
+    retired: Arc<Mutex<RetiredSet<Id>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<Id>>>,
     pub output_sender: Sender<Id>,
@@ -230,11 +248,78 @@ where
             sk_i,
             pk_map,
             shares: Arc::new(Mutex::new(BTreeMap::new())),
+            retired: Arc::new(Mutex::new(RetiredSet::new(DEFAULT_RETIRED_CAP))),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             output_sender,
             wrapper: avss_wrapper,
         })
+    }
+
+    /// Clears the dealer share mailbox entry and the underlying RBC broadcast
+    /// session for a single AVSS instance. Callers that derive one `Id` per
+    /// dealer must call this once per dealer to fully release a round.
+    pub async fn clear_session(&self, id: Id) {
+        self.rbc.clear_session(id).await;
+        self.shares.lock().await.remove(&id);
+        self.retired.lock().await.record(id);
+    }
+
+    /// Removes and returns a dealer's share, tombstoning the id so a late
+    /// duplicate of the same dealer message can't resurrect it after the
+    /// consumer has already moved on.
+    pub async fn take_share(&self, id: Id) -> Option<Option<Vec<FeldmanShamirShare<F, G>>>> {
+        let value = self.shares.lock().await.remove(&id).map(|(_, v)| v);
+        self.retired.lock().await.record(id);
+        value
+    }
+
+    /// Returns `true` if `map` has room for one more entry. Entries only leave this map via
+    /// `take_share`/`clear_session`, both driven by the consuming protocol's success path — a
+    /// dealer message for a session no local caller ever finishes waiting on (timed out, or
+    /// never legitimately started) would otherwise squat here forever. If `map` is full, evicts
+    /// anything idle past the global session TTL first to reclaim room from exactly that kind
+    /// of entry before giving up.
+    async fn admit(
+        &self,
+        map: &mut BTreeMap<Id, (Instant, Option<Vec<FeldmanShamirShare<F, G>>>)>,
+        session_id: Id,
+    ) -> bool {
+        let over_capacity = |map: &BTreeMap<
+            Id,
+            (Instant, Option<Vec<FeldmanShamirShare<F, G>>>),
+        >| { map.len() >= MAX_PENDING_SESSIONS };
+        // Per-peer quota, mirroring `SessionStore::get_or_admit`. Without it the global cap is
+        // first-come-first-served, so a single dealer can occupy all `MAX_PENDING_SESSIONS`
+        // slots and starve every honest dealer.
+        //
+        // Attribution follows the same convention as the RBC layer : charge the
+        // dealer named by `session_id`, not whichever peer happened to deliver the message.
+        // Relayed messages for an honest dealer's broadcast would otherwise be billed to the
+        // relay. `drain_rbc_output` has already rejected any message whose inner `session_id`
+        // disagrees with the RBC session it arrived on, and `verify_feldman` above has rejected
+        // malformed dealings, so a slot is only ever consumed by a well-formed dealing.
+        let dealer = session_id.dealer_id();
+        let per_peer_cap = (MAX_PENDING_SESSIONS / self.n_parties).max(1);
+        let peer_count = |map: &BTreeMap<Id, (Instant, Option<Vec<FeldmanShamirShare<F, G>>>)>| {
+            map.keys().filter(|id| id.dealer_id() == dealer).count()
+        };
+
+        if over_capacity(map) || peer_count(map) >= per_peer_cap {
+            let stale: Vec<Id> = map
+                .iter()
+                .filter(|(_, (inserted_at, _))| inserted_at.elapsed() >= session_ttl())
+                .map(|(id, _)| *id)
+                .collect();
+            if !stale.is_empty() {
+                let mut retired = self.retired.lock().await;
+                for id in stale {
+                    map.remove(&id);
+                    retired.record(id);
+                }
+            }
+        }
+        !over_capacity(map) && peer_count(map) < per_peer_cap
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), AvssError> {
@@ -370,11 +455,32 @@ where
             }
         };
         {
-            let map = self.shares.lock().await;
+            let mut map = self.shares.lock().await;
             if map.contains_key(&msg.session_id) {
                 return Ok(()); // ignore duplicates
             }
+            // Reject an over-quota dealer here, before the decryption and curve arithmetic
+            // below. Everything from `dealer_pk` onwards costs real work — `t + 1` point
+            // decompressions per commitment plus a Feldman verification per share — and
+            // without this the quota only limited what an attacker could *cache*, not what
+            // it could make us *compute*.
+            //
+            // `admit` does not insert, so this is purely an early-out; the authoritative
+            // check still runs after verification, because the lock is released in between
+            // and another task may take the last slot meanwhile.
+            if !self.admit(&mut map, msg.session_id).await {
+                warn!(
+                    session_id = msg.session_id.as_u128(),
+                    "AVSS share cache full or dealer {} over its per-peer quota; rejecting before verification",
+                    msg.session_id.dealer_id()
+                );
+                self.rbc.clear_session(msg.session_id).await;
+                return Err(AvssError::LimitExceeded);
+            }
         };
+        if self.retired.lock().await.contains(&msg.session_id) {
+            return Ok(()); // already consumed — drop the straggler instead of resurrecting it
+        }
 
         let pk_d: G = CanonicalDeserialize::deserialize_compressed(&msg.dealer_pk[..])?;
         if pk_d.is_zero() {
@@ -398,6 +504,12 @@ where
         let ss = pk_d.mul(self.sk_i);
         let key = kdf_from_point(&ss);
 
+        // Bound the batch before decoding it — see `MAX_DEAL_BATCH`. Anything larger is
+        // malformed by construction, since every consumer chunks its dealings at or below
+        // this limit.
+        if msg.public_commitments.len() > MAX_DEAL_BATCH {
+            return Err(AvssError::InvalidCommitmentLength);
+        }
         if msg
             .public_commitments
             .iter()
@@ -448,14 +560,21 @@ where
 
         {
             let mut map = self.shares.lock().await;
-            if map.len() >= MAX_PENDING_SESSIONS {
+            if !self.admit(&mut map, msg.session_id).await {
                 warn!(
-                    "AVSS share cache full; dropping session {:?}",
+                    "AVSS share cache full or dealer {} over its per-peer quota; dropping session {:?}",
+                    msg.session_id.dealer_id(),
                     msg.session_id
                 );
+                // The RBC layer already completed and is holding the raw payload for
+                // this session in its own store. Since this layer is rejecting it,
+                // nobody will ever call `take_share`/`clear_session` to release that
+                // memory, so drop it here instead of leaving it for RBC's own (much
+                // larger) cap/TTL to eventually reclaim.
+                self.rbc.clear_session(msg.session_id).await;
                 return Err(AvssError::LimitExceeded);
             }
-            map.insert(msg.session_id, Some(shares));
+            map.insert(msg.session_id, (Instant::now(), Some(shares)));
         };
 
         // A blocking `.send().await` here would stall this node's entire message-processing

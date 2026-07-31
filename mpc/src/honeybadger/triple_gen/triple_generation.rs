@@ -1,4 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use crate::common::session_store::SessionStore;
+use std::sync::Arc;
+use std::time::Instant;
 
 use ark_ff::FftField;
 use itertools::izip;
@@ -42,13 +44,14 @@ where
     /// The upper bound of corrupt parties participating in the triple generation protocol.
     pub threshold: usize,
     /// Internal storage of the node.
-    pub storage: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<TripleGenStorage<F>>>)>>>,
+    pub storage:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<TripleGenStorage<F>>>)>>>,
     /// Batch reconstruction node used in the triple generation
     pub batch_recon_node: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-// pub static MAX_TRIPLE_GEN_SESSIONS: usize = 1024;
+const MAX_TRIPLE_GEN_SESSIONS: usize = 2048;
 
 impl<F> TripleGenNode<F>
 where
@@ -63,7 +66,7 @@ where
             id,
             n_parties,
             threshold,
-            storage: Arc::new(Mutex::new(HashMap::new())),
+            storage: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             batch_recon_node,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
         })
@@ -75,37 +78,23 @@ where
         &mut self,
         session_id: SessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<TripleGenStorage<F>>>, TripleGenError> {
-        let mut storage = self.storage.lock().await;
-
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_TRIPLE_GEN_SESSIONS {
-        //         return Err(TripleGenError::LimitError);
-        //     }
-        //     let per_peer_limit = MAX_TRIPLE_GEN_SESSIONS / self.n_parties;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         return Err(TripleGenError::LimitError);
-        //     }
-        // }
-
-        Ok(storage
-            .entry(session_id)
-            .or_insert((
+    ) -> Option<Arc<Mutex<TripleGenStorage<F>>>> {
+        self.storage
+            .lock()
+            .await
+            .get_or_admit(
+                session_id,
                 initiator_id,
-                Arc::new(Mutex::new(TripleGenStorage::empty())),
-            ))
-            .1
-            .clone())
+                MAX_TRIPLE_GEN_SESSIONS,
+                MAX_TRIPLE_GEN_SESSIONS / self.n_parties,
+                || Arc::new(Mutex::new(TripleGenStorage::empty())),
+            )
+            .ok()
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         self.batch_recon_node.clear_store(session_id).await;
         let mut store = self.storage.lock().await;
-        store.remove(&session_id).is_some()
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {
@@ -143,7 +132,7 @@ where
         let output_receiver = {
             let storage = self.storage.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(TripleGenError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -271,7 +260,10 @@ where
 
         // We mark the protocol as initialized and store the input shares.
         {
-            let storage_bind = self.get_or_create_store(session_id, self.id).await?;
+            let storage_bind = match self.get_or_create_store(session_id, self.id).await {
+                Some(s) => s,
+                None => return Ok(()),
+            };
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.randousha_pairs = randousha_pairs;
@@ -279,7 +271,10 @@ where
             storage.random_shares_b_input = random_shares_b;
         }
 
-        let storage_bind = self.get_or_create_store(session_id, self.id).await?;
+        let storage_bind = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
 
         if self
             .try_finalize_triple_gen(session_id, storage_bind.clone())
@@ -340,7 +335,10 @@ where
         }
 
         {
-            let storage_bind = self.get_or_create_store(session_id, self.id).await?;
+            let storage_bind = match self.get_or_create_store(session_id, self.id).await {
+                Some(s) => s,
+                None => return Ok(()),
+            };
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.randousha_pairs = randousha_pairs;
@@ -348,7 +346,10 @@ where
             storage.random_shares_b_input = random_shares_b;
         }
 
-        let storage_bind = self.get_or_create_store(session_id, self.id).await?;
+        let storage_bind = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
 
         if self
             .try_finalize_triple_gen(session_id, storage_bind.clone())
@@ -375,7 +376,10 @@ where
         }
 
         // SHOULD ALSO NEVER FAIL, since comes from batch reconstruction
-        let storage_bind = self.get_or_create_store(session_id, self.id).await?;
+        let storage_bind = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let expected_len = {
             let storage = storage_bind.lock().await;
             storage.randousha_pairs.len()

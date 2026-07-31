@@ -1,3 +1,4 @@
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     avss_mpc::{
         triple_gen::{BeaverTriple, TripleGenError, TripleGenStore},
@@ -14,13 +15,14 @@ use crate::{
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_std::rand::Rng;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
     mpsc::{self},
     Mutex,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone, Debug)]
 pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
@@ -29,10 +31,11 @@ pub struct TripleGenNode<F: FftField, R: RBC, C: CurveGroup<ScalarField = F>> {
     pub threshold: usize,
     pub avss: AvssNode<F, R, C, AvssSessionId>,
     pub avss_output: Arc<Mutex<mpsc::Receiver<AvssSessionId>>>,
-    pub store: Arc<Mutex<HashMap<AvssSessionId, (usize, Arc<Mutex<TripleGenStore<F, C>>>)>>>,
+    pub store:
+        Arc<Mutex<SessionStore<AvssSessionId, (usize, Instant, Arc<Mutex<TripleGenStore<F, C>>>)>>>,
 }
 
-// pub static MAX_AVSS_TRIPLE_GEN_SESSIONS: usize = 256;
+const MAX_AVSS_TRIPLE_GEN_SESSIONS: usize = 256;
 
 impl<F, R, C> TripleGenNode<F, R, C>
 where
@@ -69,7 +72,7 @@ where
             threshold,
             avss,
             avss_output: Arc::new(Mutex::new(rx)),
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
         })
     }
 
@@ -77,31 +80,37 @@ where
         &mut self,
         sid: AvssSessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<TripleGenStore<F, C>>>, TripleGenError> {
-        let mut map = self.store.lock().await;
+    ) -> Option<Arc<Mutex<TripleGenStore<F, C>>>> {
+        match self.store.lock().await.get_or_admit(
+            sid,
+            initiator_id,
+            MAX_AVSS_TRIPLE_GEN_SESSIONS,
+            MAX_AVSS_TRIPLE_GEN_SESSIONS / self.n_parties,
+            || Arc::new(Mutex::new(TripleGenStore::empty(2 * self.threshold + 1))),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("AVSS TripleGen session limit reached");
+                None
+            }
+        }
+    }
 
-        // TODO: restore session limits
-        // if !map.contains_key(&sid) {
-        //     if map.len() >= MAX_AVSS_TRIPLE_GEN_SESSIONS {
-        //         warn!("AVSS TripleGen session limit reached");
-        //         return Err(TripleGenError::LimitError);
-        //     }
-        //     let per_peer_limit = MAX_AVSS_TRIPLE_GEN_SESSIONS / self.n_parties;
-        //     let peer_count = map.values().filter(|(id, _)| *id == initiator_id).count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("AVSS TripleGen per-peer session limit reached");
-        //         return Err(TripleGenError::LimitError);
-        //     }
-        // }
+    /// Retires this session and clears every per-dealer AVSS sub-session it created.
+    pub async fn clear_store(&self, session_id: AvssSessionId) -> bool {
+        let m = 2 * self.threshold + 1;
+        for dealer in 0..m {
+            let avss_sid = AvssSessionId::new(
+                session_id.calling_protocol().unwrap(),
+                AvssSessionId::pack_slot(session_id.exec_id(), dealer as u8, session_id.round_id()),
+                session_id.instance_id(),
+            );
+            self.avss.clear_session(avss_sid).await;
+        }
 
-        Ok(map
-            .entry(sid)
-            .or_insert((
-                initiator_id,
-                Arc::new(Mutex::new(TripleGenStore::empty(2 * self.threshold + 1))),
-            ))
-            .1
-            .clone())
+        let mut store = self.store.lock().await;
+        store.retire(session_id)
     }
 
     pub async fn gen_triple<N, G>(
@@ -151,7 +160,10 @@ where
         }
 
         // Create store once
-        let store_ref = self.get_or_create_store(session_id, self.id).await?;
+        let store_ref = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(vec![]),
+        };
         let xs: Vec<F> = (0..m).map(|i| F::from((i + 1) as u64)).collect();
 
         // === Step 3: collect dealer outputs, then lagrange-combine component-wise ===
@@ -170,16 +182,16 @@ where
 
             let dealer = done.sub_id() as usize;
             if dealer >= m {
-                self.avss.shares.lock().await.remove(&done);
+                self.avss.take_share(done).await;
                 continue;
             }
 
-            let mut avss_map = self.avss.shares.lock().await;
-            let pieces = avss_map
-                .remove(&done)
+            let pieces = self
+                .avss
+                .take_share(done)
+                .await
                 .and_then(|x| x)
                 .ok_or(TripleGenError::MissingDealer(dealer))?;
-            drop(avss_map);
             if pieces.len() != batch {
                 return Err(TripleGenError::InvalidShareLength);
             }

@@ -1,5 +1,10 @@
 use crate::{
-    common::{share::ShareError, utils::deser_bounded_vec, ProtocolSessionId},
+    common::{
+        session_store::{Admission, SessionStore},
+        share::ShareError,
+        utils::deser_bounded_vec,
+        ProtocolSessionId,
+    },
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         fpmul::{
@@ -17,7 +22,7 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
 use ark_std::rand::{Rng, SeedableRng};
 use itertools::Itertools;
 use num_bigint::BigUint;
-use std::{collections::HashMap, sync::Arc, vec};
+use std::{collections::HashMap, sync::Arc, time::Instant, vec};
 use stoffelnet::network_utils::Network;
 use tokio::{
     sync::{mpsc::Receiver, Mutex},
@@ -33,12 +38,13 @@ pub struct PRandBitDNode<F: PrimeField, G: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<PRandBitDStore<F, G>>>)>>>,
+    pub store:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PRandBitDStore<F, G>>>)>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-// pub static MAX_PRAND_SESSIONS: usize = 256;
+const MAX_PRAND_SESSIONS: usize = 512;
 
 impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     /// Creates a new PRandBitDNode with empty shares.
@@ -49,19 +55,35 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             id,
             n,
             t,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             batch_recon,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
         })
     }
 
-    pub async fn clear_store(&self, session_id: SessionId) -> Result<(), PRandError> {
-        self.batch_recon.clear_entire_store().await;
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        // Only the PRandBit path opens batch_recon sub-sessions (Phase 4 of
+        // try_advance_from_riss); PRandInt never creates any to clear.
+        if session_id.calling_protocol() == Some(ProtocolType::PRandBit) {
+            let num_chunks = {
+                let store = self.store.lock().await;
+                match store.get(&session_id) {
+                    Some((_, _, arc)) => arc.lock().await.batch_size.unwrap_or(0) / (self.t + 1),
+                    None => 0,
+                }
+            };
+            for i in 0..num_chunks {
+                let session_id_batch = SessionId::new(
+                    ProtocolType::PRandBit,
+                    SessionId::pack_slot(session_id.exec_id(), i as u8, 0),
+                    session_id.instance_id(),
+                );
+                self.batch_recon.clear_store(session_id_batch).await;
+            }
+        }
+
         let mut store = self.store.lock().await;
-        store
-            .remove(&session_id)
-            .map(|_| ())
-            .ok_or(PRandError::ClearStoreError(session_id))
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {
@@ -100,7 +122,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(PRandError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -126,7 +148,7 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(PRandError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -245,7 +267,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
     {
         // Phase 0: Terminal fast-path
         {
-            let binding = self.get_or_create_store(session_id, self.id).await?;
+            let binding = match self.get_or_create_store(session_id, self.id).await {
+                Some(s) => s,
+                None => return Ok(false),
+            };
             let store = binding.lock().await;
 
             match calling_proto {
@@ -263,7 +288,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         // Phase 1: Check readiness + decide what must be done
         let (batch_size, r_t_map, share_b_q, need_compute, need_open_start) = {
-            let binding = self.get_or_create_store(session_id, self.id).await?;
+            let binding = match self.get_or_create_store(session_id, self.id).await {
+                Some(s) => s,
+                None => return Ok(false),
+            };
             let store = binding.lock().await;
 
             let Some(batch_size) = store.batch_size else {
@@ -359,7 +387,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // ============================================================
         // Phase 3: Commit derived shares + PRandInt finish
         // ============================================================
-        let binding = self.get_or_create_store(session_id, self.id).await?;
+        let binding = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(false),
+        };
 
         let (int_sender, int_out) = {
             let mut store = binding.lock().await;
@@ -477,7 +508,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // Step 1: compute all maximal unqualified sets
         let tsets: Vec<Vec<usize>> = (0..self.n).combinations(self.t).collect();
 
-        let binding = self.get_or_create_store(session_id, self.id).await?;
+        let binding = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut store = binding.lock().await;
         let my_tsets: Vec<Vec<usize>> = tsets
             .clone()
@@ -517,7 +551,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         }
         let bound = BigUint::from(2 as u32).pow((k + l) as u32);
         let pending = {
-            let binding = self.get_or_create_store(session_id, self.id).await?;
+            let binding = match self.get_or_create_store(session_id, self.id).await {
+                Some(s) => s,
+                None => return Ok(()),
+            };
             let mut store = binding.lock().await;
             store.r_t_bound = Some(bound.clone());
             std::mem::take(&mut store.pending_riss_messages)
@@ -534,7 +571,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
 
         // Reprocess echo messages that arrived before this session was initialized
         let pending_echoes = {
-            let binding = self.get_or_create_store(session_id, self.id).await?;
+            let binding = match self.get_or_create_store(session_id, self.id).await {
+                Some(s) => s,
+                None => return Ok(()),
+            };
             let mut store = binding.lock().await;
             std::mem::take(&mut store.pending_echo_messages)
         };
@@ -586,9 +626,13 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             }
         };
 
-        let binding = self
+        let binding = match self
             .get_or_create_store(msg.session_id, msg.sender_id)
-            .await?;
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut store = binding.lock().await;
 
         if msg.tset.contains(&self.id) {
@@ -621,9 +665,9 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // once generate_riss() initialises the session.
         if store.batch_size.is_none() || store.r_t_bound.is_none() {
             const MAX_PENDING_RISS: usize = 4096;
-            if msg.r_t.len() > MAX_PENDING_RISS {
+            if store.pending_riss_messages.len() >= MAX_PENDING_RISS {
                 return Err(PRandError::InvalidMessage(
-                    "r_t too large for uninitialized session".into(),
+                    "too many pending messages for uninitialized session".into(),
                 ));
             }
             if store
@@ -717,7 +761,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         // All non-T parties except self must send an echo: n - t - 1
         let expected_echoes = self.n.saturating_sub(self.t + 1);
 
-        let binding = self.get_or_create_store(session_id, self.id).await?;
+        let binding = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
 
         let should_advance = {
             let mut store = binding.lock().await;
@@ -856,9 +903,13 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             None => return Err(PRandError::SessionIdError(msg.session_id)),
         };
 
-        let binding = self
+        let binding = match self
             .get_or_create_store(msg.session_id, msg.original_sender)
-            .await?;
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(()),
+        };
 
         {
             let mut store = binding.lock().await;
@@ -938,7 +989,10 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
             sid.instance_id(),
         );
 
-        let binding = self.get_or_create_store(session_id, self.id).await?;
+        let binding = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut store = binding.lock().await;
         if store.state == PrandState::BitFinished {
             return Ok(());
@@ -963,30 +1017,21 @@ impl<F: PrimeField, G: PrimeField> PRandBitDNode<F, G> {
         &mut self,
         session_id: SessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<PRandBitDStore<F, G>>>, PRandError> {
-        let mut storage = self.store.lock().await;
-
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_PRAND_SESSIONS {
-        //         warn!("PRandBitD session limit reached");
-        //         return Err(PRandError::LimitError);
-        //     }
-        //     let per_peer_limit = MAX_PRAND_SESSIONS / self.n;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("PRandBitD per-peer session limit reached");
-        //         return Err(PRandError::LimitError);
-        //     }
-        // }
-        Ok(storage
-            .entry(session_id)
-            .or_insert((initiator_id, Arc::new(Mutex::new(PRandBitDStore::empty()))))
-            .1
-            .clone())
+    ) -> Option<Arc<Mutex<PRandBitDStore<F, G>>>> {
+        match self.store.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_PRAND_SESSIONS,
+            MAX_PRAND_SESSIONS / self.n,
+            || Arc::new(Mutex::new(PRandBitDStore::empty())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("PRandBitD session limit reached");
+                None
+            }
+        }
     }
 }
 

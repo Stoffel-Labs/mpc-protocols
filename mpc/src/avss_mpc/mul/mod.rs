@@ -47,8 +47,6 @@ pub enum MulError {
     Timeout(AvssSessionId),
     #[error("Channel closed")]
     Abort,
-    #[error("Session id {0:?} does not exist in store")]
-    ClearStoreError(AvssSessionId),
     #[error("Store Limit")]
     LimitError,
 }

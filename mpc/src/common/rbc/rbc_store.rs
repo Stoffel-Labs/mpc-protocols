@@ -222,6 +222,15 @@ impl fmt::Display for MsgTypeAvid {
 #[derive(Default)]
 pub struct AvidStore {
     pub shards: HashMap<Vec<u8>, HashMap<usize, Vec<u8>>>, // Merkle root → (shard ID → shard data).
+    /// The first Merkle root this session accepted a shard under. `verify_merkle` only checks
+    /// that a shard is a valid leaf of the root carried in the *same* message — it has no way to
+    /// know what root any other party saw, so a dealer can equivocate by sending different
+    /// (root, shard) pairs to different honest parties. Each recipient's own check passes, and
+    /// without this, `insert_shard` would happily accumulate shards under every distinct root an
+    /// equivocating dealer manages to get echoed here, none of which can ever individually reach
+    /// the reconstruction threshold — the session stalls forever, retaining every root's shards.
+    /// Binding to the first root seen makes every later mismatched root a hard rejection instead.
+    pub accepted_root: Option<Vec<u8>>,
     pub fingerprint: HashMap<Vec<u8>, HashMap<usize, Vec<u8>>>, // Merkle root → (shard ID → Merkle proof/fingerprint).
     pub echo_senders: HashMap<usize, bool>, // Which parties sent ECHO (sender_id -> true)
     pub ready_senders: HashMap<usize, bool>, // Which parties sent READY (sender_id -> true)
@@ -236,6 +245,7 @@ impl AvidStore {
     pub fn new() -> Self {
         AvidStore {
             shards: HashMap::new(),
+            accepted_root: None,
             fingerprint: HashMap::new(),
             echo_senders: HashMap::new(),
             ready_senders: HashMap::new(),
@@ -299,6 +309,16 @@ impl AvidStore {
         shard: Vec<u8>,
         data_shards: usize,
     ) -> Result<(), ShardError> {
+        match &self.accepted_root {
+            Some(accepted) if accepted != &root => {
+                return Err(ShardError::Config(
+                    "Equivocation detected: mismatched Merkle roots for this session".to_string(),
+                ));
+            }
+            Some(_) => {}
+            None => self.accepted_root = Some(root.clone()),
+        }
+
         let max_shard_size = (MAX_PAYLOAD_SIZE + 8 + data_shards - 1) / data_shards;
         if shard.len() > max_shard_size {
             return Err(ShardError::Config(format!(
@@ -637,5 +657,51 @@ impl AcsStore {
     /// Sets ended flag to true
     pub fn mark_ended(&mut self) {
         self.ended = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_shard_accepts_same_root_from_multiple_senders() {
+        let mut store = AvidStore::new();
+        let root = vec![1u8; 32];
+        store
+            .insert_shard(root.clone(), 0, vec![0u8; 10], 2)
+            .unwrap();
+        store
+            .insert_shard(root.clone(), 1, vec![0u8; 10], 2)
+            .unwrap();
+        assert_eq!(store.shards.get(&root).unwrap().len(), 2);
+    }
+
+    /// Regression test for dealer equivocation: a dealer sending different (root, shard) pairs
+    /// to different honest parties used to let every distinct root accumulate its own entry in
+    /// `shards` — none of which could ever individually reach the reconstruction threshold,
+    /// stalling the session forever while retaining every root's data. The second, mismatched
+    /// root must now be rejected outright instead of being accepted alongside the first.
+    #[test]
+    fn insert_shard_rejects_mismatched_root() {
+        let mut store = AvidStore::new();
+        let root_a = vec![1u8; 32];
+        let root_b = vec![2u8; 32];
+
+        store
+            .insert_shard(root_a.clone(), 0, vec![0u8; 10], 2)
+            .unwrap();
+        let result = store.insert_shard(root_b.clone(), 1, vec![0u8; 10], 2);
+
+        assert!(result.is_err(), "mismatched root must be rejected");
+        assert!(
+            !store.shards.contains_key(&root_b),
+            "rejected root's shard must not be stored"
+        );
+        assert_eq!(
+            store.shards.get(&root_a).unwrap().len(),
+            1,
+            "the accepted root's data must be unaffected"
+        );
     }
 }

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use stoffelnet::network_utils::Network;
 use thiserror::Error;
 use tokio::{sync::mpsc::error::SendError, time::Duration};
+use tracing::warn;
 
 #[derive(Error, Debug)]
 pub enum FPError {
@@ -89,9 +90,12 @@ where
             )
             .await?;
 
-        let trunc_input = self.mult_node.wait_for_result(session_id, duration).await?;
+        let mult_result = self.mult_node.wait_for_result(session_id, duration).await;
 
-        self.mult_node.clear_store(session_id).await?;
+        if !self.mult_node.clear_store(session_id).await {
+            warn!(?session_id, "failed to clear FPMul multiplication state");
+        }
+        let trunc_input = mult_result?;
         self.trunc_node
             .init(
                 trunc_input[0].clone(),
@@ -104,12 +108,11 @@ where
             )
             .await?;
 
-        let trunc_output = self
-            .trunc_node
-            .wait_for_result(session_id, duration)
-            .await?;
+        let trunc_result = self.trunc_node.wait_for_result(session_id, duration).await;
 
-        self.trunc_node.clear_store(session_id).await?;
-        Ok(SecretFixedPoint::new(trunc_output))
+        if !self.trunc_node.clear_store(session_id).await {
+            warn!(?session_id, "failed to clear FPMul truncation state");
+        }
+        Ok(SecretFixedPoint::new(trunc_result?))
     }
 }

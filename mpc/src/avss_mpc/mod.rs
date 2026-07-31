@@ -43,6 +43,11 @@ const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 /// at the maximum supported party count and threshold.
 const MAX_AVSS_BATCH_SIZE: usize = 128;
 
+// A dealing chunked at `MAX_AVSS_BATCH_SIZE` is decoded by `AvssNode::process`, which rejects
+// anything above its own `MAX_DEAL_BATCH`. If this chunk size ever exceeded that limit, honest
+// dealings would be silently rejected as malformed — so catch the drift at compile time.
+const _: () = assert!(MAX_AVSS_BATCH_SIZE <= crate::common::share::avss::MAX_DEAL_BATCH);
+
 pub mod input;
 pub mod mul;
 pub mod output;
@@ -544,10 +549,19 @@ where
                     network.clone(),
                 )
                 .await?;
-            let mut batch_output = self
+            let batch_result = self
                 .mul_node
                 .wait_for_result(session_id, self.params.timeout)
-                .await?;
+                .await;
+
+            if !self.mul_node.clear_store(session_id).await {
+                warn!(
+                    ?session_id,
+                    "failed to clear completed AVSS multiplication protocol state"
+                );
+            }
+
+            let mut batch_output = batch_result?;
             output.append(&mut batch_output);
         }
         Ok(output)
@@ -649,10 +663,17 @@ where
                     AvssSessionId::pack_slot(triple_counter, 0, 0),
                     self.params.instance_id,
                 );
-                let triples = self
+                let result = self
                     .triple_gen
                     .gen_triple(sessionid, a.to_vec(), b.to_vec(), rng, network.clone())
-                    .await?;
+                    .await;
+
+                if !self.triple_gen.clear_store(sessionid).await {
+                    warn!(
+                        ?sessionid,
+                        "failed to clear AVSS triple generation protocol state"
+                    );
+                }
 
                 // ------------------------
                 // Step 4. Collect triples
@@ -661,7 +682,7 @@ where
                     self.preprocessing_material
                         .lock()
                         .await
-                        .add(Some(triples), None);
+                        .add(Some(result?), None);
                 }
             }
         }
@@ -705,14 +726,23 @@ where
             self.share_gen_avss
                 .init_batch(sessionid, dealer_batch_size, rng, network.clone())
                 .await?;
-            let output = self
+            let result = self
                 .share_gen_avss
                 .wait_for_result(sessionid, self.params.timeout)
-                .await?;
+                .await;
+
+            if !self.share_gen_avss.clear_store(sessionid).await {
+                warn!(
+                    ?sessionid,
+                    "failed to clear completed AVSS share generation protocol state"
+                );
+            }
+
             self.preprocessing_material
                 .lock()
                 .await
-                .add(None, Some(output));
+                .add(None, Some(result?));
+
             dealer_secrets_remaining -= dealer_batch_size;
         }
         Ok(())
@@ -813,6 +843,10 @@ impl ProtocolSessionId for AvssSessionId {
 
     fn slot(self) -> u128 {
         (self.0 >> 32) & ((1u128 << 80) - 1)
+    }
+
+    fn dealer_id(self) -> u8 {
+        self.sub_id()
     }
 
     fn instance_id(self) -> u32 {
