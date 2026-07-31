@@ -285,9 +285,10 @@ where
         map: &mut BTreeMap<Id, (Instant, Option<Vec<FeldmanShamirShare<F, G>>>)>,
         session_id: Id,
     ) -> bool {
-        let over_capacity = |map: &BTreeMap<Id, (Instant, Option<Vec<FeldmanShamirShare<F, G>>>)>| {
-            map.len() >= MAX_PENDING_SESSIONS
-        };
+        let over_capacity = |map: &BTreeMap<
+            Id,
+            (Instant, Option<Vec<FeldmanShamirShare<F, G>>>),
+        >| { map.len() >= MAX_PENDING_SESSIONS };
         // Per-peer quota, mirroring `SessionStore::get_or_admit`. Without it the global cap is
         // first-come-first-served, so a single dealer can occupy all `MAX_PENDING_SESSIONS`
         // slots and starve every honest dealer.
@@ -454,9 +455,27 @@ where
             }
         };
         {
-            let map = self.shares.lock().await;
+            let mut map = self.shares.lock().await;
             if map.contains_key(&msg.session_id) {
                 return Ok(()); // ignore duplicates
+            }
+            // Reject an over-quota dealer here, before the decryption and curve arithmetic
+            // below. Everything from `dealer_pk` onwards costs real work — `t + 1` point
+            // decompressions per commitment plus a Feldman verification per share — and
+            // without this the quota only limited what an attacker could *cache*, not what
+            // it could make us *compute*.
+            //
+            // `admit` does not insert, so this is purely an early-out; the authoritative
+            // check still runs after verification, because the lock is released in between
+            // and another task may take the last slot meanwhile.
+            if !self.admit(&mut map, msg.session_id).await {
+                warn!(
+                    session_id = msg.session_id.as_u128(),
+                    "AVSS share cache full or dealer {} over its per-peer quota; rejecting before verification",
+                    msg.session_id.dealer_id()
+                );
+                self.rbc.clear_session(msg.session_id).await;
+                return Err(AvssError::LimitExceeded);
             }
         };
         if self.retired.lock().await.contains(&msg.session_id) {

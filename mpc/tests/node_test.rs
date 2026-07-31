@@ -1720,3 +1720,62 @@ async fn fpdiv_const_e2e() {
     // 2.75 * 2^4 = 44
     assert_eq!(rec, Fr::from(44u64));
 }
+
+/// `div_with_const_fixed` feeds a 2k-bit value into TruncPr, which broadcasts
+/// `b + 2^m*r_int + r'` in the clear. `r_int` is the only thing hiding `b` above bit `m`, so a
+/// PRandInt parameter narrower than `2k - f` leaks rather than failing — the arithmetic stays
+/// correct either way, which is exactly why this went unnoticed until it was checked for.
+///
+/// Guard the guard: without this test the width check can be deleted and every existing fpdiv
+/// test still passes.
+#[tokio::test]
+async fn fpdiv_const_rejects_undersized_prandint_mask() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+    let mut rng = test_rng();
+
+    let (network, _receivers, _, _) = test_setup(n_parties, vec![]);
+
+    let k = 16;
+    let m = 4;
+    let precision = FixedPointPrecision::new(k, m);
+    let required = 2 * k - m;
+
+    // One bit short of the requirement. The check runs before any preprocessing or network
+    // activity, so no protocol material is needed to reach it.
+    let too_narrow = required - 1;
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        223,
+        0,
+        0,
+        too_narrow,
+        k,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    let x_shares = RobustShare::compute_shares(Fr::from(88), n_parties, t, None, &mut rng).unwrap();
+    let a = SecretFixedPoint::new_with_precision(x_shares[0].clone(), precision);
+    let denom = ClearFixedPoint::new_with_precision(Fr::from(32u64), precision);
+
+    let mut node = nodes[0].clone();
+    let err = node
+        .div_with_const_fixed(a, denom, network[0].clone())
+        .await
+        .expect_err("division must refuse to run with a mask narrower than 2k - f");
+
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("NotEnoughBitsPrep"),
+        "expected NotEnoughBitsPrep, got {rendered}"
+    );
+    assert!(
+        rendered.contains(&required.to_string()),
+        "error should report the required width {required}, got {rendered}"
+    );
+}
