@@ -1112,6 +1112,19 @@ where
             ));
         }
 
+        // Checks if the PRandInt parameter has enough bits to mask the fixed point numbers.
+        // `fpdiv_const` multiplies the secret by a public f-scaled reciprocal and feeds the
+        // resulting 2k-bit value into TruncPr (`k_twice` in `FPDivConstNode::init`), truncating
+        // f bits — the same magnitude `mul_fixed` produces, so it needs the same mask width.
+        // Without this the PRandInt mask can be narrower than the value it is meant to hide,
+        // which leaks rather than merely failing.
+        if self.params.l < 2 * x.precision().k() - x.precision().f() {
+            return Err(HoneyBadgerError::FPError(FPError::NotEnoughBitsPrep {
+                current: self.params.l,
+                required: 2 * x.precision().k() - x.precision().f(),
+            }));
+        }
+
         // 2. Check preprocessing inventory --------------------------------
         let (no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;

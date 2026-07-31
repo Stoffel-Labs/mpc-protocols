@@ -426,10 +426,21 @@ where
             std::mem::take(&mut store.pending_messages)
         };
 
-        // Replay messages that arrived before local initialization.
+        // Replay messages that arrived before local initialization. A parked message that
+        // fails validation on replay is the sender's fault, not ours — log and drop it. A
+        // blanket `?` here would let a single Byzantine peer abort our own initialization by
+        // parking one oversized batch before we started.
         for pending_msg in pending {
-            self.reconstruction_handler(pending_msg, Arc::clone(&network))
-                .await?;
+            let sender_id = pending_msg.sender_id;
+            if let Err(e) = self
+                .reconstruction_handler(pending_msg, Arc::clone(&network))
+                .await
+            {
+                warn!(
+                    session_id = session_id.as_u128(),
+                    "dropping invalid pre-init reconstruction message from party {sender_id}: {e:?}"
+                );
+            }
         }
 
         // Check if pending OK messages are sufficient to finalize immediately
@@ -506,15 +517,33 @@ where
             Some(s) => s,
             None => return Ok(()),
         };
-        {
+        let expected_batch = {
             let mut store = binding.lock().await;
             if store.computed_r_shares_degree_t.is_empty() {
                 // batch_size is not yet locally known; park the message.
                 // init_handler will drain and replay these once computed shares are set.
+                //
+                // Bound the queue at one parked message per peer. The length check is not
+                // redundant with the per-sender check: `sender_id` is only validated against
+                // `n_parties` further down, after this point, so a peer forging distinct ids
+                // could otherwise grow this vector without limit before ever being rejected.
+                if store.pending_messages.len() >= self.n_parties
+                    || store
+                        .pending_messages
+                        .iter()
+                        .any(|m| m.sender_id == sender_id)
+                {
+                    warn!(
+                        session_id = msg.session_id.as_u128(),
+                        "pending RanDouSha queue full or already holds a message from party {sender_id}; dropping"
+                    );
+                    return Ok(());
+                }
                 store.pending_messages.push(msg);
                 return Ok(());
             }
-        }
+            store.batch_size
+        };
 
         // msg.payload not yet consumed — proceed with deserialization.
         let payloads = match msg.payload {
@@ -522,6 +551,12 @@ where
             RanDouShaPayload::ReconstructBatch(p) => p,
             RanDouShaPayload::Output(_) => return Err(RanDouShaError::Abort),
         };
+        // Validate the declared element count against the locally-known batch size *before*
+        // deserializing any of them. The equivalent check below runs against `rec_messages.len()`,
+        // by which point a peer has already made us decode every element it chose to send.
+        if payloads.len() != expected_batch {
+            return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
+        }
         let mut rec_messages: Vec<ReconstructionMessage<F>> = Vec::with_capacity(payloads.len());
         for payload in payloads {
             rec_messages.push(ark_serialize::CanonicalDeserialize::deserialize_compressed(

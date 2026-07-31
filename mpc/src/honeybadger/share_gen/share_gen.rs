@@ -302,10 +302,18 @@ where
             std::mem::take(&mut storage.pending_share_messages)
         };
 
-        // Replay messages that arrived before local initialization.
+        // Replay messages that arrived before local initialization. A parked message that
+        // fails validation on replay is the sender's fault, not ours — log and drop it. A
+        // blanket `?` here would let a single Byzantine peer abort our own initialization by
+        // parking one oversized batch before we started.
         for msg in pending {
-            self.receive_shares_handler(msg, Arc::clone(&network))
-                .await?;
+            let sender_id = msg.sender_id;
+            if let Err(e) = self.receive_shares_handler(msg, Arc::clone(&network)).await {
+                warn!(
+                    session_id = session_id.as_u128(),
+                    "dropping invalid pre-init share from party {sender_id}: {e:?}"
+                );
+            }
         }
         Ok(())
     }
@@ -340,6 +348,24 @@ where
             if ransha_storage.state == RanShaState::NotInitialized {
                 // batch_size not yet locally known; park and return.
                 // init_batch will drain and replay these once the trusted value is set.
+                //
+                // Bound the queue at one parked message per peer. The length check is not
+                // redundant with the per-sender check: `sender_id` is only validated against
+                // `n_parties` further down, after this point, so a peer forging distinct ids
+                // could otherwise grow this vector without limit before ever being rejected.
+                if ransha_storage.pending_share_messages.len() >= self.n_parties
+                    || ransha_storage
+                        .pending_share_messages
+                        .iter()
+                        .any(|m| m.sender_id == msg.sender_id)
+                {
+                    warn!(
+                        session_id = msg.session_id.as_u128(),
+                        "pending RanSha share queue full or already holds a message from party {}; dropping",
+                        msg.sender_id
+                    );
+                    return Ok(());
+                }
                 ransha_storage.pending_share_messages.push(msg);
                 return Ok(());
             }
@@ -494,10 +520,17 @@ where
             network.send(i, &bytes).await?;
         }
 
-        // Replay reconstruction messages that arrived before init_ransha_batch completed.
+        // Replay reconstruction messages that arrived before init_ransha_batch completed. A
+        // parked message that fails validation on replay is the sender's fault, not ours —
+        // log and drop it rather than aborting our own initialization.
         for msg in pending {
-            self.reconstruction_handler(msg, Arc::clone(&network))
-                .await?;
+            let sender_id = msg.sender_id;
+            if let Err(e) = self.reconstruction_handler(msg, Arc::clone(&network)).await {
+                warn!(
+                    session_id = session_id.as_u128(),
+                    "dropping invalid pre-init reconstruction message from party {sender_id}: {e:?}"
+                );
+            }
         }
         Ok(())
     }
@@ -528,6 +561,24 @@ where
             if store.computed_r_shares.is_empty() {
                 // batch_size not yet locally known; park and return.
                 // init_ransha_batch will drain and replay these once the trusted value is set.
+                //
+                // Bound the queue at one parked message per peer. The length check is not
+                // redundant with the per-sender check: `sender_id` is only validated against
+                // `n_parties` further down, after this point, so a peer forging distinct ids
+                // could otherwise grow this vector without limit before ever being rejected.
+                if store.pending_recon_messages.len() >= self.n_parties
+                    || store
+                        .pending_recon_messages
+                        .iter()
+                        .any(|m| m.sender_id == msg.sender_id)
+                {
+                    warn!(
+                        session_id = msg.session_id.as_u128(),
+                        "pending RanSha reconstruction queue full or already holds a message from party {}; dropping",
+                        msg.sender_id
+                    );
+                    return Ok(());
+                }
                 store.pending_recon_messages.push(msg);
                 return Ok(());
             }

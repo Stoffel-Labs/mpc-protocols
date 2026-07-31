@@ -1652,8 +1652,10 @@ async fn fpdiv_const_e2e() {
         222,
         0,
         0,
-        0,
-        0,
+        // `l` must cover the 2k-bit value fed into TruncPr after truncating `m` bits,
+        // otherwise the PRandInt mask is narrower than the value it has to hide.
+        2 * k - m,
+        k,
         Duration::from_secs(30),
         vec![],
     );

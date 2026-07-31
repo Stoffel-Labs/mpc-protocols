@@ -43,6 +43,11 @@ const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 /// at the maximum supported party count and threshold.
 const MAX_AVSS_BATCH_SIZE: usize = 128;
 
+// A dealing chunked at `MAX_AVSS_BATCH_SIZE` is decoded by `AvssNode::process`, which rejects
+// anything above its own `MAX_DEAL_BATCH`. If this chunk size ever exceeded that limit, honest
+// dealings would be silently rejected as malformed — so catch the drift at compile time.
+const _: () = assert!(MAX_AVSS_BATCH_SIZE <= crate::common::share::avss::MAX_DEAL_BATCH);
+
 pub mod input;
 pub mod mul;
 pub mod output;

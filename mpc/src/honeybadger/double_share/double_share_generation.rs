@@ -209,9 +209,18 @@ where
             std::mem::take(&mut storage.pending_messages)
         };
 
-        // Replay messages that arrived before local initialization.
+        // Replay messages that arrived before local initialization. A parked message that
+        // fails validation on replay is the sender's fault, not ours — log and drop it. A
+        // blanket `?` here would let a single Byzantine peer abort our own initialization by
+        // parking one oversized batch before we started.
         for msg in pending {
-            self.receive_double_shares_handler(msg).await?;
+            let sender_id = msg.sender_id;
+            if let Err(e) = self.receive_double_shares_handler(msg).await {
+                warn!(
+                    session_id = session_id.as_u128(),
+                    "dropping invalid pre-init double share from party {sender_id}: {e:?}"
+                );
+            }
         }
         Ok(())
     }
@@ -236,6 +245,24 @@ where
             if dousha_storage.state == ProtocolState::NotInitialized {
                 // batch_size is not yet locally known; park the message and return.
                 // init_batch will drain and replay these once the trusted value is set.
+                //
+                // Bound the queue at one parked message per peer. The length check is not
+                // redundant with the per-sender check: `sender_id` is only validated against
+                // `n_parties` further down, after this point, so a peer forging distinct ids
+                // could otherwise grow this vector without limit before ever being rejected.
+                if dousha_storage.pending_messages.len() >= self.n_parties
+                    || dousha_storage
+                        .pending_messages
+                        .iter()
+                        .any(|m| m.sender_id == recv_message.sender_id)
+                {
+                    warn!(
+                        session_id = recv_message.session_id.as_u128(),
+                        "pending double-share queue full or already holds a message from party {}; dropping",
+                        recv_message.sender_id
+                    );
+                    return Ok(());
+                }
                 dousha_storage.pending_messages.push(recv_message);
                 return Ok(());
             }
