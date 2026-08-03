@@ -135,6 +135,20 @@ where
         msg: Msg<Id>,
         net: Arc<N>,
     ) -> Result<(), RbcError> {
+        if msg.sender_id >= self.n {
+            return Err(RbcError::Internal(format!(
+                "sender id {} is out of range: expected 0 <= id < n (n = {})",
+                msg.sender_id, self.n
+            )));
+        }
+        if msg.payload.len() > MAX_PAYLOAD_SIZE {
+            return Err(RbcError::Internal(format!(
+                "payload of {} bytes exceeds the maximum of {}",
+                msg.payload.len(),
+                MAX_PAYLOAD_SIZE
+            )));
+        }
+
         match &msg.msg_type {
             GenericMsgType::Bracha(msg_type) => match msg_type {
                 MsgType::Init => self.init_handler(msg, net).await?,
@@ -886,6 +900,9 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         store.insert_fingerprint(root.clone(), msg.sender_id, proof_bytes);
         store.increment_echo(&root);
         store.set_echo_sent(msg.sender_id);
+        // Commit to this root once `t + 1` distinct senders back it, which drops any competing
+        // root's state. Deliberately after the tally, not before: see `AvidStore::accepted_root`.
+        store.try_commit_root(&root, self.t + 1);
 
         let echo_count = store.get_echo_count(&root);
         let ready_count = store.get_ready_count(&root);
@@ -982,6 +999,9 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         store.insert_fingerprint(root.clone(), msg.sender_id, proof_bytes);
         store.increment_ready(&root);
         store.set_ready_sent(msg.sender_id);
+        // Commit to this root once `t + 1` distinct senders back it, which drops any competing
+        // root's state. Deliberately after the tally, not before: see `AvidStore::accepted_root`.
+        store.try_commit_root(&root, self.t + 1);
 
         let echo_count = store.get_echo_count(&root);
         let ready_count = store.get_ready_count(&root);

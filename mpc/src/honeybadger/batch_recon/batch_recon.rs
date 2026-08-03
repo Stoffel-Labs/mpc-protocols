@@ -217,6 +217,13 @@ impl<F: FftField> BatchReconNode<F> {
         msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
+        if msg.sender_id >= self.n {
+            return Err(BatchReconError::InvalidInput(format!(
+                "sender id {} is out of range: expected 0 <= id < n (n = {})",
+                msg.sender_id, self.n
+            )));
+        }
+
         match msg.msg_type {
             BatchReconMsgType::Eval => {
                 debug!(

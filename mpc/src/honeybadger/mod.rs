@@ -172,6 +172,8 @@ pub enum HoneyBadgerError {
     InvalidPartySize,
     #[error("Party Id is out of bounds")]
     InvalidPartyId,
+    #[error("sender {0} is not a member of the {1}-party consensus node set")]
+    UnauthorizedSender(PartyId, usize),
     #[error("the protocol cannot be executed any more")]
     LimitError,
 }
@@ -666,6 +668,24 @@ where
             .allow_trailing_bytes()
             .with_limit(MAX_MESSAGE_SIZE)
             .deserialize(&raw_msg)?;
+
+        let is_client_input_broadcast = match &wrapped {
+            WrappedMessage::Rbc(m) => {
+                m.msg_type.is_dealer_message()
+                    && m.session_id.calling_protocol() == Some(ProtocolType::Input)
+            }
+            _ => false,
+        };
+        if !is_client_input_broadcast && sender_id >= self.params.n_parties {
+            warn!(
+                "Rejecting message from sender {}: not a member of the {}-party node set",
+                sender_id, self.params.n_parties
+            );
+            return Err(HoneyBadgerError::UnauthorizedSender(
+                sender_id,
+                self.params.n_parties,
+            ));
+        }
 
         match wrapped {
             WrappedMessage::Rbc(rbc_msg) => {
