@@ -49,6 +49,8 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerInvalidPartyIdError,
     HoneyBadgerLimitError,
     HoneyBadgerInstanceIdError,
+    // Appended last to keep the existing discriminants ABI-stable for current SDK consumers.
+    HoneyBadgerUnauthorizedSenderError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -80,6 +82,7 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::InstanceIdError(_) => Self::HoneyBadgerInstanceIdError,
             HoneyBadgerError::AlreadyReserved => Self::HoneyBadgerAlreadyReservedError,
             HoneyBadgerError::InvalidThreshold(_, _) => Self::HoneyBadgerInvalidThesholdError,
+            HoneyBadgerError::UnauthorizedSender(_, _) => Self::HoneyBadgerUnauthorizedSenderError,
             HoneyBadgerError::InvalidPartySize => Self::HoneyBadgerInvalidPartySizeError,
             HoneyBadgerError::InvalidPartyId => Self::HoneyBadgerInvalidPartyIdError,
         }
