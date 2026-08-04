@@ -346,10 +346,14 @@ impl AvidStore {
     /// Commits the session to `root` if enough distinct senders have now backed it, and discards
     /// every competing root's state once that happens.
     ///
-    /// `corroboration_threshold` must be `t + 1`, so that crossing it proves at least one honest
-    /// party saw this root and an adversary controlling `t` identities can never commit a root of
-    /// its own. ECHO and READY tallies are compared separately rather than summed, because a
-    /// single sender may contribute to both and a sum would let `t` Byzantine parties reach `2t`.
+    /// `corroboration_threshold` must be the intersection-guaranteeing quorum (`> (n + t) / 2`,
+    /// e.g. `max((n + t + 2) / 2, k)`), not merely `t + 1`. `t + 1` only proves at least one honest
+    /// party saw this root — it does not prove *uniqueness*, so under dealer equivocation two
+    /// disjoint honest observers could each independently reach `t + 1` backing for two different
+    /// roots and both commit, permanently diverging. The strong quorum guarantees any two
+    /// quorum-sized sender sets share at least one honest member, who can only have backed one
+    /// root. ECHO and READY tallies are compared separately rather than summed, because a single
+    /// sender may contribute to both and a sum would let `t` Byzantine parties reach `2t`.
     ///
     /// Returns true if the session is committed to `root` after this call.
     pub fn try_commit_root(&mut self, root: &[u8], corroboration_threshold: usize) -> bool {
@@ -731,7 +735,8 @@ mod tests {
 
     /// A lone sender must not be able to commit the session to a root of its choosing. Binding on
     /// first arrival let any single party stall an honest dealer's broadcast permanently by racing
-    /// one ECHO with a self-built tree; commitment requires `t + 1` distinct backers instead.
+    /// one ECHO with a self-built tree; commitment requires multiple distinct backers instead (in
+    /// production, the caller passes the intersection-guaranteeing quorum — see `try_commit_root`).
     #[test]
     fn one_sender_cannot_commit_a_root() {
         let mut store = AvidStore::new();

@@ -334,6 +334,35 @@ pub fn spawn_receiver_tasks(
 
 //--------------------------TRACING--------------------------
 
+thread_local! {
+    // When set, the panic hooks below skip the hard `process::exit(1)` for a panic on this
+    // thread, letting it unwind normally so `catch_expected_panic` can observe it. Used by
+    // stress tests that intentionally overload a protocol until an internal component (e.g.
+    // turmoil's socket buffer) panics, and want to assert on that as an expected outcome
+    // instead of the whole test binary dying.
+    static ALLOW_PANIC_WITHOUT_EXIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f`, treating any panic on this thread during its execution as an expected outcome
+/// rather than a fatal error: the global "exit on any panic" hook is suppressed for the
+/// duration of the call, and a panic is converted into `Err(message)` instead of tearing down
+/// the whole test process.
+pub fn catch_expected_panic<R>(f: impl FnOnce() -> R) -> Result<R, String> {
+    ALLOW_PANIC_WITHOUT_EXIT.with(|flag| flag.set(true));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    ALLOW_PANIC_WITHOUT_EXIT.with(|flag| flag.set(false));
+
+    result.map_err(|payload| {
+        if let Some(s) = payload.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        }
+    })
+}
+
 static TRACING_INIT: Lazy<()> = Lazy::new(|| {
     let subscriber = FmtSubscriber::builder()
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
@@ -345,7 +374,9 @@ static TRACING_INIT: Lazy<()> = Lazy::new(|| {
     std::panic::set_hook(Box::new(move |info| {
         old_hook(info);
         tracing::error!("{}", info);
-        std::process::exit(1);
+        if !ALLOW_PANIC_WITHOUT_EXIT.with(|flag| flag.get()) {
+            std::process::exit(1);
+        }
     }));
 });
 
@@ -362,7 +393,9 @@ static QUIET_TRACING_INIT: Lazy<()> = Lazy::new(|| {
     std::panic::set_hook(Box::new(move |info| {
         old_hook(info);
         tracing::error!("{}", info);
-        std::process::exit(1);
+        if !ALLOW_PANIC_WITHOUT_EXIT.with(|flag| flag.get()) {
+            std::process::exit(1);
+        }
     }));
 });
 

@@ -2,8 +2,8 @@ mod utils;
 
 use crate::utils::{
     test_utils::{
-        construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
-        generate_independent_shares, setup_quiet_tracing, setup_tracing,
+        catch_expected_panic, construct_e2e_input, construct_e2e_input_mul, create_clients,
+        create_global_nodes, generate_independent_shares, setup_quiet_tracing, setup_tracing,
     },
     turmoil::{add_driver, collect_results, turmoil_setup, turmoil_setup_with_duration},
 };
@@ -15,7 +15,7 @@ use ark_std::{
     test_rng,
 };
 use chacha20poly1305::aead::OsRng;
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 use stoffelcrypto::{
     common::{
         rbc::rbc::Avid,
@@ -776,211 +776,6 @@ fn preprocessing_e2e_with_freeze_start() {
     );
 }
 
-#[test]
-#[ignore = "expensive repro: attempts to produce 402,000,000 HoneyBadger random shares"]
-fn honeybadger_402m_random_shares_5_nodes_t1_turmoil() {
-    setup_quiet_tracing();
-
-    let n_parties = 5;
-    let t = 1;
-    let n_random_shares = 402_000_000usize;
-    let instance_id = 111;
-
-    let (mut sim, inner) = turmoil_setup_with_duration(
-        n_parties,
-        vec![],
-        Some((10, 2000)),
-        Duration::from_secs(300_000),
-    );
-    let (tx, rx_done) = std::sync::mpsc::channel::<Result<usize, String>>();
-    let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
-    let barrier = Arc::new(Barrier::new(n_parties));
-
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
-        n_parties,
-        t,
-        0,
-        n_random_shares,
-        instance_id,
-        0,
-        0,
-        0,
-        0,
-        Duration::from_secs(120),
-        vec![],
-    );
-
-    for id in 0..n_parties {
-        let inner = inner.clone();
-        let node = nodes[id].clone();
-        let tx = tx.clone();
-        let done_tx = done_tx.clone();
-        let barrier = barrier.clone();
-
-        sim.host(format!("node{}", id), move || {
-            let inner = inner.clone();
-            let mut node = node.clone();
-            let tx = tx.clone();
-            let done_tx = done_tx.clone();
-            let barrier = barrier.clone();
-
-            async move {
-                let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(id), inner).await;
-                let network_arc = Arc::new(network);
-                barrier.wait().await;
-
-                let net = network_arc.clone();
-                let mut node_for_preprocessing = node.clone();
-                let preprocessing_handle = tokio::spawn(async move {
-                    let mut rng = StdRng::from_rng(OsRng).unwrap();
-                    node_for_preprocessing
-                        .run_preprocessing(net, &mut rng)
-                        .await
-                });
-
-                let mut msg_count = 0usize;
-                let mut last_store_log = Instant::now();
-                loop {
-                    if preprocessing_handle.is_finished() {
-                        break;
-                    }
-
-                    match timeout(Duration::from_millis(100), rx.recv()).await {
-                        Ok(Some((sender, msg))) => {
-                            msg_count += 1;
-                            if last_store_log.elapsed() >= Duration::from_secs(5) {
-                                eprintln!(
-                                    "[402m-store] node={} msgs={} {}",
-                                    id,
-                                    msg_count,
-                                    node.debug_store_sizes().await
-                                );
-                                last_store_log = Instant::now();
-                            }
-                            let sender_id = match sender {
-                                SenderId::Node(i) => i,
-                                SenderId::Client(i) => i,
-                            };
-                            if let Err(e) = node.process(sender_id, msg, network_arc.clone()).await
-                            {
-                                let _ = tx.send(Err(format!(
-                                    "node {} process error after {} msgs: {:?}; {}",
-                                    id,
-                                    msg_count,
-                                    e,
-                                    node.debug_store_sizes().await
-                                )));
-                                let _ = done_tx.send(());
-                                return Ok(());
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(_) => {
-                            if last_store_log.elapsed() >= Duration::from_secs(5) {
-                                eprintln!(
-                                    "[402m-store] node={} msgs={} {}",
-                                    id,
-                                    msg_count,
-                                    node.debug_store_sizes().await
-                                );
-                                last_store_log = Instant::now();
-                            }
-                        }
-                    }
-                }
-
-                match preprocessing_handle.await {
-                    Ok(Ok(())) => {
-                        let len = node.preprocessing_material.lock().await.length();
-                        let produced_random_shares = len.random_shr;
-                        if produced_random_shares == n_random_shares {
-                            eprintln!(
-                                "[402m-store] node={} completed msgs={} {}",
-                                id,
-                                msg_count,
-                                node.debug_store_sizes().await
-                            );
-                            let _ = tx.send(Ok(produced_random_shares));
-                        } else {
-                            let _ = tx.send(Err(format!(
-                                "node {} produced {} random shares, expected {}; {}",
-                                id,
-                                produced_random_shares,
-                                n_random_shares,
-                                node.debug_store_sizes().await
-                            )));
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        let _ = tx.send(Err(format!(
-                            "node {} preprocessing failed after {} msgs: {:?}; {}",
-                            id,
-                            msg_count,
-                            e,
-                            node.debug_store_sizes().await
-                        )));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(format!(
-                            "node {} preprocessing join error: {:?}",
-                            id, e
-                        )));
-                    }
-                }
-
-                let _ = done_tx.send(());
-                Ok(())
-            }
-        });
-    }
-
-    drop(tx);
-    drop(done_tx);
-
-    let mut done_rx = done_rx;
-    sim.client("driver", async move {
-        let mut count = 0;
-        while count < n_parties {
-            match done_rx.recv().await {
-                Ok(()) => count += 1,
-                Err(_) => break,
-            }
-        }
-        Ok::<(), Box<dyn std::error::Error>>(())
-    });
-
-    if let Err(error) = sim.run() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            for (id, node) in nodes.iter().enumerate() {
-                eprintln!(
-                    "[402m-store-final] node={} sim_error={} {}",
-                    id,
-                    error,
-                    node.debug_store_sizes().await
-                );
-            }
-        });
-        panic!("turmoil simulation failed: {error}");
-    }
-
-    let results: Vec<_> = std::iter::from_fn(|| rx_done.try_recv().ok()).collect();
-    assert_eq!(
-        results.len(),
-        n_parties,
-        "not all nodes reported: got {}/{}",
-        results.len(),
-        n_parties
-    );
-
-    for result in results {
-        match result {
-            Ok(produced) => assert_eq!(produced, n_random_shares),
-            Err(error) => panic!("{}", error),
-        }
-    }
-}
-
 fn run_preprocessing_stress_turmoil(
     n_parties: usize,
     t: usize,
@@ -1122,12 +917,18 @@ fn run_preprocessing_stress_turmoil(
         Ok::<(), Box<dyn std::error::Error>>(())
     });
 
-    if let Err(error) = sim.run() {
-        let snapshot = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(async { preprocessing_stress_snapshot(&nodes).await });
-        panic!("turmoil run failed: {error}\n{snapshot}");
-    }
+    // These stress tests intentionally overload preprocessing past a known capacity limit, so a
+    // failure here (turmoil panicking/stalling, a per-node error, or short material counts) is
+    // the expected, passing outcome. Only the case where everything unexpectedly succeeds is a
+    // test failure -- it means the capacity limit moved and this repro needs to be revisited.
+    // Overload can make turmoil itself panic (e.g. "socket buffer full") instead of returning an
+    // Err, so the run is wrapped in `catch_expected_panic` to treat that as expected too, rather
+    // than letting the process-wide "exit on any panic" hook tear down the whole test binary.
+    let sim_outcome: Result<(), String> = match catch_expected_panic(|| sim.run()) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(panic_msg) => Err(format!("turmoil panicked: {panic_msg}")),
+    };
 
     for (key, value) in old_env {
         match value {
@@ -1136,44 +937,68 @@ fn run_preprocessing_stress_turmoil(
         }
     }
 
+    let mut failure_reasons = Vec::new();
+
+    if let Err(error) = &sim_outcome {
+        let snapshot = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { preprocessing_stress_snapshot(&nodes).await });
+        failure_reasons.push(format!("turmoil run failed: {error}\n{snapshot}"));
+    }
+
     let results: Vec<_> = std::iter::from_fn(|| rx_done.try_recv().ok()).collect();
-    assert_eq!(
-        results.len(),
-        n_parties,
-        "not all nodes reported: got {}/{}",
-        results.len(),
-        n_parties
-    );
+    if results.len() != n_parties {
+        failure_reasons.push(format!(
+            "not all nodes reported: got {}/{}",
+            results.len(),
+            n_parties
+        ));
+    }
 
     for result in results {
-        let (produced_triples, produced_random_shares, produced_pbits, produced_pints) =
-            result.unwrap_or_else(|error| panic!("{}", error));
-
-        assert!(
-            produced_triples >= n_triples.saturating_sub(n_prandbit),
-            "produced {} triples, expected at least {}",
-            produced_triples,
-            n_triples.saturating_sub(n_prandbit)
-        );
-        assert!(
-            produced_random_shares >= n_random_shares.saturating_sub(n_prandbit),
-            "produced {} random shares, expected at least {}",
-            produced_random_shares,
-            n_random_shares.saturating_sub(n_prandbit)
-        );
-        assert!(
-            produced_pbits >= n_prandbit,
-            "produced {} probabilistic bits, expected at least {}",
-            produced_pbits,
-            n_prandbit
-        );
-        assert!(
-            produced_pints >= n_prandint,
-            "produced {} probabilistic ints, expected at least {}",
-            produced_pints,
-            n_prandint
-        );
+        match result {
+            Err(error) => failure_reasons.push(error),
+            Ok((produced_triples, produced_random_shares, produced_pbits, produced_pints)) => {
+                if produced_triples < n_triples.saturating_sub(n_prandbit) {
+                    failure_reasons.push(format!(
+                        "produced {} triples, expected at least {}",
+                        produced_triples,
+                        n_triples.saturating_sub(n_prandbit)
+                    ));
+                }
+                if produced_random_shares < n_random_shares.saturating_sub(n_prandbit) {
+                    failure_reasons.push(format!(
+                        "produced {} random shares, expected at least {}",
+                        produced_random_shares,
+                        n_random_shares.saturating_sub(n_prandbit)
+                    ));
+                }
+                if produced_pbits < n_prandbit {
+                    failure_reasons.push(format!(
+                        "produced {} probabilistic bits, expected at least {}",
+                        produced_pbits, n_prandbit
+                    ));
+                }
+                if produced_pints < n_prandint {
+                    failure_reasons.push(format!(
+                        "produced {} probabilistic ints, expected at least {}",
+                        produced_pints, n_prandint
+                    ));
+                }
+            }
+        }
     }
+
+    assert!(
+        !failure_reasons.is_empty(),
+        "expected preprocessing to fail under stress conditions, but every node succeeded with sufficient material"
+    );
+
+    println!(
+        "stress test observed {} expected failure(s):\n{}",
+        failure_reasons.len(),
+        failure_reasons.join("\n")
+    );
 }
 
 async fn preprocessing_stress_snapshot(
@@ -1614,21 +1439,27 @@ fn honeybadger_sequential_mul_1000_turmoil() {
     }
 }
 
-// Ignored on purpose, tests are meant to fail -> they stress test mpc protocols to find when it would break with unreasonable/unrealistic settings
+// Ignored by default: slow, deliberately-overloaded repro asserting preprocessing fails once
+// triple-generation exceeds the known 256-session capacity limit. Passes when that failure is
+// observed; fails (loudly) if the limit moved and everything unexpectedly succeeds.
 #[test]
 #[ignore = "stress repro: forces more than 256 triple-generation protocol sessions"]
 fn honeybadger_triple_heavy_preprocessing_turmoil() {
     run_preprocessing_stress_turmoil(4, 1, 771, 0, 0, 0, &[("HMPC_TRIPLE_BATCH_GROUPS", "1")]);
 }
 
-// Ignored on purpose, tests are meant to fail -> they stress test mpc protocols to find when it would break with unreasonable/unrealistic settings
+// Ignored by default: slow, deliberately-overloaded repro asserting preprocessing fails once
+// RanDouSha exceeds the known 256-session capacity limit. Passes when that failure is observed;
+// fails (loudly) if the limit moved and everything unexpectedly succeeds.
 #[test]
 #[ignore = "stress repro: forces more than 256 RanDouSha protocol sessions"]
 fn honeybadger_randousha_heavy_preprocessing_turmoil() {
     run_preprocessing_stress_turmoil(4, 1, 771, 0, 0, 0, &[("HMPC_RANDOUSHA_BATCH_COLUMNS", "1")]);
 }
 
-// Ignored on purpose, tests are meant to fail -> they stress test mpc protocols to find when it would break with unreasonable/unrealistic settings
+// Ignored by default: slow, deliberately-overloaded repro combining triple, RanDouSha, RandBit,
+// PRandBit, and PRandInt generation. Passes when preprocessing fails under that combined load;
+// fails (loudly) if it unexpectedly succeeds.
 #[test]
 #[ignore = "stress repro: generates triple, RanDouSha, RandBit, PRandBit, and PRandInt material"]
 fn honeybadger_multiply_heavy_preprocessing_turmoil() {

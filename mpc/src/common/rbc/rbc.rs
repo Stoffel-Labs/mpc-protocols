@@ -900,13 +900,16 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         store.insert_fingerprint(root.clone(), msg.sender_id, proof_bytes);
         store.increment_echo(&root);
         store.set_echo_sent(msg.sender_id);
-        // Commit to this root once `t + 1` distinct senders back it, which drops any competing
-        // root's state. Deliberately after the tally, not before: see `AvidStore::accepted_root`.
-        store.try_commit_root(&root, self.t + 1);
+        let threshold = usize::max((self.n + self.t + 2) / 2, self.k);
+        // Commit to this root once the strong quorum backs it, which drops any competing root's
+        // state. Must be the intersection-guaranteeing quorum, not `t + 1`: `t + 1` only proves one
+        // honest sender saw this root, which does not stop two disjoint honest observers from each
+        // reaching `t + 1` on two different equivocated roots. Deliberately after the tally, not
+        // before: see `AvidStore::accepted_root`.
+        store.try_commit_root(&root, threshold);
 
         let echo_count = store.get_echo_count(&root);
         let ready_count = store.get_ready_count(&root);
-        let threshold = usize::max((self.n + self.t + 2) / 2, self.k);
         if echo_count == threshold && ready_count < self.k {
             let shards_map = store.get_shards_for_root(&root);
             drop(store);
@@ -999,13 +1002,16 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         store.insert_fingerprint(root.clone(), msg.sender_id, proof_bytes);
         store.increment_ready(&root);
         store.set_ready_sent(msg.sender_id);
-        // Commit to this root once `t + 1` distinct senders back it, which drops any competing
-        // root's state. Deliberately after the tally, not before: see `AvidStore::accepted_root`.
-        store.try_commit_root(&root, self.t + 1);
+        let threshold = usize::max((self.n + self.t + 2) / 2, self.k);
+        // Commit to this root once the strong quorum backs it, which drops any competing root's
+        // state. Must be the intersection-guaranteeing quorum, not `t + 1`: `t + 1` only proves one
+        // honest sender saw this root, which does not stop two disjoint honest observers from each
+        // reaching `t + 1` on two different equivocated roots. Deliberately after the tally, not
+        // before: see `AvidStore::accepted_root`.
+        store.try_commit_root(&root, threshold);
 
         let echo_count = store.get_echo_count(&root);
         let ready_count = store.get_ready_count(&root);
-        let threshold = usize::max((self.n + self.t + 2) / 2, self.k);
 
         if echo_count < threshold && ready_count == self.k {
             let shards_map = store.get_shards_for_root(&root);
