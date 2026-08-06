@@ -3,7 +3,7 @@ use ark_ff::FftField;
 use ark_std::test_rng;
 use std::sync::Arc;
 use std::time::Duration;
-use stoffelcrypto::common::{SecretSharingScheme, RBC};
+use stoffelcrypto::common::SecretSharingScheme;
 use stoffelcrypto::honeybadger::fpmul::rand_bit::RandBit;
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelcrypto::honeybadger::triple_gen::ShamirBeaverTriple;
@@ -61,15 +61,14 @@ where
 }
 
 /// Spawn receiver tasks for the RandBit protocol.
-pub async fn spawn_receiver_tasks<F, R>(
+pub async fn spawn_receiver_tasks<F>(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<RandBit<F, R>>,
+    nodes: Vec<RandBit<F>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()>
 where
     F: FftField,
-    R: RBC<Id = SessionId> + Clone + 'static,
 {
     let mut set = JoinSet::new();
 
@@ -97,6 +96,12 @@ where
                             node.mult_node.drain_batch_recon_output().await.unwrap();
                         }
                     }
+                    WrappedMessage::Mult(msg) => {
+                        let _ = node
+                            .mult_node
+                            .process(msg.sender, msg.session_id, msg.payload)
+                            .await;
+                    }
                     _ => {}
                 }
             }
@@ -105,18 +110,17 @@ where
     set
 }
 
-pub async fn initialize_nodes<F, R>(
+pub async fn initialize_nodes<F>(
     num_parties: usize,
     a_shares: Vec<Vec<RobustShare<F>>>,
     mult_triples: Vec<Vec<ShamirBeaverTriple<F>>>,
     session_id: SessionId,
-    nodes: Vec<RandBit<F, R>>,
+    nodes: Vec<RandBit<F>>,
     network: Arc<FakeNetwork>,
     duration: Duration,
 ) -> JoinSet<()>
 where
     F: FftField,
-    R: RBC<Id = SessionId> + Clone + 'static,
 {
     let mut init_set = JoinSet::new();
     for i in 0..num_parties {
