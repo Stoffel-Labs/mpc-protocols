@@ -96,8 +96,10 @@ pub struct DirectionalMsgCounts {
     pub batch_recon: BatchReconMsgCounts,
     pub input: AtomicU64,
     pub output: AtomicU64,
-    pub prand_bit_d: AtomicU64,
-    pub prand_bit_d_echo: AtomicU64,
+    pub prand_int: AtomicU64,
+    pub prand_int_echo: AtomicU64,
+    pub mult: AtomicU64,
+    pub trunc: AtomicU64,
 }
 
 // ── top-level counters ────────────────────────────────────────────────────────
@@ -255,8 +257,10 @@ pub struct DirectionalMsgSnapshot {
     pub batch_recon: BatchReconMsgSnapshot,
     pub input: u64,
     pub output: u64,
-    pub prand_bit_d: u64,
-    pub prand_bit_d_echo: u64,
+    pub prand_int: u64,
+    pub prand_int_echo: u64,
+    pub mult: u64,
+    pub trunc: u64,
 }
 
 impl From<&DirectionalMsgCounts> for DirectionalMsgSnapshot {
@@ -269,8 +273,10 @@ impl From<&DirectionalMsgCounts> for DirectionalMsgSnapshot {
             batch_recon: BatchReconMsgSnapshot::from(&c.batch_recon),
             input: c.input.load(RELAX),
             output: c.output.load(RELAX),
-            prand_bit_d: c.prand_bit_d.load(RELAX),
-            prand_bit_d_echo: c.prand_bit_d_echo.load(RELAX),
+            prand_int: c.prand_int.load(RELAX),
+            prand_int_echo: c.prand_int_echo.load(RELAX),
+            mult: c.mult.load(RELAX),
+            trunc: c.trunc.load(RELAX),
         }
     }
 }
@@ -350,8 +356,10 @@ impl fmt::Display for NodeStatisticsSnapshot {
         writeln!(f, "├───────────────────────────────────────┼──────────┼──────────┤")?;
         row!("Input",               self.sent.input,       self.received.input);
         row!("Output",              self.sent.output,      self.received.output);
-        row!("PRandBitD",           self.sent.prand_bit_d, self.received.prand_bit_d);
-        row!("PRandBitDEcho",       self.sent.prand_bit_d_echo, self.received.prand_bit_d_echo);
+        row!("PRandInt",           self.sent.prand_int, self.received.prand_int);
+        row!("PRandIntEcho",       self.sent.prand_int_echo, self.received.prand_int_echo);
+        row!("Mult",                self.sent.mult,         self.received.mult);
+        row!("Trunc",               self.sent.trunc,        self.received.trunc);
         write!(f,  "└───────────────────────────────────────┴──────────┴──────────┘")
     }
 }
@@ -431,11 +439,17 @@ pub(crate) fn record_received(msg: &WrappedMessage, counts: &DirectionalMsgCount
         WrappedMessage::Output(_) => {
             counts.output.fetch_add(1, RELAX);
         }
-        WrappedMessage::PRandBitD(_) => {
-            counts.prand_bit_d.fetch_add(1, RELAX);
+        WrappedMessage::PRandInt(_) => {
+            counts.prand_int.fetch_add(1, RELAX);
         }
-        WrappedMessage::PRandBitDEcho(_) => {
-            counts.prand_bit_d_echo.fetch_add(1, RELAX);
+        WrappedMessage::PRandIntEcho(_) => {
+            counts.prand_int_echo.fetch_add(1, RELAX);
+        }
+        WrappedMessage::Mult(_) => {
+            counts.mult.fetch_add(1, RELAX);
+        }
+        WrappedMessage::Trunc(_) => {
+            counts.trunc.fetch_add(1, RELAX);
         }
     }
 }
