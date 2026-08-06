@@ -1,6 +1,6 @@
 use crate::common::session_store::SessionStore;
 use crate::common::utils::deser_bounded_vec;
-use crate::common::{ProtocolSessionId, RBC};
+use crate::common::ProtocolSessionId;
 use crate::honeybadger::batch_recon::batch_recon::BatchReconNode;
 use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitStorage};
 use crate::honeybadger::mul::concat_sorted;
@@ -35,10 +35,9 @@ use tokio::time::{timeout, Duration};
 /// If the underlying sharing scheme implements the ideal arithmetic black box functionality, then
 /// this protocol is secure.
 #[derive(Clone, Debug)]
-pub struct RandBit<F, R>
+pub struct RandBit<F>
 where
     F: FftField,
-    R: RBC,
 {
     /// The ID of the node.
     pub id: PartyId,
@@ -50,17 +49,16 @@ where
     pub storage:
         Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<RandBitStorage<F>>>)>>>,
     /// Node to execute a secure multiplication.
-    pub mult_node: Multiply<F, R>,
+    pub mult_node: Multiply<F>,
     /// Batch reconstruction node to reconstruct `a^2 mod p`.
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 const MAX_RANDBIT_SESSIONS: usize = 512;
 
-impl<F, R> RandBit<F, R>
+impl<F> RandBit<F>
 where
     F: FftField,
-    R: RBC<Id = SessionId>,
 {
     pub fn new(id: PartyId, n_parties: usize, threshold: usize) -> Result<Self, RandBitError> {
         let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
@@ -363,12 +361,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::rbc::rbc::Avid;
     use ark_bls12_381::Fr;
 
     #[tokio::test]
     async fn test_randbit_storage_limit() {
-        let node = RandBit::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
+        let node = RandBit::<Fr>::new(0, 5, 1).unwrap();
 
         // Fill up storage to the per-peer limit (MAX_RANDBIT_SESSIONS / n_parties)
         let per_peer_limit = super::MAX_RANDBIT_SESSIONS / 5;

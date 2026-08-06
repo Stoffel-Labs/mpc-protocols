@@ -51,7 +51,7 @@ pub fn create_nodes(
     t: usize,
     n_triples: usize,
     n_shares: usize,
-    n_prandbit: usize,
+    n_randbit: usize,
     n_prandint: usize,
     instance_id: u32,
 ) -> Vec<HoneyBadgerMPCNode<Fr, Avid<SessionId>>> {
@@ -67,7 +67,7 @@ pub fn create_nodes(
         n_triples,
         n_shares,
         instance_id,
-        n_prandbit,
+        n_randbit,
         n_prandint,
         8,
         4,
