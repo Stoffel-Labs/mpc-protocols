@@ -3,6 +3,7 @@ use crate::utils::test_utils::{setup_tracing, test_setup};
 use ark_ff::{AdditiveGroup, Field};
 use std::time::Duration;
 use stoffelcrypto::common::math::goldilocks::GoldilocksField;
+use stoffelcrypto::common::rbc::rbc::Avid;
 use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelcrypto::honeybadger::fpmul::rand_bit::RandBit;
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -26,7 +27,7 @@ async fn rand_bit_with_small_field_e2e() {
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);
 
     // === Create RandBit nodes ===
-    let nodes: Vec<RandBit<GoldilocksField>> = (0..num_parties)
+    let nodes: Vec<RandBit<GoldilocksField, Avid<SessionId>>> = (0..num_parties)
         .map(|i| RandBit::new(i, num_parties, threshold).unwrap())
         .collect();
 

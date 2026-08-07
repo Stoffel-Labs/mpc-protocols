@@ -178,6 +178,8 @@ async fn synthetic_inputs(
             None,
             None,
             None,
+            None,
+            None,
         );
     }
 

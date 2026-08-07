@@ -92,7 +92,7 @@ mpc-protocols/
 | Preprocessing | Shamir Random Share (RanSha) | Implemented |
 | Preprocessing | Double Sharing / RanDouSha | Implemented |
 | Preprocessing | Beaver Triple Generation | Implemented |
-| Preprocessing | RandBit / PRandInt | Implemented |
+| Preprocessing | PRandBit / PRandInt | Implemented |
 | Arithmetic | Secure Beaver Multiplication | Implemented |
 | Arithmetic | Fixed-Point Mul / Div / Trunc | Implemented |
 | I/O | Distributed Input/Output (RBC) | Implemented |
@@ -137,7 +137,7 @@ Secure multiplication using Beaver triples:
 Preprocessing store management:
 - Random shares, double shares
 - Beaver triples
-- RandBit/PRandInt outputs
+- PRandBit/PRandInt outputs
 
 ### `mpc/src/ffi/c_bindings/`
 C FFI exports for language SDK bindings:

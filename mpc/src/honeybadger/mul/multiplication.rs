@@ -1,8 +1,8 @@
 use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{
-        share::ShareError, utils::deser_bounded_vec, ProtocolSessionId, SecretSharingScheme,
-        ShamirShare,
+        rbc::RbcError, share::ShareError, utils::deser_bounded_vec, ProtocolSessionId,
+        SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
         batch_recon::{batch_recon::BatchReconNode, BatchReconError},
@@ -12,11 +12,12 @@ use crate::{
         },
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         triple_gen::ShamirBeaverTriple,
-        SessionId, WrappedMessage,
+        SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
+use bincode::Options;
 use itertools::izip;
 use std::{
     collections::HashMap,
@@ -25,7 +26,10 @@ use std::{
     time::Instant,
 };
 use stoffelnet::network_utils::{Network, PartyId};
-use tokio::sync::{mpsc::Receiver, Mutex};
+use tokio::sync::{
+    mpsc::{self, Receiver},
+    Mutex,
+};
 use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn};
 
@@ -37,20 +41,17 @@ use tracing::{error, info, warn};
 /// 2. calculate x*y = a*b - (a - x)(b - y) - (a - x)y - (b - y)x; a - x and b - y have been
 ///    opened, a*b is part of the Beaver triple and x and y are known shares
 ///
-/// Opening in step (1) happens using batch reconstruction and, for whatever doesn't fit evenly
-/// into a batch, direct point-to-point messages (`WrappedMessage::Mult`).
+/// Opening in step (1) happens using batch reconstruction and also RBC.
 /// The former is used for chunks of t + 1 shares and the remainder of these, if any, is
 /// reconstructed using the latter.
 /// For example, if `n = 10` and `t = 3`, then 10 multiplications would be performed by running
 /// batch reconstruction four times: on two chunks each of size 4 for `a - x` and `b - y`,
-/// respectively. In addition, each node would broadcast its own remaining values directly,
-/// which are two values of `a - x` and `b - y`, respectively. Both paths reconstruct robustly
-/// (Reed-Solomon decoding tolerating up to `t` bad shares among the received ones), so neither
-/// needs RBC's reliable-broadcast agreement — a Byzantine sender equivocating over direct
-/// point-to-point messages cannot bias the decoded result, since every honest node's own share
-/// is correct and outnumbers the faulty ones.
+/// respectively. In addition, each node would run RBC once for the remaining values, which are two
+/// values of `a - x` and `b - y`, respectively. While batch reconstruction takes care of the
+/// distribution of the shares and their reconstruction at the same time, the nodes need to
+/// manually reconstruct the shares received via RBC.
 ///
-/// The storage per multiplication is accessed by `Multiply::init` and `process` and is protected by
+/// The storage per multiplication is accessed by `Multiply::init` and `open_mult_handler` and is protected by
 /// a mutex.
 
 // requires that Multiply::init has been called before and all chunks and shares via RBC have been
@@ -140,7 +141,7 @@ fn reconstruct_rbc<F: FftField>(
 }
 
 #[derive(Clone, Debug)]
-pub struct Multiply<F: FftField> {
+pub struct Multiply<F: FftField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
@@ -148,14 +149,25 @@ pub struct Multiply<F: FftField> {
         Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<MultStorage<F>>>)>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
+    pub rbc: R,
+    pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
 const MAX_MUL_SESSIONS: usize = 1024;
 
-impl<F: FftField> Multiply<F> {
+impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
+        let (rbc_sender, rbc_receiver) = mpsc::channel(200);
         let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
         let batch_recon = BatchReconNode::<F>::new(id, n, threshold, threshold, batch_sender)?;
+        let rbc = R::new(
+            id,
+            n,
+            threshold,
+            threshold + 1,
+            rbc_sender,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?;
         Ok(Self {
             id,
             n,
@@ -163,7 +175,77 @@ impl<F: FftField> Multiply<F> {
             mult_storage: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             batch_recon,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
+            rbc,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
+    }
+
+    pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {
+        loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(MulError::Abort);
+                    }
+                }
+            };
+
+            let output = match self.rbc.get_store(id).await {
+                Ok(output) => output,
+                Err(RbcError::Internal(msg)) if msg.contains("does not exist") => {
+                    warn!(
+                        session_id = ?id,
+                        "ignoring stale RBC output for cleared/finished multiplication session"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let msg: MultMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
+            let authenticated_sender = id.sub_id() as usize;
+            if msg.sender != authenticated_sender {
+                warn!(
+                    "Dropping 
+                RBC output: inner sender {} does not match session's designated sender {}",
+                    msg.sender,
+                    id.sub_id()
+                );
+                continue;
+            }
+            if msg.session_id.exec_id() != id.exec_id()
+                || msg.session_id.instance_id() != id.instance_id()
+            {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != id.sub_id()
+            {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
+
+            if id.round_id() != 2 {
+                warn!("Dropping RBC output: unexpected round_id for Mul RBC message");
+                continue;
+            }
+            match self
+                .open_mult_handler(authenticated_sender, msg.session_id, msg.payload)
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn drain_batch_recon_output(&mut self) -> Result<(), MulError> {
@@ -189,7 +271,7 @@ impl<F: FftField> Multiply<F> {
                 }
                 Err(e) => return Err(e.into()),
             };
-            match self.process(self.id, id, output).await {
+            match self.open_mult_handler(self.id, id, output).await {
                 Ok(()) => {}
                 Err(e) => {
                     return Err(e);
@@ -228,6 +310,15 @@ impl<F: FftField> Multiply<F> {
             self.batch_recon.clear_store(session_id2).await;
         }
 
+        for party_id in 0..self.n {
+            let rbc_session_id = SessionId::new(
+                session_id.calling_protocol().unwrap(),
+                SessionId::pack_slot(session_id.exec_id(), party_id as u8, 2),
+                session_id.instance_id(),
+            );
+            self.rbc.clear_session(rbc_session_id).await;
+        }
+
         let mut store = self.mult_storage.lock().await;
         store.retire(session_id)
     }
@@ -238,8 +329,8 @@ impl<F: FftField> Multiply<F> {
 
     /// Starts or completes a multiplication session.
     ///
-    /// This method is deliberately re-entrant. Network outputs for child BatchRecon sessions or
-    /// direct-open messages may arrive before the local caller invokes `init`, so the method first records the caller's
+    /// This method is deliberately re-entrant. Network outputs for child BatchRecon or RBC sessions
+    /// may arrive before the local caller invokes `init`, so the method first records the caller's
     /// inputs and triples, then checks whether enough openings are already buffered to finish the
     /// multiplication immediately. If not, it computes this party's `(a - x)` and `(b - y)` shares
     /// only for the missing chunks and starts the child protocols for those chunks.
@@ -341,7 +432,7 @@ impl<F: FftField> Multiply<F> {
         let (a_full, remaining_a) = a_sub_x.split_at(split_at);
         let (b_full, remaining_b) = b_sub_y.split_at(split_at);
 
-        let need_direct_open = storage.openings.is_none();
+        let need_rbc = storage.openings.is_none();
 
         // 7.
         drop(storage);
@@ -373,10 +464,8 @@ impl<F: FftField> Multiply<F> {
                 .await?;
         }
 
-        // 9. Broadcast the remaining (< t+1) values directly, point-to-point. Robust
-        //    interpolation in `process` tolerates up to `t` bad shares among the
-        //    received ones, so this doesn't need RBC's reliable-broadcast agreement.
-        if need_direct_open {
+        // 9.
+        if need_rbc {
             // Reconstruct < t+1 values
             let reconst_message =
                 ReconstructionMessage::new(remaining_a.to_vec(), remaining_b.to_vec());
@@ -389,11 +478,12 @@ impl<F: FftField> Multiply<F> {
                 session_id.instance_id(),
             );
 
-            let mult_msg = MultMessage::new(self.id, sessionid, bytes_rec_message);
-            let wrapped = WrappedMessage::Mult(mult_msg);
+            let wrapped = MultMessage::new(self.id, sessionid, bytes_rec_message);
             let bytes_wrapped = bincode::serialize(&wrapped)?;
 
-            network.broadcast(&bytes_wrapped).await?;
+            self.rbc
+                .init(bytes_wrapped, sessionid, Arc::clone(&network))
+                .await?;
         }
 
         Ok(())
@@ -407,10 +497,10 @@ impl<F: FftField> Multiply<F> {
     // 5. Perform the multiplication and return if all openings are available
     // 6. Otherwise, compute all local (a - x)- and (b - y)-shares
     //
-    // `process` mainly serves to receive opened values from batch reconstruction
+    // `open_mult_handler` mainly serves to receive opened values from batch reconstruction
     // or shares from RBC, from which openings will be manually reconstructed.
     // If `init` has been called, then it can also try to perform the multiplication.
-    pub async fn process(
+    pub async fn open_mult_handler(
         &self,
         sender: usize,
         sid: SessionId,
@@ -464,7 +554,7 @@ impl<F: FftField> Multiply<F> {
             if target_map.contains_key(&dealer_id) {
                 warn!(
                     self_id = self.id,
-                    dealer_id, "ignoring duplicate batch-recon opening in process"
+                    dealer_id, "ignoring duplicate batch-recon opening in open_mult_handler"
                 );
                 return Ok(());
             }
@@ -489,7 +579,7 @@ impl<F: FftField> Multiply<F> {
             if storage.received_shares.contains_key(&sender) {
                 warn!(
                     self_id = self.id,
-                    sender, "ignoring duplicate RBC shares from dealer in process"
+                    sender, "ignoring duplicate RBC shares from dealer in open_mult_handler"
                 );
                 return Ok(());
             }
@@ -615,7 +705,7 @@ impl<F: FftField> Multiply<F> {
 pub mod tests {
     use super::*;
     use crate::{
-        common::SecretSharingScheme,
+        common::{rbc::rbc::Avid, SecretSharingScheme},
         honeybadger::{
             robust_interpolate::robust_interpolate::RobustShare, ProtocolType, WrappedMessage,
         },
@@ -786,7 +876,7 @@ pub mod tests {
             .collect();
 
         let mut nodes: Vec<_> = (0..n)
-            .map(|i| Multiply::<Fr>::new(i, n, t).unwrap())
+            .map(|i| Multiply::<Fr, Avid<SessionId>>::new(i, n, t).unwrap())
             .collect();
 
         // all but one node call init
@@ -815,10 +905,10 @@ pub mod tests {
             });
         }
 
-        // process batch-recon and direct-open messages for the masked input
+        // run RBC for masked input and eventually process it
         for (i, node) in nodes.iter_mut().enumerate() {
-            let mut node = node.clone();
             let network = network.clone();
+            let mut node = node.clone();
             let receiver = receivers.remove(0);
             let mut merged_rx = fan_in_inboxes(receiver);
             tokio::spawn(async move {
@@ -834,16 +924,14 @@ pub mod tests {
                                 .unwrap();
                             let _ = node.drain_batch_recon_output().await;
                         }
-                        WrappedMessage::Mult(mult_msg) => {
-                            match node
-                                .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
-                                .await
-                            {
+                        WrappedMessage::Rbc(rbc_msg) => {
+                            match node.rbc.process(rbc_msg, network[i].clone()).await {
                                 Ok(()) => {}
                                 Err(e) => {
-                                    panic!("unexpected error during direct open: {e}");
+                                    panic!("unexpected error during RBC: {e}");
                                 }
                             }
+                            let _ = node.drain_rbc_output().await;
                         }
                         _ => {
                             panic!();
@@ -1028,7 +1116,7 @@ pub mod tests {
         }
 
         // 4. Create node
-        let mul_node = Multiply::<Fr>::new(node_id, n_parties, t).unwrap();
+        let mul_node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n_parties, t).unwrap();
 
         let storage_bind = mul_node
             .get_or_create_mult_storage(session_id, node_id)
@@ -1079,7 +1167,7 @@ pub mod tests {
             mul_msgs.push(MultMessage::new(node_id, session_id_b, b_bytes));
         }
 
-        // using direct point-to-point open
+        // using RBC
         for i in 0..n_parties {
             if i == node_id {
                 continue;
@@ -1122,7 +1210,7 @@ pub mod tests {
         // 7. Make node handle messages
         for msg in mul_msgs {
             let result = mul_node
-                .process(msg.sender, msg.session_id, msg.payload)
+                .open_mult_handler(msg.sender, msg.session_id, msg.payload)
                 .await;
             match result {
                 Ok(()) => {}
@@ -1157,7 +1245,68 @@ pub mod tests {
         }
     }
 
-    /// Regression test for the batch-reconstruction late-output race.
+    /// Regression test for the mul pipelining / RBC late-output race.
+    ///
+    /// `drain_rbc_output` reads session ids the RBC queued on delivery, then calls
+    /// `rbc.get_store(id)`. After a pipelined mul finishes, `mul()` calls
+    /// `clear_store`, which removes the round-2 RBC sessions. An id queued just
+    /// before the clear becomes stale: its session is gone, so `get_store` returns
+    /// "Session ID does not exist". Previously that propagated as a fatal
+    /// `MulError::RbcError` (crashing the node's message loop under workloads like
+    /// `aes-unoptimized.stflb`); it must now be ignored as harmless late traffic.
+    ///
+    /// The post-clear state (stale id in the drain queue, RBC session absent) is
+    /// reproduced directly rather than by driving a full network, which is enough
+    /// to cover the fixed branch.
+    #[tokio::test]
+    async fn test_drain_rbc_output_ignores_cleared_session() {
+        let n = 10;
+        let t = 3;
+        let node_id = 0;
+        // Odd count not divisible by t + 1 so the RBC remainder path is active.
+        let no_of_mul = 5;
+        let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot(7, 0, 0), 111);
+
+        let mut node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n, t).unwrap();
+
+        // Swap in a drain queue we control so we can inject a stale id. (The real
+        // queue is fed by RBC delivery; here we only need the post-clear state.)
+        let (stale_tx, stale_rx) = mpsc::channel(200);
+        node.rbc_output = Arc::new(Mutex::new(stale_rx));
+
+        // `clear_store` needs a mult_storage entry; create one for this session.
+        {
+            let storage = node
+                .get_or_create_mult_storage(session_id, node_id)
+                .await
+                .unwrap();
+            storage.lock().await.no_of_mul = Some(no_of_mul);
+        }
+
+        // A round-2 RBC id for this party, as would be queued on RBC delivery.
+        let stale_id = SessionId::new(
+            ProtocolType::Mul,
+            SessionId::pack_slot(session_id.exec_id(), node_id as u8, 2),
+            session_id.instance_id(),
+        );
+        stale_tx.send(stale_id).await.unwrap();
+
+        // The mul finished: `clear_store` removes the round-2 RBC sessions (a
+        // no-op here since none ran) and the mult_storage entry. The queued id is
+        // now stale.
+        assert!(node.clear_store(session_id).await);
+
+        // Without the fix: Err(MulError::RbcError("Session ID does not exist")).
+        // With the fix: the stale output is dropped and drain succeeds.
+        assert!(
+            node.drain_rbc_output().await.is_ok(),
+            "drain_rbc_output must ignore stale outputs for cleared sessions"
+        );
+        // Draining an empty queue afterwards must also be fine.
+        assert!(node.drain_rbc_output().await.is_ok());
+    }
+
+    /// Same race as above, but on the batch-reconstruction output queue.
     /// `drain_batch_recon_output` must also ignore ids whose session was cleared
     /// by `clear_store` instead of propagating "Session ID does not exist".
     #[tokio::test]
@@ -1170,7 +1319,7 @@ pub mod tests {
         let no_of_mul = 5;
         let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot(9, 0, 0), 222);
 
-        let mut node = Multiply::<Fr>::new(node_id, n, t).unwrap();
+        let mut node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n, t).unwrap();
 
         let (stale_tx, stale_rx) = mpsc::channel(200);
         node.batch_output = Arc::new(Mutex::new(stale_rx));
@@ -1201,18 +1350,18 @@ pub mod tests {
 
     /// Regression test for the "Duplicate" symptom of the mul late-message race.
     ///
-    /// A late/duplicate direct-open delivery can hand the same dealer to `process`
-    /// twice. Previously that returned a fatal `MulError::Duplicate`; it must now be idempotent
-    /// (return `Ok(())`) — reconstruction counts each dealer once, so a duplicate cannot change
-    /// the result.
+    /// A late/duplicate RBC delivery can hand the same dealer to `open_mult_handler` twice.
+    /// Previously that returned a fatal `MulError::Duplicate`; it must now be idempotent
+    /// (return `Ok(())`) — RBC agreement delivers one value per dealer and reconstruction counts
+    /// each dealer once, so a duplicate cannot change the result.
     #[tokio::test]
-    async fn test_open_mult_handler_ignores_duplicate_sender() {
+    async fn test_open_mult_handler_ignores_duplicate_rbc_sender() {
         let n = 10;
         let t = 3;
         let node_id = 0;
         let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot(7, 0, 0), 111);
 
-        let mul_node = Multiply::<Fr>::new(node_id, n, t).unwrap();
+        let mul_node = Multiply::<Fr, Avid<SessionId>>::new(node_id, n, t).unwrap();
 
         // Seed the session: init has run, and dealer 3 has already delivered its RBC shares.
         {
@@ -1233,7 +1382,7 @@ pub mod tests {
         );
 
         // Pre-fix: Err(MulError::Duplicate(...)). Post-fix: idempotent Ok(()).
-        let result = mul_node.process(3, dup_sid, Vec::new()).await;
+        let result = mul_node.open_mult_handler(3, dup_sid, Vec::new()).await;
         assert!(
             result.is_ok(),
             "duplicate RBC delivery must be tolerated: {result:?}"

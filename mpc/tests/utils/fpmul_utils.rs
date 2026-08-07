@@ -4,11 +4,11 @@ use crate::utils::test_utils::fan_in_inboxes;
 use ark_ff::{FftField, PrimeField};
 use ark_std::test_rng;
 use std::sync::Arc;
-use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use stoffelcrypto::honeybadger::fpmul::fpmul::FPMulNode;
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelcrypto::honeybadger::triple_gen::ShamirBeaverTriple;
-use stoffelcrypto::honeybadger::{ProtocolType, WrappedMessage};
+use stoffelcrypto::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
@@ -17,14 +17,15 @@ use tracing::error;
 // Simulates the `process` function in the FPMul execution.
 //
 // This function should be only used during testing.
-pub async fn spawn_receiver_tasks<F>(
+pub async fn spawn_receiver_tasks<F, R>(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<FPMulNode<F>>,
+    nodes: Vec<FPMulNode<F, R>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()>
 where
     F: FftField + PrimeField,
+    R: RBC<Id = SessionId> + Clone + 'static,
 {
     let mut set = JoinSet::new();
     for i in 0..num_parties {
@@ -50,25 +51,21 @@ where
                             .unwrap();
                         node.mult_node.drain_batch_recon_output().await.unwrap();
                     }
-                    WrappedMessage::Mult(msg) => match msg.session_id.calling_protocol() {
+                    WrappedMessage::Rbc(msg) => match msg.session_id.calling_protocol() {
                         Some(ProtocolType::FpMul) => {
-                            node.mult_node
-                                .process(msg.sender, msg.session_id, msg.payload)
-                                .await
-                                .unwrap();
+                            if msg.session_id.round_id() == 2 {
+                                node.mult_node.rbc.process(msg, net.clone()).await.unwrap();
+                                node.mult_node.drain_rbc_output().await.unwrap();
+                            } else if msg.session_id.round_id() == 0 {
+                                node.trunc_node.rbc.process(msg, net.clone()).await.unwrap();
+                                node.trunc_node.drain_rbc_output().await.unwrap();
+                            } else {
+                                panic!("Unexpected sub-id in RBC message: {:?}", msg.session_id);
+                            }
                         }
-                        Some(other) => panic!("Unexpected protocol in Mult message: {:?}", other),
+                        Some(other) => panic!("Unexpected protocol in RBC message: {:?}", other),
                         None => {
-                            panic!("Received Mult message without calling protocol: {:?}", msg);
-                        }
-                    },
-                    WrappedMessage::Trunc(msg) => match msg.session_id.calling_protocol() {
-                        Some(ProtocolType::FpMul) => {
-                            node.trunc_node.process(msg).await.unwrap();
-                        }
-                        Some(other) => panic!("Unexpected protocol in Trunc message: {:?}", other),
-                        None => {
-                            panic!("Received Trunc message without calling protocol: {:?}", msg);
+                            panic!("Received RBC message without calling protocol: {:?}", msg);
                         }
                     },
                     message => {

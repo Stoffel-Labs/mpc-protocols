@@ -89,11 +89,14 @@ fn run_config(n: usize, t: usize, n_muls: usize, lat: Option<(u64, u64)>) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             for pid in 0..n {
-                nodes[pid]
-                    .preprocessing_material
-                    .lock()
-                    .await
-                    .add(Some(triples[pid].clone()), None, None, None);
+                nodes[pid].preprocessing_material.lock().await.add(
+                    Some(triples[pid].clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
             }
         });
     }

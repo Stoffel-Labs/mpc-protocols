@@ -68,10 +68,15 @@ pub enum ProtocolType {
     Dousha = 7,
     Mul = 8,
     PRandInt = 9,
+    PRandBit = 10,
     RandBit = 11,
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
+    TripleSmallField = 15,
+    RanShaSmallField = 16,
+    RanDouShaSmallField = 17,
+    DouShaSmallField = 18,
 }
 
 impl From<ProtocolType> for crate::honeybadger::ProtocolType {
@@ -87,10 +92,17 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             ProtocolType::Dousha => crate::honeybadger::ProtocolType::Dousha,
             ProtocolType::Mul => crate::honeybadger::ProtocolType::Mul,
             ProtocolType::PRandInt => crate::honeybadger::ProtocolType::PRandInt,
+            ProtocolType::PRandBit => crate::honeybadger::ProtocolType::PRandBit,
             ProtocolType::RandBit => crate::honeybadger::ProtocolType::RandBit,
             ProtocolType::FpMul => crate::honeybadger::ProtocolType::FpMul,
             ProtocolType::Trunc => crate::honeybadger::ProtocolType::Trunc,
             ProtocolType::FpDivConst => crate::honeybadger::ProtocolType::FpDivConst,
+            ProtocolType::TripleSmallField => crate::honeybadger::ProtocolType::TripleSmallField,
+            ProtocolType::RanShaSmallField => crate::honeybadger::ProtocolType::RanShaSmallField,
+            ProtocolType::RanDouShaSmallField => {
+                crate::honeybadger::ProtocolType::RanDouShaSmallField
+            }
+            ProtocolType::DouShaSmallField => crate::honeybadger::ProtocolType::DouShaSmallField,
         }
     }
 }
@@ -108,10 +120,17 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::Dousha => ProtocolType::Dousha,
             crate::honeybadger::ProtocolType::Mul => ProtocolType::Mul,
             crate::honeybadger::ProtocolType::PRandInt => ProtocolType::PRandInt,
+            crate::honeybadger::ProtocolType::PRandBit => ProtocolType::RandBit,
             crate::honeybadger::ProtocolType::RandBit => ProtocolType::RandBit,
             crate::honeybadger::ProtocolType::FpMul => ProtocolType::FpMul,
             crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
             crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
+            crate::honeybadger::ProtocolType::TripleSmallField => ProtocolType::TripleSmallField,
+            crate::honeybadger::ProtocolType::RanShaSmallField => ProtocolType::RanShaSmallField,
+            crate::honeybadger::ProtocolType::RanDouShaSmallField => {
+                ProtocolType::RanDouShaSmallField
+            }
+            crate::honeybadger::ProtocolType::DouShaSmallField => ProtocolType::DouShaSmallField,
         }
     }
 }

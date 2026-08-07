@@ -1,5 +1,5 @@
 use crate::{
-    common::types::fixed::SecretFixedPoint,
+    common::{types::fixed::SecretFixedPoint, RBC},
     honeybadger::{
         fpmul::{truncpr::TruncPrNode, TruncPrError},
         mul::{multiplication::Multiply, MulError},
@@ -34,20 +34,22 @@ pub enum FPError {
 }
 
 #[derive(Clone, Debug)]
-pub struct FPMulNode<F>
+pub struct FPMulNode<F, R>
 where
     F: PrimeField,
+    R: RBC,
 {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub mult_node: Multiply<F>,
-    pub trunc_node: TruncPrNode<F>,
+    pub mult_node: Multiply<F, R>,
+    pub trunc_node: TruncPrNode<F, R>,
 }
 
-impl<F> FPMulNode<F>
+impl<F, R> FPMulNode<F, R>
 where
     F: PrimeField,
+    R: RBC<Id = SessionId>,
 {
     pub fn new(id: usize, n_parties: usize, threshold: usize) -> Result<Self, FPError> {
         let trunc_node = TruncPrNode::new(id, n_parties, threshold)?;

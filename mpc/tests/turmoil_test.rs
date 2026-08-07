@@ -27,6 +27,7 @@ use stoffelcrypto::{
         batch_recon::{
             batch_recon::BatchReconNode, BatchReconError, BatchReconMsg, BatchReconMsgType,
         },
+        fpmul::f256::Gf256,
         input::input::{InputClient, InputType},
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -571,7 +572,7 @@ fn preprocessing_e2e_turmoil(
     let no_of_triples = 7;
     let no_of_randomshares = 4;
     let instance_id = 111;
-    let n_randbit = 4;
+    let n_prandbit = 4;
     let n_prandint = 4;
 
     let (mut sim, inner) = turmoil_setup_with_duration(
@@ -591,7 +592,7 @@ fn preprocessing_e2e_turmoil(
         no_of_triples,
         no_of_randomshares,
         instance_id,
-        n_randbit,
+        n_prandbit,
         n_prandint,
         l,
         k,
@@ -651,11 +652,10 @@ fn preprocessing_e2e_turmoil(
                     if preprocessing_handle.is_finished() {
                         let len = node.preprocessing_material.lock().await.length();
                         let n_triples = len.beaver_triples;
-                        let n_rbit = len.randbit;
+                        let n_pbit = len.prandbit;
                         let n_pint = len.prandint;
-                        // no_of_triples=7 rounds up to a multiple of group_size (2t+1=3) -> 9,
-                        // then RandBit draws 4 more directly from the same pool -> 5 remain.
-                        if n_triples == 5 && n_rbit == n_randbit && n_pint == n_prandint {
+                        // no_of_triples=7 rounds up to a multiple of group_size (2t+1=3) -> 9.
+                        if n_triples == 9 && n_pbit == n_prandbit && n_pint == n_prandint {
                             break;
                         }
                     }
@@ -665,10 +665,10 @@ fn preprocessing_e2e_turmoil(
                 let len = node.preprocessing_material.lock().await.length();
                 let n_triples = len.beaver_triples;
                 let n_shares = len.random_shr;
-                let n_rbit = len.randbit;
+                let n_pbit = len.prandbit;
                 let n_pint = len.prandint;
 
-                let _ = tx.send(Ok((n_triples, n_shares, n_rbit, n_pint)));
+                let _ = tx.send(Ok((n_triples, n_shares, n_pbit, n_pint)));
                 let _ = done_tx.send(());
                 Ok(())
             }
@@ -744,13 +744,10 @@ fn preprocessing_e2e_turmoil(
     for r in results {
         match r {
             Err(e) => panic!("node failed: {}", e),
-            Ok((n_triples, n_shares, n_rbit, n_pint)) => {
-                // no_of_triples=7 rounds up to group_size (2t+1=3) -> 9, then RandBit draws 4
-                // more directly from the same pool (no auto top-up) -> 5 remain. Likewise
-                // no_of_randomshares=4 are fully consumed by RandBit's own `a` input -> 0 remain.
-                assert_eq!(n_triples, 5);
-                assert_eq!(n_shares, 0);
-                assert_eq!(n_rbit, 4);
+            Ok((n_triples, n_shares, n_pbit, n_pint)) => {
+                assert_eq!(n_triples, 9); // no_of_triples=7 rounds up to group_size (2t+1=3) -> 9
+                assert_eq!(n_shares, 4); // no_of_randomshares=4 remain after triple gen
+                assert_eq!(n_pbit, 4);
                 assert_eq!(n_pint, 4);
             }
         }
@@ -784,7 +781,7 @@ fn run_preprocessing_stress_turmoil(
     t: usize,
     n_triples: usize,
     n_random_shares: usize,
-    n_randbit: usize,
+    n_prandbit: usize,
     n_prandint: usize,
     env_overrides: &[(&str, &str)],
 ) {
@@ -810,7 +807,7 @@ fn run_preprocessing_stress_turmoil(
         n_triples,
         n_random_shares,
         instance_id,
-        n_randbit,
+        n_prandbit,
         n_prandint,
         8,
         4,
@@ -880,7 +877,7 @@ fn run_preprocessing_stress_turmoil(
                         let counts = (
                             len.beaver_triples,
                             len.random_shr,
-                            len.randbit,
+                            len.prandbit,
                             len.prandint,
                         );
                         let _ = tx.send(Ok(counts));
@@ -961,25 +958,25 @@ fn run_preprocessing_stress_turmoil(
     for result in results {
         match result {
             Err(error) => failure_reasons.push(error),
-            Ok((produced_triples, produced_random_shares, produced_rbits, produced_pints)) => {
-                if produced_triples < n_triples.saturating_sub(n_randbit) {
+            Ok((produced_triples, produced_random_shares, produced_pbits, produced_pints)) => {
+                if produced_triples < n_triples.saturating_sub(n_prandbit) {
                     failure_reasons.push(format!(
                         "produced {} triples, expected at least {}",
                         produced_triples,
-                        n_triples.saturating_sub(n_randbit)
+                        n_triples.saturating_sub(n_prandbit)
                     ));
                 }
-                if produced_random_shares < n_random_shares.saturating_sub(n_randbit) {
+                if produced_random_shares < n_random_shares.saturating_sub(n_prandbit) {
                     failure_reasons.push(format!(
                         "produced {} random shares, expected at least {}",
                         produced_random_shares,
-                        n_random_shares.saturating_sub(n_randbit)
+                        n_random_shares.saturating_sub(n_prandbit)
                     ));
                 }
-                if produced_rbits < n_randbit {
+                if produced_pbits < n_prandbit {
                     failure_reasons.push(format!(
-                        "produced {} random bits, expected at least {}",
-                        produced_rbits, n_randbit
+                        "produced {} probabilistic bits, expected at least {}",
+                        produced_pbits, n_prandbit
                     ));
                 }
                 if produced_pints < n_prandint {
@@ -1014,15 +1011,16 @@ async fn preprocessing_stress_snapshot(
         let len = node.preprocessing_material.lock().await.length();
         let n_triples = len.beaver_triples;
         let n_random = len.random_shr;
-        let n_rbits = len.randbit;
+        let n_pbits = len.prandbit;
         let n_pints = len.prandint;
         out.push_str(&format!(
-            "node {} material triples={} random={} rbits={} pints={}\n",
-            node.id, n_triples, n_random, n_rbits, n_pints
+            "node {} material triples={} random={} pbits={} pints={}\n",
+            node.id, n_triples, n_random, n_pbits, n_pints
         ));
 
         let rand_bit_sessions = node
             .preprocess
+            .small_field_preproc
             .rand_bit
             .storage
             .lock()
@@ -1055,6 +1053,7 @@ async fn preprocessing_stress_snapshot(
 
         let rand_bit_batch_output_len = node
             .preprocess
+            .small_field_preproc
             .rand_bit
             .batch_output
             .lock()
@@ -1067,6 +1066,7 @@ async fn preprocessing_stress_snapshot(
 
         let rand_bit_mul_sessions = node
             .preprocess
+            .small_field_preproc
             .rand_bit
             .mult_node
             .mult_storage
@@ -1096,19 +1096,30 @@ async fn preprocessing_stress_snapshot(
 
         let rand_bit_mul_batch_output_len = node
             .preprocess
+            .small_field_preproc
             .rand_bit
             .mult_node
             .batch_output
             .lock()
             .await
             .len();
+        let rand_bit_mul_rbc_output_len = node
+            .preprocess
+            .small_field_preproc
+            .rand_bit
+            .mult_node
+            .rbc_output
+            .lock()
+            .await
+            .len();
         out.push_str(&format!(
-            "node {} rand_bit.mul.batch_output.pending={}\n",
-            node.id, rand_bit_mul_batch_output_len
+            "node {} rand_bit.mul.batch_output.pending={} rbc_output.pending={}\n",
+            node.id, rand_bit_mul_batch_output_len, rand_bit_mul_rbc_output_len
         ));
 
         let rand_bit_mul_batch_sessions = node
             .preprocess
+            .small_field_preproc
             .rand_bit
             .mult_node
             .batch_recon
@@ -1172,6 +1183,7 @@ async fn preprocessing_stress_snapshot(
 
         let rand_bit_batch_sessions = node
             .preprocess
+            .small_field_preproc
             .rand_bit
             .batch_recon
             .store
@@ -1272,11 +1284,14 @@ fn honeybadger_sequential_mul_1000_turmoil() {
 
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         for pid in 0..n_parties {
-            nodes[pid]
-                .preprocessing_material
-                .lock()
-                .await
-                .add(Some(triple[pid].clone()), None, None, None);
+            nodes[pid].preprocessing_material.lock().await.add(
+                Some(triple[pid].clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
         }
     });
 
@@ -1443,10 +1458,10 @@ fn honeybadger_randousha_heavy_preprocessing_turmoil() {
 }
 
 // Ignored by default: slow, deliberately-overloaded repro combining triple, RanDouSha, RandBit,
-// and PRandInt generation. Passes when preprocessing fails under that combined load;
+// PRandBit, and PRandInt generation. Passes when preprocessing fails under that combined load;
 // fails (loudly) if it unexpectedly succeeds.
 #[test]
-#[ignore = "stress repro: generates triple, RanDouSha, RandBit, and PRandInt material"]
+#[ignore = "stress repro: generates triple, RanDouSha, RandBit, PRandBit, and PRandInt material"]
 fn honeybadger_multiply_heavy_preprocessing_turmoil() {
     run_preprocessing_stress_turmoil(
         4,
@@ -2105,11 +2120,14 @@ fn mul_e2e_without_preprocessing_turmoil() {
     // load triples before sim starts
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         for pid in 0..n_parties {
-            nodes[pid]
-                .preprocessing_material
-                .lock()
-                .await
-                .add(Some(triple[pid].clone()), None, None, None);
+            nodes[pid].preprocessing_material.lock().await.add(
+                Some(triple[pid].clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
         }
     });
 
@@ -2283,7 +2301,7 @@ fn fpmul_e2e_with_preprocessing(
     let mut rng = test_rng();
     let n_triples = 1 + m; // 1 (fpmul) + m(no of random bits)
     let n_random_shares = m; // no of random bits
-    let n_randbit = m;
+    let n_prandbit = m;
     let n_prandint = 1;
     let bound_l = 28;
     let security_k = 4;
@@ -2321,7 +2339,7 @@ fn fpmul_e2e_with_preprocessing(
         n_triples,
         n_random_shares,
         111,
-        n_randbit,
+        n_prandbit,
         n_prandint,
         bound_l,
         security_k,
@@ -2556,14 +2574,14 @@ fn fpdiv_const_e2e(
     // PRandInt
     let r_int = RobustShare::compute_shares(Fr::from(3u64), n_parties, t, None, &mut rng).unwrap();
 
-    // RandBits: m bits
+    // PRandBits: m bits
     let mut r_bits = vec![Vec::new(); n_parties];
     for j in 0..m {
         let bit_shares =
             RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
                 .unwrap();
         for (i, share) in bit_shares.iter().enumerate() {
-            r_bits[i].push(share.clone());
+            r_bits[i].push((share.clone(), Gf256::one()));
         }
     }
 
@@ -2618,7 +2636,9 @@ fn fpdiv_const_e2e(
                 node.preprocessing_material.lock().await.add(
                     None, // No Beaver triple needed
                     None,
-                    Some(r_bits),      // RandBit[]
+                    None,
+                    None,
+                    Some(r_bits),      // PRandBit[]
                     Some(vec![r_int]), // PRandInt[]
                 );
                 let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(pid), inner).await;

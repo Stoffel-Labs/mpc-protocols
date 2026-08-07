@@ -16,6 +16,7 @@ use futures::future::join_all;
 use std::collections::HashMap;
 use stoffelcrypto::{
     common::{
+        math::goldilocks::GoldilocksField,
         rbc::rbc::Avid,
         types::{
             fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
@@ -25,6 +26,7 @@ use stoffelcrypto::{
         ShamirShare,
     },
     honeybadger::{
+        fpmul::f256::Gf256,
         input::input::InputClient,
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
@@ -506,10 +508,14 @@ async fn mul_e2e() {
     //Load the triples
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        node.preprocessing_material
-            .lock()
-            .await
-            .add(Some(triple[pid].clone()), None, None, None);
+        node.preprocessing_material.lock().await.add(
+            Some(triple[pid].clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
     }
 
     // init all nodes
@@ -770,7 +776,7 @@ async fn preprocessing_e2e() {
     let no_of_triples = 7;
     let no_of_randomshares = 4;
     let instance_id = 111;
-    let n_randbit = 4;
+    let n_prandbit = 4;
     let n_prandint = 4;
 
     //Setup
@@ -784,7 +790,7 @@ async fn preprocessing_e2e() {
         no_of_triples,
         no_of_randomshares,
         instance_id,
-        n_randbit,
+        n_prandbit,
         n_prandint,
         l,
         k,
@@ -831,15 +837,13 @@ async fn preprocessing_e2e() {
         let len = node.preprocessing_material.lock().await.length();
         let n_triples = len.beaver_triples;
         let n_shares = len.random_shr;
-        let n_randbit = len.randbit;
+        let n_prandbit = len.prandbit;
         let n_prandint = len.prandint;
-        // no_of_triples=7 is rounded up to a multiple of group_size (2t+1=3) -> 9. RandBit
-        // generation draws directly from this same pool (no auto top-up) rather than
-        // generating extra: 4 triples and 4 random shares for its 4 RandBit outputs, leaving
-        // 9-4=5 triples and 4-4=0 random shares behind.
-        assert_eq!(n_triples, 5);
-        assert_eq!(n_shares, 0);
-        assert_eq!(n_randbit, 4);
+        // no_of_triples=7 is rounded up to a multiple of group_size (2t+1=3) -> 9.
+        // no_of_randomshares=4 remain after triple generation consumes its share pool.
+        assert_eq!(n_triples, 9); //>no_of_triples
+        assert_eq!(n_shares, 4); //>no_of_randomshares
+        assert_eq!(n_prandbit, 4);
         assert_eq!(n_prandint, 4);
     }
 }
@@ -857,15 +861,17 @@ async fn test_rand_bit() {
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
-    // The construction of triples is same as that of mul. RandBit now runs directly in the
-    // node's field `F` (`Fr` here), so the input shares and Beaver triples are over `Fr`.
-    let (_, per_party_triples) = construct_e2e_input_mul::<Fr>(n_parties, no_of_rand_bits, t);
+    // The construction of triples is same as that of mul.
+    // RandBit operates in the small (Goldilocks) field, so the input shares and
+    // Beaver triples must be over `GoldilocksField`.
+    let (_, per_party_triples) =
+        construct_e2e_input_mul::<GoldilocksField>(n_parties, no_of_rand_bits, t);
 
     // assumes each party holds shares of some secrets
     let mut a = Vec::new();
     let mut shares_a = Vec::new();
     for _ in 0..no_of_rand_bits {
-        let a_value = Fr::rand(&mut rng);
+        let a_value = GoldilocksField::rand(&mut rng);
         a.push(a_value);
         let shares = RobustShare::compute_shares(a_value, n_parties, t, None, &mut rng).unwrap();
         shares_a.push(shares);
@@ -900,7 +906,7 @@ async fn test_rand_bit() {
     let mut handles = Vec::new();
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let mut rand_bit_node = node.preprocess.rand_bit;
+        let mut prand_bit_node = node.preprocess.small_field_preproc.rand_bit;
         let net = network[pid].clone();
 
         // Prepare the input shares for this party
@@ -914,7 +920,7 @@ async fn test_rand_bit() {
 
         let handle = tokio::spawn(async move {
             {
-                rand_bit_node
+                prand_bit_node
                     .init(
                         a_value,
                         mult_triple,
@@ -940,6 +946,7 @@ async fn test_rand_bit() {
         let node = nodes[pid].clone();
         let store = node
             .preprocess
+            .small_field_preproc
             .rand_bit
             .storage
             .lock()
@@ -964,14 +971,14 @@ async fn test_rand_bit() {
         .1;
     println!("recovered bit: {}", bit0);
     // check if bit is 0 or 1
-    assert!(bit0 == Fr::ZERO || bit0 == Fr::ONE);
+    assert!(bit0 == GoldilocksField::ZERO || bit0 == GoldilocksField::ONE);
 
     let bit1 = RobustShare::recover_secret(&bit_share1, n_parties, t)
         .unwrap()
         .1;
     println!("recovered bit: {}", bit1);
     // check if bit is 0 or 1
-    assert!(bit1 == Fr::ZERO || bit1 == Fr::ONE);
+    assert!(bit1 == GoldilocksField::ZERO || bit1 == GoldilocksField::ONE);
 }
 //----------------------------------------MUL----------------------------------------
 
@@ -1018,7 +1025,7 @@ async fn fpmul_e2e() {
         let x = RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
             .unwrap();
         for (i, share) in x.iter().enumerate() {
-            r_bits[i].push(share.clone());
+            r_bits[i].push((share.clone(), Gf256::one()));
         }
     }
     //----------------------------------------SETUP NODES----------------------------------------
@@ -1052,6 +1059,8 @@ async fn fpmul_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             Some(triple[pid].clone()),
+            None,
+            None,
             None,
             Some(r_bits[pid].clone()),
             Some(vec![r_int[pid].clone()]),
@@ -1109,7 +1118,7 @@ async fn fpmul_e2e_with_preprocessing() {
     let precision = FixedPointPrecision::new(k, m);
     let n_triples = 1 + m; // 1 (fpmul) + m(no of random bits)
     let n_random_shares = m; // no of random bits
-    let n_randbit = m;
+    let n_prandbit = m;
     let n_prandint = 1;
     let bound_l = 28;
     let security_k = 4;
@@ -1147,7 +1156,7 @@ async fn fpmul_e2e_with_preprocessing() {
         n_triples,
         n_random_shares,
         instance_id,
-        n_randbit,
+        n_prandbit,
         n_prandint,
         bound_l,
         security_k,
@@ -1510,7 +1519,7 @@ async fn mul_int_e2e_with_preprocessing() {
         /*beaver triples*/ 2, // safe for one mul
         /*random shares */ 2,
         instance_id,
-        /*randbit*/ 0,
+        /*prandbit*/ 0,
         /*prandint*/ 0,
         0,
         0,
@@ -1623,14 +1632,14 @@ async fn fpdiv_const_e2e() {
     // PRandInt
     let r_int = RobustShare::compute_shares(Fr::from(3u64), n_parties, t, None, &mut rng).unwrap();
 
-    // RandBits: m bits
+    // PRandBits: m bits
     let mut r_bits = vec![Vec::new(); n_parties];
     for j in 0..m {
         let bit_shares =
             RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
                 .unwrap();
         for (i, share) in bit_shares.iter().enumerate() {
-            r_bits[i].push(share.clone());
+            r_bits[i].push((share.clone(), Gf256::one()));
         }
     }
 
@@ -1665,7 +1674,9 @@ async fn fpdiv_const_e2e() {
         node.preprocessing_material.lock().await.add(
             None, // No Beaver triple needed
             None,
-            Some(r_bits[pid].clone()),      // RandBit[]
+            None,
+            None,
+            Some(r_bits[pid].clone()),      // PRandBit[]
             Some(vec![r_int[pid].clone()]), // PRandInt[]
         );
     }

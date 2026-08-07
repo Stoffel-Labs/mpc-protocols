@@ -30,11 +30,11 @@ async fn run_preprocessing(
     t: usize,
     n_triples: usize,
     n_shares: usize,
-    n_randbit: usize,
+    n_prandbit: usize,
     n_prandint: usize,
 ) {
     let (network, receivers) = test_setup(n_parties);
-    let nodes = create_nodes(n_parties, t, n_triples, n_shares, n_randbit, n_prandint, 1);
+    let nodes = create_nodes(n_parties, t, n_triples, n_shares, n_prandbit, n_prandint, 1);
 
     let receiver_handles = spawn_receivers(receivers, nodes.clone(), network.clone());
 
@@ -98,16 +98,16 @@ fn bench_preprocessing(c: &mut Criterion) {
         60,
     )));
 
-    for &(n, t, triples, shares, n_randbit, n_prandint) in &params {
+    for &(n, t, triples, shares, n_prandbit, n_prandint) in &params {
         group.bench_with_input(
             BenchmarkId::new(
                 "e2e",
-                format!("n{n}_t{t}_tri{triples}_sh{shares}_pb{n_randbit}_pi{n_prandint}"),
+                format!("n{n}_t{t}_tri{triples}_sh{shares}_pb{n_prandbit}_pi{n_prandint}"),
             ),
-            &(n, t, triples, shares, n_randbit, n_prandint),
-            |b, &(n, t, triples, shares, n_randbit, n_prandint)| {
+            &(n, t, triples, shares, n_prandbit, n_prandint),
+            |b, &(n, t, triples, shares, n_prandbit, n_prandint)| {
                 b.to_async(&rt)
-                    .iter(|| run_preprocessing(n, t, triples, shares, n_randbit, n_prandint))
+                    .iter(|| run_preprocessing(n, t, triples, shares, n_prandbit, n_prandint))
             },
         );
     }

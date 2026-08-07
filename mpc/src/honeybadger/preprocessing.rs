@@ -1,6 +1,9 @@
-use crate::honeybadger::{
-    robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple,
-    HoneyBadgerError,
+use crate::{
+    common::math::goldilocks::GoldilocksField,
+    honeybadger::{
+        fpmul::f256::Gf256, robust_interpolate::robust_interpolate::RobustShare,
+        triple_gen::ShamirBeaverTriple, HoneyBadgerError,
+    },
 };
 use ark_ff::FftField;
 use tracing::error;
@@ -12,17 +15,23 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     beaver_triples: Vec<ShamirBeaverTriple<F>>,
     /// A pool of random shares used for inputing private data for the protocol.
     random_shares: Vec<RobustShare<F>>,
-    /// A pool of RandBit outputs for truncation
-    randbit_shares: Vec<RobustShare<F>>,
+    /// A pool of PRandBit outputs for truncation
+    prandbit_shares: Vec<(RobustShare<F>, Gf256)>,
     /// A pool of PRandInt outputs for truncation
     prandint_shares: Vec<RobustShare<F>>,
+    /// A pool of random shares in the Goldilocks field for rand bit generation.
+    random_shares_small_field: Vec<RobustShare<GoldilocksField>>,
+    /// A pool of random Breaver triples in the Goldilocks field.
+    beaver_triples_small_field: Vec<ShamirBeaverTriple<GoldilocksField>>,
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
 pub struct PreprocMaterialLength {
     pub beaver_triples: usize,
+    pub beaver_triples_small_field: usize,
     pub random_shr: usize,
-    pub randbit: usize,
+    pub random_shr_small_field: usize,
+    pub prandbit: usize,
     pub prandint: usize,
 }
 
@@ -30,8 +39,10 @@ impl PreprocMaterialLength {
     pub fn zero() -> Self {
         Self {
             beaver_triples: 0,
+            beaver_triples_small_field: 0,
             random_shr: 0,
-            randbit: 0,
+            random_shr_small_field: 0,
+            prandbit: 0,
             prandint: 0,
         }
     }
@@ -46,8 +57,10 @@ where
         Self {
             random_shares: Vec::new(),
             beaver_triples: Vec::new(),
-            randbit_shares: Vec::new(),
+            beaver_triples_small_field: Vec::new(),
+            prandbit_shares: Vec::new(),
             prandint_shares: Vec::new(),
+            random_shares_small_field: Vec::new(),
         }
     }
 
@@ -55,22 +68,32 @@ where
     pub fn add(
         &mut self,
         mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
+        mut triples_small_field: Option<Vec<ShamirBeaverTriple<GoldilocksField>>>,
         mut random_shares: Option<Vec<RobustShare<F>>>,
-        mut randbit_shares: Option<Vec<RobustShare<F>>>,
-        mut prandint_shares: Option<Vec<RobustShare<F>>>,
+        mut random_shares_small_field: Option<Vec<RobustShare<GoldilocksField>>>,
+        mut prandbit_shares: Option<Vec<(RobustShare<F>, Gf256)>>,
+        mut prandbit_int: Option<Vec<RobustShare<F>>>,
     ) {
         if let Some(pairs) = &mut triples {
             self.beaver_triples.append(pairs);
+        }
+
+        if let Some(triples) = &mut triples_small_field {
+            self.beaver_triples_small_field.append(triples);
+        }
+
+        if let Some(shares) = &mut random_shares_small_field {
+            self.random_shares_small_field.append(shares);
         }
 
         if let Some(shares) = &mut random_shares {
             self.random_shares.append(shares);
         }
 
-        if let Some(shares) = &mut randbit_shares {
-            self.randbit_shares.append(shares);
+        if let Some(shares) = &mut prandbit_shares {
+            self.prandbit_shares.append(shares);
         }
-        if let Some(shares) = &mut prandint_shares {
+        if let Some(shares) = &mut prandbit_int {
             self.prandint_shares.append(shares);
         }
     }
@@ -80,8 +103,10 @@ where
     pub fn length(&self) -> PreprocMaterialLength {
         PreprocMaterialLength {
             beaver_triples: self.beaver_triples.len(),
+            beaver_triples_small_field: self.beaver_triples_small_field.len(),
             random_shr: self.random_shares.len(),
-            randbit: self.randbit_shares.len(),
+            random_shr_small_field: self.random_shares_small_field.len(),
+            prandbit: self.prandbit_shares.len(),
             prandint: self.prandint_shares.len(),
         }
     }
@@ -98,6 +123,23 @@ where
         Ok(self.beaver_triples.drain(0..n_triples).collect())
     }
 
+    pub fn take_beaver_triples_small_field(
+        &mut self,
+        n_triples: usize,
+    ) -> Result<Vec<ShamirBeaverTriple<GoldilocksField>>, HoneyBadgerError> {
+        let current_beaver_triples = self.beaver_triples_small_field.len();
+        if n_triples > current_beaver_triples {
+            error!(
+                "Error trying to take triples in the small field: There is no enough preprocessing. Current Beaver triples: {current_beaver_triples}, Needed Beaver triples: {n_triples}"
+            );
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self
+            .beaver_triples_small_field
+            .drain(0..n_triples)
+            .collect())
+    }
+
     /// Take up to n random shares from the preprocessing material.
     pub fn take_random_shares(
         &mut self,
@@ -110,15 +152,26 @@ where
         Ok(self.random_shares.drain(0..n_shares).collect())
     }
 
-    pub fn take_randbit_shares(
+    pub fn take_random_shares_small_field(
         &mut self,
-        n_randbit: usize,
-    ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
-        if n_randbit > self.randbit_shares.len() {
-            error!("Error trying to take RandBit shares: There is no enough preprocessing");
+        n_shares: usize,
+    ) -> Result<Vec<RobustShare<GoldilocksField>>, HoneyBadgerError> {
+        if n_shares > self.random_shares_small_field.len() {
+            error!("Error trying to take random shares in the small field: There is no enough preprocessing");
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
-        Ok(self.randbit_shares.drain(0..n_randbit).collect())
+        Ok(self.random_shares_small_field.drain(0..n_shares).collect())
+    }
+
+    pub fn take_prandbit_shares(
+        &mut self,
+        n_prandbit: usize,
+    ) -> Result<Vec<(RobustShare<F>, Gf256)>, HoneyBadgerError> {
+        if n_prandbit > self.prandbit_shares.len() {
+            error!("Error trying to take PRandBit shares: There is no enough preprocessing");
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self.prandbit_shares.drain(0..n_prandbit).collect())
     }
 
     pub fn take_prandint_shares(
@@ -156,7 +209,9 @@ mod test {
 
         cache.add(
             Some(vec![triple.clone(), triple.clone()]),
+            None,
             Some(vec![share.clone()]),
+            None,
             None,
             None,
         );
@@ -165,8 +220,10 @@ mod test {
             cache.length(),
             PreprocMaterialLength {
                 beaver_triples: 2,
+                beaver_triples_small_field: 0,
                 random_shr: 1,
-                randbit: 0,
+                random_shr_small_field: 0,
+                prandbit: 0,
                 prandint: 0
             }
         );
@@ -178,8 +235,10 @@ mod test {
             cache.length(),
             PreprocMaterialLength {
                 beaver_triples: 1,
+                beaver_triples_small_field: 0,
                 random_shr: 1,
-                randbit: 0,
+                random_shr_small_field: 0,
+                prandbit: 0,
                 prandint: 0
             }
         );

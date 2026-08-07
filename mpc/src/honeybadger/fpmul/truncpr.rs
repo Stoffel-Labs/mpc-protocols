@@ -1,42 +1,118 @@
 use crate::common::session_store::{Admission, SessionStore};
 use crate::{
-    common::{share::ShareError, ProtocolSessionId, SecretSharingScheme},
+    common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, RBC},
     honeybadger::{
         fpmul::{
             mod_pow_2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore, TruncState,
         },
         robust_interpolate::robust_interpolate::RobustShare,
-        SessionId, WrappedMessage,
+        SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use bincode::Options;
 use std::sync::Arc;
 use std::time::Instant;
 use stoffelnet::network_utils::Network;
 use tokio::{
-    sync::Mutex,
+    sync::{
+        mpsc::{self, Receiver},
+        Mutex,
+    },
     time::{timeout, Duration},
 };
 use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
-pub struct TruncPrNode<F: PrimeField> {
+pub struct TruncPrNode<F: PrimeField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<TruncPrStore<F>>>)>>>,
+    pub rbc: R,
+    pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 const MAX_TRUNCPR_SESSIONS: usize = 1024;
 
-impl<F: PrimeField> TruncPrNode<F> {
+impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, TruncPrError> {
+        let (rbc_sender, rbc_receiver) = mpsc::channel(200);
+
+        let rbc = R::new(
+            id,
+            n,
+            t,
+            t + 1,
+            rbc_sender,
+            Arc::new(WrappedMessage::rbc_wrap),
+        )?;
         Ok(Self {
             id,
             n,
             t,
             store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
+            rbc,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
+    }
+
+    pub async fn drain_rbc_output(&mut self) -> Result<(), TruncPrError> {
+        info!(node_id = self.id, "TruncPr is draining RBC output");
+        loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        error!(
+                            node_id = self.id,
+                            "Channel for RBC in TruncPr is disconnected"
+                        );
+                        return Err(TruncPrError::Abort);
+                    }
+                }
+            };
+
+            let output = self.rbc.get_store(id).await?;
+            let mut msg: TruncPrMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
+            let authenticated_sender = id.sub_id() as usize;
+            if msg.sender_id != authenticated_sender {
+                warn!(
+                    "Dropping RBC output: inner sender_id {} does not match session round_id {}",
+                    msg.sender_id, authenticated_sender
+                );
+                continue;
+            }
+            if msg.session_id.exec_id() != id.exec_id()
+                || msg.session_id.instance_id() != id.instance_id()
+            {
+                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
+                continue;
+            }
+            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != 0 {
+                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
+                continue;
+            }
+
+            msg.sender_id = authenticated_sender;
+            info!(
+                node_id = self.id,
+                "TruncPr received RBC output for open handler"
+            );
+            match self.handle_open(msg).await {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn get_or_create_store(
@@ -65,6 +141,17 @@ impl<F: PrimeField> TruncPrNode<F> {
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        if let Some(calling_proto) = session_id.calling_protocol() {
+            for party_id in 0..self.n {
+                let rbc_session_id = SessionId::new(
+                    calling_proto,
+                    SessionId::pack_slot(session_id.exec_id(), party_id as u8, 0),
+                    session_id.instance_id(),
+                );
+                self.rbc.clear_session(rbc_session_id).await;
+            }
+        }
+
         let mut store = self.store.lock().await;
         store.retire(session_id)
     }
@@ -174,9 +261,12 @@ impl<F: PrimeField> TruncPrNode<F> {
     ) -> Result<(), TruncPrError> {
         info!(node_id = self.id, session_id = ?session, "TruncPr start");
 
-        if session.calling_protocol().is_none() {
-            return Err(TruncPrError::SessionIdError(session));
-        }
+        let calling_proto = match session.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(TruncPrError::SessionIdError(session));
+            }
+        };
 
         let store = match self.get_or_create_store(session, self.id).await {
             Some(s) => s,
@@ -211,20 +301,28 @@ impl<F: PrimeField> TruncPrNode<F> {
         // share of (b + r)
         let open_share = (b + r)?;
 
-        // Serialize and broadcast directly (point-to-point). Robust reconstruction in
-        // `try_finalize` tolerates up to `t` bad shares among the received ones, so this
-        // doesn't need RBC's reliable-broadcast agreement.
+        // serialize and broadcast
         let mut payload = Vec::new();
         open_share.serialize_compressed(&mut payload)?;
-        let trunc_msg = TruncPrMessage::new(self.id, session, payload);
-        let wrapped = WrappedMessage::Trunc(trunc_msg);
+        let wrapped = TruncPrMessage::new(self.id, session, payload);
         let bytes_wrapped = bincode::serialize(&wrapped)?;
 
-        network.broadcast(&bytes_wrapped).await?;
+        let session_id = SessionId::new(
+            calling_proto,
+            SessionId::pack_slot(session.exec_id(), self.id as u8, 0),
+            session.instance_id(),
+        );
+        self.rbc
+            .init(
+                bytes_wrapped,
+                session_id, // A unique session id per node
+                Arc::clone(&network),
+            )
+            .await?;
         Ok(())
     }
 
-    pub async fn process(&mut self, msg: TruncPrMessage) -> Result<(), TruncPrError> {
+    async fn handle_open(&mut self, msg: TruncPrMessage) -> Result<(), TruncPrError> {
         info!(
             node_id = self.id,
             sender = msg.sender_id,
@@ -281,6 +379,7 @@ impl<F: PrimeField> TruncPrNode<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::rbc::rbc::Avid;
     use crate::honeybadger::fpmul::{TruncPrError, TruncPrMessage};
     use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use crate::honeybadger::SessionId;
@@ -289,7 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_truncpr_handle_open_invalid_sub_id() {
-        let mut node = TruncPrNode::<Fr>::new(0, 5, 1).unwrap();
+        let mut node = TruncPrNode::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(
@@ -306,7 +405,7 @@ mod tests {
         let msg = TruncPrMessage::new(0, session_id, payload);
 
         // Should return a SessionIdError due to sub_id != 0
-        let result = node.process(msg).await;
+        let result = node.handle_open(msg).await;
         match result {
             Err(TruncPrError::SessionIdError(sid)) => assert_eq!(sid, session_id),
             _ => panic!("Expected SessionIdError for invalid sub_id"),

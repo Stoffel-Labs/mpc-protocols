@@ -30,16 +30,16 @@ async fn setup_fpdiv(
     Vec<Vec<SecretFixedPoint<Fr, RobustShare<Fr>>>>,
     Vec<ClearFixedPoint<Fr>>,
 ) {
-    // fpdiv needs f randbits and 1 prandint per division
+    // fpdiv needs f prandbits and 1 prandint per division
     let batch = t + 1;
-    let n_randbit = n_divs * m;
-    let total_randbit = (n_randbit + batch - 1) / batch * batch;
-    let n_triples = total_randbit; // only for randbit generation
+    let n_prandbit = n_divs * m;
+    let total_randbit = (n_prandbit + batch - 1) / batch * batch;
+    let n_triples = total_randbit; // only for prandbit generation
     let n_shares = total_randbit;
     let n_prandint = n_divs;
 
     let (network, receivers) = test_setup(n_parties);
-    let nodes = create_nodes(n_parties, t, n_triples, n_shares, n_randbit, n_prandint, 1);
+    let nodes = create_nodes(n_parties, t, n_triples, n_shares, n_prandbit, n_prandint, 1);
     spawn_receivers(receivers, nodes.clone(), network.clone());
 
     // Run preprocessing
