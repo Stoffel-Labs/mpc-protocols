@@ -23,11 +23,13 @@ pub mod fpdiv;
 pub mod fpmul;
 pub mod input;
 pub mod mul;
+pub mod mul_pub;
 pub mod output;
 pub mod preprocessing;
 pub mod share_gen;
 #[cfg(feature = "statistics")]
 pub mod statistics;
+pub mod zero_share;
 
 use crate::{
     common::{
@@ -48,7 +50,7 @@ use crate::{
             fpmul::{FPError, FPMulNode},
             prandint::PRandIntNode,
             rand_bit::RandBit,
-            PRandIntEchoMessage, PRandIntMessage, PRandIntError, RandBitError, TruncPrError,
+            PRandIntEchoMessage, PRandIntError, PRandIntMessage, RandBitError, TruncPrError,
             TruncPrMessage,
         },
         input::{
@@ -56,6 +58,7 @@ use crate::{
             InputError, InputMessage,
         },
         mul::{multiplication::Multiply, MulError, MultMessage},
+        mul_pub::MulPubError,
         output::{
             output::{OutputClient, OutputServer},
             OutputError, OutputMessage,
@@ -65,6 +68,7 @@ use crate::{
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
         triple_gen::TripleGenError,
+        zero_share::{zero_share::ZeroShaNode, ZeroShaError},
     },
 };
 use ark_ff::{FftField, PrimeField};
@@ -127,6 +131,10 @@ pub enum HoneyBadgerError {
     NetworkError(#[from] NetworkError),
     #[error("error in share generation: {0:?}")]
     RanShaError(#[from] RanShaError),
+    #[error("error in ZeroSha: {0:?}")]
+    ZeroShaError(#[from] ZeroShaError),
+    #[error("error in MulPub: {0:?}")]
+    MulPubError(#[from] MulPubError),
     #[error("error in Input share generation: {0:?}")]
     InputError(#[from] InputError),
     #[error("error in faulty double share generation: {0:?}")]
@@ -300,7 +308,7 @@ where
         let prandint = len.prandint;
         format!(
             "material=(triples:{triples},random:{random_shares},randbit:{randbit},prandint:{prandint}) \
-             stores=(share_gen:{},dou_sha:{},ran_dou_sha:{},triple:{},triple_batch_recon:{},mul:{},rand_bit:{},rand_bit_mul:{},rand_bit_batch_recon:{},prand_int:{},fpmul_mul:{},fpmul_trunc:{})",
+             stores=(share_gen:{},dou_sha:{},ran_dou_sha:{},triple:{},triple_batch_recon:{},mul:{},rand_bit:{},rand_bit_mul_pub:{},zero_sha:{},prand_int:{},fpmul_mul:{},fpmul_trunc:{})",
             self.preprocess.share_gen.store_len().await,
             self.preprocess.dou_sha.store_len().await,
             self.preprocess.ran_dou_sha.store_len().await,
@@ -308,8 +316,8 @@ where
             self.preprocess.triple_gen.batch_recon_node.store_len().await,
             self.operations.mul.store_len().await,
             self.preprocess.rand_bit.store_len().await,
-            self.preprocess.rand_bit.mult_node.store_len().await,
-            self.preprocess.rand_bit.batch_recon.store_len().await,
+            self.preprocess.rand_bit.mul_pub.store_len().await,
+            self.preprocess.zero_sha.store_len().await,
             self.preprocess.prand_int.store_len().await,
             self.type_ops.fpmul.mult_node.store_len().await,
             self.type_ops.fpmul.trunc_node.store_len().await,
@@ -340,6 +348,8 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub prand_int: PRandIntNode<F>,
     /// Generates RandBit shares directly in `F` (see `ensure_randbit_shares`).
     pub rand_bit: RandBit<F>,
+    /// Produces the degree-`2t` zero-sharings that re-randomise RandBit's MulPub opening.
+    pub zero_sha: ZeroShaNode<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -385,6 +395,7 @@ pub struct SubProtocolCounters {
     pub prand_int_counter: SubProtocolCounter,
     pub fpmul_counter: SubProtocolCounter,
     pub fpdiv_const_counter: SubProtocolCounter,
+    pub zero_sha_counter: SubProtocolCounter,
 }
 
 impl SubProtocolCounters {
@@ -400,6 +411,7 @@ impl SubProtocolCounters {
             prand_int_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             fpmul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             fpdiv_const_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            zero_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -423,6 +435,11 @@ pub struct HoneyBadgerMPCNodeOpts {
     pub n_randbit: usize,
     ///Number of PrandInt shares
     pub n_prandint: usize,
+    /// Number of degree-`2t` zero-sharings to generate. Its own preprocessing material with its
+    /// own `ensure_zero_shares` phase, not derived at point of use. `new` seeds it from
+    /// `n_randbit` because RandBit's MulPub squaring is the only consumer today (one per bit);
+    /// set it directly when another protocol starts drawing from the pool.
+    pub n_zero_shares: usize,
     ///Security parameter
     pub k: usize,
     ///Bit size for fixed point
@@ -460,6 +477,7 @@ impl HoneyBadgerMPCNodeOpts {
             instance_id,
             n_randbit,
             n_prandint,
+            n_zero_shares: n_randbit,
             k,
             l,
             timeout,
@@ -467,6 +485,10 @@ impl HoneyBadgerMPCNodeOpts {
     }
     pub fn set_timeout(&mut self, secs: u64) {
         self.timeout = Duration::from_secs(secs)
+    }
+    /// Override the zero-sharing pool size, which `new` seeds from `n_randbit`.
+    pub fn set_n_zero_shares(&mut self, n_zero_shares: usize) {
+        self.n_zero_shares = n_zero_shares
     }
 }
 
@@ -503,6 +525,8 @@ where
         let input = InputServer::new(id, params.n_parties, params.threshold, input_ids)?;
         let output = OutputServer::new(id, params.n_parties)?;
         let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold)?;
+        let zero_sha_node =
+            ZeroShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
         Ok(Self {
             id,
@@ -518,6 +542,7 @@ where
                 triple_gen: triple_gen_node,
                 prand_int: prand_int_node,
                 rand_bit: rand_bit_node,
+                zero_sha: zero_sha_node,
             },
             operations: Operation { mul: mul_node },
             type_ops: TypeOperations {
@@ -722,6 +747,10 @@ where
                         self.preprocess.input.rbc.process(rbc_msg, net).await?;
                         self.preprocess.input.drain_rbc_output().await?;
                     }
+                    Some(ProtocolType::ZeroSha) => {
+                        self.preprocess.zero_sha.rbc.process(rbc_msg, net).await?;
+                        self.preprocess.zero_sha.drain_rbc_output().await?;
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} in RBC",
@@ -794,26 +823,17 @@ where
                             .await?
                     }
                     Some(ProtocolType::RandBit) => {
-                        if batch_msg.session_id.round_id() == 0 {
-                            self.preprocess
-                                .rand_bit
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess.rand_bit.drain_batch_recon_output().await?;
-                        } else {
-                            self.preprocess
-                                .rand_bit
-                                .mult_node
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess
-                                .rand_bit
-                                .mult_node
-                                .drain_batch_recon_output()
-                                .await?;
-                        }
+                        self.preprocess
+                            .rand_bit
+                            .mul_pub
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.preprocess
+                            .rand_bit
+                            .mul_pub
+                            .drain_batch_recon_output()
+                            .await?;
                     }
                     Some(ProtocolType::FpMul) => {
                         self.type_ops
@@ -877,13 +897,6 @@ where
                             .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
                             .await?;
                     }
-                    Some(ProtocolType::RandBit) => {
-                        self.preprocess
-                            .rand_bit
-                            .mult_node
-                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
-                            .await?;
-                    }
                     Some(ProtocolType::FpMul) => {
                         self.type_ops
                             .fpmul
@@ -926,6 +939,17 @@ where
                         );
                     }
                 }
+            }
+            WrappedMessage::ZeroSha(zs_msg) => {
+                if sender_id != zs_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if zs_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        zs_msg.session_id.instance_id(),
+                    ));
+                }
+                self.preprocess.zero_sha.process(zs_msg, net).await?;
             }
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
@@ -1385,7 +1409,21 @@ where
             trace_preprocessing_phase(self.id, "triples", total_triples_to_generate, phase_start);
         }
         // ------------------------
-        // Step 5. Generate Random bits
+        // Step 5. Generate zero shares (degree-2t zero-sharings)
+        // ------------------------
+        let phase_start = Instant::now();
+        self.ensure_zero_shares(network.clone(), rng, self.params.n_zero_shares)
+            .await?;
+        trace_preprocessing_phase(
+            self.id,
+            "zero_shares",
+            self.params.n_zero_shares,
+            phase_start,
+        );
+        info!("Zero share generation done");
+
+        // ------------------------
+        // Step 6. Generate Random bits
         // ------------------------
         let phase_start = Instant::now();
         self.ensure_randbit_shares(network.clone()).await?;
@@ -1393,7 +1431,7 @@ where
         info!("RandBit share generation done");
 
         // ------------------------
-        // Step 6. Generate Random Int
+        // Step 7. Generate Random Int
         // ------------------------
         let phase_start = Instant::now();
         self.ensure_prandint_shares(network.clone()).await?;
@@ -1608,6 +1646,52 @@ where
         Ok(pair)
     }
 
+    /// Ensure the pool holds at least `target` degree-`2t` zero-sharings.
+    async fn ensure_zero_shares<G, N>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+        target: usize,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        G: Rng + Send,
+        N: Network + Send + Sync + 'static,
+    {
+        let no_have = {
+            let store = self.preprocessing_material.lock().await;
+            store.length().zero_shares
+        };
+        if no_have >= target {
+            return Ok(());
+        }
+        let missing = target - no_have;
+        let out_per_call = self.params.n_parties - 2 * self.params.threshold;
+        let batch_size = missing.div_ceil(out_per_call);
+        let zsha_session = SessionId::new(
+            ProtocolType::ZeroSha,
+            SessionId::pack_slot(self.counters.zero_sha_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+        self.preprocess
+            .zero_sha
+            .init_batch(zsha_session, batch_size, rng, network.clone())
+            .await?;
+        let result = self
+            .preprocess
+            .zero_sha
+            .wait_for_result(zsha_session, self.params.timeout)
+            .await;
+        if !self.preprocess.zero_sha.clear_store(zsha_session).await {
+            warn!(?zsha_session, "failed to clear ZeroSha protocol state");
+        }
+        let shares = result?;
+        self.preprocessing_material
+            .lock()
+            .await
+            .add_zero_shares(shares);
+        Ok(())
+    }
+
     /// Generate RandBit shares by running RandBit directly in the node's field `F`.
     ///
     /// RandBit used to route through a Goldilocks small-field RandBit run followed by a
@@ -1615,12 +1699,9 @@ where
     /// existing was to additionally produce a `Gf256` view of the bit -- a view nothing
     /// downstream ever consumed (`mul_fixed`/`div_with_const_fixed` both discarded it). Running
     /// RandBit directly in `F` produces the same `RobustShare<F>` bit shares without that detour,
-    /// and shares its Beaver-triple/random-share pool with the rest of the node instead of
-    /// requiring a dedicated small-field preprocessing pipeline.
-    async fn ensure_randbit_shares<N>(
-        &mut self,
-        network: Arc<N>,
-    ) -> Result<(), HoneyBadgerError>
+    /// and shares its random-share pool with the rest of the node instead of requiring a
+    /// dedicated small-field preprocessing pipeline.
+    async fn ensure_randbit_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
     {
@@ -1635,60 +1716,65 @@ where
             return Ok(());
         }
 
-        // Computing the amount of needed shares.
-        let missing = self.params.n_randbit.saturating_sub(no_shares);
-        let batch = self.params.threshold + 1;
-        let total_to_generate = ((missing + batch - 1) / batch) * batch;
+        // Computing the amount of needed shares. MulPub pads its last `2t+1`-wide group
+        // internally, so the count no longer has to be a multiple of anything.
+        let total_to_generate = self.params.n_randbit.saturating_sub(no_shares);
 
-        // RandBit needs one random share (its `a` input) and one Beaver triple (its secure
-        // squaring step) per output bit, drawn from the same shared pool as the rest of the
-        // node. Preprocessing sizing (`n_triples`/`n_random_shares`) is expected to already
-        // account for this demand; this does not top the pool up itself, so a config that
-        // under-sizes it surfaces as `NotEnoughPreprocessing` here instead of silently
-        // generating more.
-        let random_shares_a = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(total_to_generate)?;
+        // MulPub sends a whole session's groups in one batch-reconstruction message per
+        // recipient, so it caps how much a single `init` may open. Ask it rather than
+        // recomputing the group arithmetic here.
+        let max_per_session = self.preprocess.rand_bit.mul_pub.max_batch_size();
 
-        let beaver_triples = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_beaver_triples(total_to_generate)?;
+        for chunk in chunk_sizes(total_to_generate, max_per_session) {
+            // One random share (RandBit's `a` input) and one degree-`2t` zero-sharing
+            // (re-randomising the MulPub opening) per output bit, both drawn from the shared
+            // pools. Sizing (`n_random_shares`/`n_zero_shares`) is expected to already account
+            // for this demand; this does not top either pool up itself, so an under-sized config
+            // surfaces as `NotEnoughPreprocessing` here instead of silently generating more.
+            let random_shares_a = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_random_shares(chunk)?;
 
-        let session_id = SessionId::new(
-            ProtocolType::RandBit,
-            SessionId::pack_slot(self.counters.rand_bit_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
+            let zero_shares = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_zero_shares(chunk)?;
 
-        self.preprocess
-            .rand_bit
-            .init(
-                random_shares_a,
-                beaver_triples,
-                session_id,
-                self.params.timeout,
-                network.clone(),
-            )
-            .await?;
+            let session_id = SessionId::new(
+                ProtocolType::RandBit,
+                SessionId::pack_slot(self.counters.rand_bit_counter.get_next().await?, 0, 0),
+                self.params.instance_id,
+            );
 
-        let result = self
-            .preprocess
-            .rand_bit
-            .wait_for_result(session_id, self.params.timeout)
-            .await;
+            self.preprocess
+                .rand_bit
+                .init(
+                    random_shares_a,
+                    zero_shares,
+                    session_id,
+                    self.params.timeout,
+                    network.clone(),
+                )
+                .await?;
 
-        if !self.preprocess.rand_bit.clear_store(session_id).await {
-            warn!(?session_id, "failed to clear RandBit protocol state");
+            let result = self
+                .preprocess
+                .rand_bit
+                .wait_for_result(session_id, self.params.timeout)
+                .await;
+
+            if !self.preprocess.rand_bit.clear_store(session_id).await {
+                warn!(?session_id, "failed to clear RandBit protocol state");
+            }
+
+            self.preprocessing_material
+                .lock()
+                .await
+                .add(None, None, Some(result?), None);
         }
-
-        self.preprocessing_material
-            .lock()
-            .await
-            .add(None, None, Some(result?), None);
 
         Ok(())
     }
@@ -1786,6 +1872,7 @@ pub enum WrappedMessage {
     Mult(MultMessage),
     /// Direct point-to-point opening of a TruncPr share of `(b + r)`. Same rationale as `Mult`.
     Trunc(TruncPrMessage),
+    ZeroSha(zero_share::ZeroShaMessage),
 }
 
 impl WrappedMessage {
@@ -1814,6 +1901,7 @@ pub enum ProtocolType {
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
+    ZeroSha = 15,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -1839,6 +1927,7 @@ impl ProtocolTag for ProtocolType {
             12 => Some(Self::FpMul),
             13 => Some(Self::Trunc),
             14 => Some(Self::FpDivConst),
+            15 => Some(Self::ZeroSha),
             _ => None,
         }
     }

@@ -833,12 +833,14 @@ async fn preprocessing_e2e() {
         let n_shares = len.random_shr;
         let n_randbit = len.randbit;
         let n_prandint = len.prandint;
-        // no_of_triples=7 is rounded up to a multiple of group_size (2t+1=3) -> 9. RandBit
-        // generation draws directly from this same pool (no auto top-up) rather than
-        // generating extra: 4 triples and 4 random shares for its 4 RandBit outputs, leaving
-        // 9-4=5 triples and 4-4=0 random shares behind.
-        assert_eq!(n_triples, 5);
+        // no_of_triples=7 is rounded up to a multiple of group_size (2t+1=3) -> 9. RandBit now
+        // squares via MulPub rather than a Beaver triple, so it consumes no triples at all --
+        // all 9 survive. It still draws one random share per output from the shared pool (no
+        // auto top-up), leaving 4-4=0 random shares behind. Its degree-2t zero-sharings are
+        // topped up by `ensure_zero_shares` and fully consumed, so that pool ends empty too.
+        assert_eq!(n_triples, 9);
         assert_eq!(n_shares, 0);
+        assert_eq!(len.zero_shares, 0);
         assert_eq!(n_randbit, 4);
         assert_eq!(n_prandint, 4);
     }
@@ -857,9 +859,17 @@ async fn test_rand_bit() {
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
-    // The construction of triples is same as that of mul. RandBit now runs directly in the
-    // node's field `F` (`Fr` here), so the input shares and Beaver triples are over `Fr`.
-    let (_, per_party_triples) = construct_e2e_input_mul::<Fr>(n_parties, no_of_rand_bits, t);
+    // RandBit runs directly in the node's field `F` (`Fr` here) and squares via MulPub, so each
+    // bit needs a degree-`2t` sharing of zero to re-randomise the opening of `a^2` rather than a
+    // Beaver triple.
+    let mut per_party_zero_shares: Vec<Vec<RobustShare<Fr>>> = vec![Vec::new(); n_parties];
+    for _ in 0..no_of_rand_bits {
+        let zero_shares =
+            RobustShare::compute_shares(Fr::from(0u64), n_parties, 2 * t, None, &mut rng).unwrap();
+        for pid in 0..n_parties {
+            per_party_zero_shares[pid].push(zero_shares[pid].clone());
+        }
+    }
 
     // assumes each party holds shares of some secrets
     let mut a = Vec::new();
@@ -910,14 +920,14 @@ async fn test_rand_bit() {
         }
         assert!(a_value.len() == no_of_rand_bits);
 
-        let mult_triple = per_party_triples[pid].clone().clone();
+        let zero_shares = per_party_zero_shares[pid].clone();
 
         let handle = tokio::spawn(async move {
             {
                 rand_bit_node
                     .init(
                         a_value,
-                        mult_triple,
+                        zero_shares,
                         session_id,
                         Duration::from_secs(30),
                         net.clone(),

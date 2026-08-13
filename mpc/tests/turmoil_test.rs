@@ -653,9 +653,10 @@ fn preprocessing_e2e_turmoil(
                         let n_triples = len.beaver_triples;
                         let n_rbit = len.randbit;
                         let n_pint = len.prandint;
-                        // no_of_triples=7 rounds up to a multiple of group_size (2t+1=3) -> 9,
-                        // then RandBit draws 4 more directly from the same pool -> 5 remain.
-                        if n_triples == 5 && n_rbit == n_randbit && n_pint == n_prandint {
+                        // no_of_triples=7 rounds up to a multiple of group_size (2t+1=3) -> 9.
+                        // RandBit squares via MulPub rather than a Beaver triple, so it draws
+                        // none of them and all 9 survive.
+                        if n_triples == 9 && n_rbit == n_randbit && n_pint == n_prandint {
                             break;
                         }
                     }
@@ -745,10 +746,10 @@ fn preprocessing_e2e_turmoil(
         match r {
             Err(e) => panic!("node failed: {}", e),
             Ok((n_triples, n_shares, n_rbit, n_pint)) => {
-                // no_of_triples=7 rounds up to group_size (2t+1=3) -> 9, then RandBit draws 4
-                // more directly from the same pool (no auto top-up) -> 5 remain. Likewise
+                // no_of_triples=7 rounds up to group_size (2t+1=3) -> 9. RandBit squares via
+                // MulPub instead of consuming a Beaver triple, so all 9 survive. Likewise
                 // no_of_randomshares=4 are fully consumed by RandBit's own `a` input -> 0 remain.
-                assert_eq!(n_triples, 5);
+                assert_eq!(n_triples, 9);
                 assert_eq!(n_shares, 0);
                 assert_eq!(n_rbit, 4);
                 assert_eq!(n_pint, 4);
@@ -1053,126 +1054,40 @@ async fn preprocessing_stress_snapshot(
         }
         drop(rand_bit_sessions);
 
-        let rand_bit_batch_output_len = node
+        let rand_bit_mul_pub_batch_output_len = node
             .preprocess
             .rand_bit
+            .mul_pub
             .batch_output
             .lock()
             .await
             .len();
         out.push_str(&format!(
-            "node {} rand_bit.batch_output.pending={}\n",
-            node.id, rand_bit_batch_output_len
+            "node {} rand_bit.mul_pub.batch_output.pending={}\n",
+            node.id, rand_bit_mul_pub_batch_output_len
         ));
 
-        let rand_bit_mul_sessions = node
-            .preprocess
-            .rand_bit
-            .mult_node
-            .mult_storage
-            .lock()
-            .await;
+        let rand_bit_mul_pub_sessions = node.preprocess.rand_bit.mul_pub.store.lock().await;
         out.push_str(&format!(
-            "node {} rand_bit.mul.sessions={}\n",
+            "node {} rand_bit.mul_pub.sessions={}\n",
             node.id,
-            rand_bit_mul_sessions.len()
+            rand_bit_mul_pub_sessions.len()
         ));
-        for (session_id, store) in rand_bit_mul_sessions.iter().take(8) {
+        for (session_id, store) in rand_bit_mul_pub_sessions.iter().take(8) {
             let store = store.2.lock().await;
             out.push_str(&format!(
-                "  rand_bit.mul {:?} state={:?} no_of_mul={:?} inputs=({}, {}) received_shares={} openings={} open_mult1={} open_mult2={}\n",
-                session_id,
-                store.protocol_state,
-                store.no_of_mul,
-                store.inputs.0.len(),
-                store.inputs.1.len(),
-                store.received_shares.len(),
-                store.openings.is_some(),
-                store.output_open_mult1.len(),
-                store.output_open_mult2.len()
+                "  rand_bit.mul_pub {:?} state={:?} k={}\n",
+                session_id, store.state, store.k
             ));
         }
-        drop(rand_bit_mul_sessions);
+        drop(rand_bit_mul_pub_sessions);
 
-        let rand_bit_mul_batch_output_len = node
-            .preprocess
-            .rand_bit
-            .mult_node
-            .batch_output
-            .lock()
-            .await
-            .len();
-        out.push_str(&format!(
-            "node {} rand_bit.mul.batch_output.pending={}\n",
-            node.id, rand_bit_mul_batch_output_len
-        ));
-
-        let rand_bit_mul_batch_sessions = node
-            .preprocess
-            .rand_bit
-            .mult_node
-            .batch_recon
-            .store
-            .lock()
-            .await;
-        let mut min_sub_id = u8::MAX;
-        let mut max_sub_id = 0u8;
-        let mut y_j_count = 0usize;
-        let mut any_reveals = 0usize;
-        let mut secrets_count = 0usize;
-        let mut total_evals = 0usize;
-        let mut total_reveals = 0usize;
-        for (session_id, store) in rand_bit_mul_batch_sessions.iter() {
-            let store = store.2.lock().await;
-            min_sub_id = min_sub_id.min(session_id.sub_id());
-            max_sub_id = max_sub_id.max(session_id.sub_id());
-            if store.y_j.is_some() {
-                y_j_count += 1;
-            }
-            if !store.reveals_received.is_empty() {
-                any_reveals += 1;
-            }
-            if store.secrets.is_some() {
-                secrets_count += 1;
-            }
-            total_evals += store.evals_received.len();
-            total_reveals += store.reveals_received.len();
-        }
-        out.push_str(&format!(
-            "node {} rand_bit.mul.batch_recon.sessions={} sub_id_range={}..={} y_j_sessions={} sessions_with_reveals={} secrets_sessions={} total_evals={} total_reveals={}\n",
-            node.id,
-            rand_bit_mul_batch_sessions.len(),
-            if rand_bit_mul_batch_sessions.is_empty() {
-                0
-            } else {
-                min_sub_id
-            },
-            max_sub_id,
-            y_j_count,
-            any_reveals,
-            secrets_count,
-            total_evals,
-            total_reveals
-        ));
-        for (session_id, store) in rand_bit_mul_batch_sessions.iter().take(8) {
-            let store = store.2.lock().await;
-            out.push_str(&format!(
-                "  rand_bit.mul.batch {:?} evals={} reveals={} batch_evals={} batch_reveals={} y_j={} y_j_batch_len={} secrets_len={}\n",
-                session_id,
-                store.evals_received.len(),
-                store.reveals_received.len(),
-                store.batch_evals_received.len(),
-                store.batch_reveals_received.len(),
-                store.y_j.is_some(),
-                store.y_j_batch.as_ref().map(|values| values.len()).unwrap_or(0),
-                store.secrets.as_ref().map(|values| values.len()).unwrap_or(0)
-            ));
-        }
-        drop(rand_bit_mul_batch_sessions);
-
+        // MulPub opens `a^2` in one batch-reconstruction session keyed by the RandBit session
+        // id, so there is no separate multiply/square split to dump any more.
         let rand_bit_batch_sessions = node
             .preprocess
             .rand_bit
+            .mul_pub
             .batch_recon
             .store
             .lock()

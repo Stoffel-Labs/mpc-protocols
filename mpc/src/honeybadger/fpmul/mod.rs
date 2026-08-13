@@ -3,6 +3,7 @@ use crate::{
     honeybadger::{
         batch_recon::BatchReconError,
         mul::MulError,
+        mul_pub::MulPubError,
         robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId,
     },
@@ -36,7 +37,7 @@ pub enum RandBitError {
     SquareRoot,
     #[error("the inverse does not exist")]
     Inverse,
-    #[error("number of random shares is not a multiple of (t+1)")]
+    #[error("number of random shares and degree-2t zero-sharings must match")]
     Incompatible,
     #[error("Duplicate input: {0}")]
     Duplicate(String),
@@ -60,6 +61,10 @@ pub enum RandBitError {
     SessionIdError(SessionId),
     #[error("cannot create {0:?} random bits at once")]
     ShareLimitError(usize),
+    #[error("mul pub error: {0:?}")]
+    MulPubError(MulPubError),
+    #[error("failed to clear the store for session {0:?}")]
+    ClearStoreError(SessionId),
     #[error("result already received: {0:?}")]
     ResultAlreadyReceived(SessionId),
     #[error("multiplication {0:?} did not complete in time")]

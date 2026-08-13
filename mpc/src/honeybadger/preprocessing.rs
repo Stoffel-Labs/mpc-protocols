@@ -16,6 +16,8 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     randbit_shares: Vec<RobustShare<F>>,
     /// A pool of PRandInt outputs for truncation
     prandint_shares: Vec<RobustShare<F>>,
+    /// A pool of degree-`2t` sharings of zero, consumed by RandBit's MulPub opening.
+    zero_shares: Vec<RobustShare<F>>,
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
@@ -24,6 +26,7 @@ pub struct PreprocMaterialLength {
     pub random_shr: usize,
     pub randbit: usize,
     pub prandint: usize,
+    pub zero_shares: usize,
 }
 
 impl PreprocMaterialLength {
@@ -33,6 +36,7 @@ impl PreprocMaterialLength {
             random_shr: 0,
             randbit: 0,
             prandint: 0,
+            zero_shares: 0,
         }
     }
 }
@@ -48,6 +52,7 @@ where
             beaver_triples: Vec::new(),
             randbit_shares: Vec::new(),
             prandint_shares: Vec::new(),
+            zero_shares: Vec::new(),
         }
     }
 
@@ -83,7 +88,25 @@ where
             random_shr: self.random_shares.len(),
             randbit: self.randbit_shares.len(),
             prandint: self.prandint_shares.len(),
+            zero_shares: self.zero_shares.len(),
         }
+    }
+
+    /// Adds degree-`2t` zero-sharings to the pool.
+    pub fn add_zero_shares(&mut self, mut shares: Vec<RobustShare<F>>) {
+        self.zero_shares.append(&mut shares);
+    }
+
+    /// Take `n_shares` degree-`2t` zero-sharings from the preprocessing material.
+    pub fn take_zero_shares(
+        &mut self,
+        n_shares: usize,
+    ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
+        if n_shares > self.zero_shares.len() {
+            error!("Error trying to take zero shares: There is no enough preprocessing");
+            return Err(HoneyBadgerError::NotEnoughPreprocessing);
+        }
+        Ok(self.zero_shares.drain(0..n_shares).collect())
     }
 
     /// Take up to n pairs of random double sharings from the preprocessing material.
@@ -167,7 +190,8 @@ mod test {
                 beaver_triples: 2,
                 random_shr: 1,
                 randbit: 0,
-                prandint: 0
+                prandint: 0,
+                zero_shares: 0
             }
         );
 
@@ -180,7 +204,8 @@ mod test {
                 beaver_triples: 1,
                 random_shr: 1,
                 randbit: 0,
-                prandint: 0
+                prandint: 0,
+                zero_shares: 0
             }
         );
 

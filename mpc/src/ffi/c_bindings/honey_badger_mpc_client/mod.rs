@@ -24,6 +24,8 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerSuccess,
     HoneyBadgerNetworkError,
     HoneyBadgerRanShaError,
+    HoneyBadgerZeroShaError,
+    HoneyBadgerMulPubError,
     HoneyBadgerInputError,
     HoneyBadgerDouShaError,
     HoneyBadgerRanDouShaError,
@@ -58,6 +60,8 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
         match value {
             HoneyBadgerError::NetworkError(_) => Self::HoneyBadgerNetworkError,
             HoneyBadgerError::RanShaError(_) => Self::HoneyBadgerRanShaError,
+            HoneyBadgerError::ZeroShaError(_) => Self::HoneyBadgerZeroShaError,
+            HoneyBadgerError::MulPubError(_) => Self::HoneyBadgerMulPubError,
             HoneyBadgerError::InputError(_) => Self::HoneyBadgerInputError,
             HoneyBadgerError::DouShaError(_) => Self::HoneyBadgerDouShaError,
             HoneyBadgerError::RanDouShaError(_) => Self::HoneyBadgerRanDouShaError,

@@ -31,7 +31,7 @@ async fn rand_bit_with_small_field_e2e() {
         .collect();
 
     // === Create protocol inputs ===
-    let (a_shares, mult_triples) =
+    let (a_shares, zero_shares) =
         create_rand_bit_input::<GoldilocksField>(num_parties, threshold, batch_size);
 
     // === Spawn receiver tasks ===
@@ -43,12 +43,12 @@ async fn rand_bit_with_small_field_e2e() {
         let id = node.id;
         set.spawn({
             let a_share = a_shares[id].clone();
-            let mult_triple = mult_triples[id].clone();
+            let zero_share = zero_shares[id].clone();
             let session_id = session_id.clone();
             let network = network[id].clone();
             let mut node = node.clone();
             async move {
-                node.init(a_share, mult_triple, session_id, duration, network)
+                node.init(a_share, zero_share, session_id, duration, network)
                     .await
                     .unwrap()
             }
