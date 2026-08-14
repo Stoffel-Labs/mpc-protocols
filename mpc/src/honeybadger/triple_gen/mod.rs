@@ -99,6 +99,10 @@ where
 {
     /// Current state of the protocol execution.
     pub protocol_state: ProtocolState,
+    /// A batch-reconstruction result can arrive before this party initializes the
+    /// corresponding triple-generation session. Keep the serialized result until
+    /// the local inputs establish its expected width.
+    pub pending_batch_recon_payload: Option<Vec<u8>>,
     pub batch_recon_result: Option<Vec<F>>,
     pub randousha_pairs: Vec<DoubleShamirShare<F>>,
     pub random_shares_a_input: Vec<RobustShare<F>>,
@@ -118,6 +122,7 @@ where
 
         Self {
             protocol_state: ProtocolState::NotInitialized,
+            pending_batch_recon_payload: None,
             batch_recon_result: None,
             randousha_pairs: Vec::new(),
             random_shares_a_input: Vec::new(),
