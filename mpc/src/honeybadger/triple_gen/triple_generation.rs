@@ -219,6 +219,53 @@ where
 
         Ok(true)
     }
+
+    /// Accept a completed batch reconstruction without assuming that the local
+    /// triple-generation inputs have already been installed. A fast quorum of
+    /// remote parties can finish reconstruction before a slower party reaches
+    /// `init`/`init_batch`; in that case the input width is not known yet and the
+    /// serialized payload must be retained rather than decoded against width zero.
+    async fn accept_batch_recon_payload(
+        &self,
+        session_id: SessionId,
+        storage_bind: Arc<Mutex<TripleGenStorage<F>>>,
+        payload: Vec<u8>,
+    ) -> Result<bool, TripleGenError> {
+        let expected_len = {
+            let mut storage = storage_bind.lock().await;
+
+            match storage.protocol_state {
+                ProtocolState::Finished => return Ok(true),
+                ProtocolState::NotInitialized => {
+                    // Batch reconstruction emits one completion per session. Keep
+                    // the first completion if a duplicate is ever delivered.
+                    if storage.pending_batch_recon_payload.is_none() {
+                        storage.pending_batch_recon_payload = Some(payload);
+                    }
+                    return Ok(false);
+                }
+                ProtocolState::Initialized => storage.randousha_pairs.len(),
+            }
+        };
+
+        let batch_recon_result: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), expected_len)?;
+        if batch_recon_result.len() != expected_len {
+            return Err(TripleGenError::NotEnoughShares);
+        }
+
+        {
+            let mut storage = storage_bind.lock().await;
+
+            if storage.protocol_state == ProtocolState::Finished {
+                return Ok(true);
+            }
+
+            storage.batch_recon_result = Some(batch_recon_result);
+        }
+
+        self.try_finalize_triple_gen(session_id, storage_bind).await
+    }
+
     /// Initializes the protocol to generate random triples based on previously generated shares
     /// and random double shares.
     pub async fn init<N: Network>(
@@ -258,23 +305,25 @@ where
             sub_shares_deg_2t.push(sub_share_deg_2t);
         }
 
-        // We mark the protocol as initialized and store the input shares.
-        {
-            let storage_bind = match self.get_or_create_store(session_id, self.id).await {
-                Some(s) => s,
-                None => return Ok(()),
-            };
+        // Mark the protocol initialized and atomically claim any reconstruction
+        // result that arrived before the local inputs.
+        let storage_bind = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pending_batch_recon_payload = {
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.randousha_pairs = randousha_pairs;
             storage.random_shares_a_input = random_shares_a;
             storage.random_shares_b_input = random_shares_b;
-        }
-
-        let storage_bind = match self.get_or_create_store(session_id, self.id).await {
-            Some(s) => s,
-            None => return Ok(()),
+            storage.pending_batch_recon_payload.take()
         };
+
+        if let Some(payload) = pending_batch_recon_payload {
+            self.accept_batch_recon_payload(session_id, storage_bind.clone(), payload)
+                .await?;
+        }
 
         if self
             .try_finalize_triple_gen(session_id, storage_bind.clone())
@@ -334,22 +383,23 @@ where
             sub_shares_deg_2t.push(sub_share_deg_2t);
         }
 
-        {
-            let storage_bind = match self.get_or_create_store(session_id, self.id).await {
-                Some(s) => s,
-                None => return Ok(()),
-            };
+        let storage_bind = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pending_batch_recon_payload = {
             let mut storage = storage_bind.lock().await;
             storage.protocol_state = ProtocolState::Initialized;
             storage.randousha_pairs = randousha_pairs;
             storage.random_shares_a_input = random_shares_a;
             storage.random_shares_b_input = random_shares_b;
-        }
-
-        let storage_bind = match self.get_or_create_store(session_id, self.id).await {
-            Some(s) => s,
-            None => return Ok(()),
+            storage.pending_batch_recon_payload.take()
         };
+
+        if let Some(payload) = pending_batch_recon_payload {
+            self.accept_batch_recon_payload(session_id, storage_bind.clone(), payload)
+                .await?;
+        }
 
         if self
             .try_finalize_triple_gen(session_id, storage_bind.clone())
@@ -380,25 +430,86 @@ where
             Some(s) => s,
             None => return Ok(()),
         };
-        let expected_len = {
-            let storage = storage_bind.lock().await;
-            storage.randousha_pairs.len()
-        };
-        let batch_recon_result: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), expected_len)?;
-        {
-            let mut storage = storage_bind.lock().await;
-
-            if storage.protocol_state == ProtocolState::Finished {
-                return Ok(());
-            }
-
-            // STORE result instead of immediately computing
-            storage.batch_recon_result = Some(batch_recon_result);
-        }
-
-        self.try_finalize_triple_gen(session_id, storage_bind)
+        self.accept_batch_recon_payload(session_id, storage_bind, payload)
             .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::share::shamir::NonRobustShare;
+    use crate::common::ProtocolSessionId;
+    use crate::honeybadger::ProtocolType;
+    use ark_bls12_381::Fr;
+    use ark_serialize::CanonicalSerialize;
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+
+    #[tokio::test]
+    async fn buffers_batch_reconstruction_that_finishes_before_local_init() {
+        let mut node = TripleGenNode::<Fr>::new(0, 5, 1).unwrap();
+        let session_id = SessionId::new(ProtocolType::Triple, SessionId::pack_slot(7, 0, 0), 42);
+        let values = vec![Fr::from(1_u64), Fr::from(2_u64), Fr::from(3_u64)];
+        let mut payload = Vec::new();
+        values.serialize_compressed(&mut payload).unwrap();
+
+        // Before this fix, the handler decoded this vector with an expected
+        // width of zero and returned SerializationError::InvalidData.
+        node.batch_recon_finish_handler(session_id, payload.clone())
+            .await
+            .unwrap();
+
+        {
+            let storage_bind = node.get_or_create_store(session_id, node.id).await.unwrap();
+            let storage = storage_bind.lock().await;
+            assert_eq!(storage.protocol_state, ProtocolState::NotInitialized);
+            assert_eq!(
+                storage.pending_batch_recon_payload.as_deref(),
+                Some(payload.as_slice())
+            );
+            assert!(storage.batch_recon_result.is_none());
+        }
+
+        let random_shares_a = values
+            .iter()
+            .map(|value| RobustShare::new(*value, node.id, 1))
+            .collect();
+        let random_shares_b = values
+            .iter()
+            .map(|value| RobustShare::new(*value, node.id, 1))
+            .collect();
+        let randousha_pairs = values
+            .iter()
+            .map(|value| {
+                DoubleShamirShare::new(
+                    NonRobustShare::new(*value, node.id, 1),
+                    NonRobustShare::new(*value, node.id, 2),
+                )
+            })
+            .collect();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+
+        node.init(
+            random_shares_a,
+            random_shares_b,
+            randousha_pairs,
+            session_id,
+            Arc::new(FakeNetwork::new(node.id, inner)),
+        )
+        .await
+        .unwrap();
+
+        let triples = node
+            .wait_for_result(session_id, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(triples.len(), values.len());
+
+        let storage_bind = node.get_or_create_store(session_id, node.id).await.unwrap();
+        let storage = storage_bind.lock().await;
+        assert_eq!(storage.protocol_state, ProtocolState::Finished);
+        assert!(storage.pending_batch_recon_payload.is_none());
     }
 }
