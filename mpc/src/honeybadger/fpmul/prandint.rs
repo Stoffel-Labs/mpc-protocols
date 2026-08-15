@@ -5,9 +5,16 @@ use crate::{
         ProtocolSessionId,
     },
     honeybadger::{
-        fpmul::{build_all_f_polys, PRandIntEchoMessage, PRandIntMessage, PRandIntStore, PRandIntError, PrandState},
+        fpmul::{
+            build_all_f_polys, PRandIntEchoMessage, PRandIntError, PRandIntMessage, PRandIntStore,
+            PrandState,
+        },
+        prss::{
+            prss::{all_tsets, derive_key_from_riss, PrssKeys},
+            PRSS_KEY_LEN,
+        },
         robust_interpolate::robust_interpolate::RobustShare,
-        SessionId, WrappedMessage,
+        ProtocolType, SessionId, WrappedMessage,
     },
 };
 use ark_ff::PrimeField;
@@ -32,8 +39,10 @@ pub struct PRandIntNode<G: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub store:
-        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PRandIntStore<G>>>)>>>,
+    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PRandIntStore<G>>>)>>>,
+    /// PRSS key material. When present, `generate_prss` derives masks locally and the whole RISS
+    /// message path below goes unused. Absent until a key setup has run.
+    prss: Option<PrssKeys<G>>,
 }
 
 const MAX_PRAND_SESSIONS: usize = 512;
@@ -46,7 +55,107 @@ impl<G: PrimeField> PRandIntNode<G> {
             n,
             t,
             store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
+            prss: None,
         })
+    }
+
+    /// Installs PRSS key material, switching mask generation from RISS to local derivation.
+    pub fn install_prss_keys(&mut self, keys: PrssKeys<G>) {
+        self.prss = Some(keys);
+    }
+
+    pub fn has_prss_keys(&self) -> bool {
+        self.prss.is_some()
+    }
+
+    /// Largest mask width this node can derive without the summed value wrapping the field.
+    ///
+    /// The secret is the sum over **all** `C(n,t)` sets, so it reaches `C(n,t) · 2^bits` — the
+    /// per-set width alone is not the bound. Note there is no factor of `n` here as there is on
+    /// the RISS path, where each `r_T` was itself a sum of `n` party contributions.
+    pub fn max_mask_bits(&self) -> usize {
+        let n_tsets = num_integer::binomial(self.n as u64, self.t as u64);
+        let headroom = (n_tsets as f64).log2().ceil() as usize + 1;
+        (G::MODULUS_BIT_SIZE as usize).saturating_sub(headroom)
+    }
+
+    /// Derives the mask shares at absolute positions `start .. start + count`. No network, no
+    /// session state.
+    ///
+    /// `start` is the party's current pool depth, so a node topping up a half-filled pool derives
+    /// exactly the suffix the others already hold. Masks are addressed by position rather than by
+    /// a per-invocation counter precisely so that restarts, retries and pool-level skew cannot
+    /// silently repoint the derivation: with a local counter in the PRF input, two parties out of
+    /// step by one produce shares of entirely different secrets and no message exchange remains
+    /// to notice.
+    ///
+    /// Parties must still agree on `bits` and on the pool position they are filling.
+    pub fn generate_prss_at(
+        &self,
+        instance_id: u32,
+        start: usize,
+        count: usize,
+        bits: usize,
+    ) -> Result<Vec<RobustShare<G>>, PRandIntError> {
+        let keys = self.prss.as_ref().ok_or(PRandIntError::NoPrssKeys)?;
+        if bits > self.max_mask_bits() {
+            return Err(PRandIntError::SurpassedFieldCapacity);
+        }
+
+        let session_id = SessionId::new(
+            ProtocolType::PRandInt,
+            SessionId::pack_slot(0, 0, 0),
+            instance_id,
+        );
+
+        Ok(keys.shares_at(session_id, start, count, bits)?)
+    }
+
+    /// Turns a completed RISS session's folded `r_T` values into PRSS key material.
+    ///
+    /// RISS already establishes exactly what a key setup needs: an agreed `r_T` per unqualified
+    /// set, held by the `n-t` parties outside it and unknown to those inside — range-checked and
+    /// echo-verified on the way in. Run once at startup, its output is stored as keys instead of
+    /// being converted to Shamir shares, and every mask thereafter is derived locally.
+    ///
+    /// Must be called before `clear_store` retires the session.
+    pub async fn take_riss_keys(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<(usize, [u8; PRSS_KEY_LEN])>, PRandIntError> {
+        let binding = {
+            let store = self.store.lock().await;
+            store
+                .get(&session_id)
+                .map(|(_, _, arc)| arc.clone())
+                .ok_or(PRandIntError::NoSuchSessionId(session_id))?
+        };
+        let store = binding.lock().await;
+
+        let expected = all_tsets(self.n, self.t)
+            .iter()
+            .filter(|ts| !ts.contains(&self.id))
+            .count();
+        if store.r_t.len() != expected {
+            return Err(PRandIntError::NotSet(format!(
+                "RISS folded {} of {expected} unqualified sets; key setup needs all of them",
+                store.r_t.len()
+            )));
+        }
+
+        let tsets = all_tsets(self.n, self.t);
+        let mut keys = Vec::with_capacity(store.r_t.len());
+        for (tset, values) in store.r_t.iter() {
+            let rank = tsets
+                .iter()
+                .position(|candidate| candidate == tset)
+                .ok_or_else(|| {
+                    PRandIntError::InvalidMessage(format!("unrecognised unqualified set {tset:?}"))
+                })?;
+            keys.push((rank, derive_key_from_riss(rank, values)));
+        }
+        keys.sort_by_key(|(rank, _)| *rank);
+        Ok(keys)
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
@@ -84,7 +193,10 @@ impl<G: PrimeField> PRandIntNode<G> {
         }
     }
 
-    async fn try_advance_from_riss(&mut self, session_id: SessionId) -> Result<bool, PRandIntError> {
+    async fn try_advance_from_riss(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<bool, PRandIntError> {
         // Phase 0: Terminal fast-path
         {
             let binding = match self.get_or_create_store(session_id, self.id).await {

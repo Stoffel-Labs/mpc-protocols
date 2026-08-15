@@ -346,3 +346,92 @@ async fn fpmul_e2e() {
     );
     assert!(expected_result == result || expected_result_plus_one == result);
 }
+
+/// PRandInt via PRSS: every party derives its mask shares from pre-distributed keys with **no
+/// messages at all**, and the result must still reconstruct as a valid degree-`t` sharing of a
+/// value inside the summed bound.
+///
+/// The keys come from the dev dealer, which is a total privacy break (one party sees every key)
+/// and exists only until the distributed setup lands. It is fine here because the property under
+/// test is the derivation and conversion path, not key secrecy.
+#[tokio::test]
+async fn prandint_via_prss_needs_no_network() {
+    setup_tracing();
+    let n = 4;
+    let t = 1;
+    let count = 6;
+    let bits = 12;
+    let instance_id = 222u32;
+
+    let mut rng = test_rng();
+    let dealt = crate::utils::prss_utils::deal_keys(n, t, &mut rng);
+
+    let nodes: Vec<PRandIntNode<G>> = (0..n)
+        .map(|i| {
+            let mut node = PRandIntNode::new(i, n, t).unwrap();
+            let keys =
+                stoffelcrypto::honeybadger::prss::prss::PrssKeys::<G>::new(i, n, t, &dealt[i])
+                    .unwrap();
+            node.install_prss_keys(keys);
+            node
+        })
+        .collect();
+
+    // No network is constructed anywhere in this test -- that is the point.
+    let per_party: Vec<Vec<RobustShare<G>>> = nodes
+        .iter()
+        .map(|node| node.generate_prss_at(instance_id, 0, count, bits).unwrap())
+        .collect();
+
+    let n_tsets = (0..n).combinations(t).count();
+    let bound = BigUint::from(n_tsets) << bits;
+
+    for i in 0..count {
+        let shares: Vec<RobustShare<G>> = (0..n).map(|id| per_party[id][i].clone()).collect();
+        let (coeffs, secret) = RobustShare::recover_secret(&shares, n, t).unwrap();
+        assert!(coeffs.len() <= t + 1, "mask {i} is not a degree-t sharing");
+        assert_eq!(coeffs[0], secret);
+        assert!(
+            BigUint::from(secret.into_bigint()) < bound,
+            "mask {i} exceeded C(n,t)*2^bits"
+        );
+    }
+
+    // Re-deriving the same range must be byte-identical; a different instance must differ.
+    let again = nodes[0]
+        .generate_prss_at(instance_id, 0, count, bits)
+        .unwrap();
+    assert_eq!(again, per_party[0]);
+
+    let different = nodes[0]
+        .generate_prss_at(instance_id + 1, 0, count, bits)
+        .unwrap();
+    assert_ne!(different, per_party[0]);
+
+    // Topping up from a pool depth must land on the same values as the one-shot derivation --
+    // the property `ensure_prandint_shares` relies on when a node restarts mid-fill.
+    let tail = nodes[0]
+        .generate_prss_at(instance_id, 2, count - 2, bits)
+        .unwrap();
+    assert_eq!(tail, per_party[0][2..]);
+}
+
+/// A width the summed value cannot fit must be refused rather than silently wrapping the field.
+#[tokio::test]
+async fn prandint_prss_rejects_an_oversized_mask() {
+    let n = 4;
+    let t = 1;
+    let mut rng = test_rng();
+    let dealt = crate::utils::prss_utils::deal_keys(n, t, &mut rng);
+    let mut node = PRandIntNode::<G>::new(0, n, t).unwrap();
+    node.install_prss_keys(
+        stoffelcrypto::honeybadger::prss::prss::PrssKeys::<G>::new(0, n, t, &dealt[0]).unwrap(),
+    );
+
+    assert!(node
+        .generate_prss_at(222, 0, 1, node.max_mask_bits())
+        .is_ok());
+    assert!(node
+        .generate_prss_at(222, 0, 1, node.max_mask_bits() + 1)
+        .is_err());
+}

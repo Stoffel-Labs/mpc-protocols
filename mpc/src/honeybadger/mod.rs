@@ -26,6 +26,7 @@ pub mod mul;
 pub mod mul_pub;
 pub mod output;
 pub mod preprocessing;
+pub mod prss;
 pub mod share_gen;
 #[cfg(feature = "statistics")]
 pub mod statistics;
@@ -64,6 +65,7 @@ use crate::{
             OutputError, OutputMessage,
         },
         preprocessing::HoneyBadgerMPCNodePreprocMaterial,
+        prss::prss::{PrssKeys, PRSS_KEY_ENTROPY_BITS},
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
@@ -298,6 +300,67 @@ where
     #[cfg(feature = "statistics")]
     pub fn statistics_snapshot(&self) -> statistics::NodeStatisticsSnapshot {
         self.statistics_counters.snapshot()
+    }
+    /// Establishes this party's PRSS keys by running RISS **once**, then switches PRandInt to
+    /// local derivation.
+    pub async fn setup_prss_keys<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
+        if self.preprocess.prand_int.has_prss_keys() {
+            info!("PRSS keys already installed");
+            return Ok(());
+        }
+
+        // Each folded `r_T` hides at least `k + l` bits from the parties inside `T`, so take as
+        // many as the entropy target needs. Sized from the parameters rather than hardcoded:
+        // a small `k + l` would otherwise silently yield a low-entropy key.
+        let bits_per_value = (self.params.k + self.params.l).max(1);
+        let batch_size = PRSS_KEY_ENTROPY_BITS.div_ceil(bits_per_value);
+
+        // The setup session is a real RISS session, so a counter is safe here — a mismatch makes
+        // messages fail to assemble and surfaces as a timeout. That is exactly the property the
+        // derivation path lacks, which is why its exec id is fixed instead.
+        let sessionid = SessionId::new(
+            ProtocolType::PRandInt,
+            SessionId::pack_slot(self.counters.prand_int_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        self.preprocess
+            .prand_int
+            .generate_riss(
+                sessionid,
+                self.params.l,
+                self.params.k,
+                batch_size,
+                network.clone(),
+            )
+            .await?;
+
+        // Waiting on the share output is how we learn the fold completed; the shares themselves
+        // are discarded, only `r_T` matters for keys.
+        let _ = self
+            .preprocess
+            .prand_int
+            .wait_for_int_result(sessionid, self.params.timeout)
+            .await?;
+
+        let keys = self.preprocess.prand_int.take_riss_keys(sessionid).await?;
+
+        if !self.preprocess.prand_int.clear_store(sessionid).await {
+            warn!(?sessionid, "failed to clear PRSS setup session state");
+        }
+
+        let keys = PrssKeys::<F>::new(self.id, self.params.n_parties, self.params.threshold, &keys)
+            .map_err(PRandIntError::from)?;
+        self.preprocess.prand_int.install_prss_keys(keys);
+        info!("PRSS key setup complete");
+        Ok(())
+    }
+
+    pub fn prss_keys_installed(&self) -> bool {
+        self.preprocess.prand_int.has_prss_keys()
     }
 
     pub async fn debug_store_sizes(&self) -> String {
@@ -1259,6 +1322,18 @@ where
         N: 'async_trait,
         G: Rng + Send,
     {
+        // ------------------------
+        // Step 0. Establish PRSS keys (once)
+        // ------------------------
+        // Idempotent, and safe to run here rather than as a separate call by the application:
+        // every party reaches `run_preprocessing` together, so the setup's RISS session runs in
+        // lockstep — and RISS is loud if it does not.
+        if !self.preprocess.prand_int.has_prss_keys() {
+            let phase_start = Instant::now();
+            self.setup_prss_keys(network.clone()).await?;
+            trace_preprocessing_phase(self.id, "prss_setup", 1, phase_start);
+        }
+
         // Get how many triples and random shares are already available
         let (no_of_triples_avail, no_of_random_shares_avail) = {
             let store = self.preprocessing_material.lock().await;
@@ -1434,7 +1509,7 @@ where
         // Step 7. Generate Random Int
         // ------------------------
         let phase_start = Instant::now();
-        self.ensure_prandint_shares(network.clone()).await?;
+        self.ensure_prandint_shares().await?;
         trace_preprocessing_phase(self.id, "prandint", self.params.n_prandint, phase_start);
         info!("PrandInt share generation done");
 
@@ -1779,63 +1854,38 @@ where
         Ok(())
     }
 
-    async fn ensure_prandint_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
-    where
-        N: Network + Send + Sync + 'static,
-    {
-        // How many shares are already present?
+    /// Tops the PRandInt mask pool up to `n_prandint`, deriving locally from PRSS keys.
+    ///
+    /// No network: the keys were established once by [`Self::setup_prss_keys`], and every mask
+    /// after that is a local PRF evaluation. Masks are addressed by pool position, so a node
+    /// filling a partly-drained pool derives exactly the suffix the others already hold, and no
+    /// per-invocation counter enters the PRF input — a counter that drifted between parties would
+    /// silently yield shares of different secrets, with no message exchange left to catch it.
+    async fn ensure_prandint_shares(&mut self) -> Result<(), HoneyBadgerError> {
         let no_shares = {
             let store = self.preprocessing_material.lock().await;
             store.length().prandint
         };
 
         if no_shares >= self.params.n_prandint {
-            info!("There are enough randbit shares");
+            info!("There are enough PRandInt shares");
             return Ok(());
         }
 
-        // How many more do we need?
         let missing = self.params.n_prandint.saturating_sub(no_shares);
-
-        // PRandInt share generation.
         info!("PRandInt share generation");
 
-        let max_prandint_batch = 64 * (self.params.threshold + 1);
-        let mut prandint_output = Vec::with_capacity(missing);
-        for batch_size in chunk_sizes(missing, max_prandint_batch) {
-            let sessionid = SessionId::new(
-                ProtocolType::PRandInt,
-                SessionId::pack_slot(self.counters.prand_int_counter.get_next().await?, 0, 0),
-                self.params.instance_id,
-            );
-
-            // Run PRandInt protocol. PRandIntNode<F> produces the big-field shares here.
-            self.preprocess
-                .prand_int
-                .generate_riss(
-                    sessionid,
-                    self.params.l,
-                    self.params.k,
-                    batch_size,
-                    network.clone(),
-                )
-                .await?;
-
-            let result = self
-                .preprocess
-                .prand_int
-                .wait_for_int_result(sessionid, self.params.timeout)
-                .await;
-
-            if !self.preprocess.prand_int.clear_store(sessionid).await {
-                warn!(?sessionid, "failed to clear PRandInt protocol state");
-            }
-            prandint_output.extend(result?);
-        }
+        let bits = self.params.k + self.params.l;
+        let output = self.preprocess.prand_int.generate_prss_at(
+            self.params.instance_id,
+            no_shares,
+            missing,
+            bits,
+        )?;
         self.preprocessing_material
             .lock()
             .await
-            .add(None, None, None, Some(prandint_output));
+            .add(None, None, None, Some(output));
         Ok(())
     }
 }

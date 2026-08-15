@@ -158,6 +158,10 @@ pub enum PRandIntError {
     LimitError,
     #[error("Invalid message: {0}")]
     InvalidMessage(String),
+    #[error("no PRSS keys installed; run the key setup or use the RISS path")]
+    NoPrssKeys,
+    #[error("PRSS error: {0:?}")]
+    PrssError(#[from] crate::honeybadger::prss::PrssError),
 }
 
 /// Message sent in the Random Double Sharing protocol.

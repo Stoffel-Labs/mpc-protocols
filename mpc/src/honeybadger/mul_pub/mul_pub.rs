@@ -135,12 +135,25 @@ impl<F: FftField> MulPubNode<F> {
             ));
         }
 
-        if self
-            .get_or_create_store(session_id, self.id, k)
-            .await
-            .is_none()
-        {
-            return Err(MulPubError::LimitError);
+        let storage_bind = match self.get_or_create_store(session_id, self.id, k).await {
+            Some(s) => s,
+            None => return Err(MulPubError::LimitError),
+        };
+        // Set k and atomically claim any reconstruction result that arrived
+        // before this call (a faster quorum can finish this node's own
+        // reconstruction before it reaches `init`).
+        let pending_batch_recon_payload = {
+            let mut store = storage_bind.lock().await;
+            store.k = k;
+            store.pending_batch_recon_payload.take()
+        };
+        if let Some(payload) = pending_batch_recon_payload {
+            self.finish_from_payload(session_id, storage_bind.clone(), payload)
+                .await?;
+            if storage_bind.lock().await.state == MulPubState::Finished {
+                // Already have the result — skip the redundant network round.
+                return Ok(());
+            }
         }
 
         let batch_size = 2 * self.threshold + 1;
@@ -180,43 +193,53 @@ impl<F: FftField> MulPubNode<F> {
                 }
             };
 
-            let storage = self
-                .store
-                .lock()
-                .await
-                .get(&sid)
-                .map(|(_, _, arc)| arc.clone());
-            let bind = match storage {
+            // Create the session if `init` hasn't run locally yet — a faster quorum can
+            // finish this node's own reconstruction first. `k = 0` is never valid for a
+            // real `init` call, so it's a safe placeholder here.
+            let storage_bind = match self.get_or_create_store(sid, self.id, 0).await {
                 Some(b) => b,
-                None => {
-                    warn!("MulPub: no session for {sid:?}; init not yet called");
-                    continue;
-                }
+                None => continue,
             };
-            let mut store = bind.lock().await;
-            if store.state == MulPubState::Finished {
-                continue;
-            }
-
-            let batch_size = 2 * self.threshold + 1;
-            let num_batches = (store.k + batch_size - 1) / batch_size;
             let poly_bytes = self.batch_recon.get_store(sid).await?;
-            let coeffs: Vec<F> =
-                deser_bounded_vec(&mut poly_bytes.as_slice(), num_batches * batch_size)
-                    .map_err(MulPubError::ArkSerialization)?;
+            self.finish_from_payload(sid, storage_bind, poly_bytes)
+                .await?;
+        }
+        Ok(())
+    }
 
-            if coeffs.len() < store.k {
-                warn!("MulPub: short coefficient vector for session {sid:?}");
-                continue;
-            }
+    /// Decodes a completed batch-reconstruction payload and finishes the session, or —
+    /// if `init` hasn't set `k` locally yet — parks the raw bytes for `init` to replay.
+    async fn finish_from_payload(
+        &self,
+        session_id: SessionId,
+        storage_bind: Arc<Mutex<MulPubStore<F>>>,
+        payload: Vec<u8>,
+    ) -> Result<(), MulPubError> {
+        let mut store = storage_bind.lock().await;
+        if store.state == MulPubState::Finished {
+            return Ok(());
+        }
+        if store.k == 0 {
+            store.pending_batch_recon_payload = Some(payload);
+            return Ok(());
+        }
 
-            // Only the first store.k values are real; the rest is padding from
-            // completing the last chunk.
-            let output: Vec<F> = coeffs.into_iter().take(store.k).collect();
-            store.state = MulPubState::Finished;
-            if let Some(tx) = store.output_sender.take() {
-                tx.send(output).map_err(|_| MulPubError::SendError)?;
-            }
+        let batch_size = 2 * self.threshold + 1;
+        let num_batches = (store.k + batch_size - 1) / batch_size;
+        let coeffs: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), num_batches * batch_size)
+            .map_err(MulPubError::ArkSerialization)?;
+
+        if coeffs.len() < store.k {
+            warn!("MulPub: short coefficient vector for session {session_id:?}");
+            return Ok(());
+        }
+
+        // Only the first store.k values are real; the rest is padding from
+        // completing the last chunk.
+        let output: Vec<F> = coeffs.into_iter().take(store.k).collect();
+        store.state = MulPubState::Finished;
+        if let Some(tx) = store.output_sender.take() {
+            tx.send(output).map_err(|_| MulPubError::SendError)?;
         }
         Ok(())
     }
@@ -242,5 +265,77 @@ impl<F: FftField> MulPubNode<F> {
             Ok(Err(_)) => Err(MulPubError::ReceiveError(session_id)),
             Ok(Ok(result)) => Ok(result),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::ProtocolSessionId;
+    use crate::honeybadger::ProtocolType;
+    use ark_bls12_381::Fr;
+    use ark_serialize::CanonicalSerialize;
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+
+    #[tokio::test]
+    async fn buffers_batch_reconstruction_that_finishes_before_local_init() {
+        let mut node = MulPubNode::<Fr>::new(0, 5, 1).unwrap();
+        let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot(7, 0, 0), 42);
+
+        // k = 3, batch_size = 2t+1 = 3, so this is exactly one batch's worth of coefficients.
+        let coeffs = vec![Fr::from(1_u64), Fr::from(2_u64), Fr::from(3_u64)];
+        let mut payload = Vec::new();
+        coeffs.serialize_compressed(&mut payload).unwrap();
+
+        // Before this fix: dropped silently ("no session; init not yet called"), and
+        // `wait_for_result` would time out despite the value already being correctly,
+        // robustly reconstructed.
+        let storage_bind = node
+            .get_or_create_store(session_id, node.id, 0)
+            .await
+            .unwrap();
+        node.finish_from_payload(session_id, storage_bind.clone(), payload.clone())
+            .await
+            .unwrap();
+
+        {
+            let store = storage_bind.lock().await;
+            assert_eq!(store.state, MulPubState::Running);
+            assert_eq!(
+                store.pending_batch_recon_payload.as_deref(),
+                Some(payload.as_slice())
+            );
+        }
+
+        let a: Vec<RobustShare<Fr>> = coeffs
+            .iter()
+            .map(|v| RobustShare::new(*v, node.id, 1))
+            .collect();
+        let b = a.clone();
+        let zero_shares: Vec<RobustShare<Fr>> = coeffs
+            .iter()
+            .map(|_| RobustShare::new(Fr::from(0_u64), node.id, 2))
+            .collect();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+
+        node.init(
+            session_id,
+            a,
+            b,
+            zero_shares,
+            Arc::new(FakeNetwork::new(node.id, inner)),
+        )
+        .await
+        .unwrap();
+
+        let result = node
+            .wait_for_result(session_id, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(result, coeffs);
+
+        let store = storage_bind.lock().await;
+        assert_eq!(store.state, MulPubState::Finished);
+        assert!(store.pending_batch_recon_payload.is_none());
     }
 }

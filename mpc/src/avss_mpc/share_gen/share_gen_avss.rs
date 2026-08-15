@@ -196,7 +196,15 @@ where
                 && id.round_id() == session_id.round_id()
                 && id.instance_id() == session_id.instance_id()
             {
-                let avss_share = self.avss.take_share(id).await.unwrap().unwrap();
+                // The entry can be evicted by `admit`'s idle-session sweep between the
+                // notification being queued and this loop draining it (this node fell
+                // behind, or another dealer's flood forced capacity pressure). Skip this
+                // dealer's contribution rather than panicking the node — the loop is still
+                // waiting on the rest.
+                let Some(avss_share) = self.avss.take_share(id).await.flatten() else {
+                    warn!(?id, "AVSS share evicted before consumption; skipping");
+                    continue;
+                };
                 let binding = match self.get_or_create_store(session_id, self.id).await {
                     Some(s) => s,
                     None => return Ok(()),

@@ -47,6 +47,10 @@ pub struct MulPubStore<F: FftField> {
     pub state: MulPubState,
     pub output_sender: Option<Sender<Vec<F>>>,
     pub output_receiver: Option<Receiver<Vec<F>>>,
+    /// A batch-reconstruction result can arrive before `init` sets `k` (a faster
+    /// quorum can finish this node's reconstruction before it calls `init`).
+    /// Keep the raw bytes until `k` is known.
+    pub pending_batch_recon_payload: Option<Vec<u8>>,
 }
 
 impl<F: FftField> MulPubStore<F> {
@@ -57,6 +61,7 @@ impl<F: FftField> MulPubStore<F> {
             state: MulPubState::Running,
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
+            pending_batch_recon_payload: None,
         }
     }
 }

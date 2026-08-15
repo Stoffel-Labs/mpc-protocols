@@ -1778,3 +1778,85 @@ async fn fpdiv_const_rejects_undersized_prandint_mask() {
         "error should report the required width {required}, got {rendered}"
     );
 }
+
+/// PRSS key setup end to end: one RISS run establishes the keys, after which every party derives
+/// its PRandInt masks locally and they still reconstruct as a valid degree-`t` sharing.
+///
+/// This is the property the whole PRSS change rests on — that RISS, run once, produces key
+/// material good enough that no further communication is needed for masks.
+#[tokio::test]
+async fn prss_setup_from_riss_then_local_masks() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+    let l = 8;
+    let k = 4;
+    let instance_id = 111;
+
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        instance_id,
+        0,
+        0,
+        l,
+        k,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    // Key setup: the one and only time these nodes talk about PRandInt.
+    let mut handles = Vec::new();
+    for (pid, node) in nodes.iter().enumerate() {
+        let mut node = node.clone();
+        let net = network[pid].clone();
+        handles.push(tokio::spawn(async move {
+            node.setup_prss_keys(net).await.expect("prss setup");
+            node
+        }));
+    }
+    for (pid, handle) in handles.into_iter().enumerate() {
+        nodes[pid] = handle.await.unwrap();
+        assert!(nodes[pid].prss_keys_installed(), "node {pid} has no keys");
+    }
+
+    // From here on, masks are derived with no messages at all.
+    let count = 5;
+    let bits = k + l;
+    let per_party: Vec<Vec<RobustShare<Fr>>> = nodes
+        .iter()
+        .map(|node| {
+            node.preprocess
+                .prand_int
+                .generate_prss_at(instance_id, 0, count, bits)
+                .unwrap()
+        })
+        .collect();
+
+    for i in 0..count {
+        let shares: Vec<RobustShare<Fr>> =
+            (0..n_parties).map(|p| per_party[p][i].clone()).collect();
+        let (coeffs, secret) = RobustShare::recover_secret(&shares, n_parties, t)
+            .unwrap_or_else(|e| panic!("mask {i} failed to reconstruct: {e:?}"));
+        assert!(coeffs.len() <= t + 1, "mask {i} is not a degree-t sharing");
+        assert_eq!(coeffs[0], secret);
+    }
+
+    // Two distinct sets of keys must not collide: a second instance derives different masks.
+    let other = nodes[0]
+        .preprocess
+        .prand_int
+        .generate_prss_at(instance_id + 1, 0, count, bits)
+        .unwrap();
+    assert_ne!(other, per_party[0]);
+}
