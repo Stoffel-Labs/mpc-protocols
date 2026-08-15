@@ -12,7 +12,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```text
 //! let inner_net = FakeNetwork::new(id, inner);
 //! let counting_net = Arc::new(node.counting_network(inner_net));
 //!
