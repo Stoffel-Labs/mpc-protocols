@@ -11,6 +11,7 @@ use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, vec};
 use stoffelcrypto::common::rbc::rbc::Avid;
 use stoffelcrypto::common::rbc::RbcError;
 use stoffelcrypto::common::share::shamir::NonRobustShare;
+use stoffelcrypto::common::types::fixed::FixedPointPrecision;
 use stoffelcrypto::common::{MPCProtocol, SecretSharingScheme, RBC};
 use stoffelcrypto::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -517,6 +518,16 @@ pub fn receive<F, R, S, N>(
     }
 }
 
+/// Precision for tests that never run a fixed-point operation.
+///
+/// The node options still need one — it sizes the PRandInt mask pool — but nothing in those tests
+/// masks anything, so the value is immaterial. Deliberately not `global_precision()`: reading that
+/// pins the process-wide `OnceLock` to the default and would break the fixed-point tests sharing
+/// the same test binary.
+pub fn unused_precision() -> FixedPointPrecision {
+    FixedPointPrecision::new(32, 16)
+}
+
 pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     n_parties: usize,
     t: usize,
@@ -525,8 +536,8 @@ pub fn create_global_nodes<F: PrimeField, R: RBC + 'static, S, N>(
     instance_id: u32,
     n_randbit: usize,
     n_prandint: usize,
-    l: usize,
-    k: usize,
+    precision: FixedPointPrecision,
+    statistical_security: usize,
     timeout: Duration,
     input_ids: Vec<ClientId>,
 ) -> Vec<HoneyBadgerMPCNode<F, R>>
@@ -543,8 +554,8 @@ where
         instance_id,
         n_randbit,
         n_prandint,
-        l,
-        k,
+        precision,
+        statistical_security,
         timeout,
     )
     .unwrap();

@@ -4,10 +4,11 @@ use ark_bls12_381::Fr;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
+use stoffelcrypto::common::types::fixed::FixedPointPrecision;
 use stoffelcrypto::common::{rbc::rbc::Avid, MPCProtocol};
 use stoffelcrypto::honeybadger::{
     robust_interpolate::robust_interpolate::RobustShare, HoneyBadgerMPCNode,
-    HoneyBadgerMPCNodeOpts, SessionId,
+    HoneyBadgerMPCNodeOpts, SessionId, MIN_STATISTICAL_SECURITY,
 };
 use stoffelmpc_network::fake_network::{
     FakeInnerNetwork, FakeNetwork, FakeNetworkConfig, SenderId,
@@ -69,8 +70,10 @@ pub fn create_nodes(
         instance_id,
         n_randbit,
         n_prandint,
-        8,
-        4,
+        // Benches never run below the node's configured precision, so size the mask pool for the
+        // library default rather than threading a precision through every bench.
+        FixedPointPrecision::new(32, 16),
+        MIN_STATISTICAL_SECURITY,
         timeout,
     )
     .unwrap();

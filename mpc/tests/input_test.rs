@@ -1,6 +1,6 @@
 use crate::utils::test_utils::{
     create_global_nodes, fan_in_inboxes, generate_independent_shares, receive, setup_tracing,
-    test_setup,
+    test_setup, unused_precision,
 };
 use ark_bls12_381::Fr;
 use futures::future::join_all;
@@ -11,7 +11,7 @@ use stoffelcrypto::{
     honeybadger::{
         input::input::InputClient,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
-        HoneyBadgerMPCNode, WrappedMessage,
+        HoneyBadgerMPCNode, WrappedMessage, MIN_STATISTICAL_SECURITY,
     },
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
@@ -48,8 +48,8 @@ async fn test_multiple_clients_parallel_input() {
             111,
             0,
             0,
-            0,
-            0,
+            unused_precision(),
+            MIN_STATISTICAL_SECURITY,
             Duration::from_secs(30),
             client_ids.clone(),
         );
@@ -138,8 +138,8 @@ async fn test_input_recovery_with_missing_server() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![clientid],
     );
@@ -222,8 +222,8 @@ async fn test_input_with_too_many_faulty_shares() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![client_id],
     );

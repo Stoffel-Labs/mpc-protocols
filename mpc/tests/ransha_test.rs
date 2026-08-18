@@ -1,5 +1,6 @@
 use crate::utils::test_utils::{
     construct_e2e_input_ransha, create_global_nodes, fan_in_inboxes, setup_tracing, test_setup,
+    unused_precision,
 };
 use ark_bls12_381::Fr;
 use ark_serialize::CanonicalSerialize;
@@ -13,7 +14,7 @@ use stoffelcrypto::{
             share_gen::RanShaNode, RanShaError, RanShaMessage, RanShaMessageType, RanShaPayload,
             RanShaState,
         },
-        ProtocolType, SessionId, WrappedMessage,
+        ProtocolType, SessionId, WrappedMessage, MIN_STATISTICAL_SECURITY,
     },
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
@@ -57,8 +58,8 @@ async fn test_reconstruct_handler_incorrect_share() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );

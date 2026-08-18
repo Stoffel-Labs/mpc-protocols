@@ -36,7 +36,7 @@ use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
         types::{
-            fixed::{ClearFixedPoint, SecretFixedPoint},
+            fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
             integer::{ClearInt, SecretInt},
             TypeError,
         },
@@ -92,6 +92,8 @@ use triple_gen::triple_generation::TripleGenNode;
 /// Maximum number of bytes accepted from a single network message before deserialization.
 /// Rejects payloads that would cause multi-gigabyte allocations via a crafted length prefix.
 const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+/// Minimum statistical security parameter
+pub const MIN_STATISTICAL_SECURITY: usize = 40;
 
 fn preprocessing_trace_enabled() -> bool {
     std::env::var("HMPC_PREPROCESSING_TRACE")
@@ -133,6 +135,11 @@ pub enum HoneyBadgerError {
     NetworkError(#[from] NetworkError),
     #[error("error in share generation: {0:?}")]
     RanShaError(#[from] RanShaError),
+    #[error(
+        "statistical security parameter {requested} is below the minimum {minimum}: leakage at a \
+         TruncPr opening is bounded by 2^-kappa, so this delivers no meaningful privacy"
+    )]
+    InsufficientStatisticalSecurity { requested: usize, minimum: usize },
     #[error("error in ZeroSha: {0:?}")]
     ZeroShaError(#[from] ZeroShaError),
     #[error("error in MulPub: {0:?}")]
@@ -315,7 +322,7 @@ where
         // Each folded `r_T` hides at least `k + l` bits from the parties inside `T`, so take as
         // many as the entropy target needs. Sized from the parameters rather than hardcoded:
         // a small `k + l` would otherwise silently yield a low-entropy key.
-        let bits_per_value = (self.params.k + self.params.l).max(1);
+        let bits_per_value = self.params.mask_bits().max(1);
         let batch_size = PRSS_KEY_ENTROPY_BITS.div_ceil(bits_per_value);
 
         // The setup session is a real RISS session, so a counter is safe here — a mismatch makes
@@ -331,8 +338,7 @@ where
             .prand_int
             .generate_riss(
                 sessionid,
-                self.params.l,
-                self.params.k,
+                self.params.mask_bits(),
                 batch_size,
                 network.clone(),
             )
@@ -361,6 +367,39 @@ where
 
     pub fn prss_keys_installed(&self) -> bool {
         self.preprocess.prand_int.has_prss_keys()
+    }
+
+    /// TruncPr opens `b + r` in the clear, so its privacy rests on one inequality
+    /// (Damgård–Thorbek §3.2): a value in `[0, 2^l)` needs a mask drawn from `[0, 2^(l+k))`.
+    ///
+    /// ```text
+    /// mask_bits  >=  value_bits + statistical_security
+    /// ```
+    ///
+    /// `value_bits` is the width of *this* value — taken from the value's own precision, not the
+    /// node's, since `SecretFixedPoint::new_with_precision` lets them differ. The pool was sized
+    /// once for `max_masked_width(params.precision)`, so this catches both a value carrying a
+    /// wider precision than configured and an operation masking something the sizing function
+    /// does not account for.
+    ///
+    /// This used to compare against a configured `params.l`, with `l` and `k` as separate knobs.
+    /// Only their sum ever mattered, so splitting them invited one specific misconfiguration:
+    /// passing the *precision* into the security slot, which reads plausibly and silently
+    /// delivers whatever margin happens to be left over.
+    fn check_mask_security(&self, value_bits: usize) -> Result<(), HoneyBadgerError> {
+        let mask_bits = self.params.mask_bits();
+        let delivered = mask_bits.saturating_sub(value_bits);
+        if delivered < self.params.statistical_security {
+            return Err(HoneyBadgerError::FPError(
+                FPError::InsufficientStatisticalSecurity {
+                    delivered,
+                    required: self.params.statistical_security,
+                    mask_bits,
+                    value_bits,
+                },
+            ));
+        }
+        Ok(())
     }
 
     pub async fn debug_store_sizes(&self) -> String {
@@ -503,10 +542,19 @@ pub struct HoneyBadgerMPCNodeOpts {
     /// `n_randbit` because RandBit's MulPub squaring is the only consumer today (one per bit);
     /// set it directly when another protocol starts drawing from the pool.
     pub n_zero_shares: usize,
-    ///Security parameter
-    pub k: usize,
-    ///Bit size for fixed point
-    pub l: usize,
+    /// Fixed-point precision this node's preprocessing is sized for.
+    ///
+    /// The mask pool is generated once, before any value exists, so its width has to be decided
+    /// here. Operations still check their own value's precision at use time — a value carrying a
+    /// wider precision than this is rejected rather than silently under-masked.
+    pub precision: FixedPointPrecision,
+    /// Statistical security parameter κ: leakage at a TruncPr opening is bounded by `2^-κ`.
+    ///
+    /// Policy-level and operation-independent — this is Damgård–Thorbek's `k`. The companion
+    /// parameter `l` from that paper is *not* configurable: it is the width of the value being
+    /// masked, so it is derived from `precision` rather than chosen. Letting it float free of the
+    /// value is what silently decouples the configured κ from the delivered one.
+    pub statistical_security: usize,
     pub timeout: Duration,
 }
 
@@ -520,8 +568,8 @@ impl HoneyBadgerMPCNodeOpts {
         instance_id: u32,
         n_randbit: usize,
         n_prandint: usize,
-        l: usize,
-        k: usize,
+        precision: FixedPointPrecision,
+        statistical_security: usize,
         timeout: Duration,
     ) -> Result<Self, HoneyBadgerError> {
         //No of parties should not exceed 255
@@ -532,6 +580,14 @@ impl HoneyBadgerMPCNodeOpts {
             // ceil(n / 3)
             return Err(HoneyBadgerError::InvalidThreshold(threshold, n_parties));
         }
+        // Reject a κ too small to mean anything here, rather than letting it surface later as an
+        // undersized mask at the first fixed-point operation.
+        if statistical_security < MIN_STATISTICAL_SECURITY {
+            return Err(HoneyBadgerError::InsufficientStatisticalSecurity {
+                requested: statistical_security,
+                minimum: MIN_STATISTICAL_SECURITY,
+            });
+        }
         Ok(Self {
             n_parties,
             threshold,
@@ -541,13 +597,33 @@ impl HoneyBadgerMPCNodeOpts {
             n_randbit,
             n_prandint,
             n_zero_shares: n_randbit,
-            k,
-            l,
+            precision,
+            statistical_security,
             timeout,
         })
     }
     pub fn set_timeout(&mut self, secs: u64) {
         self.timeout = Duration::from_secs(secs)
+    }
+
+    /// Width of TruncPr's high mask `r''`, in bits: the widest value any supported fixed-point
+    /// operation feeds into TruncPr at this precision, plus the statistical margin.
+    ///
+    /// Damgård–Thorbek §3.2: to mask a value in `[0, 2^l)` the mask must be drawn from
+    /// `[0, 2^(l+k))`. Derived, never configured — see [`Self::max_masked_width`].
+    pub fn mask_bits(&self) -> usize {
+        Self::max_masked_width(self.precision) + self.statistical_security
+    }
+
+    /// The widest value any supported fixed-point operation masks at this precision.
+    ///
+    /// `mul_fixed` and `div_with_const_fixed` both truncate a `2k`-bit product by `f` bits, so
+    /// `2k - f` covers both. **A new operation that masks something wider belongs here** —
+    /// otherwise `check_mask_security` rejects it at first use rather than under-masking it
+    /// silently. Sizing one pool for the widest consumer is deliberate: an over-wide mask costs
+    /// only keystream bytes during derivation, while a short one leaks.
+    pub fn max_masked_width(precision: FixedPointPrecision) -> usize {
+        (2usize * precision.k()).saturating_sub(precision.f())
     }
     /// Override the zero-sharing pool size, which `new` seeds from `n_randbit`.
     pub fn set_n_zero_shares(&mut self, n_zero_shares: usize) {
@@ -1076,13 +1152,7 @@ where
         if x.precision() != y.precision() {
             return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
-        // Checks if the PRandInt parameter has enough bits to mask the fixed point numbers.
-        if self.params.l < 2 * x.precision().k() - x.precision().f() {
-            return Err(HoneyBadgerError::FPError(FPError::NotEnoughBitsPrep {
-                current: self.params.l,
-                required: 2 * x.precision().k() - x.precision().f(),
-            }));
-        }
+        self.check_mask_security(HoneyBadgerMPCNodeOpts::max_masked_width(*x.precision()))?;
 
         let (no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;
@@ -1146,18 +1216,9 @@ where
             ));
         }
 
-        // Checks if the PRandInt parameter has enough bits to mask the fixed point numbers.
         // `fpdiv_const` multiplies the secret by a public f-scaled reciprocal and feeds the
-        // resulting 2k-bit value into TruncPr (`k_twice` in `FPDivConstNode::init`), truncating
-        // f bits — the same magnitude `mul_fixed` produces, so it needs the same mask width.
-        // Without this the PRandInt mask can be narrower than the value it is meant to hide,
-        // which leaks rather than merely failing.
-        if self.params.l < 2 * x.precision().k() - x.precision().f() {
-            return Err(HoneyBadgerError::FPError(FPError::NotEnoughBitsPrep {
-                current: self.params.l,
-                required: 2 * x.precision().k() - x.precision().f(),
-            }));
-        }
+        // resulting 2k-bit value into TruncPr, so it needs the same mask margin as `mul_fixed`.
+        self.check_mask_security(HoneyBadgerMPCNodeOpts::max_masked_width(*x.precision()))?;
 
         // 2. Check preprocessing inventory --------------------------------
         let (no_rand_bit, no_rand_int) = {
@@ -1875,7 +1936,7 @@ where
         let missing = self.params.n_prandint.saturating_sub(no_shares);
         info!("PRandInt share generation");
 
-        let bits = self.params.k + self.params.l;
+        let bits = self.params.mask_bits();
         let output = self.preprocess.prand_int.generate_prss_at(
             self.params.instance_id,
             no_shares,

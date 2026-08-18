@@ -4,6 +4,7 @@ use crate::utils::{
     test_utils::{
         catch_expected_panic, construct_e2e_input, construct_e2e_input_mul, create_clients,
         create_global_nodes, generate_independent_shares, setup_quiet_tracing, setup_tracing,
+        unused_precision,
     },
     turmoil::{add_driver, collect_results, turmoil_setup, turmoil_setup_with_duration},
 };
@@ -31,7 +32,7 @@ use stoffelcrypto::{
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         share_gen::{RanShaError, RanShaMessage, RanShaMessageType, RanShaPayload, RanShaState},
-        ProtocolType, SessionId, WrappedMessage,
+        ProtocolType, SessionId, WrappedMessage, MIN_STATISTICAL_SECURITY,
     },
 };
 use stoffelmpc_network::{
@@ -68,8 +69,8 @@ fn ransha_e2e_turmoil() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -207,8 +208,8 @@ fn ransha_retired_session_blocks_late_message_turmoil() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -356,8 +357,8 @@ fn test_input_protocol_e2e_turmoil() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![client_id],
     );
@@ -566,8 +567,6 @@ fn preprocessing_e2e_turmoil(
 
     let n_parties = 4;
     let t = 1;
-    let l = 8;
-    let k = 4;
     let no_of_triples = 7;
     let no_of_randomshares = 4;
     let instance_id = 111;
@@ -593,8 +592,8 @@ fn preprocessing_e2e_turmoil(
         instance_id,
         n_randbit,
         n_prandint,
-        l,
-        k,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -813,8 +812,8 @@ fn run_preprocessing_stress_turmoil(
         instance_id,
         n_randbit,
         n_prandint,
-        8,
-        4,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(120),
         vec![],
     );
@@ -1022,12 +1021,7 @@ async fn preprocessing_stress_snapshot(
             node.id, n_triples, n_random, n_rbits, n_pints
         ));
 
-        let rand_bit_sessions = node
-            .preprocess
-            .rand_bit
-            .storage
-            .lock()
-            .await;
+        let rand_bit_sessions = node.preprocess.rand_bit.storage.lock().await;
         out.push_str(&format!(
             "node {} rand_bit.sessions={}\n",
             node.id,
@@ -1179,19 +1173,20 @@ fn honeybadger_sequential_mul_1000_turmoil() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(120),
         vec![],
     );
 
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         for pid in 0..n_parties {
-            nodes[pid]
-                .preprocessing_material
-                .lock()
-                .await
-                .add(Some(triple[pid].clone()), None, None, None);
+            nodes[pid].preprocessing_material.lock().await.add(
+                Some(triple[pid].clone()),
+                None,
+                None,
+                None,
+            );
         }
     });
 
@@ -1410,8 +1405,8 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![input_client_id],
     );
@@ -1809,8 +1804,8 @@ fn randousha_e2e_turmoil() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -2011,8 +2006,8 @@ fn mul_e2e_without_preprocessing_turmoil() {
         111,
         0,
         0,
-        28,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -2020,11 +2015,12 @@ fn mul_e2e_without_preprocessing_turmoil() {
     // load triples before sim starts
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         for pid in 0..n_parties {
-            nodes[pid]
-                .preprocessing_material
-                .lock()
-                .await
-                .add(Some(triple[pid].clone()), None, None, None);
+            nodes[pid].preprocessing_material.lock().await.add(
+                Some(triple[pid].clone()),
+                None,
+                None,
+                None,
+            );
         }
     });
 
@@ -2200,8 +2196,6 @@ fn fpmul_e2e_with_preprocessing(
     let n_random_shares = m; // no of random bits
     let n_randbit = m;
     let n_prandint = 1;
-    let bound_l = 28;
-    let security_k = 4;
     let precision = FixedPointPrecision::new(k, m);
 
     // Setup of the network.
@@ -2238,8 +2232,8 @@ fn fpmul_e2e_with_preprocessing(
         111,
         n_randbit,
         n_prandint,
-        bound_l,
-        security_k,
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(300),
         vec![],
     );
@@ -2496,10 +2490,10 @@ fn fpdiv_const_e2e(
         222,
         0,
         0,
-        // `l` must cover the 2k-bit value fed into TruncPr after truncating `m` bits,
-        // otherwise the PRandInt mask is narrower than the value it has to hide.
-        2 * k - m,
-        k,
+        // Sizing the mask pool from the precision is what makes it cover the `2k - m`-bit value
+        // `div_with_const_fixed` feeds into TruncPr.
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -2744,8 +2738,8 @@ fn ransha_e2e_turmoil_with_hold(
         111,
         0,
         0,
-        28,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );

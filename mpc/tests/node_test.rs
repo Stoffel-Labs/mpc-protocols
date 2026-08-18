@@ -2,6 +2,7 @@ use crate::utils::test_utils::{
     construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
     fan_in_inboxes, generate_independent_shares, initialize_global_nodes_randousha,
     initialize_global_nodes_ransha, receive, receive_client, setup_tracing, test_setup,
+    unused_precision,
 };
 use ark_bls12_381::Fr;
 use ark_ff::{AdditiveGroup, Field, UniformRand};
@@ -29,7 +30,7 @@ use stoffelcrypto::{
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         share_gen::RanShaState,
-        ProtocolType, SessionId, WrappedMessage,
+        ProtocolType, SessionId, WrappedMessage, MIN_STATISTICAL_SECURITY,
     },
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
@@ -66,8 +67,8 @@ async fn randousha_e2e() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -144,8 +145,8 @@ async fn ransha_e2e() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -216,8 +217,8 @@ async fn test_input_protocol_e2e() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         clientid.clone(),
     );
@@ -317,8 +318,8 @@ async fn gen_masks_for_input_e2e() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         clientid.clone(),
     );
@@ -487,8 +488,8 @@ async fn mul_e2e() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -598,8 +599,8 @@ async fn mul_e2e_with_preprocessing() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![clientid[0]],
     );
@@ -765,8 +766,6 @@ async fn preprocessing_e2e() {
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 4;
     let t = 1;
-    let l = 8;
-    let k = 4;
     let no_of_triples = 7;
     let no_of_randomshares = 4;
     let instance_id = 111;
@@ -786,8 +785,8 @@ async fn preprocessing_e2e() {
         instance_id,
         n_randbit,
         n_prandint,
-        l,
-        k,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -891,8 +890,8 @@ async fn test_rand_bit() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1041,8 +1040,8 @@ async fn fpmul_e2e() {
         111,
         0,
         0,
-        28,
-        0,
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1121,8 +1120,6 @@ async fn fpmul_e2e_with_preprocessing() {
     let n_random_shares = m; // no of random bits
     let n_randbit = m;
     let n_prandint = 1;
-    let bound_l = 28;
-    let security_k = 4;
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -1159,8 +1156,8 @@ async fn fpmul_e2e_with_preprocessing() {
         instance_id,
         n_randbit,
         n_prandint,
-        bound_l,
-        security_k,
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1257,8 +1254,8 @@ async fn add_fixed_e2e() {
         instance_id,
         0,
         0,
-        8,
-        4,
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1332,8 +1329,8 @@ async fn sub_fixed_e2e() {
         instance_id,
         0,
         0,
-        8,
-        4,
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1396,8 +1393,8 @@ async fn add_int_e2e() {
         instance_id,
         0,
         0,
-        8,
-        4,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1460,8 +1457,8 @@ async fn sub_int_e2e() {
         instance_id,
         0,
         0,
-        8,
-        4,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1522,8 +1519,8 @@ async fn mul_int_e2e_with_preprocessing() {
         instance_id,
         /*randbit*/ 0,
         /*prandint*/ 0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1653,10 +1650,11 @@ async fn fpdiv_const_e2e() {
         222,
         0,
         0,
-        // `l` must cover the 2k-bit value fed into TruncPr after truncating `m` bits,
-        // otherwise the PRandInt mask is narrower than the value it has to hide.
-        2 * k - m,
-        k,
+        // Sizing the mask pool from the precision is what makes it cover the `2k - m`-bit value
+        // `div_with_const_fixed` feeds into TruncPr; passing a narrower precision here is the
+        // misconfiguration `fpdiv_const_rejects_undersized_prandint_mask` exercises.
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1722,8 +1720,12 @@ async fn fpdiv_const_e2e() {
 
 /// `div_with_const_fixed` feeds a 2k-bit value into TruncPr, which broadcasts
 /// `b + 2^m*r_int + r'` in the clear. `r_int` is the only thing hiding `b` above bit `m`, so a
-/// PRandInt parameter narrower than `2k - f` leaks rather than failing — the arithmetic stays
-/// correct either way, which is exactly why this went unnoticed until it was checked for.
+/// mask pool narrower than `2k - f` leaks rather than failing — the arithmetic stays correct
+/// either way, which is exactly why this went unnoticed until it was checked for.
+///
+/// The pool is sized from `params.precision` before any value exists, so the way to get it wrong
+/// is now to configure the node for a *different* precision than the values it is handed. That
+/// is what this sets up, and what `check_mask_security` has to catch.
 ///
 /// Guard the guard: without this test the width check can be deleted and every existing fpdiv
 /// test still passes.
@@ -1739,11 +1741,13 @@ async fn fpdiv_const_rejects_undersized_prandint_mask() {
     let k = 16;
     let m = 4;
     let precision = FixedPointPrecision::new(k, m);
-    let required = 2 * k - m;
+    let value_bits = 2 * k - m;
 
-    // One bit short of the requirement. The check runs before any preprocessing or network
-    // activity, so no protocol material is needed to reach it.
-    let too_narrow = required - 1;
+    // Size the node for one extra fractional bit: `2k - (m + 1)` is exactly one bit shy of the
+    // `2k - m` the values actually carry, so the pool delivers `MIN_STATISTICAL_SECURITY - 1`.
+    // The check runs before any preprocessing or network activity, so no protocol material is
+    // needed to reach it.
+    let too_narrow = FixedPointPrecision::new(k, m + 1);
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
@@ -1753,7 +1757,7 @@ async fn fpdiv_const_rejects_undersized_prandint_mask() {
         0,
         0,
         too_narrow,
-        k,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1766,16 +1770,22 @@ async fn fpdiv_const_rejects_undersized_prandint_mask() {
     let err = node
         .div_with_const_fixed(a, denom, network[0].clone())
         .await
-        .expect_err("division must refuse to run with a mask narrower than 2k - f");
+        .expect_err("division must refuse to run below the statistical security floor");
 
     let rendered = format!("{err:?}");
     assert!(
-        rendered.contains("NotEnoughBitsPrep"),
-        "expected NotEnoughBitsPrep, got {rendered}"
+        rendered.contains("InsufficientStatisticalSecurity"),
+        "expected InsufficientStatisticalSecurity, got {rendered}"
+    );
+    // One bit short, so exactly one bit below the floor -- and the error must say so rather
+    // than just naming a width, since the delivered margin is the thing that matters.
+    assert!(
+        rendered.contains(&format!("delivered: {}", MIN_STATISTICAL_SECURITY - 1)),
+        "error should report the delivered margin, got {rendered}"
     );
     assert!(
-        rendered.contains(&required.to_string()),
-        "error should report the required width {required}, got {rendered}"
+        rendered.contains(&format!("value_bits: {value_bits}")),
+        "error should report the value width {value_bits}, got {rendered}"
     );
 }
 
@@ -1789,8 +1799,6 @@ async fn prss_setup_from_riss_then_local_masks() {
     setup_tracing();
     let n_parties = 4;
     let t = 1;
-    let l = 8;
-    let k = 4;
     let instance_id = 111;
 
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -1802,8 +1810,8 @@ async fn prss_setup_from_riss_then_local_masks() {
         instance_id,
         0,
         0,
-        l,
-        k,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1832,7 +1840,7 @@ async fn prss_setup_from_riss_then_local_masks() {
 
     // From here on, masks are derived with no messages at all.
     let count = 5;
-    let bits = k + l;
+    let bits = nodes[0].params.mask_bits();
     let per_party: Vec<Vec<RobustShare<Fr>>> = nodes
         .iter()
         .map(|node| {

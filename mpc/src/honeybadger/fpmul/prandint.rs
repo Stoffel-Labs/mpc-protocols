@@ -74,8 +74,7 @@ impl<G: PrimeField> PRandIntNode<G> {
     /// per-set width alone is not the bound. Note there is no factor of `n` here as there is on
     /// the RISS path, where each `r_T` was itself a sum of `n` party contributions.
     pub fn max_mask_bits(&self) -> usize {
-        let n_tsets = num_integer::binomial(self.n as u64, self.t as u64);
-        let headroom = (n_tsets as f64).log2().ceil() as usize + 1;
+        let headroom = log2_tsets_ceil(self.n, self.t) + 1;
         (G::MODULUS_BIT_SIZE as usize).saturating_sub(headroom)
     }
 
@@ -326,8 +325,7 @@ impl<G: PrimeField> PRandIntNode<G> {
     pub async fn generate_riss<N: Network + Send + Sync>(
         &mut self,
         session_id: SessionId,
-        l: usize,
-        k: usize,
+        mask_bits: usize,
         batch_size: usize,
         network: Arc<N>,
     ) -> Result<(), PRandIntError> {
@@ -355,18 +353,27 @@ impl<G: PrimeField> PRandIntNode<G> {
         drop(store);
         self.try_advance_from_riss(session_id).await?;
 
-        // Step 2: P_i samples randomness and sends
-        // Random integer range: [0, 2^(l+k)]
-        // Check that k + l + (2 bits for b) + ceil(log2(n)) fit the modulus.
-        // The ceil(log2(n)) accounts for summing n individual shares without overflow.
-        const B_MARGIN: usize = 2;
+        // Step 2: P_i samples randomness and sends.
+        //
+        // Each party draws an `r_T^i` in `[0, 2^mask_bits)` for every one of the `C(n,t)`
+        // unqualified sets; `r_T` is the sum of all `n` of those, and the secret is the sum of
+        // every `r_T`. The integer that must not wrap the modulus is therefore
+        // `C(n,t) * n * 2^mask_bits` — Damgard-Thorbek Sec. 3.1's "choose p such that p > r".
+        //
+        // Counting only the `n` contributions per set under-reports that by `log2 C(n,t)`: two
+        // bits at n=4 but thirteen at n=16, growing with n, so the check was loosest exactly
+        // where wrapping first becomes reachable. It wraps silently — TruncPr's opened value is
+        // then not `b + r` over the integers and the truncation takes the wrong bits — which is
+        // why this is a hard error rather than a warning.
+        const B_MARGIN: usize = 2; // `b` itself, plus a bit of slack
         let n_margin = (self.n as f64).log2().ceil() as usize;
-        let required_bits = k + l + B_MARGIN + n_margin;
+        let tset_margin = log2_tsets_ceil(self.n, self.t);
+        let required_bits = mask_bits + B_MARGIN + n_margin + tset_margin;
         let max_field_cap = G::MODULUS_BIT_SIZE;
         if required_bits as u32 >= max_field_cap {
             return Err(PRandIntError::SurpassedFieldCapacity);
         }
-        let bound = BigUint::from(2 as u32).pow((k + l) as u32);
+        let bound = BigUint::from(2 as u32).pow(mask_bits as u32);
         let pending = {
             let binding = match self.get_or_create_store(session_id, self.id).await {
                 Some(s) => s,
@@ -510,10 +517,13 @@ impl<G: PrimeField> PRandIntNode<G> {
         }
 
         if let Some(ref bound) = store.r_t_bound {
+            // `>=`: the range is half-open, so `bound` itself is out of range. Accepting it let a
+            // peer contribute an `L+1`-bit value under an `L`-bit declaration -- the one input the
+            // width accounting in `generate_riss` does not cover.
             for val in &msg.r_t {
-                if val > bound {
+                if val >= bound {
                     return Err(PRandIntError::InvalidMessage(format!(
-                        "r_t value from sender {} exceeds maximum allowed bound",
+                        "r_t value from sender {} is at or above the maximum allowed bound",
                         msg.sender_id
                     )));
                 }
@@ -736,9 +746,9 @@ impl<G: PrimeField> PRandIntNode<G> {
             }
             if let Some(ref bound) = store.r_t_bound {
                 for val in &msg.r_t {
-                    if val > bound {
+                    if val >= bound {
                         return Err(PRandIntError::InvalidMessage(format!(
-                            "echo: r_t value from echoer {} exceeds bound",
+                            "echo: r_t value from echoer {} is at or above the bound",
                             msg.echoer_id
                         )));
                     }
@@ -784,23 +794,120 @@ impl<G: PrimeField> PRandIntNode<G> {
     }
 }
 
-/// Generates a random number in the range [0, bound] via rejection sampling.
+/// `ceil(log2(C(n, t)))` — the width a sum gains from ranging over every unqualified set.
+///
+/// Summed logs rather than `binomial(n, t)`: `n` is only bounded by 255 here and `C(255, 84)`
+/// overflows `u64`, so computing the binomial to size a capacity check would wrap silently on the
+/// very inputs the check exists for. The combinatorics make those party counts unreachable long
+/// before the arithmetic matters — every RISS and PRSS structure here is `C(n, t)`-sized — but the
+/// bound guarding correctness does not get to be the part that overflows.
+fn log2_tsets_ceil(n: usize, t: usize) -> usize {
+    let t = t.min(n);
+    (1..=t)
+        .map(|i| (((n - t + i) as f64) / (i as f64)).log2())
+        .sum::<f64>()
+        .ceil() as usize
+}
+
+/// Uniform on the half-open range `[0, bound)`.
+///
+/// Half-open so that a `bound` of `2^L` yields exactly `L`-bit values. An inclusive range makes
+/// `2^L` itself a legal draw, and the one extra value costs an entire bit of declared width: the
+/// capacity bound in `generate_riss` would have to carry slack for a case that occurs with
+/// probability `2^-L`, instead of being exact.
 fn gen_big_uint_range<R>(rng: &mut R, bound: &BigUint) -> BigUint
 where
     R: Rng,
 {
-    // To generate the random element including `bound`.
-    let bound = bound + BigUint::from(1 as usize);
-    let n_bytes = bound.to_bytes_le().len();
-    let n_bits = bound.bits();
-    let excess_bits = (8 - n_bits % 8) % 8;
+    assert!(bound > &BigUint::ZERO, "empty range");
 
-    // Rejection sampling.
+    // Width of the largest *legal* value, not of `bound` itself. Sizing from `bound` would draw a
+    // bit too many for the only shape this is ever called with -- `bound = 2^mask_bits`, where the
+    // legal values are exactly `mask_bits` wide -- and reject half of every draw for nothing.
+    let n_bits = (bound - BigUint::from(1u32)).bits() as usize;
+    let n_bytes = n_bits.div_ceil(8);
+    let excess_bits = n_bytes * 8 - n_bits;
+
+    // Rejection sampling: uniform on `[0, 2^n_bits)`, retried until it lands below `bound`. For a
+    // power-of-two bound the two coincide and nothing is ever rejected.
     loop {
         let bytes: Vec<u8> = (0..n_bytes).map(|_| rng.gen()).collect();
         let candidate = BigUint::from_bytes_le(&bytes) >> excess_bits;
-        if candidate < bound {
+        if candidate < *bound {
             return candidate;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gen_big_uint_range, log2_tsets_ceil};
+    use ark_std::rand::SeedableRng;
+    use num_bigint::BigUint;
+
+    /// The sampler must never return `bound`. A single draw of `2^L` under an `L`-bit declaration
+    /// is what the peer-side range check is written to reject, so the two have to agree on which
+    /// end is open -- otherwise honest parties trip each other's validation.
+    #[test]
+    fn gen_big_uint_range_is_half_open_and_covers_the_range() {
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(7);
+        let bound = BigUint::from(4u32);
+
+        let mut seen = [false; 4];
+        for _ in 0..512 {
+            let v = gen_big_uint_range(&mut rng, &bound);
+            assert!(
+                v < bound,
+                "sampler returned {v}, which is not below {bound}"
+            );
+            seen[u32::try_from(v).unwrap() as usize] = true;
+        }
+        // Every value below the bound is reachable: a half-open range must not be produced by
+        // clamping or by dropping the top value's probability mass.
+        assert!(seen.iter().all(|&hit| hit), "sampler did not cover 0..4");
+
+        // A non-power-of-two bound still has to reject rather than fold the excess back in.
+        let bound = BigUint::from(5u32);
+        let mut counts = [0usize; 5];
+        for _ in 0..5_000 {
+            let v = gen_big_uint_range(&mut rng, &bound);
+            assert!(v < bound);
+            counts[u32::try_from(v).unwrap() as usize] += 1;
+        }
+        // Folding the 3 excess values of a 3-bit draw onto 0..3 would roughly double their share;
+        // this only has to be tight enough to catch that, not to be a statistical test.
+        assert!(
+            counts.iter().all(|&c| (700..=1300).contains(&c)),
+            "draws are not close to uniform over 0..5: {counts:?}"
+        );
+    }
+
+    /// Exact against `C(n, t)` wherever the binomial is computable, and still finite where it is
+    /// not — the two properties the summed-log form is there to provide.
+    #[test]
+    fn log2_tsets_matches_the_binomial_and_survives_past_u64() {
+        fn exact_ceil(n: u32, t: u32) -> usize {
+            let mut c: u128 = 1;
+            for i in 0..t as u128 {
+                c = c * (n as u128 - i) / (i + 1);
+            }
+            (128 - (c - 1).leading_zeros()) as usize
+        }
+
+        for &(n, t) in &[(4, 1), (5, 1), (7, 2), (10, 3), (16, 5), (31, 10)] {
+            assert_eq!(
+                log2_tsets_ceil(n, t),
+                exact_ceil(n as u32, t as u32),
+                "C({n},{t})"
+            );
+        }
+
+        // C(255, 84) is a 229-bit number: `binomial` over `u64` wrapped here, which would have
+        // handed the capacity check a headroom smaller than the real one.
+        assert_eq!(log2_tsets_ceil(255, 84), 229);
+
+        // Degenerate shapes: C(n, 0) = C(n, n) = 1 costs no headroom at all.
+        assert_eq!(log2_tsets_ceil(7, 0), 0);
+        assert_eq!(log2_tsets_ceil(7, 7), 0);
     }
 }

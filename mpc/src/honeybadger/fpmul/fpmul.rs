@@ -31,6 +31,17 @@ pub enum FPError {
         "the preprocessing does not have enough bits, current: {current}, required: {required}"
     )]
     NotEnoughBitsPrep { current: usize, required: usize },
+    #[error(
+        "TruncPr mask delivers only {delivered} bits of statistical security, need at least \
+         {required}: the {mask_bits}-bit mask must cover the {value_bits}-bit value plus the \
+         margin -- size the node for the precision these values carry"
+    )]
+    InsufficientStatisticalSecurity {
+        delivered: usize,
+        required: usize,
+        mask_bits: usize,
+        value_bits: usize,
+    },
 }
 
 #[derive(Clone, Debug)]

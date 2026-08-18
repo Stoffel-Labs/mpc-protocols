@@ -33,8 +33,9 @@ async fn prandint_r_reconstruction() {
     setup_tracing();
     let n = 4;
     let t = 1;
-    let l = 8;
-    let k = 4;
+    // Any width the field can hold: this test only checks that the RISS fold reconstructs, not
+    // that the masks are wide enough for a particular operation.
+    let mask_bits = 12;
     let batch_size = 2;
     let session_id = SessionId::new(ProtocolType::PRandInt, SessionId::pack_slot(123, 0, 0), 222);
     // Build fake network
@@ -46,7 +47,7 @@ async fn prandint_r_reconstruction() {
         .collect();
 
     for node in &mut nodes {
-        node.generate_riss(session_id, l, k, batch_size, network[node.id].clone())
+        node.generate_riss(session_id, mask_bits, batch_size, network[node.id].clone())
             .await
             .unwrap();
     }
