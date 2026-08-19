@@ -52,13 +52,10 @@
 //! Identical to PreMulC: call PreMulCOfflineNode offline and pass the resulting
 //! PreMulCPrep here. No new message types or session IDs are introduced.
 
-use crate::{
-    common::RBC,
-    honeybadger::{
-        bitwise::{pre_mulc::PreMulCOnlineNode, PreMulCError, PreMulCPrep},
-        robust_interpolate::robust_interpolate::RobustShare,
-        SessionId,
-    },
+use crate::honeybadger::{
+    bitwise::{pre_mulc::PreMulCOnlineNode, PreMulCError, PreMulCPrep},
+    robust_interpolate::robust_interpolate::RobustShare,
+    SessionId,
 };
 use ark_ff::PrimeField;
 use std::sync::Arc;
@@ -67,11 +64,11 @@ use tokio::time::Duration;
 use tracing::warn;
 
 #[derive(Clone, Debug)]
-pub struct SufOrNode<F: PrimeField, R: RBC> {
-    pub inner: PreMulCOnlineNode<F, R>,
+pub struct SufOrNode<F: PrimeField> {
+    pub inner: PreMulCOnlineNode<F>,
 }
 
-impl<F: PrimeField, R: RBC<Id = SessionId>> SufOrNode<F, R> {
+impl<F: PrimeField> SufOrNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PreMulCError> {
         Ok(Self {
             inner: PreMulCOnlineNode::new(id, n, t)?,

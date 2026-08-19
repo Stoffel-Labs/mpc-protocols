@@ -14,9 +14,8 @@ use num_bigint::BigUint;
 use num_traits::FromPrimitive;
 use std::collections::HashMap;
 use std::time::Duration;
-use stoffelcrypto::common::rbc::rbc::Avid;
 use stoffelcrypto::common::types::fixed::{FixedPointPrecision, SecretFixedPoint};
-use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC};
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme, ShamirShare};
 use stoffelcrypto::honeybadger::fpmul::f256::{
     build_all_f_polys_2_8, lagrange_interpolate_f2_8, Gf256, Gf256Domain,
 };
@@ -369,7 +368,7 @@ async fn test_truncpr_end_to_end() {
     let (network, mut recv, _, _) = test_setup(n, vec![]);
 
     // === Initialize nodes ===
-    let mut nodes: Vec<TruncPrNode<F, Avid<SessionId>>> =
+    let mut nodes: Vec<TruncPrNode<F>> =
         (0..n).map(|i| TruncPrNode::new(i, n, t).unwrap()).collect();
 
     // === Input secret [a] (same across parties for test) ===
@@ -389,7 +388,6 @@ async fn test_truncpr_end_to_end() {
     for i in 0..n {
         let receiver = recv.remove(0);
         let mut node = nodes[i].clone();
-        let net = network[i].clone();
         let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
             .into_iter() // MOVE the receivers
             .enumerate()
@@ -401,9 +399,8 @@ async fn test_truncpr_end_to_end() {
             while let Some(received) = merged_rx.recv().await {
                 let wrapped: WrappedMessage = bincode::deserialize(&received.1).unwrap();
                 match wrapped {
-                    WrappedMessage::Rbc(msg) => {
-                        let _ = node.rbc.process(msg, net.clone()).await;
-                        let _ = node.drain_rbc_output().await;
+                    WrappedMessage::Trunc(msg) => {
+                        let _ = node.process(msg).await;
                     }
                     _ => continue,
                 }
@@ -475,7 +472,7 @@ async fn fpmul_e2e() {
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);
 
     // Create nodes for the protocol.
-    let mut nodes: Vec<FPMulNode<Fr, Avid<SessionId>>> = (0..num_parties)
+    let mut nodes: Vec<FPMulNode<Fr>> = (0..num_parties)
         .map(|node_id| FPMulNode::new(node_id, num_parties, threshold).unwrap())
         .collect();
 

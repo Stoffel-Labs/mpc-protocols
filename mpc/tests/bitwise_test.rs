@@ -10,9 +10,8 @@ use ark_bls12_381::Fr;
 use ark_ff::{BigInteger, Field, PrimeField, UniformRand};
 use ark_std::test_rng;
 use std::sync::Arc;
-use stoffelcrypto::common::RBC;
 use stoffelcrypto::common::{
-    rbc::rbc::Avid, types::fixed::FixedPointPrecision, ProtocolSessionId, SecretSharingScheme,
+    types::fixed::FixedPointPrecision, ProtocolSessionId, SecretSharingScheme,
 };
 use stoffelcrypto::honeybadger::bitwise::app_rec::AppRecNode;
 use stoffelcrypto::honeybadger::bitwise::bit_dec::BitDecNode;
@@ -34,7 +33,7 @@ use tracing::warn;
 fn spawn_premulc_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<PreMulCOnlineNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<PreMulCOnlineNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -83,16 +82,11 @@ fn spawn_premulc_receiver_tasks(
                             warn!("unexpected round_id {round}");
                         }
                     }
-                    WrappedMessage::Rbc(msg) => {
+                    WrappedMessage::Mult(msg) => {
                         node.mul
-                            .rbc
-                            .process(msg, net.clone())
+                            .process(msg.sender, msg.session_id, msg.payload)
                             .await
-                            .expect("rbc process failed");
-                        node.mul
-                            .drain_rbc_output()
-                            .await
-                            .expect("drain_rbc_output failed");
+                            .expect("mul process failed");
                     }
                     _ => warn!("unexpected message type"),
                 }
@@ -105,7 +99,7 @@ fn spawn_premulc_receiver_tasks(
 fn spawn_premulcoff_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<PreMulCOfflineNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<PreMulCOfflineNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -156,16 +150,11 @@ fn spawn_premulcoff_receiver_tasks(
                             warn!("unexpected round_id {round}");
                         }
                     }
-                    WrappedMessage::Rbc(msg) => {
+                    WrappedMessage::Mult(msg) => {
                         node.mul
-                            .rbc
-                            .process(msg, net.clone())
+                            .process(msg.sender, msg.session_id, msg.payload)
                             .await
-                            .expect("rbc process failed");
-                        node.mul
-                            .drain_rbc_output()
-                            .await
-                            .expect("drain_rbc_output failed");
+                            .expect("mul process failed");
                     }
                     _ => warn!("unexpected message type"),
                 }
@@ -211,7 +200,7 @@ async fn premulc_offline_e2e() {
     let u_zero = make_zero_shares(n, t, k);
     let v_triples = make_triples(n, t, k - 1);
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<PreMulCOfflineNode<Fr, Avid<SessionId>>> = (0..n)
+    let nodes: Vec<PreMulCOfflineNode<Fr>> = (0..n)
         .map(|id| PreMulCOfflineNode::new(id, n, t).unwrap())
         .collect();
     let _recv = spawn_premulcoff_receiver_tasks(n, receivers, nodes.clone(), network.clone());
@@ -290,7 +279,7 @@ async fn premulc_online_e2e() {
 
     let premulc_prep = make_premulc_prep(k, n, t);
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<PreMulCOnlineNode<Fr, Avid<SessionId>>> = (0..n)
+    let nodes: Vec<PreMulCOnlineNode<Fr>> = (0..n)
         .map(|id| PreMulCOnlineNode::new(id, n, t).unwrap())
         .collect();
     let _recv = spawn_premulc_receiver_tasks(n, receivers, nodes.clone(), network.clone());
@@ -330,14 +319,14 @@ async fn premulc_online_e2e() {
 fn spawn_mod2_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<Mod2Node<Fr, Avid<SessionId>>>,
+    nodes: Vec<Mod2Node<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
     for i in 0..num_parties {
-        let mut node = nodes[i].clone();
+        let node = nodes[i].clone();
         let receiver = receivers.remove(0);
-        let net = network[i].clone();
+        let _net = network[i].clone();
         let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
             .into_iter()
             .enumerate()
@@ -355,14 +344,8 @@ fn spawn_mod2_receiver_tasks(
                     }
                 };
                 match wrapped {
-                    WrappedMessage::Rbc(msg) => {
-                        node.rbc
-                            .process(msg, net.clone())
-                            .await
-                            .expect("mod2 rbc process failed");
-                        node.drain_rbc_output()
-                            .await
-                            .expect("mod2 drain_rbc_output failed");
+                    WrappedMessage::Mod2(msg) => {
+                        node.process(msg).await.expect("mod2 process failed");
                     }
                     _ => warn!("unexpected message type"),
                 }
@@ -387,8 +370,8 @@ async fn mod2_run(a_val: u64, k: usize) {
     let prep_per_party = make_mod2_prep(k, n, t);
 
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<Mod2Node<Fr, Avid<SessionId>>> = (0..n)
-        .map(|id| Mod2Node::<Fr, Avid<SessionId>>::new(id, n, t).unwrap())
+    let nodes: Vec<Mod2Node<Fr>> = (0..n)
+        .map(|id| Mod2Node::<Fr>::new(id, n, t).unwrap())
         .collect();
 
     let _recv = spawn_mod2_receiver_tasks(n, receivers, nodes.clone(), network.clone());
@@ -454,7 +437,7 @@ async fn mod2_one() {
 fn spawn_sufor_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<SufOrNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<SufOrNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -507,18 +490,12 @@ fn spawn_sufor_receiver_tasks(
                             warn!("unexpected round_id {round}");
                         }
                     }
-                    WrappedMessage::Rbc(msg) => {
+                    WrappedMessage::Mult(msg) => {
                         node.inner
                             .mul
-                            .rbc
-                            .process(msg, net.clone())
+                            .process(msg.sender, msg.session_id, msg.payload)
                             .await
-                            .expect("rbc process failed");
-                        node.inner
-                            .mul
-                            .drain_rbc_output()
-                            .await
-                            .expect("drain_rbc_output failed");
+                            .expect("mul process failed");
                     }
                     _ => warn!("unexpected message type"),
                 }
@@ -551,8 +528,7 @@ async fn suf_or_run(bit_vals: Vec<u64>) {
 
     let prep = make_premulc_prep(k, n, t);
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<SufOrNode<Fr, Avid<SessionId>>> =
-        (0..n).map(|id| SufOrNode::new(id, n, t).unwrap()).collect();
+    let nodes: Vec<SufOrNode<Fr>> = (0..n).map(|id| SufOrNode::new(id, n, t).unwrap()).collect();
     let _recv = spawn_sufor_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut init_set = JoinSet::new();
@@ -625,7 +601,7 @@ async fn suf_or_leading_one() {
 fn spawn_sufmulinv_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<SufMulInvNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<SufMulInvNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -678,18 +654,12 @@ fn spawn_sufmulinv_receiver_tasks(
                             warn!("unexpected round_id {round}");
                         }
                     }
-                    WrappedMessage::Rbc(msg) => {
+                    WrappedMessage::Mult(msg) => {
                         node.inner
                             .mul
-                            .rbc
-                            .process(msg, net.clone())
+                            .process(msg.sender, msg.session_id, msg.payload)
                             .await
-                            .expect("rbc process failed");
-                        node.inner
-                            .mul
-                            .drain_rbc_output()
-                            .await
-                            .expect("drain_rbc_output failed");
+                            .expect("mul process failed");
                     }
                     _ => warn!("unexpected message type"),
                 }
@@ -734,7 +704,7 @@ async fn suf_mul_inv_e2e() {
 
     let prep = make_premulc_prep(k, n, t);
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<SufMulInvNode<Fr, Avid<SessionId>>> = (0..n)
+    let nodes: Vec<SufMulInvNode<Fr>> = (0..n)
         .map(|id| SufMulInvNode::new(id, n, t).unwrap())
         .collect();
     let _recv = spawn_sufmulinv_receiver_tasks(n, receivers, nodes.clone(), network.clone());
@@ -799,7 +769,7 @@ async fn suf_mul_inv_e2e() {
 fn spawn_prebitlt_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<PreBitLTNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<PreBitLTNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -867,48 +837,24 @@ fn spawn_prebitlt_receiver_tasks(
                             warn!("unexpected round_id {round}");
                         }
                     }
-                    WrappedMessage::Rbc(msg) => {
+                    WrappedMessage::Mult(msg) => {
                         let proto = msg.session_id.calling_protocol();
-                        let round = msg.session_id.round_id();
                         if proto == Some(ProtocolType::PreBitMul3) {
                             node.mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("mul.rbc process failed");
-                            node.mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("mul.drain_rbc_output failed");
-                        } else if round == 2 {
-                            node.suf_mul_inv
-                                .inner
-                                .mul
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("suf_mul_inv.mul rbc process failed");
-                            node.suf_mul_inv
-                                .inner
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("suf_mul_inv.mul drain_rbc_output failed");
-                        } else if round == 0 || round == 1 {
-                            // round 0 = single-value Mod2 session, round 1 =
-                            // batched (used by PreBitLT's phase 5).
-                            node.mod2
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("mod2 rbc process failed");
-                            node.mod2
-                                .drain_rbc_output()
-                                .await
-                                .expect("mod2 drain_rbc_output failed");
+                                .expect("mul process failed");
                         } else {
-                            warn!("unexpected round_id {round}");
+                            node.suf_mul_inv
+                                .inner
+                                .mul
+                                .process(msg.sender, msg.session_id, msg.payload)
+                                .await
+                                .expect("suf_mul_inv.mul process failed");
                         }
+                    }
+                    WrappedMessage::Mod2(msg) => {
+                        node.mod2.process(msg).await.expect("mod2 process failed");
                     }
                     _ => warn!("unexpected message type"),
                 }
@@ -992,7 +938,7 @@ async fn pre_bitlt_run(a_vals: Vec<u64>, b_vals: Vec<u64>) {
 
     let prep = make_prebitlt_prep(k, n, t);
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<PreBitLTNode<Fr, Avid<SessionId>>> = (0..n)
+    let nodes: Vec<PreBitLTNode<Fr>> = (0..n)
         .map(|id| PreBitLTNode::new(id, n, t).unwrap())
         .collect();
     let _recv = spawn_prebitlt_receiver_tasks(n, receivers, nodes.clone(), network.clone());
@@ -1066,7 +1012,7 @@ async fn pre_bitlt_equal() {
 fn spawn_premod2m_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<PreMod2mNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<PreMod2mNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -1091,62 +1037,32 @@ fn spawn_premod2m_receiver_tasks(
                     }
                 };
                 match wrapped {
-                    WrappedMessage::Rbc(msg) => {
-                        let round = msg.session_id.round_id();
+                    WrappedMessage::PreMod2m(msg) => {
+                        node.process(msg).await.expect("pre_mod2m process failed");
+                    }
+                    WrappedMessage::Mod2(msg) => {
+                        node.pre_bitlt
+                            .mod2
+                            .process(msg)
+                            .await
+                            .expect("mod2 process failed");
+                    }
+                    WrappedMessage::Mult(msg) => {
                         let proto = msg.session_id.calling_protocol();
-                        if round == 4 {
-                            // PreMod2m's own reveal (round=4 is unique to it;
-                            // pre_bitlt's Rbc traffic uses rounds 0-2). Purely
-                            // local now — no longer needs a detached task.
-                            node.rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("pre_mod2m rbc process failed");
-                            node.drain_rbc_output()
-                                .await
-                                .expect("pre_mod2m drain_rbc_output failed");
-                        } else if proto == Some(ProtocolType::PreBitMul3) {
+                        if proto == Some(ProtocolType::PreBitMul3) {
                             node.pre_bitlt
                                 .mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("mul.rbc process failed");
-                            node.pre_bitlt
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("mul.drain_rbc_output failed");
-                        } else if round == 2 {
-                            node.pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("suf_mul_inv.mul rbc process failed");
-                            node.pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("suf_mul_inv.mul drain_rbc_output failed");
-                        } else if round == 0 || round == 1 {
-                            node.pre_bitlt
-                                .mod2
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("mod2 rbc process failed");
-                            node.pre_bitlt
-                                .mod2
-                                .drain_rbc_output()
-                                .await
-                                .expect("mod2 drain_rbc_output failed");
+                                .expect("mul process failed");
                         } else {
-                            warn!("unexpected Rbc round_id {round}");
+                            node.pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .mul
+                                .process(msg.sender, msg.session_id, msg.payload)
+                                .await
+                                .expect("suf_mul_inv.mul process failed");
                         }
                     }
                     WrappedMessage::BatchRecon(msg) => {
@@ -1221,7 +1137,7 @@ async fn pre_mod2m_run(a_val: u64, k: usize, m: usize, dp_bits: usize) {
     let prep = make_premod2m_prep(dp_bits, m, n, t);
 
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<PreMod2mNode<Fr, Avid<SessionId>>> = (0..n)
+    let nodes: Vec<PreMod2mNode<Fr>> = (0..n)
         .map(|id| PreMod2mNode::new(id, n, t).unwrap())
         .collect();
     let _recv = spawn_premod2m_receiver_tasks(n, receivers, nodes.clone(), network.clone());
@@ -1281,7 +1197,7 @@ async fn pre_mod2m_max() {
 fn spawn_bitdec_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<BitDecNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<BitDecNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -1306,67 +1222,38 @@ fn spawn_bitdec_receiver_tasks(
                     }
                 };
                 match wrapped {
-                    WrappedMessage::Rbc(msg) => {
-                        let round = msg.session_id.round_id();
+                    WrappedMessage::PreMod2m(msg) => {
+                        node.pre_mod2m
+                            .process(msg)
+                            .await
+                            .expect("pre_mod2m process failed");
+                    }
+                    WrappedMessage::Mod2(msg) => {
+                        node.pre_mod2m
+                            .pre_bitlt
+                            .mod2
+                            .process(msg)
+                            .await
+                            .expect("mod2 process failed");
+                    }
+                    WrappedMessage::Mult(msg) => {
                         let proto = msg.session_id.calling_protocol();
-                        if round == 4 {
-                            node.pre_mod2m
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("pre_mod2m rbc process failed");
-                            node.pre_mod2m
-                                .drain_rbc_output()
-                                .await
-                                .expect("pre_mod2m drain_rbc_output failed");
-                        } else if proto == Some(ProtocolType::PreBitMul3) {
+                        if proto == Some(ProtocolType::PreBitMul3) {
                             node.pre_mod2m
                                 .pre_bitlt
                                 .mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("mul.rbc process failed");
-                            node.pre_mod2m
-                                .pre_bitlt
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("mul.drain_rbc_output failed");
-                        } else if round == 2 {
-                            node.pre_mod2m
-                                .pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("suf_mul_inv.mul rbc process failed");
-                            node.pre_mod2m
-                                .pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("suf_mul_inv.mul drain_rbc_output failed");
-                        } else if round == 0 || round == 1 {
-                            node.pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("mod2 rbc process failed");
-                            node.pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .drain_rbc_output()
-                                .await
-                                .expect("mod2 drain_rbc_output failed");
+                                .expect("mul process failed");
                         } else {
-                            warn!("unexpected Rbc round_id {round}");
+                            node.pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .mul
+                                .process(msg.sender, msg.session_id, msg.payload)
+                                .await
+                                .expect("suf_mul_inv.mul process failed");
                         }
                     }
                     WrappedMessage::BatchRecon(msg) => {
@@ -1452,7 +1339,7 @@ async fn bit_dec_run(u_bar: i128, k: usize, dp_bits: usize) {
     let prep = make_premod2m_prep(dp_bits, k - 1, n, t);
 
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<BitDecNode<Fr, Avid<SessionId>>> = (0..n)
+    let nodes: Vec<BitDecNode<Fr>> = (0..n)
         .map(|id| BitDecNode::new(id, n, t).unwrap())
         .collect();
     let _recv = spawn_bitdec_receiver_tasks(n, receivers, nodes.clone(), network.clone());
@@ -1525,7 +1412,7 @@ async fn bit_dec_most_negative() {
 fn spawn_apprec_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<AppRecNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<AppRecNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -1550,50 +1437,39 @@ fn spawn_apprec_receiver_tasks(
                     }
                 };
                 match wrapped {
-                    WrappedMessage::Rbc(msg) => {
-                        let round = msg.session_id.round_id();
+                    WrappedMessage::PreMod2m(msg) => {
+                        // BitDec's own PreMod2m reveal.
+                        node.bit_dec
+                            .pre_mod2m
+                            .process(msg)
+                            .await
+                            .expect("bitdec pre_mod2m process failed");
+                    }
+                    WrappedMessage::Trunc(msg) => {
+                        // AppRec's own final TruncPr reveal.
+                        node.trunc.process(msg).await.expect("trunc process failed");
+                    }
+                    WrappedMessage::Mod2(msg) => {
+                        // BitDec's nested batched Mod2.
+                        node.bit_dec
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mod2
+                            .process(msg)
+                            .await
+                            .expect("nested mod2 process failed");
+                    }
+                    WrappedMessage::Mult(msg) => {
                         let proto = msg.session_id.calling_protocol();
-                        if round == 4 {
-                            // BitDec's own PreMod2m reveal.
-                            node.bit_dec
-                                .pre_mod2m
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("bitdec pre_mod2m rbc process failed");
-                            node.bit_dec
-                                .pre_mod2m
-                                .drain_rbc_output()
-                                .await
-                                .expect("bitdec pre_mod2m drain_rbc_output failed");
-                        } else if round == 0 {
-                            // AppRec's own final TruncPr reveal.
-                            node.trunc
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("trunc rbc process failed");
-                            node.trunc
-                                .drain_rbc_output()
-                                .await
-                                .expect("trunc drain_rbc_output failed");
-                        } else if proto == Some(ProtocolType::PreBitMul3) {
+                        if proto == Some(ProtocolType::PreBitMul3) {
                             // BitDec's nested PreBitLT's own Multiply (phase 4).
                             node.bit_dec
                                 .pre_mod2m
                                 .pre_bitlt
                                 .mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("nested pre_bitlt.mul rbc process failed");
-                            node.bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("nested pre_bitlt.mul drain_rbc_output failed");
+                                .expect("nested pre_bitlt.mul process failed");
                         } else if matches!(
                             proto,
                             Some(ProtocolType::PreBitMul)
@@ -1602,30 +1478,18 @@ fn spawn_apprec_receiver_tasks(
                         ) {
                             // AppRec's own 3 Multiply rounds (steps 3, 6/7, 8).
                             node.mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("apprec mul rbc process failed");
-                            node.mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("apprec mul drain_rbc_output failed");
+                                .expect("apprec mul process failed");
                         } else if proto == Some(ProtocolType::SufOr) {
                             // AppRec's own SufOr call's embedded Multiply.
                             node.suf_or
                                 .inner
                                 .mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("sufor mul rbc process failed");
-                            node.suf_or
-                                .inner
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("sufor mul drain_rbc_output failed");
-                        } else if round == 2 {
+                                .expect("sufor mul process failed");
+                        } else {
                             // BitDec's nested SufMulInv's embedded Multiply.
                             node.bit_dec
                                 .pre_mod2m
@@ -1633,38 +1497,9 @@ fn spawn_apprec_receiver_tasks(
                                 .suf_mul_inv
                                 .inner
                                 .mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("nested suf_mul_inv.mul rbc process failed");
-                            node.bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("nested suf_mul_inv.mul drain_rbc_output failed");
-                        } else if round == 1 {
-                            // BitDec's nested batched Mod2.
-                            node.bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("nested mod2 rbc process failed");
-                            node.bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .drain_rbc_output()
-                                .await
-                                .expect("nested mod2 drain_rbc_output failed");
-                        } else {
-                            warn!("unexpected Rbc round_id {round}");
+                                .expect("nested suf_mul_inv.mul process failed");
                         }
                     }
                     WrappedMessage::BatchRecon(msg) => {
@@ -1800,7 +1635,7 @@ async fn app_rec_run(u_bar: i128, k: usize, f: usize) {
     let prep = make_apprec_prep(dp_bits, k, f, n, t);
 
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<AppRecNode<Fr, Avid<SessionId>>> = (0..n)
+    let nodes: Vec<AppRecNode<Fr>> = (0..n)
         .map(|id| AppRecNode::new(id, n, t).unwrap())
         .collect();
     let _recv = spawn_apprec_receiver_tasks(n, receivers, nodes.clone(), network.clone());
@@ -1880,7 +1715,7 @@ async fn app_rec_zero() {
 fn spawn_fpdiv_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<FpDivNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<FpDivNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -1905,64 +1740,56 @@ fn spawn_fpdiv_receiver_tasks(
                     }
                 };
                 match wrapped {
-                    WrappedMessage::Rbc(msg) => {
-                        let round = msg.session_id.round_id();
+                    WrappedMessage::Trunc(msg) => {
                         let proto = msg.session_id.calling_protocol();
                         if proto == Some(ProtocolType::FpDivTrunc) {
                             // FpDivNode's own Trunc calls (step 3, steps 6/7/8
                             // per iteration), isolated from each other by round_id.
                             node.trunc
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg)
                                 .await
-                                .expect("fpdiv trunc rbc process failed");
-                            node.trunc
-                                .drain_rbc_output()
+                                .expect("fpdiv trunc process failed");
+                        } else {
+                            // AppRec's own final TruncPr reveal.
+                            node.app_rec
+                                .trunc
+                                .process(msg)
                                 .await
-                                .expect("fpdiv trunc drain_rbc_output failed");
-                        } else if matches!(
+                                .expect("apprec trunc process failed");
+                        }
+                    }
+                    WrappedMessage::PreMod2m(msg) => {
+                        // AppRec's BitDec's own PreMod2m reveal.
+                        node.app_rec
+                            .bit_dec
+                            .pre_mod2m
+                            .process(msg)
+                            .await
+                            .expect("bitdec pre_mod2m process failed");
+                    }
+                    WrappedMessage::Mod2(msg) => {
+                        // BitDec's nested batched Mod2.
+                        node.app_rec
+                            .bit_dec
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mod2
+                            .process(msg)
+                            .await
+                            .expect("nested mod2 process failed");
+                    }
+                    WrappedMessage::Mult(msg) => {
+                        let proto = msg.session_id.calling_protocol();
+                        if matches!(
                             proto,
                             Some(ProtocolType::FpDivMulA) | Some(ProtocolType::FpDivMulB)
                         ) {
                             // FpDivNode's own Multiply rounds (step 3/4 batch,
                             // and each iteration's Round A / Round B).
                             node.mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("fpdiv mul rbc process failed");
-                            node.mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("fpdiv mul drain_rbc_output failed");
-                        } else if round == 4 {
-                            // AppRec's BitDec's own PreMod2m reveal.
-                            node.app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("bitdec pre_mod2m rbc process failed");
-                            node.app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .drain_rbc_output()
-                                .await
-                                .expect("bitdec pre_mod2m drain_rbc_output failed");
-                        } else if round == 0 {
-                            // AppRec's own final TruncPr reveal.
-                            node.app_rec
-                                .trunc
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("apprec trunc rbc process failed");
-                            node.app_rec
-                                .trunc
-                                .drain_rbc_output()
-                                .await
-                                .expect("apprec trunc drain_rbc_output failed");
+                                .expect("fpdiv mul process failed");
                         } else if proto == Some(ProtocolType::PreBitMul3) {
                             // BitDec's nested PreBitLT's own Multiply (phase 4).
                             node.app_rec
@@ -1970,18 +1797,9 @@ fn spawn_fpdiv_receiver_tasks(
                                 .pre_mod2m
                                 .pre_bitlt
                                 .mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("nested pre_bitlt.mul rbc process failed");
-                            node.app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("nested pre_bitlt.mul drain_rbc_output failed");
+                                .expect("nested pre_bitlt.mul process failed");
                         } else if matches!(
                             proto,
                             Some(ProtocolType::PreBitMul)
@@ -1991,33 +1809,19 @@ fn spawn_fpdiv_receiver_tasks(
                             // AppRec's own 3 Multiply rounds (steps 3, 6/7, 8).
                             node.app_rec
                                 .mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("apprec mul rbc process failed");
-                            node.app_rec
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("apprec mul drain_rbc_output failed");
+                                .expect("apprec mul process failed");
                         } else if proto == Some(ProtocolType::SufOr) {
                             // AppRec's own SufOr call's embedded Multiply.
                             node.app_rec
                                 .suf_or
                                 .inner
                                 .mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("sufor mul rbc process failed");
-                            node.app_rec
-                                .suf_or
-                                .inner
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("sufor mul drain_rbc_output failed");
-                        } else if round == 2 {
+                                .expect("sufor mul process failed");
+                        } else {
                             // BitDec's nested SufMulInv's embedded Multiply.
                             node.app_rec
                                 .bit_dec
@@ -2026,41 +1830,9 @@ fn spawn_fpdiv_receiver_tasks(
                                 .suf_mul_inv
                                 .inner
                                 .mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("nested suf_mul_inv.mul rbc process failed");
-                            node.app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("nested suf_mul_inv.mul drain_rbc_output failed");
-                        } else if round == 1 {
-                            // BitDec's nested batched Mod2.
-                            node.app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("nested mod2 rbc process failed");
-                            node.app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .drain_rbc_output()
-                                .await
-                                .expect("nested mod2 drain_rbc_output failed");
-                        } else {
-                            warn!("unexpected Rbc round_id {round}");
+                                .expect("nested suf_mul_inv.mul process failed");
                         }
                     }
                     WrappedMessage::BatchRecon(msg) => {
@@ -2218,8 +1990,7 @@ async fn fpdiv_run(a_bar: i128, b_bar: i128, k: usize, f: usize) {
     let prep = make_fpdiv_prep(dp_bits, k, f, n, t);
 
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<FpDivNode<Fr, Avid<SessionId>>> =
-        (0..n).map(|id| FpDivNode::new(id, n, t).unwrap()).collect();
+    let nodes: Vec<FpDivNode<Fr>> = (0..n).map(|id| FpDivNode::new(id, n, t).unwrap()).collect();
     let _recv = spawn_fpdiv_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut init_set = JoinSet::new();

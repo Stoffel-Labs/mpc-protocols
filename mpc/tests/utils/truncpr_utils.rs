@@ -4,30 +4,29 @@ use ark_std::rand::Rng;
 use ark_std::test_rng;
 use num_integer::binomial;
 use std::sync::Arc;
-use stoffelcrypto::common::{SecretSharingScheme, RBC};
+use stoffelcrypto::common::SecretSharingScheme;
 use stoffelcrypto::honeybadger::fpmul::truncpr::TruncPrNode;
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use stoffelcrypto::honeybadger::{SessionId, WrappedMessage};
+use stoffelcrypto::honeybadger::WrappedMessage;
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
 use tracing::{error, warn};
 
-pub async fn spawn_receiver_tasks<F, R>(
+pub async fn spawn_receiver_tasks<F>(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<TruncPrNode<F, R>>,
+    nodes: Vec<TruncPrNode<F>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()>
 where
     F: PrimeField,
-    R: RBC<Id = SessionId> + Clone + 'static,
 {
     let mut set = JoinSet::new();
     for i in 0..num_parties {
         let mut node = nodes[i].clone();
         let receiver = receivers.remove(0);
-        let net = network[i].clone();
+        let _net = network[i].clone();
         let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
             .into_iter() // MOVE the receivers
             .enumerate()
@@ -38,14 +37,9 @@ where
             while let Some((_, bytes)) = merge_rx.recv().await {
                 let wrapped: WrappedMessage = bincode::deserialize(&bytes).unwrap();
                 match wrapped {
-                    // WrappedMessage::Trunc(msg) => {
-                    //     node.process(msg, net.clone()).await.unwrap();
-                    // }
-                    WrappedMessage::Rbc(msg) => match node.rbc.process(msg, net.clone()).await {
-                        Ok(()) => {
-                            node.drain_rbc_output().await.unwrap();
-                        }
-                        Err(e) => warn!("Error processing RBC message: {:?}", e),
+                    WrappedMessage::Trunc(msg) => match node.process(msg).await {
+                        Ok(()) => {}
+                        Err(e) => warn!("Error processing Trunc message: {:?}", e),
                     },
                     message => {
                         error!("Unexpected message type: {:?}", message)

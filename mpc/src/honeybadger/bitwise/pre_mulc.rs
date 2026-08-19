@@ -13,7 +13,7 @@
 //!   PreMulCOn mul RBC:         round_id = 2
 
 use crate::{
-    common::{ProtocolSessionId, RBC},
+    common::ProtocolSessionId,
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         bitwise::{PreMulCError, PreMulCPrep},
@@ -105,16 +105,16 @@ impl<F: PrimeField> PreMulCOnlineStore<F> {
 /// u_i = r_i·s_i are opened publicly via MulPub.
 /// v_i = r_{i+1}·s_i are kept secret via Multiply (Beaver).
 #[derive(Clone, Debug)]
-pub struct PreMulCOfflineNode<F: PrimeField + FftField, R: RBC> {
+pub struct PreMulCOfflineNode<F: PrimeField + FftField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     prep_store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PreMulCPrepStore<F>>>>>>,
     pub mul_pub: MulPubNode<F>,
-    pub mul: Multiply<F, R>,
+    pub mul: Multiply<F>,
 }
 
-impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> {
+impl<F: PrimeField + FftField> PreMulCOfflineNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PreMulCError> {
         Ok(Self {
             id,
@@ -289,17 +289,17 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMulCOfflineNode<F, R> 
 /// Protocol 4.2 lines 9–12. Computes prefix products [p_1,…,p_k] from input
 /// shares [a_i] and offline preprocessing output.
 #[derive(Clone, Debug)]
-pub struct PreMulCOnlineNode<F: PrimeField, R: RBC> {
+pub struct PreMulCOnlineNode<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     online_store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PreMulCOnlineStore<F>>>>>>,
-    pub mul: Multiply<F, R>,
+    pub mul: Multiply<F>,
     pub batch_recon: BatchReconNode<F>,
     batch_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
+impl<F: PrimeField> PreMulCOnlineNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PreMulCError> {
         let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
         let batch_recon = BatchReconNode::new(id, n, t, t, batch_sender)?;
@@ -545,12 +545,11 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> PreMulCOnlineNode<F, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::rbc::rbc::Avid;
     use ark_bls12_381::Fr;
 
     #[tokio::test]
     async fn test_premulc_session_limit() {
-        let node = PreMulCOnlineNode::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
+        let node = PreMulCOnlineNode::<Fr>::new(0, 5, 1).unwrap();
         for i in 0u64..=255 {
             let sid = SessionId::new(
                 crate::honeybadger::ProtocolType::Trunc,

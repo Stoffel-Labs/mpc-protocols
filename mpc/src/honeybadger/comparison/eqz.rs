@@ -24,10 +24,10 @@
 //! deliberately absent here.
 
 use crate::{
-    common::{ProtocolSessionId, SecretSharingScheme, RBC},
+    common::{ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
         bitwise::{kor_cl::KOrCLNode, kor_cs::KOrCSPrep, pre_mulc::PhaseState, PRandMPrep},
-        comparison::EQZError,
+        comparison::{EQZError, EqzMessage},
         robust_interpolate::robust_interpolate::RobustShare,
         SessionId, WrappedMessage,
     },
@@ -36,7 +36,7 @@ use ark_ff::{BigInteger, PrimeField};
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use tokio::{
-    sync::{mpsc::Receiver, Mutex},
+    sync::Mutex,
     time::{timeout, Duration},
 };
 
@@ -68,34 +68,21 @@ impl<F: PrimeField> EQZStore<F> {
 // ── Node ───────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
-pub struct EQZNode<F: PrimeField, R: RBC> {
+pub struct EQZNode<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<EQZStore<F>>>>>>,
-    pub rbc: R,
-    pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
-    pub kor_cl: KOrCLNode<F, R>,
+    pub kor_cl: KOrCLNode<F>,
 }
 
-impl<F: PrimeField, R: RBC<Id = SessionId>> EQZNode<F, R> {
+impl<F: PrimeField> EQZNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, EQZError> {
-        let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
-        let rbc = R::new(
-            id,
-            n,
-            t,
-            t + 1,
-            rbc_sender,
-            Arc::new(WrappedMessage::rbc_wrap),
-        )?;
         Ok(Self {
             id,
             n,
             t,
             store: Arc::new(Mutex::new(HashMap::new())),
-            rbc,
-            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             kor_cl: KOrCLNode::new(id, n, t)?,
         })
     }
@@ -115,51 +102,39 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> EQZNode<F, R> {
     }
 
     pub async fn clear_store(&self, session: SessionId) -> Result<(), EQZError> {
-        self.rbc.clear_store().await;
         let mut map = self.store.lock().await;
         map.remove(&session)
             .map(|_| ())
             .ok_or(EQZError::ClearStoreError(session))
     }
 
-    /// Drive completions from self.rbc. Route Rbc round_id=3 messages here.
-    pub async fn drain_rbc_output(&mut self) -> Result<(), EQZError> {
-        loop {
-            let id = {
-                let mut rx = self.rbc_output.lock().await;
-                match rx.try_recv() {
-                    Ok(id) => id,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        return Err(EQZError::Abort);
-                    }
-                }
-            };
+    /// Handles a directly-opened share of `c`. `msg.sender` must already be
+    /// authenticated by the caller (network-layer sender == `msg.sender`)
+    /// before this is invoked.
+    pub async fn process(&mut self, msg: EqzMessage) -> Result<(), EQZError> {
+        let id = msg.session_id;
+        let share_val: F = F::deserialize_compressed(msg.payload.as_slice())?;
+        let sender = msg.sender;
 
-            let payload = self.rbc.get_store(id).await?;
-            let share_val: F = F::deserialize_compressed(payload.as_slice())?;
-            let sender = id.sub_id() as usize;
+        let calling_proto = id.calling_protocol().ok_or(EQZError::SessionIdError(id))?;
+        let parent = SessionId::new(
+            calling_proto,
+            SessionId::pack_slot(id.exec_id(), 0, 0),
+            id.instance_id(),
+        );
 
-            let calling_proto = id.calling_protocol().ok_or(EQZError::SessionIdError(id))?;
-            let parent = SessionId::new(
-                calling_proto,
-                SessionId::pack_slot(id.exec_id(), 0, 0),
-                id.instance_id(),
-            );
-
-            let store = self.get_or_create_store(parent).await?;
-            let ready = {
-                let mut s = store.lock().await;
-                if s.state == PhaseState::Finished {
-                    continue;
-                }
-                s.received_shares.entry(sender).or_insert(share_val);
-                s.received_shares.len() >= 2 * self.t + 1
-            };
-
-            if ready {
-                self.try_finalize(parent, store).await?;
+        let store = self.get_or_create_store(parent).await?;
+        let ready = {
+            let mut s = store.lock().await;
+            if s.state == PhaseState::Finished {
+                return Ok(());
             }
+            s.received_shares.entry(sender).or_insert(share_val);
+            s.received_shares.len() >= 2 * self.t + 1
+        };
+
+        if ready {
+            self.try_finalize(parent, store).await?;
         }
         Ok(())
     }
@@ -297,16 +272,18 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> EQZNode<F, R> {
             s.r_prime_bits = Some(prandm.r_prime_bits);
         }
 
-        let rbc_session = SessionId::new(
+        // Broadcast this party's share of c directly, point-to-point.
+        let wire_session = SessionId::new(
             calling_proto,
             SessionId::pack_slot(session.exec_id(), self.id as u8, 0),
             session.instance_id(),
         );
         let mut payload = Vec::new();
         c_share.share[0].serialize_compressed(&mut payload)?;
-        self.rbc
-            .init(payload, rbc_session, Arc::clone(&network))
-            .await?;
+        let eqz_msg = EqzMessage::new(self.id, wire_session, payload);
+        let wrapped = WrappedMessage::Eqz(eqz_msg);
+        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        network.broadcast(&bytes_wrapped).await?;
 
         {
             let store = self.get_or_create_store(session).await?;
@@ -319,7 +296,7 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> EQZNode<F, R> {
             }
         }
 
-        // Wait until drain_rbc_output reconstructs c and computes d_bits.
+        // Wait until `process` reconstructs c and computes d_bits.
         let d_bits = self.wait_for_d_bits(session, duration).await?;
 
         // KOrCL on the k d_bits, then negate.

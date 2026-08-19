@@ -26,9 +26,9 @@
 //! `init_batch`'s caller-supplied session already is.
 
 use crate::{
-    common::{ProtocolSessionId, SecretSharingScheme, RBC},
+    common::{ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
-        bitwise::{pre_mulc::PhaseState, Mod2Error, PRandMPrep},
+        bitwise::{pre_mulc::PhaseState, Mod2Error, Mod2Message, PRandMPrep},
         robust_interpolate::robust_interpolate::RobustShare,
         SessionId, WrappedMessage,
     },
@@ -38,7 +38,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use tokio::{
-    sync::{mpsc::Receiver, Mutex},
+    sync::Mutex,
     time::{timeout, Duration},
 };
 use tracing::warn;
@@ -90,35 +90,22 @@ impl<F: PrimeField> Mod2BatchStore<F> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Mod2Node<F: PrimeField, R: RBC> {
+pub struct Mod2Node<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<Mod2Store<F>>>)>>>,
     batch_store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<Mod2BatchStore<F>>>)>>>,
-    pub rbc: R,
-    rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
+impl<F: PrimeField> Mod2Node<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, Mod2Error> {
-        let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
-        let rbc = R::new(
-            id,
-            n,
-            t,
-            t + 1,
-            rbc_sender,
-            Arc::new(WrappedMessage::rbc_wrap),
-        )?;
         Ok(Self {
             id,
             n,
             t,
             store: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(Mutex::new(HashMap::new())),
-            rbc,
-            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
 
@@ -171,7 +158,6 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
     /// Clears state for `session` in whichever store (single or batch) it
     /// belongs to.
     pub async fn clear_store(&self, session: SessionId) -> Result<(), Mod2Error> {
-        self.rbc.clear_store().await;
         let removed_single = self.store.lock().await.remove(&session).is_some();
         let removed_batch = self.batch_store.lock().await.remove(&session).is_some();
         if removed_single || removed_batch {
@@ -236,10 +222,10 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
             s.r_prime = Some(prep.r_prime);
         }
 
-        // Broadcast this party's share of c.
-        // sub_id = self.id identifies the broadcaster; round_id = 1 avoids colliding with
-        // the outer session (sub_id=0, round_id=0).
-        let rbc_session = SessionId::new(
+        // Broadcast this party's share of c directly, point-to-point.
+        // sub_id = self.id identifies the broadcaster; round_id = 0 distinguishes
+        // single-value sessions from batch sessions (round_id = 1, see init_batch).
+        let wire_session = SessionId::new(
             calling_proto,
             SessionId::pack_slot(session.exec_id(), self.id as u8, 0),
             session.instance_id(),
@@ -248,7 +234,10 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
         let mut payload = Vec::new();
         c_share.share[0].serialize_compressed(&mut payload)?;
 
-        self.rbc.init(payload, rbc_session, network).await?;
+        let mod2_msg = Mod2Message::new(self.id, wire_session, payload);
+        let wrapped = WrappedMessage::Mod2(mod2_msg);
+        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        network.broadcast(&bytes_wrapped).await?;
         // If n-t shares already arrived before r_prime was stored, finalize now.
         {
             let store = self.get_or_create_store(session, self.id).await?;
@@ -305,9 +294,9 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
             s.r_primes = Some(r_primes);
         }
 
-        // Broadcast this party's m c-shares in one message.
+        // Broadcast this party's m c-shares in one message, directly point-to-point.
         // round_id = 1 distinguishes batch sessions from single-value ones (round_id = 0).
-        let rbc_session = SessionId::new(
+        let wire_session = SessionId::new(
             calling_proto,
             SessionId::pack_slot(session.exec_id(), self.id as u8, 1),
             session.instance_id(),
@@ -316,7 +305,10 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
         let mut payload = Vec::new();
         c_shares.serialize_compressed(&mut payload)?;
 
-        self.rbc.init(payload, rbc_session, network).await?;
+        let mod2_msg = Mod2Message::new(self.id, wire_session, payload);
+        let wrapped = WrappedMessage::Mod2(mod2_msg);
+        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        network.broadcast(&bytes_wrapped).await?;
         // If n-t shares already arrived before r_primes was stored, finalize now.
         {
             let store = self.get_or_create_batch_store(session, self.id).await?;
@@ -331,79 +323,69 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> Mod2Node<F, R> {
         Ok(())
     }
 
-    /// Drains completed RBC outputs, accumulates shares, and finalises once
-    /// n-t shares have arrived (enough for robust reconstruction despite t faults).
-    pub async fn drain_rbc_output(&mut self) -> Result<(), Mod2Error> {
-        loop {
-            let id = {
-                let mut rx = self.rbc_output.lock().await;
-                match rx.try_recv() {
-                    Ok(id) => id,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        return Err(Mod2Error::Abort)
-                    }
-                }
-            };
+    /// Handles a directly-opened share of `c`, accumulates it, and finalises
+    /// once n-t shares have arrived (enough for robust reconstruction despite
+    /// t faults). `msg.sender` must already be authenticated by the caller
+    /// (network-layer sender == `msg.sender`) before this is invoked.
+    pub async fn process(&self, msg: Mod2Message) -> Result<(), Mod2Error> {
+        let id = msg.session_id;
+        let sender = msg.sender;
+        let payload = msg.payload;
+        let calling_proto = id.calling_protocol().ok_or(Mod2Error::SessionIdError(id))?;
+        let parent = SessionId::new(
+            calling_proto,
+            SessionId::pack_slot(id.exec_id(), 0, 0),
+            id.instance_id(),
+        );
 
-            let payload = self.rbc.get_store(id).await?;
-            let sender = id.sub_id() as usize;
-            let calling_proto = id.calling_protocol().ok_or(Mod2Error::SessionIdError(id))?;
-            let parent = SessionId::new(
-                calling_proto,
-                SessionId::pack_slot(id.exec_id(), 0, 0),
-                id.instance_id(),
-            );
-
-            if id.round_id() == 1 {
-                let share_vals: Vec<F> =
-                    CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
-                // Attributed to `sender`: whichever party's message happens to
-                // create this entry (same heuristic as Bracha/Avid), so no
-                // single sender can flood past its own per-peer share.
-                let store = self.get_or_create_batch_store(parent, sender).await?;
-                let ready = {
-                    let mut s = store.lock().await;
-                    if s.state == PhaseState::Finished {
-                        continue;
-                    }
-                    // A malicious sender can broadcast a batch of the wrong length; reject it
-                    // here when the expected length is already known, and defensively filter
-                    // again in try_finalize_batch for shares stored before r_primes was set.
-                    if let Some(expected) = s.r_primes.as_ref().map(|r| r.len()) {
-                        if share_vals.len() != expected {
-                            warn!(
-                                "Mod2 batch {parent:?}: dropping share from party {sender} with length {} (expected {expected})",
-                                share_vals.len()
-                            );
-                            continue;
-                        }
-                    }
-                    s.received_shares.entry(sender).or_insert(share_vals);
-                    s.received_shares.len() >= 2 * self.t + 1
-                };
-                if ready {
-                    self.try_finalize_batch(parent, store).await?;
-                }
-                continue;
-            }
-
-            let share_val: F = F::deserialize_compressed(payload.as_slice())?;
-
-            // Attributed to `sender` — see the batch branch above for why.
-            let store = self.get_or_create_store(parent, sender).await?;
+        if id.round_id() == 1 {
+            let share_vals: Vec<F> =
+                CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+            // Attributed to `sender`: whichever party's message happens to
+            // create this entry (same heuristic as Bracha/Avid), so no
+            // single sender can flood past its own per-peer share.
+            let store = self.get_or_create_batch_store(parent, sender).await?;
             let ready = {
                 let mut s = store.lock().await;
                 if s.state == PhaseState::Finished {
-                    continue;
+                    return Ok(());
                 }
-                s.received_shares.entry(sender).or_insert(share_val);
+                // A malicious sender can broadcast a batch of the wrong length; reject it
+                // here when the expected length is already known, and defensively filter
+                // again in try_finalize_batch for shares stored before r_primes was set.
+                if let Some(expected) = s.r_primes.as_ref().map(|r| r.len()) {
+                    if share_vals.len() != expected {
+                        warn!(
+                            "Mod2 batch {parent:?}: dropping share from party {sender} with length {} (expected {expected})",
+                            share_vals.len()
+                        );
+                        return Ok(());
+                    }
+                }
+                s.received_shares.entry(sender).or_insert(share_vals);
                 s.received_shares.len() >= 2 * self.t + 1
             };
-
             if ready {
-                self.try_finalize(parent, store).await?;
+                self.try_finalize_batch(parent, store).await?;
             }
+            return Ok(());
+        }
+
+        let share_val: F = F::deserialize_compressed(payload.as_slice())?;
+
+        // Attributed to `sender` — see the batch branch above for why.
+        let store = self.get_or_create_store(parent, sender).await?;
+        let ready = {
+            let mut s = store.lock().await;
+            if s.state == PhaseState::Finished {
+                return Ok(());
+            }
+            s.received_shares.entry(sender).or_insert(share_val);
+            s.received_shares.len() >= 2 * self.t + 1
+        };
+
+        if ready {
+            self.try_finalize(parent, store).await?;
         }
         Ok(())
     }

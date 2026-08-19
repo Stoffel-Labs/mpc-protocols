@@ -15,7 +15,7 @@
 //!
 
 use crate::{
-    common::{ProtocolSessionId, RBC},
+    common::ProtocolSessionId,
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         bitwise::{pre_mulc::PhaseState, KOrCSError},
@@ -76,19 +76,19 @@ impl<F: PrimeField> KOrCSStore<F> {
 }
 
 #[derive(Clone, Debug)]
-pub struct KOrCSNode<F: PrimeField, R: RBC> {
+pub struct KOrCSNode<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     /// Single Multiply node for both sequential mul rounds (distinguished by session ID).
-    pub mul: Multiply<F, R>,
+    pub mul: Multiply<F>,
     /// BatchRecon node for opening d_j values.
     pub batch_recon: BatchReconNode<F>,
     batch_output: Arc<Mutex<Receiver<SessionId>>>,
     store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<KOrCSStore<F>>>>>>,
 }
 
-impl<F: PrimeField, R: RBC<Id = SessionId>> KOrCSNode<F, R> {
+impl<F: PrimeField> KOrCSNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, KOrCSError> {
         let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
         let batch_recon = BatchReconNode::new(id, n, t, t, batch_sender)?;

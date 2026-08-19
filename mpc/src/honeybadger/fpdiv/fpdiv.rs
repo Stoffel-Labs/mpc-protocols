@@ -19,7 +19,7 @@
 use crate::{
     common::{
         types::fixed::{FixedPointPrecision, SecretFixedPoint},
-        ProtocolSessionId, RBC,
+        ProtocolSessionId,
     },
     honeybadger::{
         bitwise::{
@@ -93,16 +93,16 @@ pub struct FpDivPrep<F: FftField> {
 }
 
 #[derive(Clone, Debug)]
-pub struct FpDivNode<F: PrimeField + FftField, R: RBC> {
+pub struct FpDivNode<F: PrimeField + FftField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub app_rec: AppRecNode<F, R>,
-    pub mul: Multiply<F, R>,
-    pub trunc: TruncPrNode<F, R>,
+    pub app_rec: AppRecNode<F>,
+    pub mul: Multiply<F>,
+    pub trunc: TruncPrNode<F>,
 }
 
-impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> FpDivNode<F, R> {
+impl<F: PrimeField + FftField> FpDivNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, FpDivError> {
         Ok(Self {
             id,

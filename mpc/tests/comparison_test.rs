@@ -9,7 +9,7 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::sync::Arc;
-use stoffelcrypto::common::{rbc::rbc::Avid, ProtocolSessionId, SecretSharingScheme, RBC};
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelcrypto::honeybadger::bitwise::kor_cl::KOrCLNode;
 use stoffelcrypto::honeybadger::bitwise::kor_cs::KOrCSNode;
 use stoffelcrypto::honeybadger::comparison::eqz::EQZNode;
@@ -29,7 +29,7 @@ use tracing::warn;
 fn spawn_ltz_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<LTZNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<LTZNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -54,69 +54,40 @@ fn spawn_ltz_receiver_tasks(
                     }
                 };
                 match wrapped {
-                    WrappedMessage::Rbc(msg) => {
-                        let round = msg.session_id.round_id();
-                        let proto = msg.session_id.calling_protocol();
-                        if round == 4 {
-                            node.pre_mod2m
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("pre_mod2m rbc process failed");
-                            node.pre_mod2m
-                                .drain_rbc_output()
-                                .await
-                                .expect("pre_mod2m drain_rbc_output failed");
-                        } else if proto == Some(ProtocolType::LTZBitMul) {
-                            node.pre_mod2m
-                                .pre_bitlt
-                                .mul
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("mul.rbc process failed");
-                            node.pre_mod2m
-                                .pre_bitlt
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("mul.drain_rbc_output failed");
-                        } else if round == 2 {
-                            node.pre_mod2m
-                                .pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("suf_mul_inv.mul rbc process failed");
-                            node.pre_mod2m
-                                .pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("suf_mul_inv.mul drain_rbc_output failed");
-                        } else if round == 0 || round == 1 {
-                            node.pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("mod2 rbc process failed");
-                            node.pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .drain_rbc_output()
-                                .await
-                                .expect("mod2 drain_rbc_output failed");
-                        } else {
-                            warn!("unexpected Rbc round_id {round}");
-                        }
+                    WrappedMessage::PreMod2m(msg) => {
+                        node.pre_mod2m
+                            .process(msg)
+                            .await
+                            .expect("pre_mod2m process failed");
                     }
+                    WrappedMessage::Mod2(msg) => {
+                        node.pre_mod2m
+                            .pre_bitlt
+                            .mod2
+                            .process(msg)
+                            .await
+                            .expect("mod2 process failed");
+                    }
+                    WrappedMessage::Mult(msg) => match msg.session_id.calling_protocol() {
+                        Some(ProtocolType::LTZBitMul) => {
+                            node.pre_mod2m
+                                .pre_bitlt
+                                .mul
+                                .process(msg.sender, msg.session_id, msg.payload)
+                                .await
+                                .expect("mul process failed");
+                        }
+                        _ => {
+                            node.pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .mul
+                                .process(msg.sender, msg.session_id, msg.payload)
+                                .await
+                                .expect("suf_mul_inv.mul process failed");
+                        }
+                    },
                     WrappedMessage::BatchRecon(msg) => {
                         let proto = msg.session_id.calling_protocol();
                         let round = msg.session_id.round_id();
@@ -196,8 +167,7 @@ async fn ltz_run(u_bar: i128, k: usize, dp_bits: usize) {
     let prep = make_premod2m_prep(dp_bits, k - 1, n, t);
 
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<LTZNode<Fr, Avid<SessionId>>> =
-        (0..n).map(|id| LTZNode::new(id, n, t).unwrap()).collect();
+    let nodes: Vec<LTZNode<Fr>> = (0..n).map(|id| LTZNode::new(id, n, t).unwrap()).collect();
     let _recv = spawn_ltz_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut init_set = JoinSet::new();
@@ -422,7 +392,7 @@ async fn rand_inv_pair_multiple() {
 fn spawn_kor_cs_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<KOrCSNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<KOrCSNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -469,16 +439,11 @@ fn spawn_kor_cs_receiver_tasks(
                                 .expect("kor_cs drain_batch_recon failed");
                         }
                     },
-                    WrappedMessage::Rbc(msg) => {
+                    WrappedMessage::Mult(msg) => {
                         node.mul
-                            .rbc
-                            .process(msg, net.clone())
+                            .process(msg.sender, msg.session_id, msg.payload)
                             .await
-                            .expect("kor_cs mul rbc failed");
-                        node.mul
-                            .drain_rbc_output()
-                            .await
-                            .expect("kor_cs mul drain_rbc failed");
+                            .expect("kor_cs mul process failed");
                     }
                     _ => warn!("unexpected message type"),
                 }
@@ -509,8 +474,7 @@ async fn kor_cs_run(bit_values: &[u64]) {
     let prep = make_kor_cs_prep(k, n, t);
 
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<KOrCSNode<Fr, Avid<SessionId>>> =
-        (0..n).map(|id| KOrCSNode::new(id, n, t).unwrap()).collect();
+    let nodes: Vec<KOrCSNode<Fr>> = (0..n).map(|id| KOrCSNode::new(id, n, t).unwrap()).collect();
     let _recv = spawn_kor_cs_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut run_set = JoinSet::new();
@@ -576,7 +540,7 @@ async fn kor_cs_mixed() {
 fn spawn_kor_cl_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<KOrCLNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<KOrCLNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -627,30 +591,19 @@ fn spawn_kor_cl_receiver_tasks(
                                 .expect("kor_cs drain_batch_recon failed");
                         }
                     },
-                    WrappedMessage::Rbc(msg) => match msg.session_id.calling_protocol() {
+                    WrappedMessage::Mult(msg) => match msg.session_id.calling_protocol() {
                         Some(ProtocolType::KOr1) | Some(ProtocolType::KOr2) => {
                             node.kor_cs
                                 .mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("kor_cs mul rbc failed");
-                            node.kor_cs
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("kor_cs mul drain_rbc failed");
+                                .expect("kor_cs mul process failed");
                         }
-                        _ => {
-                            node.rbc
-                                .process(msg, net.clone())
-                                .await
-                                .expect("kor_cl rbc failed");
-                            node.drain_rbc_output()
-                                .await
-                                .expect("kor_cl drain_rbc failed");
-                        }
+                        _ => panic!("unexpected calling protocol for Mult: {:?}", msg.session_id),
                     },
+                    WrappedMessage::KOrCl(msg) => {
+                        node.process(msg).await.expect("kor_cl process failed");
+                    }
                     _ => warn!("unexpected message type"),
                 }
             }
@@ -682,8 +635,7 @@ async fn kor_cl_run(bit_values: &[u64]) {
     let kor_cs_prep = make_kor_cs_prep(m, n, t);
 
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<KOrCLNode<Fr, Avid<SessionId>>> =
-        (0..n).map(|id| KOrCLNode::new(id, n, t).unwrap()).collect();
+    let nodes: Vec<KOrCLNode<Fr>> = (0..n).map(|id| KOrCLNode::new(id, n, t).unwrap()).collect();
     let _recv = spawn_kor_cl_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut run_set = JoinSet::new();
@@ -743,7 +695,7 @@ async fn kor_cl_single_one() {
 fn spawn_eqz_receiver_tasks(
     num_parties: usize,
     mut receivers: Vec<Vec<Receiver<Vec<u8>>>>,
-    nodes: Vec<EQZNode<Fr, Avid<SessionId>>>,
+    nodes: Vec<EQZNode<Fr>>,
     network: Vec<Arc<FakeNetwork>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -798,44 +750,26 @@ fn spawn_eqz_receiver_tasks(
                                 .expect("kor_cs drain_batch_recon failed");
                         }
                     },
-                    WrappedMessage::Rbc(msg) => match msg.session_id.calling_protocol() {
+                    WrappedMessage::Mult(msg) => match msg.session_id.calling_protocol() {
                         Some(ProtocolType::KOr1) | Some(ProtocolType::KOr2) => {
                             node.kor_cl
                                 .kor_cs
                                 .mul
-                                .rbc
-                                .process(msg, net.clone())
+                                .process(msg.sender, msg.session_id, msg.payload)
                                 .await
-                                .expect("kor_cs mul rbc failed");
-                            node.kor_cl
-                                .kor_cs
-                                .mul
-                                .drain_rbc_output()
-                                .await
-                                .expect("kor_cs mul drain_rbc failed");
+                                .expect("kor_cs mul process failed");
                         }
-                        _ => match msg.session_id.round_id() {
-                            0 => {
-                                node.rbc
-                                    .process(msg, net.clone())
-                                    .await
-                                    .expect("eqz rbc failed");
-                                node.drain_rbc_output().await.expect("eqz drain_rbc failed");
-                            }
-                            1 => {
-                                node.kor_cl
-                                    .rbc
-                                    .process(msg, net.clone())
-                                    .await
-                                    .expect("kor_cl rbc failed");
-                                node.kor_cl
-                                    .drain_rbc_output()
-                                    .await
-                                    .expect("kor_cl drain_rbc failed");
-                            }
-                            r => warn!("unexpected Rbc round_id {r}"),
-                        },
+                        _ => panic!("unexpected calling protocol for Mult: {:?}", msg.session_id),
                     },
+                    WrappedMessage::Eqz(msg) => {
+                        node.process(msg).await.expect("eqz process failed");
+                    }
+                    WrappedMessage::KOrCl(msg) => {
+                        node.kor_cl
+                            .process(msg)
+                            .await
+                            .expect("kor_cl process failed");
+                    }
                     _ => warn!("unexpected message type"),
                 }
             }
@@ -862,8 +796,7 @@ async fn eqz_run(a_val: u64, k: usize) {
     let kor_cs_prep = make_kor_cs_prep(m, n, t);
 
     let (network, receivers, _, _) = test_setup(n, vec![]);
-    let nodes: Vec<EQZNode<Fr, Avid<SessionId>>> =
-        (0..n).map(|id| EQZNode::new(id, n, t).unwrap()).collect();
+    let nodes: Vec<EQZNode<Fr>> = (0..n).map(|id| EQZNode::new(id, n, t).unwrap()).collect();
     let _recv = spawn_eqz_receiver_tasks(n, receivers, nodes.clone(), network.clone());
 
     let mut run_set = JoinSet::new();

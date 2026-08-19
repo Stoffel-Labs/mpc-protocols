@@ -30,7 +30,7 @@
 //! * `prep.mod2_preps` has exactly k elements.
 
 use crate::{
-    common::{ProtocolSessionId, RBC},
+    common::ProtocolSessionId,
     honeybadger::{
         bitwise::{mod2::Mod2Node, suf_mul_inv::SufMulInvNode, PreBitLTError, PreBitLTPrep},
         mul::multiplication::Multiply,
@@ -47,19 +47,19 @@ use tracing::warn;
 // ── Node ───────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
-pub struct PreBitLTNode<F: PrimeField, R: RBC> {
+pub struct PreBitLTNode<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     /// Inner SufMulInv node — also handles its own Mul and BatchRecon for phase 1.
-    pub suf_mul_inv: SufMulInvNode<F, R>,
+    pub suf_mul_inv: SufMulInvNode<F>,
     /// Standalone Multiply node for phase 3 (s_i × p_inv_{i+1}).
-    pub mul: Multiply<F, R>,
+    pub mul: Multiply<F>,
     /// Mod2 node, shared across all k parallel Mod2 invocations in phase 4.
-    pub mod2: Mod2Node<F, R>,
+    pub mod2: Mod2Node<F>,
 }
 
-impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreBitLTNode<F, R> {
+impl<F: PrimeField + FftField> PreBitLTNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PreBitLTError> {
         Ok(Self {
             id,

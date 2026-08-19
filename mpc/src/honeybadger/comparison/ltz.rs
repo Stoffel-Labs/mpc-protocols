@@ -9,14 +9,11 @@
 //! routing of its own, matching how the same primitive with no additional
 //! interaction of its own is wrapped elsewhere in this codebase.
 
-use crate::{
-    common::RBC,
-    honeybadger::{
-        bitwise::{pre_mod2m::PreMod2mNode, PreMod2mPrep},
-        comparison::LTZError,
-        robust_interpolate::robust_interpolate::RobustShare,
-        SessionId,
-    },
+use crate::honeybadger::{
+    bitwise::{pre_mod2m::PreMod2mNode, PreMod2mPrep},
+    comparison::LTZError,
+    robust_interpolate::robust_interpolate::RobustShare,
+    SessionId,
 };
 use ark_ff::{FftField, PrimeField};
 use std::sync::Arc;
@@ -24,14 +21,14 @@ use stoffelnet::network_utils::Network;
 use tokio::time::Duration;
 
 #[derive(Clone, Debug)]
-pub struct LTZNode<F: PrimeField + FftField, R: RBC> {
+pub struct LTZNode<F: PrimeField + FftField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub pre_mod2m: PreMod2mNode<F, R>,
+    pub pre_mod2m: PreMod2mNode<F>,
 }
 
-impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> LTZNode<F, R> {
+impl<F: PrimeField + FftField> LTZNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, LTZError> {
         Ok(Self {
             id,

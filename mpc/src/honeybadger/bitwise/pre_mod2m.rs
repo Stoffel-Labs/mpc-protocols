@@ -25,11 +25,11 @@
 //! No additional substitutions are needed in this protocol.
 
 use crate::{
-    common::{ProtocolSessionId, SecretSharingScheme, RBC},
+    common::{ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
         bitwise::{
-            pre_bitlt::PreBitLTNode, pre_mulc::PhaseState, PreMod2mError, PreMod2mPrep,
-            PreMod2mStore,
+            pre_bitlt::PreBitLTNode, pre_mulc::PhaseState, PreMod2mError, PreMod2mMessage,
+            PreMod2mPrep, PreMod2mStore,
         },
         robust_interpolate::robust_interpolate::RobustShare,
         SessionId, WrappedMessage,
@@ -40,7 +40,7 @@ use ark_ff::{BigInteger, FftField, PrimeField};
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use tokio::{
-    sync::{mpsc::Receiver, Mutex},
+    sync::Mutex,
     time::{timeout, Duration},
 };
 
@@ -49,7 +49,7 @@ const MAX_PRE_MOD2M_SESSIONS: usize = 1024;
 // ── Node ───────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
-pub struct PreMod2mNode<F: PrimeField + FftField, R: RBC> {
+pub struct PreMod2mNode<F: PrimeField + FftField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
@@ -57,31 +57,18 @@ pub struct PreMod2mNode<F: PrimeField + FftField, R: RBC> {
     // party can't flood this store past its own per-peer share of the cap
     // (same heuristic as Bracha/Avid's own session stores).
     store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<PreMod2mStore<F>>>)>>>,
-    pub rbc: R,
-    rbc_output: Arc<Mutex<Receiver<SessionId>>>,
     /// Owned so `try_finalize` can run Phase 3 (PreBitLT) directly, without
     /// every caller having to thread a shared instance through each call.
-    pub pre_bitlt: PreBitLTNode<F, R>,
+    pub pre_bitlt: PreBitLTNode<F>,
 }
 
-impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMod2mNode<F, R> {
+impl<F: PrimeField + FftField> PreMod2mNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PreMod2mError> {
-        let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
-        let rbc = R::new(
-            id,
-            n,
-            t,
-            t + 1,
-            rbc_sender,
-            Arc::new(WrappedMessage::rbc_wrap),
-        )?;
         Ok(Self {
             id,
             n,
             t,
             store: Arc::new(Mutex::new(HashMap::new())),
-            rbc,
-            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             pre_bitlt: PreBitLTNode::new(id, n, t)?,
         })
     }
@@ -110,51 +97,38 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMod2mNode<F, R> {
     }
 
     pub async fn clear_store(&self, session: SessionId) -> Result<(), PreMod2mError> {
-        self.rbc.clear_store().await;
         let mut map = self.store.lock().await;
         map.remove(&session)
             .map(|_| ())
             .ok_or(PreMod2mError::ClearStoreError(session))
     }
 
-    /// Drains completed RBC outputs, handing each one to `handle_reveal_share`.
-    /// Purely local, like every other `drain_*_output` in this codebase —
-    /// safe to call inline from a shared dispatch loop. The nested PreBitLT
-    /// round-trip needed to finish this protocol is driven separately, by
-    /// `init`, in whatever task called it.
-    pub async fn drain_rbc_output(&mut self) -> Result<(), PreMod2mError> {
-        loop {
-            let id = {
-                let mut rx = self.rbc_output.lock().await;
-                match rx.try_recv() {
-                    Ok(id) => id,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        return Err(PreMod2mError::Abort)
-                    }
-                }
-            };
+    /// Handles a directly-opened share of `v`, handing it to
+    /// `handle_reveal_share`. Purely local, like every other `process`/
+    /// `drain_*_output` in this codebase — safe to call inline from a shared
+    /// dispatch loop. The nested PreBitLT round-trip needed to finish this
+    /// protocol is driven separately, by `init`, in whatever task called it.
+    /// `msg.sender` must already be authenticated by the caller (network-layer
+    /// sender == `msg.sender`) before this is invoked.
+    pub async fn process(&mut self, msg: PreMod2mMessage) -> Result<(), PreMod2mError> {
+        let id = msg.session_id;
+        let share_val: F = F::deserialize_compressed(msg.payload.as_slice())?;
+        let sender = msg.sender;
 
-            let payload = self.rbc.get_store(id).await?;
-            let share_val: F = F::deserialize_compressed(payload.as_slice())?;
-            let sender = id.sub_id() as usize;
+        // Recover the parent session (sub_id=0, round_id=0) from this
+        // broadcaster's wire session (sub_id=party_id, round_id=0).
+        // Tag read dynamically from the incoming message (not hardcoded
+        // to FpDiv) so any caller's own tag round-trips correctly — the
+        // wire session in `init` above already carries the caller's
+        // real `calling_protocol()`, this just has to match it back.
+        let parent = SessionId::new(
+            id.calling_protocol()
+                .ok_or(PreMod2mError::SessionIdError(id))?,
+            SessionId::pack_slot(id.exec_id(), 0, 0),
+            id.instance_id(),
+        );
 
-            // Recover the parent session (sub_id=0, round_id=0) from this
-            // broadcaster's RBC session (sub_id=party_id, round_id=0).
-            // Tag read dynamically from the incoming message (not hardcoded
-            // to FpDiv) so any caller's own tag round-trips correctly — the
-            // wire session in `init` above already carries the caller's
-            // real `calling_protocol()`, this just has to match it back.
-            let parent = SessionId::new(
-                id.calling_protocol()
-                    .ok_or(PreMod2mError::SessionIdError(id))?,
-                SessionId::pack_slot(id.exec_id(), 0, 0),
-                id.instance_id(),
-            );
-
-            self.handle_reveal_share(parent, sender, share_val).await?;
-        }
-        Ok(())
+        self.handle_reveal_share(parent, sender, share_val).await
     }
 
     /// Records one party's share of v and, once n-t shares are in, calls
@@ -376,16 +350,18 @@ impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> PreMod2mNode<F, R> {
             .calling_protocol()
             .ok_or(PreMod2mError::SessionIdError(session))?;
 
-        let rbc_session = SessionId::new(
+        // Broadcast this party's share of v directly, point-to-point.
+        let wire_session = SessionId::new(
             calling_proto,
             SessionId::pack_slot(session.exec_id(), self.id as u8, 4),
             session.instance_id(),
         );
         let mut payload = Vec::new();
         v_share.share[0].serialize_compressed(&mut payload)?;
-        self.rbc
-            .init(payload, rbc_session, Arc::clone(&network))
-            .await?;
+        let pre_mod2m_msg = PreMod2mMessage::new(self.id, wire_session, payload);
+        let wrapped = WrappedMessage::PreMod2m(pre_mod2m_msg);
+        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        network.broadcast(&bytes_wrapped).await?;
 
         // If n-t shares already arrived during init, finalize immediately.
         {

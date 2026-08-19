@@ -34,13 +34,10 @@
 //! * `a ∈ Z⟨k⟩ = [-2^{k-1}, 2^{k-1}-1]` (signed).
 //! * `prep.prandm.r_prime_bits.len() == k-1`.
 
-use crate::{
-    common::RBC,
-    honeybadger::{
-        bitwise::{pre_mod2m::PreMod2mNode, PreMod2mError, PreMod2mPrep},
-        robust_interpolate::robust_interpolate::RobustShare,
-        SessionId,
-    },
+use crate::honeybadger::{
+    bitwise::{pre_mod2m::PreMod2mNode, PreMod2mError, PreMod2mPrep},
+    robust_interpolate::robust_interpolate::RobustShare,
+    SessionId,
 };
 use ark_ff::{FftField, PrimeField};
 use std::sync::Arc;
@@ -55,14 +52,14 @@ pub type BitDecError = PreMod2mError;
 // ── Node ──────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
-pub struct BitDecNode<F: PrimeField, R: RBC> {
+pub struct BitDecNode<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub pre_mod2m: PreMod2mNode<F, R>,
+    pub pre_mod2m: PreMod2mNode<F>,
 }
 
-impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> BitDecNode<F, R> {
+impl<F: PrimeField + FftField> BitDecNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, BitDecError> {
         Ok(Self {
             id,

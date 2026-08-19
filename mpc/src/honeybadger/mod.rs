@@ -47,10 +47,10 @@ use crate::{
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
         bitwise::{
-            kor_cs::KOrCSPrep, pre_mulc::PreMulCOfflineNode, KOrCLError, KOrCSError, Mod2Error,
-            PreMod2mError, PreMulCError, PreMulCPrep,
+            kor_cs::KOrCSPrep, pre_mulc::PreMulCOfflineNode, KOrCLError, KOrCSError, KOrClMessage,
+            Mod2Error, Mod2Message, PreMod2mError, PreMod2mMessage, PreMulCError, PreMulCPrep,
         },
-        comparison::{eqz::EQZNode, ltz::LTZNode, EQZError, LTZError},
+        comparison::{eqz::EQZNode, ltz::LTZNode, EQZError, EqzMessage, LTZError},
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
         fpdiv::fpdiv::{FpDivError, FpDivNode},
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
@@ -58,13 +58,13 @@ use crate::{
             fpmul::{FPError, FPMulNode},
             prandbitd::PRandBitDNode,
             rand_bit::RandBit,
-            PRandBitDMessage, PRandError, RandBitError, TruncPrError,
+            PRandBitDMessage, PRandError, RandBitError, TruncPrError, TruncPrMessage,
         },
         input::{
             input::{InputClient, InputServer},
             InputError, InputMessage,
         },
-        mul::{multiplication::Multiply, MulError},
+        mul::{multiplication::Multiply, MulError, MultMessage},
         mul_pub::MulPubError,
         output::{
             output::{OutputClient, OutputServer},
@@ -295,8 +295,8 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     // Preprocessing parameters.
     pub params: HoneyBadgerMPCNodeOpts,
     pub preprocess: PreprocessNodes<F, R>,
-    pub operations: Operation<F, R>,
-    pub type_ops: TypeOperations<F, R>,
+    pub operations: Operation<F>,
+    pub type_ops: TypeOperations<F>,
     pub output: OutputServer,
     pub counters: SubProtocolCounters,
 }
@@ -332,17 +332,17 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct Operation<F: FftField, R: RBC> {
-    pub mul: Multiply<F, R>,
+pub struct Operation<F: FftField> {
+    pub mul: Multiply<F>,
 }
 
 #[derive(Clone, Debug)]
-pub struct TypeOperations<F: PrimeField, R: RBC> {
-    pub fpmul: FPMulNode<F, R>,
-    pub fpdiv_const: FPDivConstNode<F, R>,
-    pub fpdiv: FpDivNode<F, R>,
-    pub ltz: LTZNode<F, R>,
-    pub eqz: EQZNode<F, R>,
+pub struct TypeOperations<F: PrimeField> {
+    pub fpmul: FPMulNode<F>,
+    pub fpdiv_const: FPDivConstNode<F>,
+    pub fpdiv: FpDivNode<F>,
+    pub ltz: LTZNode<F>,
+    pub eqz: EQZNode<F>,
 }
 
 #[derive(Clone, Debug)]
@@ -361,7 +361,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     /// PreMulC's offline (preprocessing) phase: generates the correlated
     /// (w, z, r) from fresh random shares,
     /// zero-sharings, and Beaver triples.
-    pub premulc_offline: PreMulCOfflineNode<F, R>,
+    pub premulc_offline: PreMulCOfflineNode<F>,
     /// Produces the ([r], [r^-1]) pairs consumed by EQZ's KOrCS.
     pub rand_inv_pair: RandInvPairNode<F>,
     /// Nodes for small field (Goldilocks) preprocessing.
@@ -879,10 +879,6 @@ where
                         self.preprocess.input.rbc.process(rbc_msg, net).await?;
                         self.preprocess.input.drain_rbc_output().await?;
                     }
-                    Some(ProtocolType::Mul) => {
-                        self.operations.mul.rbc.process(rbc_msg, net).await?;
-                        self.operations.mul.drain_rbc_output().await?;
-                    }
                     Some(ProtocolType::ZeroShaSmallField) => {
                         self.preprocess
                             .small_field_preproc
@@ -896,64 +892,54 @@ where
                             .drain_rbc_output()
                             .await?;
                     }
-                    Some(ProtocolType::FpMul) => {
-                        if rbc_msg.session_id.round_id() == 0 {
-                            self.type_ops
-                                .fpmul
-                                .trunc_node
-                                .rbc
-                                .process(rbc_msg, net)
-                                .await?;
-                            self.type_ops.fpmul.trunc_node.drain_rbc_output().await?;
-                        } else {
-                            self.type_ops
-                                .fpmul
-                                .mult_node
-                                .rbc
-                                .process(rbc_msg, net)
-                                .await?;
-                            self.type_ops.fpmul.mult_node.drain_rbc_output().await?;
-                        }
-                    }
-                    Some(ProtocolType::FpDivConst) => {
-                        self.type_ops
-                            .fpdiv_const
-                            .trunc_node
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.type_ops
-                            .fpdiv_const
-                            .trunc_node
-                            .drain_rbc_output()
-                            .await?;
-                    }
                     Some(ProtocolType::ZeroSha) => {
                         self.preprocess.zero_sha.rbc.process(rbc_msg, net).await?;
                         self.preprocess.zero_sha.drain_rbc_output().await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in RBC",
+                            rbc_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::Mult(mult_msg) => {
+                if sender_id != mult_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if mult_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        mult_msg.session_id.instance_id(),
+                    ));
+                }
+                match mult_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::Mul) => {
+                        self.operations
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::FpMul) => {
+                        self.type_ops
+                            .fpmul
+                            .mult_node
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
                     }
                     Some(ProtocolType::PreMulCOff) => {
                         self.preprocess
                             .premulc_offline
                             .mul
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.preprocess
-                            .premulc_offline
-                            .mul
-                            .drain_rbc_output()
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
                             .await?;
                     }
-
-                    Some(ProtocolType::FpDivTrunc) => {
-                        self.type_ops.fpdiv.trunc.rbc.process(rbc_msg, net).await?;
-                        self.type_ops.fpdiv.trunc.drain_rbc_output().await?;
-                    }
-
                     Some(ProtocolType::FpDivMulA) | Some(ProtocolType::FpDivMulB) => {
-                        self.type_ops.fpdiv.mul.rbc.process(rbc_msg, net).await?;
-                        self.type_ops.fpdiv.mul.drain_rbc_output().await?;
+                        self.type_ops
+                            .fpdiv
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
                     }
                     Some(ProtocolType::LTZBitMul) => {
                         self.type_ops
@@ -961,69 +947,19 @@ where
                             .pre_mod2m
                             .pre_bitlt
                             .mul
-                            .rbc
-                            .process(rbc_msg, net)
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
                             .await?;
+                    }
+                    Some(ProtocolType::LTZ) => {
                         self.type_ops
                             .ltz
                             .pre_mod2m
                             .pre_bitlt
+                            .suf_mul_inv
+                            .inner
                             .mul
-                            .drain_rbc_output()
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
                             .await?;
-                    }
-                    Some(ProtocolType::LTZ) => {
-                        // Mirrors the FpDiv arm below, one level shallower:
-                        // LTZ drives PreMod2m directly rather than via
-                        // AppRec/BitDec.
-                        let round = rbc_msg.session_id.round_id();
-                        if round == 4 {
-                            self.type_ops
-                                .ltz
-                                .pre_mod2m
-                                .rbc
-                                .process(rbc_msg, net)
-                                .await?;
-                            self.type_ops.ltz.pre_mod2m.drain_rbc_output().await?;
-                        } else if round == 2 {
-                            self.type_ops
-                                .ltz
-                                .pre_mod2m
-                                .pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .rbc
-                                .process(rbc_msg, net)
-                                .await?;
-                            self.type_ops
-                                .ltz
-                                .pre_mod2m
-                                .pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .drain_rbc_output()
-                                .await?;
-                        } else if round == 0 || round == 1 {
-                            self.type_ops
-                                .ltz
-                                .pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .rbc
-                                .process(rbc_msg, net)
-                                .await?;
-                            self.type_ops
-                                .ltz
-                                .pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .drain_rbc_output()
-                                .await?;
-                        } else {
-                            warn!("unexpected LTZ Rbc round_id {round}");
-                        }
                     }
                     Some(ProtocolType::KOr1) | Some(ProtocolType::KOr2) => {
                         self.type_ops
@@ -1031,29 +967,8 @@ where
                             .kor_cl
                             .kor_cs
                             .mul
-                            .rbc
-                            .process(rbc_msg, net)
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
                             .await?;
-                        self.type_ops
-                            .eqz
-                            .kor_cl
-                            .kor_cs
-                            .mul
-                            .drain_rbc_output()
-                            .await?;
-                    }
-                    Some(ProtocolType::EQZ) => {
-                        // round 0 = EQZ's own masking reveal, round 1 = KOrCL's.
-                        let round = rbc_msg.session_id.round_id();
-                        if round == 0 {
-                            self.type_ops.eqz.rbc.process(rbc_msg, net).await?;
-                            self.type_ops.eqz.drain_rbc_output().await?;
-                        } else if round == 1 {
-                            self.type_ops.eqz.kor_cl.rbc.process(rbc_msg, net).await?;
-                            self.type_ops.eqz.kor_cl.drain_rbc_output().await?;
-                        } else {
-                            warn!("unexpected EQZ Rbc round_id {round}");
-                        }
                     }
                     Some(ProtocolType::PreBitMul3) => {
                         self.type_ops
@@ -1063,17 +978,7 @@ where
                             .pre_mod2m
                             .pre_bitlt
                             .mul
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.type_ops
-                            .fpdiv
-                            .app_rec
-                            .bit_dec
-                            .pre_mod2m
-                            .pre_bitlt
-                            .mul
-                            .drain_rbc_output()
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
                             .await?;
                     }
                     Some(ProtocolType::PreBitMul)
@@ -1083,10 +988,8 @@ where
                             .fpdiv
                             .app_rec
                             .mul
-                            .rbc
-                            .process(rbc_msg, net)
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
                             .await?;
-                        self.type_ops.fpdiv.app_rec.mul.drain_rbc_output().await?;
                     }
                     Some(ProtocolType::SufOr) => {
                         self.type_ops
@@ -1095,99 +998,173 @@ where
                             .suf_or
                             .inner
                             .mul
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.type_ops
-                            .fpdiv
-                            .app_rec
-                            .suf_or
-                            .inner
-                            .mul
-                            .drain_rbc_output()
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
                             .await?;
                     }
                     Some(ProtocolType::FpDiv) => {
-                        let round = rbc_msg.session_id.round_id();
-                        if round == 4 {
-                            // BitDec's own PreMod2m reveal.
-                            self.type_ops
-                                .fpdiv
-                                .app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .rbc
-                                .process(rbc_msg, net)
-                                .await?;
-                            self.type_ops
-                                .fpdiv
-                                .app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .drain_rbc_output()
-                                .await?;
-                        } else if round == 0 {
-                            self.type_ops
-                                .fpdiv
-                                .app_rec
-                                .trunc
-                                .rbc
-                                .process(rbc_msg, net)
-                                .await?;
-                            self.type_ops.fpdiv.app_rec.trunc.drain_rbc_output().await?;
-                        } else if round == 2 {
-                            // BitDec's nested SufMulInv's embedded Multiply.
-                            self.type_ops
-                                .fpdiv
-                                .app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .rbc
-                                .process(rbc_msg, net)
-                                .await?;
-                            self.type_ops
-                                .fpdiv
-                                .app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .suf_mul_inv
-                                .inner
-                                .mul
-                                .drain_rbc_output()
-                                .await?;
-                        } else if round == 1 {
-                            self.type_ops
-                                .fpdiv
-                                .app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .rbc
-                                .process(rbc_msg, net)
-                                .await?;
-                            self.type_ops
-                                .fpdiv
-                                .app_rec
-                                .bit_dec
-                                .pre_mod2m
-                                .pre_bitlt
-                                .mod2
-                                .drain_rbc_output()
-                                .await?;
-                        } else {
-                            warn!("unexpected FpDiv Rbc round_id {round}");
-                        }
+                        // BitDec's nested SufMulInv's embedded Multiply.
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .bit_dec
+                            .pre_mod2m
+                            .pre_bitlt
+                            .suf_mul_inv
+                            .inner
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
                     }
                     _ => {
                         warn!(
-                            "Unknown protocol ID in session ID: {:?} in RBC",
-                            rbc_msg.session_id
+                            "Unknown protocol ID in session ID: {:?} in Mult",
+                            mult_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::Trunc(trunc_msg) => {
+                if sender_id != trunc_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if trunc_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        trunc_msg.session_id.instance_id(),
+                    ));
+                }
+                match trunc_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::FpMul) => {
+                        self.type_ops.fpmul.trunc_node.process(trunc_msg).await?;
+                    }
+                    Some(ProtocolType::FpDivConst) => {
+                        self.type_ops
+                            .fpdiv_const
+                            .trunc_node
+                            .process(trunc_msg)
+                            .await?;
+                    }
+                    Some(ProtocolType::FpDivTrunc) => {
+                        self.type_ops.fpdiv.trunc.process(trunc_msg).await?;
+                    }
+                    Some(ProtocolType::FpDiv) => {
+                        // AppRec's own final TruncPr reveal.
+                        self.type_ops.fpdiv.app_rec.trunc.process(trunc_msg).await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in Trunc",
+                            trunc_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::Mod2(mod2_msg) => {
+                if sender_id != mod2_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if mod2_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        mod2_msg.session_id.instance_id(),
+                    ));
+                }
+                match mod2_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::LTZ) => {
+                        self.type_ops
+                            .ltz
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mod2
+                            .process(mod2_msg)
+                            .await?;
+                    }
+                    Some(ProtocolType::FpDiv) => {
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .bit_dec
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mod2
+                            .process(mod2_msg)
+                            .await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in Mod2",
+                            mod2_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::PreMod2m(pre_mod2m_msg) => {
+                if sender_id != pre_mod2m_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if pre_mod2m_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        pre_mod2m_msg.session_id.instance_id(),
+                    ));
+                }
+                match pre_mod2m_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::LTZ) => {
+                        self.type_ops.ltz.pre_mod2m.process(pre_mod2m_msg).await?;
+                    }
+                    Some(ProtocolType::FpDiv) => {
+                        // BitDec's own PreMod2m reveal.
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .bit_dec
+                            .pre_mod2m
+                            .process(pre_mod2m_msg)
+                            .await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in PreMod2m",
+                            pre_mod2m_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::KOrCl(kor_cl_msg) => {
+                if sender_id != kor_cl_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if kor_cl_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        kor_cl_msg.session_id.instance_id(),
+                    ));
+                }
+                match kor_cl_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::EQZ) => {
+                        self.type_ops.eqz.kor_cl.process(kor_cl_msg).await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in KOrCl",
+                            kor_cl_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::Eqz(eqz_msg) => {
+                if sender_id != eqz_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if eqz_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        eqz_msg.session_id.instance_id(),
+                    ));
+                }
+                match eqz_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::EQZ) => {
+                        self.type_ops.eqz.process(eqz_msg).await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in Eqz",
+                            eqz_msg.session_id
                         );
                     }
                 }
@@ -3130,6 +3107,12 @@ pub enum WrappedMessage {
     Output(OutputMessage),
     PRandBitD(PRandBitDMessage),
     ZeroSha(zero_share::ZeroShaMessage),
+    Mult(MultMessage),
+    Trunc(TruncPrMessage),
+    Mod2(Mod2Message),
+    PreMod2m(PreMod2mMessage),
+    KOrCl(KOrClMessage),
+    Eqz(EqzMessage),
 }
 
 impl WrappedMessage {

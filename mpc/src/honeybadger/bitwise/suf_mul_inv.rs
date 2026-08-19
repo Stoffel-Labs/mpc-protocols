@@ -27,13 +27,10 @@
 //!
 //! Identical to PreMulC: use PreMulCOfflineNode. PreMulCPrep.r is required.
 
-use crate::{
-    common::RBC,
-    honeybadger::{
-        bitwise::{pre_mulc::PreMulCOnlineNode, PreMulCError, PreMulCPrep},
-        robust_interpolate::robust_interpolate::RobustShare,
-        SessionId,
-    },
+use crate::honeybadger::{
+    bitwise::{pre_mulc::PreMulCOnlineNode, PreMulCError, PreMulCPrep},
+    robust_interpolate::robust_interpolate::RobustShare,
+    SessionId,
 };
 use ark_ff::PrimeField;
 use std::sync::Arc;
@@ -42,11 +39,11 @@ use tokio::time::Duration;
 use tracing::warn;
 
 #[derive(Clone, Debug)]
-pub struct SufMulInvNode<F: PrimeField, R: RBC> {
-    pub inner: PreMulCOnlineNode<F, R>,
+pub struct SufMulInvNode<F: PrimeField> {
+    pub inner: PreMulCOnlineNode<F>,
 }
 
-impl<F: PrimeField, R: RBC<Id = SessionId>> SufMulInvNode<F, R> {
+impl<F: PrimeField> SufMulInvNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PreMulCError> {
         Ok(Self {
             inner: PreMulCOnlineNode::new(id, n, t)?,

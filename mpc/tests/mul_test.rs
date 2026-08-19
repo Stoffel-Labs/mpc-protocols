@@ -8,7 +8,7 @@ use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::{collections::HashMap, sync::Arc, time::Duration, vec};
 use stoffelcrypto::common::ProtocolSessionId;
-use stoffelcrypto::common::{rbc::rbc::Avid, SecretSharingScheme, RBC};
+use stoffelcrypto::common::SecretSharingScheme;
 use stoffelcrypto::honeybadger::{
     mul::multiplication::Multiply, robust_interpolate::robust_interpolate::RobustShare,
     ProtocolType, SessionId, WrappedMessage,
@@ -94,7 +94,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
 
     // 4. Create nodes
     let mut mul_nodes: Vec<_> = (0..n_parties)
-        .map(|id| Multiply::<Fr, Avid<SessionId>>::new(id, n_parties, t).unwrap())
+        .map(|id| Multiply::<Fr>::new(id, n_parties, t).unwrap())
         .collect();
 
     // 5. Init multiplication at each node
@@ -145,16 +145,12 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
                 };
                 // Match the message type and route it appropriately
                 match &wrapped {
-                    WrappedMessage::Rbc(msg) => {
+                    WrappedMessage::Mult(msg) => {
                         if let Err(e) = mul_node
-                            .rbc
-                            .process(msg.clone(), Arc::clone(&net_clone))
+                            .process(msg.sender, msg.session_id, msg.payload.clone())
                             .await
                         {
-                            warn!("RBC processing error: {e}");
-                        }
-                        if let Err(e) = mul_node.drain_rbc_output().await {
-                            warn!("RBC output handling error: {e}");
+                            warn!("direct-open processing error: {e}");
                         }
                     }
                     WrappedMessage::BatchRecon(batch_msg) => {

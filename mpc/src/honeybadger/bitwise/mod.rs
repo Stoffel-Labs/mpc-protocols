@@ -15,7 +15,8 @@ use crate::{
 use ark_ff::{FftField, PrimeField};
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
-use stoffelnet::network_utils::NetworkError;
+use serde::{Deserialize, Serialize};
+use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 
 pub mod app_rec;
@@ -28,6 +29,62 @@ pub mod pre_mod2m;
 pub mod pre_mulc;
 pub mod suf_mul_inv;
 pub mod suf_or;
+
+/// Direct point-to-point opening of a Mod2 share of `c`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Mod2Message {
+    pub sender: PartyId,
+    pub session_id: SessionId,
+    pub payload: Vec<u8>,
+}
+
+impl Mod2Message {
+    pub fn new(sender: PartyId, session_id: SessionId, payload: Vec<u8>) -> Self {
+        Self {
+            sender,
+            session_id,
+            payload,
+        }
+    }
+}
+
+/// Direct point-to-point opening of a PreMod2m share of `v`. Same rationale as
+/// [`Mod2Message`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreMod2mMessage {
+    pub sender: PartyId,
+    pub session_id: SessionId,
+    pub payload: Vec<u8>,
+}
+
+impl PreMod2mMessage {
+    pub fn new(sender: PartyId, session_id: SessionId, payload: Vec<u8>) -> Self {
+        Self {
+            sender,
+            session_id,
+            payload,
+        }
+    }
+}
+
+/// Direct point-to-point opening of a KOrCL share of `c`. Same rationale as
+/// [`Mod2Message`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KOrClMessage {
+    pub sender: PartyId,
+    pub session_id: SessionId,
+    pub payload: Vec<u8>,
+}
+
+impl KOrClMessage {
+    pub fn new(sender: PartyId, session_id: SessionId, payload: Vec<u8>) -> Self {
+        Self {
+            sender,
+            session_id,
+            payload,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct PreMulCPrep<F: FftField> {
@@ -123,10 +180,14 @@ pub enum PreMulCError {
 pub enum Mod2Error {
     #[error("rbc error: {0}")]
     RbcError(#[from] RbcError),
+    #[error("there was an error in the network: {0:?}")]
+    NetworkError(#[from] NetworkError),
     #[error("share error: {0}")]
     ShareError(#[from] ShareError),
     #[error("serialization: {0}")]
     SerializationError(#[from] SerializationError),
+    #[error("error during the serialization using bincode: {0:?}")]
+    BincodeSerializationError(#[from] Box<ErrorKind>),
     #[error("no session: {0:?}")]
     NoSuchSessionId(SessionId),
     #[error("already received: {0:?}")]
@@ -196,10 +257,14 @@ pub enum PreMod2mError {
     PreBitLTError(#[from] PreBitLTError),
     #[error("RBC error: {0}")]
     RbcError(#[from] RbcError),
+    #[error("there was an error in the network: {0:?}")]
+    NetworkError(#[from] NetworkError),
     #[error("share error: {0}")]
     ShareError(#[from] crate::common::share::ShareError),
     #[error("serialization: {0}")]
     SerializationError(#[from] SerializationError),
+    #[error("error during the serialization using bincode: {0:?}")]
+    BincodeSerializationError(#[from] Box<ErrorKind>),
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("no session: {0:?}")]
@@ -256,12 +321,16 @@ pub enum KOrCSError {
 pub enum KOrCLError {
     #[error("rbc error: {0}")]
     RbcError(#[from] RbcError),
+    #[error("there was an error in the network: {0:?}")]
+    NetworkError(#[from] NetworkError),
     #[error("share error: {0}")]
     ShareError(#[from] ShareError),
     #[error("kor_cs error: {0}")]
     KOrCSError(#[from] KOrCSError),
     #[error("serialization: {0}")]
     SerializationError(#[from] SerializationError),
+    #[error("error during the serialization using bincode: {0:?}")]
+    BincodeSerializationError(#[from] Box<ErrorKind>),
     #[error("no session: {0:?}")]
     NoSuchSessionId(SessionId),
     #[error("already received: {0:?}")]

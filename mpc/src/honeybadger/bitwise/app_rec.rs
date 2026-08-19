@@ -20,7 +20,7 @@
 //!    and truncate back to f fractional bits.
 
 use crate::{
-    common::{ProtocolSessionId, RBC},
+    common::ProtocolSessionId,
     honeybadger::{
         bitwise::{
             bit_dec::BitDecNode, suf_or::SufOrNode, AppRecPrep, PreMod2mError, PreMulCError,
@@ -58,17 +58,17 @@ pub enum AppRecError {
 }
 
 #[derive(Clone, Debug)]
-pub struct AppRecNode<F: PrimeField + FftField, R: RBC> {
+pub struct AppRecNode<F: PrimeField + FftField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub bit_dec: BitDecNode<F, R>,
-    pub suf_or: SufOrNode<F, R>,
-    pub mul: Multiply<F, R>,
-    pub trunc: TruncPrNode<F, R>,
+    pub bit_dec: BitDecNode<F>,
+    pub suf_or: SufOrNode<F>,
+    pub mul: Multiply<F>,
+    pub trunc: TruncPrNode<F>,
 }
 
-impl<F: PrimeField + FftField, R: RBC<Id = SessionId>> AppRecNode<F, R> {
+impl<F: PrimeField + FftField> AppRecNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, AppRecError> {
         Ok(Self {
             id,

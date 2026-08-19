@@ -11,12 +11,12 @@
 //!   5. [e] ← KOrCS([d_1], ..., [d_m])
 
 use crate::{
-    common::{ProtocolSessionId, SecretSharingScheme, RBC},
+    common::{ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
         bitwise::{
             kor_cs::{KOrCSNode, KOrCSPrep},
             pre_mulc::PhaseState,
-            KOrCLError, PRandMPrep,
+            KOrCLError, KOrClMessage, PRandMPrep,
         },
         robust_interpolate::robust_interpolate::RobustShare,
         SessionId, WrappedMessage,
@@ -26,7 +26,7 @@ use ark_ff::{BigInteger, PrimeField};
 use std::{collections::HashMap, sync::Arc};
 use stoffelnet::network_utils::Network;
 use tokio::{
-    sync::{mpsc::Receiver, Mutex},
+    sync::Mutex,
     time::{timeout, Duration},
 };
 
@@ -58,34 +58,21 @@ impl<F: PrimeField> KOrCLStore<F> {
 // ── Node ───────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
-pub struct KOrCLNode<F: PrimeField, R: RBC> {
+pub struct KOrCLNode<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<KOrCLStore<F>>>>>>,
-    pub rbc: R,
-    pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
-    pub kor_cs: KOrCSNode<F, R>,
+    pub kor_cs: KOrCSNode<F>,
 }
 
-impl<F: PrimeField, R: RBC<Id = SessionId>> KOrCLNode<F, R> {
+impl<F: PrimeField> KOrCLNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, KOrCLError> {
-        let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
-        let rbc = R::new(
-            id,
-            n,
-            t,
-            t + 1,
-            rbc_sender,
-            Arc::new(WrappedMessage::rbc_wrap),
-        )?;
         Ok(Self {
             id,
             n,
             t,
             store: Arc::new(Mutex::new(HashMap::new())),
-            rbc,
-            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             kor_cs: KOrCSNode::new(id, n, t)?,
         })
     }
@@ -105,53 +92,41 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> KOrCLNode<F, R> {
     }
 
     pub async fn clear_store(&self, session: SessionId) -> Result<(), KOrCLError> {
-        self.rbc.clear_store().await;
         let mut map = self.store.lock().await;
         map.remove(&session)
             .map(|_| ())
             .ok_or(KOrCLError::ClearStoreError(session))
     }
 
-    /// Drive completions from self.rbc. Route Rbc round_id=1 messages here.
-    pub async fn drain_rbc_output(&mut self) -> Result<(), KOrCLError> {
-        loop {
-            let id = {
-                let mut rx = self.rbc_output.lock().await;
-                match rx.try_recv() {
-                    Ok(id) => id,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        return Err(KOrCLError::Abort);
-                    }
-                }
-            };
+    /// Handles a directly-opened share of `c`. `msg.sender` must already be
+    /// authenticated by the caller (network-layer sender == `msg.sender`)
+    /// before this is invoked.
+    pub async fn process(&mut self, msg: KOrClMessage) -> Result<(), KOrCLError> {
+        let id = msg.session_id;
+        let share_val: F = F::deserialize_compressed(msg.payload.as_slice())?;
+        let sender = msg.sender;
 
-            let payload = self.rbc.get_store(id).await?;
-            let share_val: F = F::deserialize_compressed(payload.as_slice())?;
-            let sender = id.sub_id() as usize;
+        let calling_proto = id
+            .calling_protocol()
+            .ok_or(KOrCLError::SessionIdError(id))?;
+        let parent = SessionId::new(
+            calling_proto,
+            SessionId::pack_slot(id.exec_id(), 0, 0),
+            id.instance_id(),
+        );
 
-            let calling_proto = id
-                .calling_protocol()
-                .ok_or(KOrCLError::SessionIdError(id))?;
-            let parent = SessionId::new(
-                calling_proto,
-                SessionId::pack_slot(id.exec_id(), 0, 0),
-                id.instance_id(),
-            );
-
-            let store = self.get_or_create_store(parent).await?;
-            let ready = {
-                let mut s = store.lock().await;
-                if s.state == PhaseState::Finished {
-                    continue;
-                }
-                s.received_shares.entry(sender).or_insert(share_val);
-                s.received_shares.len() >= 2 * self.t + 1
-            };
-
-            if ready {
-                self.try_finalize(parent, store).await?;
+        let store = self.get_or_create_store(parent).await?;
+        let ready = {
+            let mut s = store.lock().await;
+            if s.state == PhaseState::Finished {
+                return Ok(());
             }
+            s.received_shares.entry(sender).or_insert(share_val);
+            s.received_shares.len() >= 2 * self.t + 1
+        };
+
+        if ready {
+            self.try_finalize(parent, store).await?;
         }
         Ok(())
     }
@@ -284,18 +259,20 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> KOrCLNode<F, R> {
             s.r_prime_bits = Some(prandm.r_prime_bits);
         }
 
-        // Broadcast via RBC with round_id=1 to avoid collision with KOrCS Mod2 (round_id=0).
-        let rbc_session = SessionId::new(
+        // Broadcast this party's share of c directly, point-to-point (round_id=1 to
+        // avoid collision with KOrCS Mod2's round_id=0).
+        let wire_session = SessionId::new(
             calling_proto,
             SessionId::pack_slot(session.exec_id(), self.id as u8, 1),
             session.instance_id(),
         );
         let mut payload = Vec::new();
         c_share.share[0].serialize_compressed(&mut payload)?;
-        self.rbc
-            .init(payload, rbc_session, Arc::clone(&network))
-            .await?;
-        // Eagerly finalize if all RBC shares arrived before run() stored local state.
+        let kor_cl_msg = KOrClMessage::new(self.id, wire_session, payload);
+        let wrapped = WrappedMessage::KOrCl(kor_cl_msg);
+        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        network.broadcast(&bytes_wrapped).await?;
+        // Eagerly finalize if all shares arrived before run() stored local state.
         {
             let store = self.get_or_create_store(session).await?;
             let ready = {

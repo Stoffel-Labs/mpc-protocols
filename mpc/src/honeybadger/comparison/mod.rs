@@ -4,10 +4,30 @@ use crate::{
     honeybadger::SessionId,
 };
 use ark_serialize::SerializationError;
+use serde::{Deserialize, Serialize};
+use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 
 pub mod eqz;
 pub mod ltz;
+
+/// Direct point-to-point opening of EQZ's own share of `c`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EqzMessage {
+    pub sender: PartyId,
+    pub session_id: SessionId,
+    pub payload: Vec<u8>,
+}
+
+impl EqzMessage {
+    pub fn new(sender: PartyId, session_id: SessionId, payload: Vec<u8>) -> Self {
+        Self {
+            sender,
+            session_id,
+            payload,
+        }
+    }
+}
 
 /// Raw pool draws one `LTZ(k)` consumes: `(triples, prandbit, prandint)`.
 /// LTZ runs PreMod2m(k, m = k-1), whose PRandM(k, m) mask costs 1 PRandInt +
@@ -44,12 +64,16 @@ pub enum LTZError {
 pub enum EQZError {
     #[error("rbc error: {0}")]
     RbcError(#[from] RbcError),
+    #[error("there was an error in the network: {0:?}")]
+    NetworkError(#[from] NetworkError),
     #[error("share error: {0}")]
     ShareError(#[from] ShareError),
     #[error("kor_cl error: {0}")]
     KOrCLError(#[from] KOrCLError),
     #[error("serialization: {0}")]
     SerializationError(#[from] SerializationError),
+    #[error("error during the serialization using bincode: {0:?}")]
+    BincodeSerializationError(#[from] Box<bincode::ErrorKind>),
     #[error("no session: {0:?}")]
     NoSuchSessionId(SessionId),
     #[error("already received: {0:?}")]
