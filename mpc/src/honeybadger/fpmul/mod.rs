@@ -1,5 +1,5 @@
 use crate::{
-    common::{lagrange_interpolate, share::ShareError},
+    common::{lagrange_interpolate, rbc::RbcError, share::ShareError},
     honeybadger::{
         batch_recon::BatchReconError,
         mul::MulError,
@@ -122,6 +122,8 @@ pub enum PRandIntError {
     SurpassedFieldCapacity,
     #[error("RISS equivocation detected from party {0} for tset {1:?}")]
     EquivocationDetected(usize, Vec<usize>),
+    #[error("error in RBC: {0:?}")]
+    RbcError(#[from] RbcError),
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
@@ -164,7 +166,18 @@ pub enum PRandIntError {
     PrssError(#[from] crate::honeybadger::prss::PrssError),
 }
 
-/// Message sent in the Random Double Sharing protocol.
+/// Length of the blinding nonce in a RISS commitment.
+///
+/// The commitment must hide `r_T^i` from the parties inside `T`, who receive it over RBC. A bare
+/// `H(values)` would not: a mask width of 40 bits is `2^40` hashes to brute-force. The nonce makes
+/// hiding independent of whatever width the caller picked.
+pub const PRANDINT_NONCE_LEN: usize = 32;
+
+/// Length of a RISS commitment digest (SHA-256).
+pub const PRANDINT_COMMIT_LEN: usize = 32;
+
+/// One party's RISS contribution to one unqualified set, sent point-to-point to the parties
+/// outside `T`.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct PRandIntMessage {
     /// ID of the sender of the message.
@@ -172,6 +185,7 @@ pub struct PRandIntMessage {
     pub session_id: SessionId,
     pub tset: Vec<usize>,
     pub r_t: Vec<BigUint>,
+    pub nonce: [u8; PRANDINT_NONCE_LEN],
 }
 
 impl PRandIntMessage {
@@ -181,42 +195,37 @@ impl PRandIntMessage {
         session_id: SessionId,
         tset: Vec<usize>,
         r_t: Vec<BigUint>,
+        nonce: [u8; PRANDINT_NONCE_LEN],
     ) -> Self {
         Self {
             sender_id,
             session_id,
             tset,
             r_t,
+            nonce,
         }
     }
 }
 
-/// Echo message for RISS consistency verification.
-/// Sent by every non-T recipient after receiving a RISS contribution, carrying the
-/// value they received so all other non-T parties can detect equivocation.
+/// A sender's commitments to *all* of its `C(n,t)` RISS contributions, reliably broadcast once per
+/// session, indexed by the rank of the unqualified set in `all_tsets`.
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct PRandIntEchoMessage {
-    pub echoer_id: usize,
-    pub original_sender: usize,
+pub struct PRandIntCommitMessage {
+    pub sender_id: usize,
     pub session_id: SessionId,
-    pub tset: Vec<usize>,
-    pub r_t: Vec<BigUint>,
+    pub commitments: Vec<[u8; PRANDINT_COMMIT_LEN]>,
 }
 
-impl PRandIntEchoMessage {
+impl PRandIntCommitMessage {
     pub fn new(
-        echoer_id: usize,
-        original_sender: usize,
+        sender_id: usize,
         session_id: SessionId,
-        tset: Vec<usize>,
-        r_t: Vec<BigUint>,
+        commitments: Vec<[u8; PRANDINT_COMMIT_LEN]>,
     ) -> Self {
         Self {
-            echoer_id,
-            original_sender,
+            sender_id,
             session_id,
-            tset,
-            r_t,
+            commitments,
         }
     }
 }
@@ -232,18 +241,24 @@ pub struct PRandIntStore<G: PrimeField> {
     /// For every maximal unqualified set T that excludes this player,
     /// we store the full mask r_T = sum_i r_T^i
     pub batch_size: Option<usize>,
-    /// Messages that arrived before batch_size/r_t_bound were set; reprocessed once initialized.
+    /// Openings that arrived before this session was locally initialized, or before their sender's
+    /// commitment was delivered by RBC. Replayed from both of those points.
     pub pending_riss_messages: Vec<PRandIntMessage>,
-    /// Echo messages that arrived before the session was initialized.
-    pub pending_echo_messages: Vec<PRandIntEchoMessage>,
-    /// Contributions verified by the echo protocol and accepted into the share sum.
+    /// Contributions verified against their sender's commitment and accepted into the share sum.
     pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<BigUint>>>, // tset -> {sender -> val}
-    /// Raw values received directly from each RISS sender, held pending echo verification.
-    /// Key: (tset, original_sender)
-    pub riss_direct: HashMap<(Vec<usize>, usize), Vec<BigUint>>,
-    /// Echo messages received from other non-T parties for each (tset, original_sender).
-    /// Key: (tset, original_sender) -> {echoer_id -> echoed_value}
-    pub riss_echoes: HashMap<(Vec<usize>, usize), HashMap<usize, Vec<BigUint>>>,
+    /// RBC-delivered commitment vectors, keyed by sender, indexed by unqualified-set rank.
+    pub commitments: HashMap<usize, Vec<[u8; PRANDINT_COMMIT_LEN]>>,
+    /// This party's own contributions, held back until every party has committed.
+    ///
+    /// Committing before opening is only worth anything if the commitment is fixed *before* its
+    /// sender sees anyone else's values. Sending our openings the moment we broadcast would let a
+    /// corrupt party sit on its own broadcast, collect the honest openings, choose its values to
+    /// steer the sum, and only then commit — binding to a choice made after the fact constrains
+    /// nothing.
+    pub my_openings: Vec<(Vec<usize>, Vec<BigUint>, [u8; PRANDINT_NONCE_LEN])>,
+    /// Whether the barrier has already fired. The release path is reachable from both
+    /// `generate_riss` and every `drain_rbc_output`, and the openings must go out exactly once.
+    pub openings_sent: bool,
     pub r_t: HashMap<Vec<usize>, Vec<BigUint>>,
     pub no_of_tsets: Option<usize>,
     /// PRandInt output.
@@ -260,10 +275,10 @@ impl<G: PrimeField> PRandIntStore<G> {
         Self {
             batch_size: None,
             pending_riss_messages: Vec::new(),
-            pending_echo_messages: Vec::new(),
             riss_shares: HashMap::new(),
-            riss_direct: HashMap::new(),
-            riss_echoes: HashMap::new(),
+            commitments: HashMap::new(),
+            my_openings: Vec::new(),
+            openings_sent: false,
             r_t: HashMap::new(),
             no_of_tsets: None,
             share_r_p: None,

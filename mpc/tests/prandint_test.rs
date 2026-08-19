@@ -5,11 +5,12 @@ use ark_ff::{BigInteger, PrimeField, Zero};
 use num_bigint::BigUint;
 use num_integer::binomial;
 use std::time::Duration;
+use stoffelcrypto::common::rbc::rbc::Avid;
 use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelcrypto::honeybadger::fpmul::prandint::PRandIntNode;
-use stoffelcrypto::honeybadger::fpmul::PRandIntMessage;
+use stoffelcrypto::honeybadger::fpmul::{PRandIntMessage, PRANDINT_NONCE_LEN};
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use stoffelcrypto::honeybadger::{ProtocolType, SessionId};
+use stoffelcrypto::honeybadger::{ProtocolType, SessionId, WrappedMessage};
 use tokio::task::JoinSet;
 
 mod utils;
@@ -38,8 +39,8 @@ async fn prandint_masks_have_their_declared_width() {
     let session_id = SessionId::new(ProtocolType::PRandInt, SessionId::pack_slot(77, 0, 0), 111);
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);
 
-    let nodes: Vec<PRandIntNode<Fr>> = (0..num_parties)
-        .map(|i| PRandIntNode::new(i, num_parties, threshold).unwrap())
+    let nodes: Vec<PRandIntNode<Fr, Avid<SessionId>>> = (0..num_parties)
+        .map(|i| PRandIntNode::new(i, num_parties, threshold, threshold + 1).unwrap())
         .collect();
     let _set = spawn_receiver_tasks(num_parties, receivers, nodes.clone(), network.clone()).await;
 
@@ -131,7 +132,7 @@ async fn riss_capacity_check_counts_every_unqualified_set() {
         )
     };
 
-    let mut node = PRandIntNode::<Fr>::new(0, n, t).unwrap();
+    let mut node = PRandIntNode::<Fr, Avid<SessionId>>::new(0, n, t, t + 1).unwrap();
     let err = node
         .generate_riss(session(1), 250, batch_size, network[0].clone())
         .await
@@ -143,7 +144,7 @@ async fn riss_capacity_check_counts_every_unqualified_set() {
 
     // Guard against the check becoming vacuously strict: 248 bits still fits, and the widths the
     // node is actually configured for are far below either boundary.
-    let mut node = PRandIntNode::<Fr>::new(0, n, t).unwrap();
+    let mut node = PRandIntNode::<Fr, Avid<SessionId>>::new(0, n, t, t + 1).unwrap();
     node.generate_riss(session(2), 248, batch_size, network[0].clone())
         .await
         .expect("248 bits leaves room for the 6 bits of overhead");
@@ -167,7 +168,7 @@ async fn riss_rejects_a_contribution_at_the_bound() {
     let (network, _receivers, _, _) = test_setup(n, vec![]);
 
     // Sets `r_t_bound`, without which `process` queues the message instead of checking it.
-    let mut node = PRandIntNode::<Fr>::new(0, n, t).unwrap();
+    let mut node = PRandIntNode::<Fr, Avid<SessionId>>::new(0, n, t, t + 1).unwrap();
     node.generate_riss(
         session_id,
         mask_bits as usize,
@@ -178,9 +179,15 @@ async fn riss_rejects_a_contribution_at_the_bound() {
     .unwrap();
 
     let at_bound = BigUint::from(2u32).pow(mask_bits);
-    let msg = PRandIntMessage::new(1, session_id, vec![1], vec![at_bound.clone(); batch_size]);
+    let msg = PRandIntMessage::new(
+        1,
+        session_id,
+        vec![1],
+        vec![at_bound.clone(); batch_size],
+        [0u8; PRANDINT_NONCE_LEN],
+    );
     let err = node
-        .process(msg, network[0].clone())
+        .process(msg)
         .await
         .expect_err("2^mask_bits is outside a half-open [0, 2^mask_bits)");
     assert!(
@@ -189,9 +196,145 @@ async fn riss_rejects_a_contribution_at_the_bound() {
     );
 
     // One below is legal, so the check is rejecting the endpoint rather than the whole top bit.
+    // It gets no further than the range gate here — with no commitment broadcast from party 2 the
+    // opening simply parks, which is the correct outcome and still distinguishes it from rejection.
     let below = at_bound - BigUint::from(1u32);
-    let msg = PRandIntMessage::new(2, session_id, vec![1], vec![below; batch_size]);
-    node.process(msg, network[0].clone())
+    let msg = PRandIntMessage::new(
+        2,
+        session_id,
+        vec![1],
+        vec![below; batch_size],
+        [0u8; PRANDINT_NONCE_LEN],
+    );
+    node.process(msg)
         .await
         .expect("2^mask_bits - 1 is the largest legal contribution");
+}
+
+/// The barrier: no opening may leave a party until every party has committed.
+///
+/// This is the whole anti-rushing property. Without it a corrupt party withholds its own
+/// broadcast, watches the honest openings land, picks its `r_T` to steer the sum, and only then
+/// commits — a commitment made after seeing the inputs binds it to nothing.
+///
+/// Guard the guard: releasing openings straight from `generate_riss` passes every other test in
+/// this file, because with all parties honest the values are correct either way. Only the *timing*
+/// differs, so timing is what this asserts.
+#[tokio::test]
+async fn riss_holds_openings_until_every_party_has_committed() {
+    setup_tracing();
+
+    let n = 4;
+    let t = 1;
+    let batch_size = t + 1;
+    let mask_bits = 40;
+    let session_id = SessionId::new(ProtocolType::PRandInt, SessionId::pack_slot(31, 0, 0), 111);
+    let (network, mut receivers, _, _) = test_setup(n, vec![]);
+
+    let mut nodes: Vec<PRandIntNode<Fr, Avid<SessionId>>> = (0..n)
+        .map(|i| PRandIntNode::new(i, n, t, t + 1).unwrap())
+        .collect();
+
+    // Every party commits. No receiver task is running, so nothing is delivered and no party can
+    // see another's commitment yet — exactly the window in which a rushing adversary would act.
+    for node in &mut nodes {
+        node.generate_riss(session_id, mask_bits, batch_size, network[node.id].clone())
+            .await
+            .unwrap();
+    }
+
+    // Drain what is actually in flight to party 0 and classify it.
+    let mut commitments = 0;
+    let mut openings = 0;
+    for rx in receivers[0].iter_mut() {
+        while let Ok(bytes) = rx.try_recv() {
+            match bincode::deserialize::<WrappedMessage>(&bytes).unwrap() {
+                WrappedMessage::Rbc(_) => commitments += 1,
+                WrappedMessage::PRandInt(_) => openings += 1,
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        commitments > 0,
+        "no commitment traffic at all — the test is not exercising the protocol"
+    );
+    assert_eq!(
+        openings, 0,
+        "{openings} opening(s) were sent before any commitment was delivered; the barrier is not \
+         holding and a rushing party could choose its contribution after seeing these"
+    );
+
+    // And the barrier must not be a deadlock: once commitments are delivered the openings go out.
+    assert!(
+        !nodes[0].missing_committers(session_id).await.is_empty(),
+        "no commitment has been delivered yet, so every party should still be outstanding"
+    );
+}
+
+/// An opening that does not match its sender's committed value must be rejected, and blamed on the
+/// sender.
+///
+#[tokio::test]
+async fn riss_rejects_an_opening_that_does_not_match_its_commitment() {
+    setup_tracing();
+
+    let n = 4;
+    let t = 1;
+    let batch_size = t + 1;
+    let mask_bits = 40;
+    let session_id = SessionId::new(ProtocolType::PRandInt, SessionId::pack_slot(32, 0, 0), 111);
+    let (network, receivers, _, _) = test_setup(n, vec![]);
+
+    let nodes: Vec<PRandIntNode<Fr, Avid<SessionId>>> = (0..n)
+        .map(|i| PRandIntNode::new(i, n, t, t + 1).unwrap())
+        .collect();
+    let _set = spawn_receiver_tasks(n, receivers, nodes.clone(), network.clone()).await;
+
+    let mut set = JoinSet::new();
+    for node in &nodes {
+        let id = node.id;
+        let net = network[id].clone();
+        let mut node = node.clone();
+        set.spawn(async move {
+            node.generate_riss(session_id, mask_bits, batch_size, net)
+                .await
+                .unwrap();
+        });
+    }
+    while set.join_next().await.is_some() {}
+
+    // Let the commitments land, so party 0 holds party 1's commitment vector.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut victim = nodes[0].clone();
+    assert!(
+        victim.missing_committers(session_id).await.is_empty(),
+        "commitments did not all arrive; the tampered opening below would park, not be checked"
+    );
+
+    // Party 1 opens a value it never committed to. `vec![1]` is a real unqualified set that
+    // excludes party 0, so this reaches the commitment check rather than a shape guard.
+    let forged = PRandIntMessage::new(
+        1,
+        session_id,
+        vec![1],
+        vec![BigUint::from(7u32); batch_size],
+        [0u8; PRANDINT_NONCE_LEN],
+    );
+    let err = victim
+        .process(forged)
+        .await
+        .expect_err("an opening that does not match the committed value must be rejected");
+
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("EquivocationDetected"),
+        "expected EquivocationDetected, got {rendered}"
+    );
+    // The blame must name the sender — the whole point is that it is unambiguous now.
+    assert!(
+        rendered.contains("EquivocationDetected(1"),
+        "equivocation must be attributed to sender 1, got {rendered}"
+    );
 }

@@ -13,7 +13,9 @@ use itertools::Itertools;
 use num_bigint::BigUint;
 use std::collections::HashMap;
 use std::time::Duration;
+use stoffelcrypto::common::rbc::rbc::Avid;
 use stoffelcrypto::common::types::fixed::{FixedPointPrecision, SecretFixedPoint};
+use stoffelcrypto::common::RBC;
 use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme, ShamirShare};
 use stoffelcrypto::honeybadger::fpmul::fpmul::FPMulNode;
 use stoffelcrypto::honeybadger::fpmul::prandint::PRandIntNode;
@@ -42,8 +44,8 @@ async fn prandint_r_reconstruction() {
     let (network, mut recv, _, _) = test_setup(n, vec![]);
 
     // Initialize nodes
-    let mut nodes: Vec<PRandIntNode<G>> = (0..n)
-        .map(|i| PRandIntNode::new(i, n, t).unwrap())
+    let mut nodes: Vec<PRandIntNode<G, Avid<SessionId>>> = (0..n)
+        .map(|i| PRandIntNode::new(i, n, t, t + 1).unwrap())
         .collect();
 
     for node in &mut nodes {
@@ -70,10 +72,11 @@ async fn prandint_r_reconstruction() {
                 let wrapped: WrappedMessage = bincode::deserialize(&received.1).unwrap();
                 match wrapped {
                     WrappedMessage::PRandInt(msg) => {
-                        let _ = node.process(msg, net.clone()).await;
+                        let _ = node.process(msg).await;
                     }
-                    WrappedMessage::PRandIntEcho(msg) => {
-                        let _ = node.process_echo(msg).await;
+                    WrappedMessage::Rbc(msg) => {
+                        let _ = node.rbc.process(msg, net.clone()).await;
+                        let _ = node.drain_rbc_output(net.clone()).await;
                     }
                     _ => continue,
                 }
@@ -367,9 +370,9 @@ async fn prandint_via_prss_needs_no_network() {
     let mut rng = test_rng();
     let dealt = crate::utils::prss_utils::deal_keys(n, t, &mut rng);
 
-    let nodes: Vec<PRandIntNode<G>> = (0..n)
+    let nodes: Vec<PRandIntNode<G, Avid<SessionId>>> = (0..n)
         .map(|i| {
-            let mut node = PRandIntNode::new(i, n, t).unwrap();
+            let mut node = PRandIntNode::new(i, n, t, t + 1).unwrap();
             let keys =
                 stoffelcrypto::honeybadger::prss::prss::PrssKeys::<G>::new(i, n, t, &dealt[i])
                     .unwrap();
@@ -424,7 +427,7 @@ async fn prandint_prss_rejects_an_oversized_mask() {
     let t = 1;
     let mut rng = test_rng();
     let dealt = crate::utils::prss_utils::deal_keys(n, t, &mut rng);
-    let mut node = PRandIntNode::<G>::new(0, n, t).unwrap();
+    let mut node = PRandIntNode::<G, Avid<SessionId>>::new(0, n, t, t + 1).unwrap();
     node.install_prss_keys(
         stoffelcrypto::honeybadger::prss::prss::PrssKeys::<G>::new(0, n, t, &dealt[0]).unwrap(),
     );

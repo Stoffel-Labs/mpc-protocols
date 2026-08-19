@@ -2,26 +2,27 @@ use crate::{
     common::{
         session_store::{Admission, SessionStore},
         share::ShareError,
-        ProtocolSessionId,
+        ProtocolSessionId, RBC,
     },
     honeybadger::{
         fpmul::{
-            build_all_f_polys, PRandIntEchoMessage, PRandIntError, PRandIntMessage, PRandIntStore,
-            PrandState,
+            build_all_f_polys, PRandIntCommitMessage, PRandIntError, PRandIntMessage,
+            PRandIntStore, PrandState, PRANDINT_COMMIT_LEN, PRANDINT_NONCE_LEN,
         },
         prss::{
             prss::{all_tsets, derive_key_from_riss, PrssKeys},
             PRSS_KEY_LEN,
         },
         robust_interpolate::robust_interpolate::RobustShare,
-        ProtocolType, SessionId, WrappedMessage,
+        ProtocolType, SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
     },
 };
 use ark_ff::PrimeField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
 use ark_std::rand::{Rng, SeedableRng};
-use itertools::Itertools;
+use bincode::Options;
 use num_bigint::BigUint;
+use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use stoffelnet::network_utils::Network;
 use tokio::{
@@ -35,7 +36,7 @@ use tracing::{info, warn};
 ///
 /// `G` is the field the generated shares live in.
 #[derive(Debug, Clone)]
-pub struct PRandIntNode<G: PrimeField> {
+pub struct PRandIntNode<G: PrimeField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
@@ -43,19 +44,38 @@ pub struct PRandIntNode<G: PrimeField> {
     /// PRSS key material. When present, `generate_prss` derives masks locally and the whole RISS
     /// message path below goes unused. Absent until a key setup has run.
     prss: Option<PrssKeys<G>>,
+    /// Rank of each unqualified set in `all_tsets(n, t)`, built once at construction.
+    /// `Arc` because the node is cloned per message task; the map itself is immutable.
+    tset_ranks: Arc<HashMap<Vec<usize>, usize>>,
+    pub rbc: R,
+    pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
 }
 
 const MAX_PRAND_SESSIONS: usize = 512;
 
-impl<G: PrimeField> PRandIntNode<G> {
+impl<G, R> PRandIntNode<G, R>
+where
+    G: PrimeField,
+    R: RBC<Id = SessionId>,
+{
     /// Creates a new PRandIntNode with empty shares.
-    pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PRandIntError> {
+    pub fn new(id: usize, n: usize, t: usize, k: usize) -> Result<Self, PRandIntError> {
+        let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
+        let rbc = R::new(id, n, t, k, rbc_sender, Arc::new(WrappedMessage::rbc_wrap))?;
+        let tset_ranks = all_tsets(n, t)
+            .into_iter()
+            .enumerate()
+            .map(|(rank, tset)| (tset, rank))
+            .collect();
         Ok(Self {
             id,
             n,
             t,
             store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             prss: None,
+            rbc,
+            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
+            tset_ranks: Arc::new(tset_ranks),
         })
     }
 
@@ -66,6 +86,14 @@ impl<G: PrimeField> PRandIntNode<G> {
 
     pub fn has_prss_keys(&self) -> bool {
         self.prss.is_some()
+    }
+
+    /// Position of `tset` in `all_tsets(n, t)`. Rejects anything that is not a real unqualified
+    /// set, which is what keeps a peer from addressing a commitment slot that does not exist.
+    fn rank_of(&self, tset: &[usize]) -> Result<usize, PRandIntError> {
+        self.tset_ranks.get(tset).copied().ok_or_else(|| {
+            PRandIntError::InvalidMessage(format!("unrecognised unqualified set {tset:?}"))
+        })
     }
 
     /// Largest mask width this node can derive without the summed value wrapping the field.
@@ -131,8 +159,9 @@ impl<G: PrimeField> PRandIntNode<G> {
         };
         let store = binding.lock().await;
 
-        let expected = all_tsets(self.n, self.t)
-            .iter()
+        let expected = self
+            .tset_ranks
+            .keys()
             .filter(|ts| !ts.contains(&self.id))
             .count();
         if store.r_t.len() != expected {
@@ -142,19 +171,114 @@ impl<G: PrimeField> PRandIntNode<G> {
             )));
         }
 
-        let tsets = all_tsets(self.n, self.t);
         let mut keys = Vec::with_capacity(store.r_t.len());
         for (tset, values) in store.r_t.iter() {
-            let rank = tsets
-                .iter()
-                .position(|candidate| candidate == tset)
-                .ok_or_else(|| {
-                    PRandIntError::InvalidMessage(format!("unrecognised unqualified set {tset:?}"))
-                })?;
+            let rank = self.rank_of(tset)?;
             keys.push((rank, derive_key_from_riss(rank, values)));
         }
         keys.sort_by_key(|(rank, _)| *rank);
         Ok(keys)
+    }
+
+    /// Pulls RBC-completed commitment broadcasts and replays the openings that were waiting on
+    /// them.
+    ///
+    pub async fn drain_rbc_output<N: Network + Send + Sync>(
+        &mut self,
+        network: Arc<N>,
+    ) -> Result<(), PRandIntError> {
+        loop {
+            let id = {
+                let mut rx = self.rbc_output.lock().await;
+                match rx.try_recv() {
+                    Ok(id) => id,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(PRandIntError::Abort);
+                    }
+                }
+            };
+
+            let output = self.rbc.get_store(id).await?;
+            let msg: PRandIntCommitMessage = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .allow_trailing_bytes()
+                .with_limit(MAX_MESSAGE_SIZE)
+                .deserialize(&output)?;
+
+            let authenticated_sender = id.sub_id() as usize;
+            if msg.sender_id != authenticated_sender || authenticated_sender >= self.n {
+                warn!("Dropping PRandInt commitment: sender mismatch");
+                continue;
+            }
+            if msg.session_id != id {
+                warn!("Dropping PRandInt commitment: session_id mismatch");
+                continue;
+            }
+
+            let expected_sets = self.tset_ranks.len();
+            if msg.commitments.len() != expected_sets {
+                warn!(
+                    sender = authenticated_sender,
+                    got = msg.commitments.len(),
+                    expected_sets,
+                    "Dropping PRandInt commitment: wrong number of unqualified sets"
+                );
+                continue;
+            }
+
+            // Openings are addressed to the originating session, whose sub_id is 0; the broadcast
+            // carries the dealer in sub_id so the RBC layer can bind it.
+            let session_id = SessionId::new(
+                ProtocolType::PRandInt,
+                SessionId::pack_slot(id.exec_id(), 0, id.round_id()),
+                id.instance_id(),
+            );
+
+            let replay = {
+                let binding = match self
+                    .get_or_create_store(session_id, authenticated_sender)
+                    .await
+                {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let mut store = binding.lock().await;
+                if store
+                    .commitments
+                    .insert(authenticated_sender, msg.commitments)
+                    .is_some()
+                {
+                    warn!(
+                        sender = authenticated_sender,
+                        "duplicate PRandInt commitment broadcast"
+                    );
+                    continue;
+                }
+                // Only the openings this commitment unblocks; everything else stays parked.
+                let (ready, still_pending) = std::mem::take(&mut store.pending_riss_messages)
+                    .into_iter()
+                    .partition::<Vec<_>, _>(|m| m.sender_id == authenticated_sender);
+                store.pending_riss_messages = still_pending;
+                ready
+            };
+
+            for opening in replay {
+                match self.process(opening).await {
+                    Ok(()) => {}
+                    Err(PRandIntError::InvalidMessage(_)) | Err(PRandIntError::Duplicate(_)) => {
+                        warn!("dropping invalid parked RISS opening");
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            // This may have been the commitment that completed the set, in which case our own
+            // openings are now clear to go out.
+            self.try_release_openings(session_id, network.clone())
+                .await?;
+        }
+        Ok(())
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
@@ -186,10 +310,43 @@ impl<G: PrimeField> PRandIntNode<G> {
         };
 
         match timeout(duration, output_receiver).await {
-            Err(_) => Err(PRandIntError::Timeout(session_id)),
+            Err(_) => {
+                // A stalled session is nearly always a party that never committed, and the store
+                // already knows which. Reporting it turns "PRandInt timed out" into a named
+                // suspect: RBC totality means every honest party computes the same set here, so
+                // the accusation is consistent across the network rather than one node's guess.
+                let missing = self.missing_committers(session_id).await;
+                if !missing.is_empty() {
+                    warn!(
+                        node_id = self.id,
+                        ?session_id,
+                        ?missing,
+                        "PRandInt timed out waiting for commitments; these parties never broadcast"
+                    );
+                }
+                Err(PRandIntError::Timeout(session_id))
+            }
             Ok(Err(_)) => Err(PRandIntError::ReceiveError(session_id)),
             Ok(Ok(shares)) => Ok(shares),
         }
+    }
+
+    /// Parties whose commitment vector has not been RBC-delivered for this session.
+    ///
+    /// Empty once the barrier has fired, so a non-empty result on a stalled session is the direct
+    /// cause rather than a symptom.
+    pub async fn missing_committers(&self, session_id: SessionId) -> Vec<usize> {
+        let binding = {
+            let store = self.store.lock().await;
+            match store.get(&session_id) {
+                Some((_, _, arc)) => arc.clone(),
+                None => return Vec::new(),
+            }
+        };
+        let store = binding.lock().await;
+        (0..self.n)
+            .filter(|id| !store.commitments.contains_key(id))
+            .collect()
     }
 
     async fn try_advance_from_riss(
@@ -335,7 +492,7 @@ impl<G: PrimeField> PRandIntNode<G> {
         assert_eq!(session_id.round_id(), 0);
 
         // Step 1: compute all maximal unqualified sets
-        let tsets: Vec<Vec<usize>> = (0..self.n).combinations(self.t).collect();
+        let tsets = all_tsets(self.n, self.t);
 
         let binding = match self.get_or_create_store(session_id, self.id).await {
             Some(s) => s,
@@ -384,7 +541,7 @@ impl<G: PrimeField> PRandIntNode<G> {
             std::mem::take(&mut store.pending_riss_messages)
         };
         for pending_msg in pending {
-            match self.process(pending_msg, network.clone()).await {
+            match self.process(pending_msg).await {
                 Ok(()) => {}
                 Err(PRandIntError::InvalidMessage(_)) | Err(PRandIntError::Duplicate(_)) => {
                     warn!("dropping invalid pending RISS message from Byzantine peer");
@@ -393,32 +550,99 @@ impl<G: PrimeField> PRandIntNode<G> {
             }
         }
 
-        // Reprocess echo messages that arrived before this session was initialized
-        let pending_echoes = {
+        // Step 3: commit to every contribution and reliably broadcast the commitments. The values
+        // themselves are held back until *every* party has committed — see `try_release_openings`.
+
+        let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
+        let mut openings: Vec<(Vec<usize>, Vec<BigUint>, [u8; PRANDINT_NONCE_LEN])> =
+            Vec::with_capacity(tsets.len());
+        let mut commitments = Vec::with_capacity(tsets.len());
+
+        for tset in &tsets {
+            let r_t_i: Vec<BigUint> = (0..batch_size)
+                .map(|_| gen_big_uint_range(&mut rng, &bound))
+                .collect();
+            let mut nonce = [0u8; PRANDINT_NONCE_LEN];
+            rng.fill(&mut nonce);
+            commitments.push(commit_contribution(tset, &r_t_i, &nonce));
+            openings.push((tset.clone(), r_t_i, nonce));
+        }
+
+        // `sub_id` carries our own party id so the RBC's dealer check binds the broadcast to us
+        let commit_session = SessionId::new(
+            ProtocolType::PRandInt,
+            SessionId::pack_slot(session_id.exec_id(), self.id as u8, session_id.round_id()),
+            session_id.instance_id(),
+        );
+        let commit_msg =
+            PRandIntCommitMessage::new(self.id, commit_session, std::mem::take(&mut commitments));
+        {
             let binding = match self.get_or_create_store(session_id, self.id).await {
                 Some(s) => s,
                 None => return Ok(()),
             };
             let mut store = binding.lock().await;
-            std::mem::take(&mut store.pending_echo_messages)
-        };
-        for echo_msg in pending_echoes {
-            match self.process_echo(echo_msg).await {
-                Ok(()) => {}
-                Err(PRandIntError::InvalidMessage(_)) | Err(PRandIntError::Duplicate(_)) => {
-                    warn!("dropping invalid pending echo message from Byzantine peer");
-                }
-                Err(e) => return Err(e),
-            }
+            store.my_openings = openings;
         }
 
-        let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-        for tset in tsets {
-            let r_t_i: Vec<BigUint> = (0..batch_size)
-                .map(|_| gen_big_uint_range(&mut rng, &bound))
-                .collect();
+        self.rbc
+            .init(
+                bincode::serialize(&commit_msg)?,
+                commit_session,
+                network.clone(),
+            )
+            .await?;
 
-            // Send to all players not in T
+        // Our own broadcast may already have come back to us, so try the barrier here as well as
+        // from the drain — whichever call sees the last commitment arrive is the one that fires.
+        self.try_release_openings(session_id, network).await
+    }
+
+    /// Sends this party's openings once every party's commitments have been delivered, and not
+    /// before.
+    ///
+    /// This is the anti-rushing barrier. Without it a corrupt party can withhold its own broadcast,
+    /// watch the honest openings arrive, pick its `r_T` to drive the sum wherever it likes, and
+    /// only then commit — a commitment made after seeing the inputs binds it to nothing. Holding
+    /// every opening until all `n` vectors are in means each contribution is fixed before its
+    /// sender has seen any other.
+    ///
+    /// The cost is a liveness coupling: a party that never broadcasts stalls the session. That is
+    /// the intended trade, and it is a *clean* stall — RBC totality means either every honest party
+    /// delivers a given vector or none does, so all of them reach the same conclusion about who is
+    /// missing rather than each timing out on a different peer.
+    ///
+    /// What this does not stop is abort-steering: having committed, an adversary can still watch
+    /// the honest openings and decline to send its own. Nothing in a commit-then-open structure
+    /// prevents walking away.
+    async fn try_release_openings<N: Network + Send + Sync>(
+        &mut self,
+        session_id: SessionId,
+        network: Arc<N>,
+    ) -> Result<(), PRandIntError> {
+        let openings = {
+            let binding = match self.get_or_create_store(session_id, self.id).await {
+                Some(s) => s,
+                None => return Ok(()),
+            };
+            let mut store = binding.lock().await;
+
+            if store.openings_sent
+                || store.my_openings.is_empty()
+                || store.commitments.len() < self.n
+            {
+                return Ok(());
+            }
+            // Set before releasing the lock: `drain_rbc_output` can re-enter here.
+            store.openings_sent = true;
+            std::mem::take(&mut store.my_openings)
+        };
+
+        info!(
+            node_id = self.id,
+            "all parties committed, releasing openings"
+        );
+        for (tset, r_t_i, nonce) in openings {
             for j in 0..self.n {
                 if !tset.contains(&j) {
                     let msg = WrappedMessage::PRandInt(PRandIntMessage::new(
@@ -426,6 +650,7 @@ impl<G: PrimeField> PRandIntNode<G> {
                         session_id,
                         tset.clone(),
                         r_t_i.clone(),
+                        nonce,
                     ));
                     let bytes_msg = bincode::serialize(&msg)?;
                     network.send(j, &bytes_msg).await?;
@@ -435,11 +660,7 @@ impl<G: PrimeField> PRandIntNode<G> {
         Ok(())
     }
 
-    pub async fn process<N: Network + Send + Sync>(
-        &mut self,
-        msg: PRandIntMessage,
-        network: Arc<N>,
-    ) -> Result<(), PRandIntError> {
+    pub async fn process(&mut self, msg: PRandIntMessage) -> Result<(), PRandIntError> {
         info!(node_id = self.id, sender = msg.sender_id, "At RISS handler");
 
         if msg.session_id.calling_protocol().is_none() {
@@ -530,51 +751,64 @@ impl<G: PrimeField> PRandIntNode<G> {
             }
         }
 
-        // Deduplicate per (sender, tset) against the direct-receive buffer
-        let key = (msg.tset.clone(), msg.sender_id);
-        if store.riss_direct.contains_key(&key) {
-            return Err(PRandIntError::Duplicate(format!(
-                "PRandInt: Already received from {} for tset {:?}",
-                msg.sender_id, msg.tset
-            )));
-        }
-
-        // Park value pending echo verification — do NOT insert into riss_shares yet
-        store.riss_direct.insert(key, msg.r_t.clone());
+        // The commitment may not have been RBC-delivered yet — openings and broadcasts race. Park
+        // the opening and let `drain_rbc_output` replay it when the commitment lands.
+        let Some(sender_commitments) = store.commitments.get(&msg.sender_id).cloned() else {
+            const MAX_PENDING_RISS: usize = 4096;
+            if store.pending_riss_messages.len() >= MAX_PENDING_RISS {
+                return Err(PRandIntError::InvalidMessage(
+                    "too many openings pending a commitment".into(),
+                ));
+            }
+            if store
+                .pending_riss_messages
+                .iter()
+                .any(|m| m.sender_id == msg.sender_id && m.tset == msg.tset)
+            {
+                return Err(PRandIntError::Duplicate(format!(
+                    "Already queued from {} for tset {:?}",
+                    msg.sender_id, msg.tset
+                )));
+            }
+            store.pending_riss_messages.push(msg);
+            return Ok(());
+        };
         drop(store);
 
-        // Echo the received value to all other non-T parties
-        let non_t_others: Vec<usize> = (0..self.n)
-            .filter(|&j| !msg.tset.contains(&j) && j != self.id)
-            .collect();
-        let echo = WrappedMessage::PRandIntEcho(PRandIntEchoMessage::new(
-            self.id,
-            msg.sender_id,
-            msg.session_id,
-            msg.tset.clone(),
-            msg.r_t,
-        ));
-        let echo_bytes = bincode::serialize(&echo)?;
-        for &j in &non_t_others {
-            network.send(j, &echo_bytes).await?;
-        }
-
-        self.try_maybe_verify_and_insert(msg.session_id, msg.tset, msg.sender_id)
-            .await
+        self.verify_and_insert(msg, &sender_commitments).await
     }
 
-    /// Verifies echo consistency for a single (tset, original_sender) contribution and,
-    /// if all n-t-1 echoes have arrived and agree with the directly received value,
-    /// inserts the verified contribution into riss_shares and folds r_t when complete.
-    async fn try_maybe_verify_and_insert(
+    /// Checks one opening against its sender's RBC-delivered commitment vector, accepts it, and
+    /// folds `r_T` once every contributor for that unqualified set has been accepted.
+    ///
+    /// A mismatch here is unambiguous. The commitment vector came from RBC, so every honest party
+    /// holds the identical one, and only the sender could have produced an opening for it — there
+    /// is no third party whose word is being taken. That is what makes aborting on this sound,
+    async fn verify_and_insert(
         &mut self,
-        session_id: SessionId,
-        tset: Vec<usize>,
-        original_sender: usize,
+        msg: PRandIntMessage,
+        sender_commitments: &[[u8; PRANDINT_COMMIT_LEN]],
     ) -> Result<(), PRandIntError> {
-        let key = (tset.clone(), original_sender);
-        // All non-T parties except self must send an echo: n - t - 1
-        let expected_echoes = self.n.saturating_sub(self.t + 1);
+        let session_id = msg.session_id;
+        let tset = msg.tset;
+        let original_sender = msg.sender_id;
+
+        let rank = self.rank_of(&tset)?;
+
+        let expected = sender_commitments.get(rank).ok_or_else(|| {
+            PRandIntError::InvalidMessage(format!(
+                "sender {original_sender} committed to {} sets, no entry at rank {rank}",
+                sender_commitments.len()
+            ))
+        })?;
+
+        if &commit_contribution(&tset, &msg.r_t, &msg.nonce) != expected {
+            warn!(
+                node_id = self.id,
+                original_sender, "RISS opening does not match committed value"
+            );
+            return Err(PRandIntError::EquivocationDetected(original_sender, tset));
+        }
 
         let binding = match self.get_or_create_store(session_id, self.id).await {
             Some(s) => s,
@@ -584,35 +818,7 @@ impl<G: PrimeField> PRandIntNode<G> {
         let should_advance = {
             let mut store = binding.lock().await;
 
-            // Wait until the direct message has arrived
-            let direct_val = match store.riss_direct.get(&key) {
-                Some(v) => v.clone(),
-                None => return Ok(()),
-            };
-
-            // Wait until all expected echoes have arrived
-            let echo_count = store.riss_echoes.get(&key).map(|m| m.len()).unwrap_or(0);
-            if echo_count < expected_echoes {
-                return Ok(());
-            }
-
-            // Verify every echo matches what we received directly
-            if let Some(echoes) = store.riss_echoes.get(&key) {
-                for (&echoer, echo_val) in echoes {
-                    if echo_val != &direct_val {
-                        warn!(
-                            node_id = self.id,
-                            original_sender, echoer, "RISS equivocation detected"
-                        );
-                        return Err(PRandIntError::EquivocationDetected(
-                            original_sender,
-                            tset.clone(),
-                        ));
-                    }
-                }
-            }
-
-            // Guard against duplicate insertion (e.g. called twice)
+            // Guard against duplicate insertion (e.g. a replayed opening)
             if store
                 .riss_shares
                 .get(&tset)
@@ -628,7 +834,7 @@ impl<G: PrimeField> PRandIntNode<G> {
                     .riss_shares
                     .entry(tset.clone())
                     .or_insert_with(HashMap::new);
-                entry.insert(original_sender, direct_val);
+                entry.insert(original_sender, msg.r_t);
             }
 
             // Fold into r_t when all n contributors for this tset have been verified
@@ -662,116 +868,6 @@ impl<G: PrimeField> PRandIntNode<G> {
         Ok(())
     }
 
-    /// Handles an incoming RISS echo message.
-    /// Stores the echo and triggers verification once all echoes for a contribution arrive.
-    pub async fn process_echo(&mut self, msg: PRandIntEchoMessage) -> Result<(), PRandIntError> {
-        if msg.tset.contains(&self.id) {
-            return Err(PRandIntError::InvalidMessage(format!(
-                "echo: node {} received echo for tset containing itself: {:?}",
-                self.id, msg.tset
-            )));
-        }
-        if msg.tset.len() != self.t {
-            return Err(PRandIntError::InvalidMessage(format!(
-                "echo: tset length {} != threshold {}",
-                msg.tset.len(),
-                self.t
-            )));
-        }
-        if msg.tset.iter().any(|&id| id >= self.n) {
-            return Err(PRandIntError::InvalidMessage(
-                "echo: tset contains out-of-range party ID".into(),
-            ));
-        }
-        {
-            let mut seen = std::collections::HashSet::new();
-            if msg.tset.iter().any(|id| !seen.insert(id)) {
-                return Err(PRandIntError::InvalidMessage(
-                    "echo: tset contains duplicate IDs".into(),
-                ));
-            }
-        }
-        if msg.tset.contains(&msg.echoer_id) {
-            return Err(PRandIntError::InvalidMessage(format!(
-                "echo: echoer {} is in the tset {:?}",
-                msg.echoer_id, msg.tset
-            )));
-        }
-        if msg.echoer_id == self.id {
-            return Err(PRandIntError::InvalidMessage(
-                "echo: received own echo".to_string(),
-            ));
-        }
-        if msg.original_sender >= self.n || msg.echoer_id >= self.n {
-            return Err(PRandIntError::InvalidMessage(
-                "echo: party ID out of range".to_string(),
-            ));
-        }
-
-        if msg.session_id.calling_protocol().is_none() {
-            return Err(PRandIntError::SessionIdError(msg.session_id));
-        }
-
-        let binding = match self
-            .get_or_create_store(msg.session_id, msg.original_sender)
-            .await
-        {
-            Some(s) => s,
-            None => return Ok(()),
-        };
-
-        {
-            let mut store = binding.lock().await;
-
-            // Queue if session not yet initialized
-            if store.batch_size.is_none() || store.r_t_bound.is_none() {
-                const MAX_PENDING_ECHO: usize = 4096;
-                if store.pending_echo_messages.len() >= MAX_PENDING_ECHO {
-                    return Err(PRandIntError::InvalidMessage(
-                        "pending echo queue full".to_string(),
-                    ));
-                }
-                store.pending_echo_messages.push(msg);
-                return Ok(());
-            }
-
-            if let Some(batch_size) = store.batch_size {
-                if msg.r_t.len() != batch_size {
-                    return Err(PRandIntError::InvalidMessage(format!(
-                        "echo: r_t length {} != batch_size {}",
-                        msg.r_t.len(),
-                        batch_size
-                    )));
-                }
-            }
-            if let Some(ref bound) = store.r_t_bound {
-                for val in &msg.r_t {
-                    if val >= bound {
-                        return Err(PRandIntError::InvalidMessage(format!(
-                            "echo: r_t value from echoer {} is at or above the bound",
-                            msg.echoer_id
-                        )));
-                    }
-                }
-            }
-
-            let key = (msg.tset.clone(), msg.original_sender);
-            let echo_map = store.riss_echoes.entry(key).or_insert_with(HashMap::new);
-
-            if echo_map.contains_key(&msg.echoer_id) {
-                return Err(PRandIntError::Duplicate(format!(
-                    "PRandInt: Already received echo from {} for (sender={}, tset={:?})",
-                    msg.echoer_id, msg.original_sender, msg.tset
-                )));
-            }
-
-            echo_map.insert(msg.echoer_id, msg.r_t);
-        }
-
-        self.try_maybe_verify_and_insert(msg.session_id, msg.tset, msg.original_sender)
-            .await
-    }
-
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
@@ -792,6 +888,31 @@ impl<G: PrimeField> PRandIntNode<G> {
             }
         }
     }
+}
+
+/// Binding, hiding commitment to one party's contribution for one unqualified set.
+/// Lengths are hashed alongside the values because `BigUint` byte encodings are variable-width:
+/// without them, two different `r_T` vectors could serialise to the same concatenated bytes and
+/// the commitment would not bind.
+fn commit_contribution(
+    tset: &[usize],
+    values: &[BigUint],
+    nonce: &[u8; PRANDINT_NONCE_LEN],
+) -> [u8; PRANDINT_COMMIT_LEN] {
+    let mut h = Sha256::new();
+    h.update(b"STOFFEL-RISS-COMMIT-v1");
+    h.update((tset.len() as u64).to_le_bytes());
+    for party in tset {
+        h.update((*party as u64).to_le_bytes());
+    }
+    h.update((values.len() as u64).to_le_bytes());
+    for value in values {
+        let bytes = value.to_bytes_le();
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(&bytes);
+    }
+    h.update(nonce);
+    h.finalize().into()
 }
 
 /// `ceil(log2(C(n, t)))` — the width a sum gains from ranging over every unqualified set.

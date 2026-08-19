@@ -51,8 +51,7 @@ use crate::{
             fpmul::{FPError, FPMulNode},
             prandint::PRandIntNode,
             rand_bit::RandBit,
-            PRandIntEchoMessage, PRandIntError, PRandIntMessage, RandBitError, TruncPrError,
-            TruncPrMessage,
+            PRandIntError, PRandIntMessage, RandBitError, TruncPrError, TruncPrMessage,
         },
         input::{
             input::{InputClient, InputServer},
@@ -447,7 +446,7 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
     /// Generates PRandInt shares via the distributed RISS protocol.
-    pub prand_int: PRandIntNode<F>,
+    pub prand_int: PRandIntNode<F, R>,
     /// Generates RandBit shares directly in `F` (see `ensure_randbit_shares`).
     pub rand_bit: RandBit<F>,
     /// Produces the degree-`2t` zero-sharings that re-randomise RandBit's MulPub opening.
@@ -651,7 +650,8 @@ where
         }
         // Create nodes for preprocessing.
         let dousha_node = DoubleShareNode::new(id, params.n_parties, params.threshold);
-        let prand_int_node = PRandIntNode::new(id, params.n_parties, params.threshold)?;
+        let prand_int_node =
+            PRandIntNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
         let ran_dou_sha_node =
             RanDouShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
@@ -890,6 +890,14 @@ where
                         self.preprocess.zero_sha.rbc.process(rbc_msg, net).await?;
                         self.preprocess.zero_sha.drain_rbc_output().await?;
                     }
+                    Some(ProtocolType::PRandInt) => {
+                        self.preprocess
+                            .prand_int
+                            .rbc
+                            .process(rbc_msg, net.clone())
+                            .await?;
+                        self.preprocess.prand_int.drain_rbc_output(net).await?;
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} in RBC",
@@ -1004,21 +1012,7 @@ where
                         prand_message.session_id.instance_id(),
                     ));
                 }
-                self.preprocess
-                    .prand_int
-                    .process(prand_message, net)
-                    .await?;
-            }
-            WrappedMessage::PRandIntEcho(echo_msg) => {
-                if sender_id != echo_msg.echoer_id {
-                    return Err(HoneyBadgerError::InvalidPartyId);
-                }
-                if echo_msg.session_id.instance_id() != self.params.instance_id {
-                    return Err(HoneyBadgerError::InstanceIdError(
-                        echo_msg.session_id.instance_id(),
-                    ));
-                }
-                self.preprocess.prand_int.process_echo(echo_msg).await?;
+                self.preprocess.prand_int.process(prand_message).await?;
             }
             WrappedMessage::Mult(mult_msg) => {
                 if sender_id != mult_msg.sender {
@@ -1975,7 +1969,6 @@ pub enum WrappedMessage {
     Dousha(DouShaMessage),
     Output(OutputMessage),
     PRandInt(PRandIntMessage),
-    PRandIntEcho(PRandIntEchoMessage),
     /// Direct point-to-point opening of a multiplication's `(a - x)`/`(b - y)` remainder shares
     /// (used when the batch size isn't a multiple of `t + 1`). Robust interpolation tolerates up
     /// to `t` bad shares, so this doesn't need RBC's reliable-broadcast agreement — same trust
