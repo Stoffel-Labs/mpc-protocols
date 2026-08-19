@@ -2,8 +2,8 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use futures::lock::Mutex;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 use crate::avss_mpc::AvssSessionId;
 
