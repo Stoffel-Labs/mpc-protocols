@@ -229,6 +229,13 @@ impl<F: PrimeField> PrssKeys<F> {
         self.entries.len()
     }
 
+    /// Never true for a `PrssKeys` built by [`Self::new`]: `C(n-1, t) >= 1` for any valid `n > t`,
+    /// and `new` rejects a key set that doesn't match the held ranks. Present because `len`
+    /// without it is a clippy error under `-D warnings`.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// This party's Shamir shares of the masks at absolute positions `start .. start + count`,
     /// each uniform in `[0, 2^bits)`.
     ///
