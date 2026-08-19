@@ -44,7 +44,6 @@ const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 pub mod input;
 pub mod mul;
 pub mod output;
-pub mod reshare;
 pub mod share_gen;
 pub mod triple_gen;
 
