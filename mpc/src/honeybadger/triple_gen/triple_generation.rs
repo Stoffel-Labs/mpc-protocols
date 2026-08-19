@@ -9,6 +9,7 @@ use tokio::time::{timeout, Duration};
 use tracing::info;
 
 use crate::common::utils::deser_bounded_vec;
+use crate::common::ProtocolSessionId;
 use crate::honeybadger::triple_gen::{TripleGenError, TripleGenStorage};
 use crate::honeybadger::{
     double_share::DoubleShamirShare, triple_gen::ShamirBeaverTriple, SessionId,

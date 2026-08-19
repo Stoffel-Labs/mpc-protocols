@@ -853,24 +853,23 @@ impl ProtocolSessionId for AvssSessionId {
     unsafe fn from_u128(id: u128) -> Self {
         AvssSessionId(id)
     }
-}
-impl AvssSessionId {
+
     /// Execution id — widened to 64 bits (bits 48..112) so back-to-back sessions do not wrap.
-    pub fn exec_id(self) -> u64 {
+    fn exec_id(self) -> u64 {
         (self.0 >> 48) as u64
     }
 
-    pub fn sub_id(self) -> u8 {
+    fn sub_id(self) -> u8 {
         ((self.0 >> 40) & 0xFF) as u8
     }
 
-    pub fn round_id(self) -> u8 {
+    fn round_id(self) -> u8 {
         ((self.0 >> 32) & 0xFF) as u8
     }
 
     /// Pack the flexible field: exec_id at the top of the 80-bit slot, sub_id and round_id below.
     #[inline]
-    pub fn pack_slot(exec_id: u64, sub_id: u8, round_id: u8) -> u128 {
+    fn pack_slot(exec_id: u64, sub_id: u8, round_id: u8) -> u128 {
         ((exec_id as u128) << 16) | ((sub_id as u128) << 8) | (round_id as u128)
     }
 }

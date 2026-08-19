@@ -3,7 +3,7 @@ use ark_ff::FftField;
 use ark_std::test_rng;
 use std::sync::Arc;
 use std::time::Duration;
-use stoffelcrypto::common::{SecretSharingScheme, RBC};
+use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use stoffelcrypto::honeybadger::fpmul::rand_bit::RandBit;
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelcrypto::honeybadger::triple_gen::ShamirBeaverTriple;

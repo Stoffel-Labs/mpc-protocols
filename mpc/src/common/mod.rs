@@ -1,3 +1,9 @@
+// Recovered from session transcripts (state of 2026-08-06). Written against an `aba::Aba`
+// trait and an `aba::crain_aba` submodule that the committed ABA implementation replaced with
+// the concrete `aba::CrainAba`. Re-enable once `acs` is ported to the current ABA API.
+// pub mod acs;
+pub mod dc_avss;
+pub mod dpss;
 pub mod rbc;
 
 /// In MPC, the most fundamental underlying type is called a share.
@@ -8,10 +14,13 @@ pub mod rbc;
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
 
-/// Implementation of the hbACSS protocol from https://eprint.iacr.org/2021/159.
+/// Implementation of the hbACSS protocol from <https://eprint.iacr.org/2021/159>.
 pub mod acss;
 
-/// Implementation of Crain ABA in "Two More Algorithms for Randomized Signature-Free Asynchronous Binary Byzantine Consensus with t < n/3 and O(n^2) Messages and O(1) Round Expected Termination".
+/// The asynchronous binary Byzantine agreement abstraction, [`aba::Aba`], and the implementations of
+/// it. Currently one: [`aba::crain_aba`], Figure 3 of "Two More Algorithms for Randomized
+/// Signature-Free Asynchronous Binary Byzantine Consensus with t < n/3 and O(n^2) Messages and O(1)
+/// Round Expected Termination".
 pub mod aba;
 
 pub mod math;
@@ -517,4 +526,10 @@ pub trait ProtocolSessionId:
     /// # Safety
     /// Caller must ensure the raw value is well-formed.
     unsafe fn from_u128(raw: u128) -> Self;
+
+    fn pack_slot(exec_id: u64, sub_id: u8, round_id: u8) -> u128;
+
+    fn exec_id(self) -> u64;
+    fn sub_id(self) -> u8;
+    fn round_id(self) -> u8;
 }

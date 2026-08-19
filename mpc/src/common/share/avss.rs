@@ -1,4 +1,5 @@
 use crate::common::{
+    dc_avss::Committee,
     rbc::RbcError,
     share::{feldman::FeldmanShamirShare, shamir::Shamirshare, ShareError},
     ProtocolSessionId, RbcWrapFn, SecretSharingScheme, RBC,
@@ -266,8 +267,89 @@ where
         Ok(())
     }
 
+    pub async fn init_for<Rnd, N>(
+        &self,
+        committee: Committee<F, G>,
+        secrets: Vec<F>,
+        session_id: Id,
+        rng: &mut Rnd,
+        net: Arc<N>,
+    ) -> Result<(), AvssError>
+    where
+        Rnd: Rng,
+        N: Network + Sync + Send,
+    {
+        info!("Receiving init for avss from {0:?}", self.id);
+
+        // Generate the random polynomial of degree `degree` with `secret` as constant term
+        let shares: Vec<Vec<FeldmanShamirShare<F, G>>> = secrets
+            .into_iter()
+            .map(|secret| {
+                FeldmanShamirShare::compute_shares(
+                    secret,
+                    committee.n,
+                    committee.t,
+                    Some(&committee.ids),
+                    rng,
+                )
+            })
+            .collect::<Result<Vec<_>, ShareError>>()?;
+
+        // Dealer ephemeral keypair
+        let sk_d = F::rand(rng);
+        let pk_d = G::generator().mul(sk_d);
+
+        let mut pk_d_bytes = Vec::new();
+        pk_d.serialize_compressed(&mut pk_d_bytes)?;
+
+        let mut encrypted: Vec<Vec<Vec<u8>>> = vec![Vec::with_capacity(shares.len()); committee.n];
+
+        let keys: Vec<_> = committee
+            .pub_keys
+            .iter()
+            .map(|pk| {
+                let ss = pk.mul(sk_d);
+                kdf_from_point(&ss)
+            })
+            .collect();
+        let mut public_commitments: Vec<Vec<Vec<u8>>> = Vec::with_capacity(shares.len());
+        let mut pt = Vec::new();
+        for x in &shares {
+            assert_eq!(x.len(), committee.n);
+            // commitments are identical across all parties for the same polynomial
+            let commitment_bytes = x[0]
+                .commitments
+                .iter()
+                .map(|c| {
+                    let mut b = Vec::new();
+                    c.serialize_compressed(&mut b).map(|_| b)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            public_commitments.push(commitment_bytes);
+
+            for (i, share) in x.iter().enumerate() {
+                pt.clear();
+                share.feldmanshare.serialize_compressed(&mut pt)?; // scalar only
+                encrypted[i].push(encrypt(keys[i].clone(), &pt, rng)?);
+            }
+        }
+
+        //Broadcast to servers
+        let msg = AvssMessage {
+            session_id: session_id,
+            dealer_pk: pk_d_bytes,
+            public_commitments,
+            encrypted_shares: encrypted,
+        };
+
+        let bytes = bincode::serialize(&msg)?;
+        self.rbc.init(bytes, session_id, net).await?;
+
+        Ok(())
+    }
+
     pub async fn init<Rnd, N>(
-        &mut self,
+        &self,
         secrets: Vec<F>,
         session_id: Id,
         rng: &mut Rnd,
@@ -347,7 +429,7 @@ where
         Ok(())
     }
 
-    pub async fn process(&mut self, msg: AvssMessage<Id>) -> Result<(), AvssError> {
+    pub async fn process(&self, msg: AvssMessage<Id>) -> Result<(), AvssError> {
         info!(
             party_id = ?self.id,
             session_id = msg.session_id.as_u128(),
