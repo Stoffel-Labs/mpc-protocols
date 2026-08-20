@@ -438,6 +438,15 @@ impl<F: FftField> Multiply<F> {
 
         // 2.
         if sid.round_id() == 1 {
+            // Round-1 payloads are this node's own batch-recon output, delivered only via the
+            // local `drain_batch_recon_output` -> `process(self.id, ...)` call. They must never
+            // be accepted from the network: unlike round-2 shares, they carry no quorum/degree
+            // check, so a forged one would be taken as the final reconstructed value verbatim.
+            if sender != self.id {
+                return Err(MulError::InvalidInput(
+                    "Round 1 (batch-recon output) messages must originate locally".to_string(),
+                ));
+            }
             // Batched batch-recon: one session returns ALL a-x (dealer 0) or ALL b-y (dealer 1)
             // values for the mul session. Bound the deserialization by the session capacity (not
             // self.n) — the opened vector can hold up to `max_mul_pairs_per_session` values.
