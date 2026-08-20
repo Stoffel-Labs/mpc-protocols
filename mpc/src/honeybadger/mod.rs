@@ -1912,10 +1912,14 @@ where
     /// Tops the PRandInt mask pool up to `n_prandint`, deriving locally from PRSS keys.
     ///
     /// No network: the keys were established once by [`Self::setup_prss_keys`], and every mask
-    /// after that is a local PRF evaluation. Masks are addressed by pool position, so a node
-    /// filling a partly-drained pool derives exactly the suffix the others already hold, and no
-    /// per-invocation counter enters the PRF input — a counter that drifted between parties would
-    /// silently yield shares of different secrets, with no message exchange left to catch it.
+    /// after that is a local PRF evaluation. Masks are addressed by `prandint_cursor` — the total
+    /// number ever generated — rather than by current pool depth: depth shrinks as shares are
+    /// consumed, and deriving from it would eventually rewind the PRF position and hand out a
+    /// mask some earlier, already-opened operation already used. The cursor only advances, so a
+    /// position is never issued twice. Nor is it a per-invocation counter reset on retry — it is
+    /// driven purely by how much has been generated so far, which every honest party computes
+    /// identically; a counter that drifted between parties would silently yield shares of
+    /// different secrets, with no message exchange left to catch it.
     async fn ensure_prandint_shares(&mut self) -> Result<(), HoneyBadgerError> {
         let no_shares = {
             let store = self.preprocessing_material.lock().await;
@@ -1931,9 +1935,13 @@ where
         info!("PRandInt share generation");
 
         let bits = self.params.mask_bits();
+        let cursor = {
+            let store = self.preprocessing_material.lock().await;
+            store.prandint_cursor()
+        };
         let output = self.preprocess.prand_int.generate_prss_at(
             self.params.instance_id,
-            no_shares,
+            cursor,
             missing,
             bits,
         )?;

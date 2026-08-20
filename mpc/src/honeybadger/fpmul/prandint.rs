@@ -109,14 +109,15 @@ where
     /// Derives the mask shares at absolute positions `start .. start + count`. No network, no
     /// session state.
     ///
-    /// `start` is the party's current pool depth, so a node topping up a half-filled pool derives
-    /// exactly the suffix the others already hold. Masks are addressed by position rather than by
-    /// a per-invocation counter precisely so that restarts, retries and pool-level skew cannot
-    /// silently repoint the derivation: with a local counter in the PRF input, two parties out of
-    /// step by one produce shares of entirely different secrets and no message exchange remains
-    /// to notice.
+    /// `start` must be the total count of masks ever generated so far (a monotonic cursor), *not*
+    /// current pool depth — depth shrinks as masks are consumed, and deriving from it would
+    /// eventually rewind the PRF position and reissue a mask some earlier, already-opened
+    /// operation already used. Masks are addressed by position rather than by a per-invocation
+    /// counter precisely so that restarts and retries cannot silently repoint the derivation:
+    /// with a local counter in the PRF input, two parties out of step by one produce shares of
+    /// entirely different secrets and no message exchange remains to notice.
     ///
-    /// Parties must still agree on `bits` and on the pool position they are filling.
+    /// Parties must still agree on `bits` and on the cursor position they are filling.
     pub fn generate_prss_at(
         &self,
         instance_id: u32,

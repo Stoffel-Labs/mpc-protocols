@@ -16,6 +16,8 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     randbit_shares: Vec<RobustShare<F>>,
     /// A pool of PRandInt outputs for truncation
     prandint_shares: Vec<RobustShare<F>>,
+    /// Count of PRandInt masks ever generated, independent of how many have since been consumed.
+    prandint_cursor: usize,
     /// A pool of degree-`2t` sharings of zero, consumed by RandBit's MulPub opening.
     zero_shares: Vec<RobustShare<F>>,
 }
@@ -52,6 +54,7 @@ where
             beaver_triples: Vec::new(),
             randbit_shares: Vec::new(),
             prandint_shares: Vec::new(),
+            prandint_cursor: 0,
             zero_shares: Vec::new(),
         }
     }
@@ -76,8 +79,15 @@ where
             self.randbit_shares.append(shares);
         }
         if let Some(shares) = &mut prandint_shares {
+            self.prandint_cursor += shares.len();
             self.prandint_shares.append(shares);
         }
+    }
+
+    /// Absolute PRSS position to derive the next batch of PRandInt masks at. Tracks total
+    /// generation, not remaining pool depth, so it only ever advances.
+    pub fn prandint_cursor(&self) -> usize {
+        self.prandint_cursor
     }
 
     /// Returns the number of random double share pairs, and the number of random shares
