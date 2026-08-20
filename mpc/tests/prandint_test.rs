@@ -338,3 +338,51 @@ async fn riss_rejects_an_opening_that_does_not_match_its_commitment() {
         "equivocation must be attributed to sender 1, got {rendered}"
     );
 }
+
+/// The pending-openings queue for an uninitialized session must be capped by aggregate bytes, not
+/// just by message count.
+///
+/// Before `generate_riss` sets `batch_size`/`r_t_bound`, `process` cannot check `r_t.len()` against
+/// anything real, so it queues the message whole. `r_t` is attacker-controlled up to the 10 MiB
+/// network frame cap, and the object-count cap alone (4096) would let a single sender hold ~40 GiB
+/// of queued openings hostage against one session before it engages. A single sender is limited to
+/// one message per distinct `tset` (duplicates are rejected), which at n=5, t=1 is only the four
+/// non-self singletons — nowhere near 4096 — so without a byte budget this queue would accept all
+/// four multi-megabyte messages below.
+#[tokio::test]
+async fn riss_pending_queue_enforces_an_aggregate_byte_budget() {
+    setup_tracing();
+
+    let n = 5;
+    let t = 1;
+    let session_id = SessionId::new(ProtocolType::PRandInt, SessionId::pack_slot(50, 0, 0), 111);
+
+    // No `generate_riss` call: batch_size/r_t_bound stay unset, so every message below takes the
+    // "queue for retroactive validation" branch instead of being checked against real bounds.
+    let mut node = PRandIntNode::<Fr, Avid<SessionId>>::new(0, n, t, t + 1).unwrap();
+
+    let big = BigUint::from_bytes_le(&vec![0xAAu8; 1_500_000]);
+    let mut last_result = Ok(());
+    for tset_member in 1..n {
+        let msg = PRandIntMessage::new(
+            1,
+            session_id,
+            vec![tset_member],
+            vec![big.clone()],
+            [0u8; PRANDINT_NONCE_LEN],
+        );
+        last_result = node.process(msg).await;
+        if last_result.is_err() {
+            break;
+        }
+    }
+
+    let err = last_result.expect_err(
+        "queuing three ~1.5 MiB messages for an uninitialized session must hit the aggregate byte \
+         budget long before the 4096-message count cap could ever engage",
+    );
+    assert!(
+        format!("{err:?}").contains("aggregate pending queue memory limit"),
+        "expected the aggregate pending-queue memory limit error, got {err:?}"
+    );
+}

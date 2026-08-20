@@ -244,6 +244,8 @@ pub struct PRandIntStore<G: PrimeField> {
     /// Openings that arrived before this session was locally initialized, or before their sender's
     /// commitment was delivered by RBC. Replayed from both of those points.
     pub pending_riss_messages: Vec<PRandIntMessage>,
+    /// Running total of `riss_msg_weight` over every message currently in `pending_riss_messages`.
+    pub pending_riss_bytes: usize,
     /// Contributions verified against their sender's commitment and accepted into the share sum.
     pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<BigUint>>>, // tset -> {sender -> val}
     /// RBC-delivered commitment vectors, keyed by sender, indexed by unqualified-set rank.
@@ -275,6 +277,7 @@ impl<G: PrimeField> PRandIntStore<G> {
         Self {
             batch_size: None,
             pending_riss_messages: Vec::new(),
+            pending_riss_bytes: 0,
             riss_shares: HashMap::new(),
             commitments: HashMap::new(),
             my_openings: Vec::new(),

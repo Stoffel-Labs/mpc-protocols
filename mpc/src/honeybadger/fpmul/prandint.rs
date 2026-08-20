@@ -53,6 +53,17 @@ pub struct PRandIntNode<G: PrimeField, R: RBC> {
 
 const MAX_PRAND_SESSIONS: usize = 512;
 
+/// Aggregate byte budget for a session's `pending_riss_messages` while it is uninitialized (or
+/// waiting on a sender's commitment).
+const MAX_PENDING_RISS_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+
+fn riss_msg_weight(msg: &PRandIntMessage) -> usize {
+    msg.r_t
+        .iter()
+        .map(|v| v.to_bytes_le().len() + std::mem::size_of::<BigUint>())
+        .sum()
+}
+
 impl<G, R> PRandIntNode<G, R>
 where
     G: PrimeField,
@@ -260,6 +271,7 @@ where
                 let (ready, still_pending) = std::mem::take(&mut store.pending_riss_messages)
                     .into_iter()
                     .partition::<Vec<_>, _>(|m| m.sender_id == authenticated_sender);
+                store.pending_riss_bytes -= ready.iter().map(riss_msg_weight).sum::<usize>();
                 store.pending_riss_messages = still_pending;
                 ready
             };
@@ -539,6 +551,7 @@ where
             };
             let mut store = binding.lock().await;
             store.r_t_bound = Some(bound.clone());
+            store.pending_riss_bytes = 0;
             std::mem::take(&mut store.pending_riss_messages)
         };
         for pending_msg in pending {
@@ -722,6 +735,14 @@ where
                     msg.sender_id, msg.tset
                 )));
             }
+            let weight = riss_msg_weight(&msg);
+            if store.pending_riss_bytes + weight > MAX_PENDING_RISS_BYTES {
+                return Err(PRandIntError::InvalidMessage(
+                    "aggregate pending queue memory limit exceeded for uninitialized session"
+                        .into(),
+                ));
+            }
+            store.pending_riss_bytes += weight;
             store.pending_riss_messages.push(msg);
             return Ok(());
         }
@@ -771,6 +792,14 @@ where
                     msg.sender_id, msg.tset
                 )));
             }
+            let weight = riss_msg_weight(&msg);
+            if store.pending_riss_bytes + weight > MAX_PENDING_RISS_BYTES {
+                return Err(PRandIntError::InvalidMessage(
+                    "aggregate pending queue memory limit exceeded while awaiting commitment"
+                        .into(),
+                ));
+            }
+            store.pending_riss_bytes += weight;
             store.pending_riss_messages.push(msg);
             return Ok(());
         };
