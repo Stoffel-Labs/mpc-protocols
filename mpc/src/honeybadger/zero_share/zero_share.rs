@@ -553,6 +553,10 @@ where
         if msg.session_id.sub_id() != 0 {
             return Err(ZeroShaError::SessionIdError(msg.session_id));
         }
+        if msg.sender_id >= 2 * self.threshold {
+            warn!("Rejecting output from non-verifier party {}", msg.sender_id);
+            return Err(ZeroShaError::InvalidPartyId);
+        }
 
         // Attributed to `msg.sender_id` — see receive_shares_handler for why.
         let binding = match self

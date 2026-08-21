@@ -834,6 +834,8 @@ where
             WrappedMessage::Rbc(m) => {
                 m.msg_type.is_dealer_message()
                     && m.session_id.calling_protocol() == Some(ProtocolType::Input)
+                    && m.session_id.exec_id() == 0
+                    && m.session_id.round_id() == 0
             }
             _ => false,
         };

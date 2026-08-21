@@ -146,26 +146,37 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
                 }
             };
 
-            let output = self.rbc.get_store(id).await?;
-            let msg: InputMessage = bincode::DefaultOptions::new()
+            let output = match self.rbc.get_store(id).await {
+                Ok(output) => output,
+                Err(e) => {
+                    self.rbc.clear_session(id).await;
+                    return Err(e.into());
+                }
+            };
+            let msg: InputMessage = match bincode::DefaultOptions::new()
                 .with_fixint_encoding()
                 .allow_trailing_bytes()
                 .with_limit(MAX_MESSAGE_SIZE)
-                .deserialize(&output)?;
+                .deserialize(&output)
+            {
+                Ok(msg) => msg,
+                Err(e) => {
+                    self.rbc.clear_session(id).await;
+                    return Err(e.into());
+                }
+            };
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(
                     "Dropping RBC output: inner sender_id {} does not match session sub_id {}",
                     msg.sender_id, authenticated_sender
                 );
+                self.rbc.clear_session(id).await;
                 continue;
             }
-            match self.input_handler(authenticated_sender, msg.payload).await {
-                Ok(()) => {}
-                Err(e) => {
-                    return Err(e);
-                }
-            }
+            let handler_result = self.input_handler(authenticated_sender, msg.payload).await;
+            self.rbc.clear_session(id).await;
+            handler_result?;
         }
         Ok(())
     }
