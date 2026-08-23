@@ -38,11 +38,15 @@ pub enum RanShaAvssError {
     InvalidPartyId,
     #[error("Store Limit")]
     LimitError,
+    #[error("invalid random-share batch size")]
+    InvalidBatchSize,
 }
 
 #[derive(Debug)]
 pub struct RanShaAvssStore<F: FftField, G: CurveGroup<ScalarField = F>> {
-    pub initial_shares: HashMap<usize, FeldmanShamirShare<F, G>>,
+    /// Dealer-major batches of AVSS shares. Every dealer contributes the same
+    /// number of independently shared random field elements.
+    pub initial_shares: HashMap<usize, Vec<FeldmanShamirShare<F, G>>>,
     pub reception_tracker: Vec<bool>,
     pub computed_r_shares: Vec<FeldmanShamirShare<F, G>>,
     pub protocol_output: Vec<FeldmanShamirShare<F, G>>,

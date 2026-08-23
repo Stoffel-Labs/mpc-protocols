@@ -1,3 +1,4 @@
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{
         rbc::RbcError, share::ShareError, utils::deser_bounded_vec, ProtocolSessionId,
@@ -22,6 +23,7 @@ use std::{
     collections::HashMap,
     ops::{Mul, Sub},
     sync::Arc,
+    time::Instant,
 };
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
@@ -143,14 +145,15 @@ pub struct Multiply<F: FftField, R: RBC> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub mult_storage: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<MultStorage<F>>>)>>>,
+    pub mult_storage:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<MultStorage<F>>>)>>>,
     pub batch_recon: BatchReconNode<F>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 
-// pub static MAX_MUL_SESSIONS: usize = 256;
+const MAX_MUL_SESSIONS: usize = 1024;
 
 impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
@@ -169,7 +172,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
             id,
             n,
             t: threshold,
-            mult_storage: Arc::new(Mutex::new(HashMap::new())),
+            mult_storage: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             batch_recon,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
             rbc,
@@ -277,15 +280,15 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
         Ok(())
     }
-    pub async fn clear_store(&self, session_id: SessionId) -> Result<(), MulError> {
+    pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let no_of_batch = {
             let store = self.mult_storage.lock().await;
             match store.get(&session_id) {
                 Some(storage) => {
-                    let storage = storage.1.lock().await;
+                    let storage = storage.2.lock().await;
                     storage.no_of_mul.unwrap_or(0) / (self.t + 1)
                 }
-                None => return Err(MulError::ClearStoreError(session_id)),
+                None => return false,
             }
         };
 
@@ -317,10 +320,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         }
 
         let mut store = self.mult_storage.lock().await;
-        store
-            .remove(&session_id)
-            .map(|_| ())
-            .ok_or(MulError::ClearStoreError(session_id))
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {
@@ -363,7 +363,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         let share_len = x.len() % (self.t + 1);
 
         // 1.
-        let storage_bind = self.get_or_create_mult_storage(session_id, self.id).await?;
+        let storage_bind = match self.get_or_create_mult_storage(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut storage = storage_bind.lock().await;
 
         // 2. Batch reconstruction is batched: one session for all a-x values (dealer/sub_id 0)
@@ -520,7 +523,10 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         );
 
         // 1.
-        let storage_bind = self.get_or_create_mult_storage(session_id, sender).await?;
+        let storage_bind = match self.get_or_create_mult_storage(session_id, sender).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut storage = storage_bind.lock().await;
 
         if storage.protocol_state == MultProtocolState::Finished {
@@ -649,31 +655,21 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         &self,
         session_id: SessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<MultStorage<F>>>, MulError> {
-        let mut storage = self.mult_storage.lock().await;
-
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_MUL_SESSIONS {
-        //         warn!("Mul session limit reached");
-        //         return Err(MulError::LimitError);
-        //     }
-        //     let per_peer_limit = MAX_MUL_SESSIONS / self.n;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("Mul per-peer session limit reached");
-        //         return Err(MulError::LimitError);
-        //     }
-        // }
-
-        Ok(storage
-            .entry(session_id)
-            .or_insert((initiator_id, Arc::new(Mutex::new(MultStorage::empty()))))
-            .1
-            .clone())
+    ) -> Option<Arc<Mutex<MultStorage<F>>>> {
+        match self.mult_storage.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_MUL_SESSIONS,
+            MAX_MUL_SESSIONS / self.n,
+            || Arc::new(Mutex::new(MultStorage::empty())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("Mul session limit reached");
+                None
+            }
+        }
     }
 
     pub async fn wait_for_result(
@@ -686,7 +682,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> Multiply<F, R> {
         let output_receiver = {
             let mult_storage = self.mult_storage.lock().await;
             let storage_bind = match mult_storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(MulError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -1298,7 +1294,7 @@ pub mod tests {
         // The mul finished: `clear_store` removes the round-2 RBC sessions (a
         // no-op here since none ran) and the mult_storage entry. The queued id is
         // now stale.
-        node.clear_store(session_id).await.unwrap();
+        assert!(node.clear_store(session_id).await);
 
         // Without the fix: Err(MulError::RbcError("Session ID does not exist")).
         // With the fix: the stale output is dropped and drain succeeds.
@@ -1344,7 +1340,7 @@ pub mod tests {
         );
         stale_tx.send(stale_id).await.unwrap();
 
-        node.clear_store(session_id).await.unwrap();
+        assert!(node.clear_store(session_id).await);
 
         assert!(
             node.drain_batch_recon_output().await.is_ok(),

@@ -3,8 +3,10 @@ use crate::avss_mpc::mul::{
 };
 use crate::avss_mpc::triple_gen::BeaverTriple;
 use crate::avss_mpc::{
-    deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, MAX_MESSAGE_SIZE,
+    deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, MAX_AVSS_BATCH_SIZE,
+    MAX_MESSAGE_SIZE,
 };
+use crate::common::session_store::{Admission, SessionStore};
 use crate::common::share::feldman::FeldmanShamirShare;
 use crate::common::{rbc::RbcError, share::ShareError, RBC};
 use crate::common::{ProtocolSessionId, SecretSharingScheme};
@@ -13,7 +15,8 @@ use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
 use bincode::Options;
 use itertools::izip;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, Mutex};
@@ -25,12 +28,13 @@ pub struct Multiply<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    pub mult_storage: Arc<Mutex<HashMap<AvssSessionId, (usize, Arc<Mutex<MultStorage<F, G>>>)>>>,
+    pub mult_storage:
+        Arc<Mutex<SessionStore<AvssSessionId, (usize, Instant, Arc<Mutex<MultStorage<F, G>>>)>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<AvssSessionId>>>,
 }
 
-// pub static MAX_AVSS_MUL_SESSIONS: usize = 256;
+const MAX_AVSS_MUL_SESSIONS: usize = 256;
 
 impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Multiply<F, R, G> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, MulError> {
@@ -47,19 +51,23 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             id,
             n,
             t: threshold,
-            mult_storage: Arc::new(Mutex::new(HashMap::new())),
+            mult_storage: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
-    pub async fn clear_store(&self, session_id: AvssSessionId) -> Result<(), MulError> {
-        self.rbc.clear_store().await;
+    pub async fn clear_store(&self, session_id: AvssSessionId) -> bool {
+        for party_id in 0..self.n {
+            let rbc_session_id = AvssSessionId::new(
+                session_id.calling_protocol().unwrap(),
+                AvssSessionId::pack_slot(session_id.exec_id(), party_id as u8, 0),
+                session_id.instance_id(),
+            );
+            self.rbc.clear_session(rbc_session_id).await;
+        }
 
         let mut store = self.mult_storage.lock().await;
-        store
-            .remove(&session_id)
-            .map(|_| ())
-            .ok_or(MulError::ClearStoreError(session_id))
+        store.retire(session_id)
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), MulError> {
@@ -150,7 +158,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             .map(|(y, triple)| triple.b.clone() - y.clone())
             .collect::<Result<Vec<FeldmanShamirShare<F, G>>, ShareError>>()?;
 
-        let storage_bind = self.get_or_create_mult_storage(session_id, self.id).await?;
+        let storage_bind = match self.get_or_create_mult_storage(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut storage = storage_bind.lock().await;
 
         storage.no_of_mul = Some(no_of_mul);
@@ -174,6 +185,11 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         let reconst_message = ReconstructionMessage::new(a_sub_x.to_vec(), b_sub_y.to_vec());
         let mut bytes_rec_message = Vec::new();
         reconst_message.serialize_compressed(&mut bytes_rec_message)?;
+        if bytes_rec_message.len() as u64 > MAX_MESSAGE_SIZE {
+            return Err(MulError::InvalidInput(
+                "batched multiplication opening exceeds the message-size limit".to_string(),
+            ));
+        }
 
         let rbc_sessionid = AvssSessionId::new(
             session_id.calling_protocol().unwrap(),
@@ -192,9 +208,13 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     }
 
     pub async fn open_mult_handler(&self, msg: MultMessage) -> Result<(), MulError> {
-        let storage_bind = self
+        let storage_bind = match self
             .get_or_create_mult_storage(msg.session_id, msg.sender)
-            .await?;
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut storage = storage_bind.lock().await;
         if storage.protocol_state == MultProtocolState::Finished {
             return Ok(());
@@ -220,8 +240,13 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
             ));
         }
         let mut r = msg.payload.as_slice();
-        let a_sub_x = deser_bounded_feldman_vec::<F, G>(&mut r, self.n, self.t + 1)?;
-        let b_sub_y = deser_bounded_feldman_vec::<F, G>(&mut r, self.n, self.t + 1)?;
+        let a_sub_x = deser_bounded_feldman_vec::<F, G>(&mut r, MAX_AVSS_BATCH_SIZE, self.t + 1)?;
+        let b_sub_y = deser_bounded_feldman_vec::<F, G>(&mut r, MAX_AVSS_BATCH_SIZE, self.t + 1)?;
+        if !r.is_empty() || a_sub_x.len() != b_sub_y.len() {
+            return Err(MulError::InvalidInput(
+                "malformed batched multiplication opening".to_string(),
+            ));
+        }
         let open_message = ReconstructionMessage { a_sub_x, b_sub_y };
 
         for share in open_message
@@ -241,6 +266,12 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
                     share.feldmanshare.id, msg.sender
                 )));
             }
+            if share.feldmanshare.id != msg.sender + 1 {
+                return Err(MulError::InvalidInput(format!(
+                    "Share id {} does not match authenticated sender {}",
+                    share.feldmanshare.id, msg.sender
+                )));
+            }
         }
         storage
             .received_shares
@@ -256,31 +287,21 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         &self,
         session_id: AvssSessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<MultStorage<F, G>>>, MulError> {
-        let mut storage = self.mult_storage.lock().await;
-
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_AVSS_MUL_SESSIONS {
-        //         warn!("AVSS Mul session limit reached");
-        //         return Err(MulError::LimitError);
-        //     }
-        //     let per_peer_limit = MAX_AVSS_MUL_SESSIONS / self.n;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         warn!("AVSS Mul per-peer session limit reached");
-        //         return Err(MulError::LimitError);
-        //     }
-        // }
-
-        Ok(storage
-            .entry(session_id)
-            .or_insert((initiator_id, Arc::new(Mutex::new(MultStorage::empty()))))
-            .1
-            .clone())
+    ) -> Option<Arc<Mutex<MultStorage<F, G>>>> {
+        match self.mult_storage.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_AVSS_MUL_SESSIONS,
+            MAX_AVSS_MUL_SESSIONS / self.n,
+            || Arc::new(Mutex::new(MultStorage::empty())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("AVSS Mul session limit reached");
+                None
+            }
+        }
     }
 
     pub async fn wait_for_result(
@@ -293,7 +314,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         let output_receiver = {
             let mult_storage = self.mult_storage.lock().await;
             let storage_bind = match mult_storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(MulError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -369,8 +390,12 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
 fn verify_share_against_commitments<F: FftField, G: CurveGroup<ScalarField = F>>(
     share: &FeldmanShamirShare<F, G>,
     expected_commitments: &[G],
+    expected_id: usize,
 ) -> bool {
     if expected_commitments.len() != share.feldmanshare.degree + 1 {
+        return false;
+    }
+    if share.feldmanshare.id != expected_id {
         return false;
     }
     let x = F::from(share.feldmanshare.id as u64);
@@ -404,14 +429,14 @@ fn reconstruct_if_ready<F: FftField, G: CurveGroup<ScalarField = F>>(
     let mut a_shares = vec![vec![]; no_of_mul];
     let mut b_shares = vec![vec![]; no_of_mul];
 
-    for (_, (a, b)) in storage.received_shares.iter() {
+    for (sender_id, (a, b)) in storage.received_shares.iter() {
         if a.len() != no_of_mul || b.len() != no_of_mul {
             warn!("Did not receive the right number of shares to reconstruct");
             continue;
         }
         let valid = (0..no_of_mul).all(|i| {
-            verify_share_against_commitments(&a[i], &expected_a[i])
-                && verify_share_against_commitments(&b[i], &expected_b[i])
+            verify_share_against_commitments(&a[i], &expected_a[i], *sender_id + 1)
+                && verify_share_against_commitments(&b[i], &expected_b[i], *sender_id + 1)
         });
         if !valid {
             continue;

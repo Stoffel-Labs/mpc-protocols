@@ -1,5 +1,6 @@
 pub mod messages;
 
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{
         rbc::RbcError,
@@ -17,10 +18,7 @@ use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalSerialize, SerializationError};
 use bincode::{ErrorKind, Options};
 use messages::{RanDouShaMessage, ReconstructionMessage};
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use thiserror::Error;
 use tokio::sync::{
     oneshot::{channel, Receiver, Sender},
@@ -91,6 +89,9 @@ pub struct RanDouShaStore<F: FftField> {
     pub protocol_output: Vec<DoubleShamirShare<F>>,
     pub output_sender: Option<Sender<Vec<DoubleShamirShare<F>>>>,
     pub output_receiver: Option<Receiver<Vec<DoubleShamirShare<F>>>>,
+    /// Messages queued before init_handler ran (computed_r_shares not yet set).
+    /// Drained and replayed once the trusted batch_size is known.
+    pub pending_messages: Vec<RanDouShaMessage>,
 }
 
 /// State of the Random Double Sharing protocol.
@@ -121,6 +122,7 @@ where
             protocol_output: Vec::new(),
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
+            pending_messages: Vec::new(),
         }
     }
 }
@@ -135,11 +137,12 @@ pub struct RanDouShaNode<F: FftField, R: RBC> {
     /// Threshold of corrupted parties.
     pub threshold: usize,
     /// Storage of the node.
-    pub store: Arc<Mutex<BTreeMap<SessionId, (usize, Arc<Mutex<RanDouShaStore<F>>>)>>>,
+    pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<RanDouShaStore<F>>>)>>>,
     ///Avid instance for RBC
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
 }
+const MAX_RAN_DOU_SHA_SESSIONS: usize = 1024;
 
 impl<F, R> RanDouShaNode<F, R>
 where
@@ -165,14 +168,29 @@ where
             id,
             n_parties,
             threshold,
-            store: Arc::new(Mutex::new(BTreeMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
     }
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
+        let caller = session_id
+            .calling_protocol()
+            .unwrap_or(ProtocolType::Randousha);
+        // Only parties with id in [t+1, n_parties) broadcast the reconstruction-verification
+        // message (see the `self.id >= self.threshold + 1 && self.id < self.n_parties` guard
+        // in the output handler).
+        for party_id in (self.threshold + 1)..self.n_parties {
+            let rbc_session_id = SessionId::new(
+                caller,
+                SessionId::pack_slot(session_id.exec_id(), party_id as u8, session_id.round_id()),
+                session_id.instance_id(),
+            );
+            self.rbc.clear_session(rbc_session_id).await;
+        }
+
         let mut store = self.store.lock().await;
-        store.remove(&session_id).is_some()
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {
@@ -181,33 +199,26 @@ where
 
     /// Returns the storage for a node in the Random Double Sharing protocol. If the storage has
     /// not been created yet, the function will create an empty storage and return it.
+    /// Returns `None` if the session has been retired — caller must drop the message.
     pub async fn get_or_create_store(
         &mut self,
         session_id: SessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<RanDouShaStore<F>>>, RanDouShaError> {
-        let mut storage = self.store.lock().await;
-
-        // TODO: restore session limits
-        // if !storage.contains_key(&session_id) {
-        //     if storage.len() >= MAX_RAN_DOU_SHA_SESSIONS {
-        //         return Err(RanDouShaError::LimitError);
-        //     }
-        //     let per_peer_limit = MAX_RAN_DOU_SHA_SESSIONS / self.n_parties;
-        //     let peer_count = storage
-        //         .values()
-        //         .filter(|(id, _)| *id == initiator_id)
-        //         .count();
-        //     if peer_count >= per_peer_limit {
-        //         return Err(RanDouShaError::LimitError);
-        //     }
-        // }
-
-        Ok(storage
-            .entry(session_id)
-            .or_insert((initiator_id, Arc::new(Mutex::new(RanDouShaStore::empty()))))
-            .1
-            .clone())
+    ) -> Option<Arc<Mutex<RanDouShaStore<F>>>> {
+        match self.store.lock().await.get_or_admit(
+            session_id,
+            initiator_id,
+            MAX_RAN_DOU_SHA_SESSIONS,
+            MAX_RAN_DOU_SHA_SESSIONS / self.n_parties,
+            || Arc::new(Mutex::new(RanDouShaStore::empty())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("RanDouSha session limit reached");
+                None
+            }
+        }
     }
 
     pub async fn drain_rbc_output(&mut self) -> Result<(), RanDouShaError> {
@@ -268,7 +279,7 @@ where
         let output_receiver = {
             let storage = self.store.lock().await;
             let storage_bind = match storage.get(&session_id) {
-                Some((_, arc)) => arc,
+                Some((_, _, arc)) => arc,
                 None => return Err(RanDouShaError::NoSuchSessionId(session_id)),
             };
             let mut storage = storage_bind.lock().await;
@@ -362,7 +373,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
         self.init_batch(vec![shares_deg_t], vec![shares_deg_2t], session_id, network)
             .await
@@ -376,7 +387,7 @@ where
         network: Arc<N>,
     ) -> Result<(), RanDouShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
         info!(
             "Node {} (session {}) - Starting init_handler.",
@@ -403,12 +414,35 @@ where
         }
 
         // Save the shares of r of degree t and 2t into the storage.
-        let bind_store = self.get_or_create_store(session_id, self.id).await?;
-        let mut store = bind_store.lock().await;
-        store.batch_size = r_deg_t.len() / self.n_parties;
-        store.computed_r_shares_degree_t = r_deg_t.clone();
-        store.computed_r_shares_degree_2t = r_deg_2t.clone();
-        drop(store);
+        let bind_store = match self.get_or_create_store(session_id, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pending = {
+            let mut store = bind_store.lock().await;
+            store.batch_size = r_deg_t.len() / self.n_parties;
+            store.computed_r_shares_degree_t = r_deg_t.clone();
+            store.computed_r_shares_degree_2t = r_deg_2t.clone();
+            std::mem::take(&mut store.pending_messages)
+        };
+
+        // Replay messages that arrived before local initialization. A parked message that
+        // fails validation on replay is the sender's fault, not ours — log and drop it. A
+        // blanket `?` here would let a single Byzantine peer abort our own initialization by
+        // parking one oversized batch before we started.
+        for pending_msg in pending {
+            let sender_id = pending_msg.sender_id;
+            if let Err(e) = self
+                .reconstruction_handler(pending_msg, Arc::clone(&network))
+                .await
+            {
+                warn!(
+                    session_id = session_id.as_u128(),
+                    "dropping invalid pre-init reconstruction message from party {sender_id}: {e:?}"
+                );
+            }
+        }
+
         // Check if pending OK messages are sufficient to finalize immediately
         if self.try_finalize(session_id, bind_store.clone()).await? {
             return Ok(());
@@ -476,11 +510,53 @@ where
             return Err(RanDouShaError::SessionIdError(msg.session_id));
         }
 
+        // Queue the raw message before any deserialization when init_handler has not run yet.
+        // session_id and sender_id are Copy so msg is not consumed by the store lookup.
+        let sender_id = msg.sender_id;
+        let binding = match self.get_or_create_store(msg.session_id, sender_id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let expected_batch = {
+            let mut store = binding.lock().await;
+            if store.computed_r_shares_degree_t.is_empty() {
+                // batch_size is not yet locally known; park the message.
+                // init_handler will drain and replay these once computed shares are set.
+                //
+                // Bound the queue at one parked message per peer. The length check is not
+                // redundant with the per-sender check: `sender_id` is only validated against
+                // `n_parties` further down, after this point, so a peer forging distinct ids
+                // could otherwise grow this vector without limit before ever being rejected.
+                if store.pending_messages.len() >= self.n_parties
+                    || store
+                        .pending_messages
+                        .iter()
+                        .any(|m| m.sender_id == sender_id)
+                {
+                    warn!(
+                        session_id = msg.session_id.as_u128(),
+                        "pending RanDouSha queue full or already holds a message from party {sender_id}; dropping"
+                    );
+                    return Ok(());
+                }
+                store.pending_messages.push(msg);
+                return Ok(());
+            }
+            store.batch_size
+        };
+
+        // msg.payload not yet consumed — proceed with deserialization.
         let payloads = match msg.payload {
             RanDouShaPayload::Reconstruct(p) => vec![p],
             RanDouShaPayload::ReconstructBatch(p) => p,
             RanDouShaPayload::Output(_) => return Err(RanDouShaError::Abort),
         };
+        // Validate the declared element count against the locally-known batch size *before*
+        // deserializing any of them. The equivalent check below runs against `rec_messages.len()`,
+        // by which point a peer has already made us decode every element it chose to send.
+        if payloads.len() != expected_batch {
+            return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
+        }
         let mut rec_messages: Vec<ReconstructionMessage<F>> = Vec::with_capacity(payloads.len());
         for payload in payloads {
             rec_messages.push(ark_serialize::CanonicalDeserialize::deserialize_compressed(
@@ -493,7 +569,6 @@ where
         // one for degree t and one for degree 2t.
         // These shares originate from the *sender* of the message, but they are components of the 'r_j'
 
-        let sender_id = msg.sender_id;
         for rec_msg in &rec_messages {
             if rec_msg.r_share_deg_t.id != sender_id || rec_msg.r_share_deg_2t.id != sender_id {
                 return Err(RanDouShaError::IncorrectID);
@@ -504,11 +579,8 @@ where
                 return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
             }
         }
-        let binding = self.get_or_create_store(msg.session_id, sender_id).await?;
         let mut store = binding.lock().await;
-        if store.received_r_shares_degree_t.is_empty() {
-            store.batch_size = rec_messages.len();
-        } else if store.batch_size != rec_messages.len() {
+        if store.batch_size != rec_messages.len() {
             return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
         }
 
@@ -654,9 +726,13 @@ where
         if !output {
             return Err(RanDouShaError::Abort);
         }
-        let binding = self
+        let binding = match self
             .get_or_create_store(msg.session_id, msg.sender_id)
-            .await?;
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut store = binding.lock().await;
 
         // push to received_ok_msg if sender doesn't exist
@@ -694,61 +770,57 @@ mod tests {
     use std::sync::Arc;
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
 
-    // // TODO: restore when session limits are re-enabled
-    // // #[tokio::test]
-    // #[allow(dead_code)]
-    // async fn test_randousha_storage_limit_in_reconstruction_handler() {
-    //     let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
-    //     let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
-    //     let net = Arc::new(FakeNetwork::new(0, inner));
-    //     // Fill up the storage to the limit by calling reconstruction_handler with unique session IDs
-    //     let mut exec = 0u8;
-    //     let mut round = 0u8;
-    //     for _ in 0..super::MAX_RAN_DOU_SHA_SESSIONS / 5 {
-    //         let sid = SessionId::new(
-    //             ProtocolType::Randousha,
-    //             SessionId::pack_slot24(exec, 0, round),
-    //             111,
-    //         );
+    #[tokio::test]
+    async fn test_randousha_storage_limit_in_reconstruction_handler() {
+        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        let net = Arc::new(FakeNetwork::new(0, inner));
 
-    //         let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
-    //         let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
-    //         let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+        // Fill up the per-peer limit by calling reconstruction_handler with unique session IDs
+        let per_peer_limit = super::MAX_RAN_DOU_SHA_SESSIONS / 5;
+        for exec in 0..per_peer_limit as u64 {
+            let sid = SessionId::new(
+                ProtocolType::Randousha,
+                SessionId::pack_slot(exec, 0, 0),
+                111,
+            );
 
-    //         let mut payload = Vec::new();
-    //         rec_msg.serialize_compressed(&mut payload).unwrap();
-    //         let msg = RanDouShaMessage::new(0, sid, RanDouShaPayload::Reconstruct(payload));
-    //         // Ignore the result, just fill up storage
-    //         let _ = node.reconstruction_handler(msg, net.clone()).await;
+            let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
+            let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
+            let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
 
-    //         // Increment exec and round to ensure unique session IDs
-    //         if round == u8::MAX {
-    //             round = 0;
-    //             exec = exec.wrapping_add(1);
-    //         } else {
-    //             round = round.wrapping_add(1);
-    //         }
-    //     }
+            let mut payload = Vec::new();
+            rec_msg.serialize_compressed(&mut payload).unwrap();
+            let msg = RanDouShaMessage::new(0, sid, RanDouShaPayload::Reconstruct(payload));
+            // Ignore the result, just fill up storage
+            let _ = node.reconstruction_handler(msg, net.clone()).await;
+        }
+        assert_eq!(node.store_len().await, per_peer_limit);
 
-    //     // Now try to process a message that would require a new session (should hit the limit)
-    //     let over_sid = SessionId::new(
-    //         ProtocolType::Randousha,
-    //         SessionId::pack_slot24(255, 0, 255),
-    //         0,
-    //     );
-    //     let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
-    //     let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
-    //     let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
-    //     let mut payload = Vec::new();
-    //     rec_msg.serialize_compressed(&mut payload).unwrap();
-    //     let msg = RanDouShaMessage::new(0, over_sid, RanDouShaPayload::Reconstruct(payload));
+        // Now try to process a message that would require a new session (should be dropped)
+        let over_sid = SessionId::new(
+            ProtocolType::Randousha,
+            SessionId::pack_slot(per_peer_limit as u64, 0, 0),
+            111,
+        );
+        let share_deg_t = NonRobustShare::new(Fr::from(0), 0, 1);
+        let share_deg_2t = NonRobustShare::new(Fr::from(0), 0, 2);
+        let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+        let mut payload = Vec::new();
+        rec_msg.serialize_compressed(&mut payload).unwrap();
+        let msg = RanDouShaMessage::new(0, over_sid, RanDouShaPayload::Reconstruct(payload));
 
-    //     let result = node.reconstruction_handler(msg, net).await;
-    //     assert!(
-    //         matches!(result, Err(RanDouShaError::LimitError)),
-    //         "Should error on exceeding storage limit"
-    //     );
-    // }
+        let result = node.reconstruction_handler(msg, net).await;
+        assert!(
+            result.is_ok(),
+            "handler should silently drop over-limit sessions, not error"
+        );
+        assert_eq!(
+            node.store_len().await,
+            per_peer_limit,
+            "store must not grow past the per-peer limit"
+        );
+    }
 
     #[tokio::test]
     async fn test_randousha_handle_invalid_sub_id() {
@@ -770,6 +842,91 @@ mod tests {
         match result {
             Err(RanDouShaError::SessionIdError(sid)) => assert_eq!(sid, session_id),
             _ => panic!("Expected SessionIdError for invalid sub_id"),
+        }
+    }
+
+    /// Regression test for a remote panic, mirroring RanSha's: a Byzantine peer sending an
+    /// oversized `ReconstructBatch` for a session *before* this node's own `init_batch` runs
+    /// used to provisionally set `batch_size` from the attacker's message length. `init_batch`
+    /// would then overwrite `batch_size` back to the real value without clearing the attacker's
+    /// oversized entry, so once enough parties had reported, the aggregation loop indexed a
+    /// real-`batch_size`-sized array using the attacker's oversized entry's length — an
+    /// out-of-bounds panic. `init_batch` must now discard any mismatched pre-existing entries.
+    #[tokio::test]
+    async fn test_randousha_early_oversized_batch_does_not_panic() {
+        let mut node = RanDouShaNode::<Fr, Avid<SessionId>>::new(0, 5, 1, 2).unwrap();
+        // Keep the receiver ends alive — init_batch actually sends reconstruction messages in
+        // this test, and a dropped receiver would make those sends fail.
+        let (inner, _inboxes, _) = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10));
+        let net = Arc::new(FakeNetwork::new(0, inner));
+        let session_id = SessionId::new(ProtocolType::Randousha, SessionId::pack_slot(0, 0, 0), 0);
+
+        // Attacker (party 4) sends a much larger reconstruction batch than the real session
+        // will use, before this node has locally initialized the session at all.
+        let oversized_payloads: Vec<Vec<u8>> = (0..10)
+            .map(|_| {
+                let share_deg_t = NonRobustShare::new(Fr::from(0u8), 4, 1);
+                let share_deg_2t = NonRobustShare::new(Fr::from(0u8), 4, 2);
+                let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+                let mut payload = Vec::new();
+                rec_msg.serialize_compressed(&mut payload).unwrap();
+                payload
+            })
+            .collect();
+        let attacker_msg = RanDouShaMessage::new(
+            4,
+            session_id,
+            RanDouShaPayload::ReconstructBatch(oversized_payloads),
+        );
+        node.reconstruction_handler(attacker_msg, net.clone())
+            .await
+            .unwrap();
+
+        // Local node now legitimately initializes the session with the real, much smaller
+        // batch size (2) — this must discard the attacker's oversized entry.
+        let batch_size = 2;
+        let shares_deg_t_by_batch: Vec<Vec<NonRobustShare<Fr>>> = (0..batch_size)
+            .map(|_| {
+                (0..5)
+                    .map(|_| NonRobustShare::new(Fr::from(0u8), 0, 1))
+                    .collect()
+            })
+            .collect();
+        let shares_deg_2t_by_batch: Vec<Vec<NonRobustShare<Fr>>> = (0..batch_size)
+            .map(|_| {
+                (0..5)
+                    .map(|_| NonRobustShare::new(Fr::from(0u8), 0, 2))
+                    .collect()
+            })
+            .collect();
+        node.init_batch(
+            shares_deg_t_by_batch,
+            shares_deg_2t_by_batch,
+            session_id,
+            net.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Enough parties (including party 4 again, this time correctly sized) report their
+        // real reconstruction shares. Aggregating these must not panic.
+        for sender in 0..4usize {
+            let payloads: Vec<Vec<u8>> = (0..batch_size)
+                .map(|_| {
+                    let share_deg_t = NonRobustShare::new(Fr::from(0u8), sender, 1);
+                    let share_deg_2t = NonRobustShare::new(Fr::from(0u8), sender, 2);
+                    let rec_msg = ReconstructionMessage::new(share_deg_t, share_deg_2t);
+                    let mut payload = Vec::new();
+                    rec_msg.serialize_compressed(&mut payload).unwrap();
+                    payload
+                })
+                .collect();
+            let msg = RanDouShaMessage::new(
+                sender,
+                session_id,
+                RanDouShaPayload::ReconstructBatch(payloads),
+            );
+            node.reconstruction_handler(msg, net.clone()).await.unwrap();
         }
     }
 }

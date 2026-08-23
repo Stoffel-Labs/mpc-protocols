@@ -222,6 +222,14 @@ impl fmt::Display for MsgTypeAvid {
 #[derive(Default)]
 pub struct AvidStore {
     pub shards: HashMap<Vec<u8>, HashMap<usize, Vec<u8>>>, // Merkle root → (shard ID → shard data).
+    /// The Merkle root this session has committed to, once one is *corroborated*. `verify_merkle`
+    /// only checks that a shard is a valid leaf of the root carried in the *same* message — it has
+    /// no way to know what root any other party saw, so a dealer can equivocate by sending
+    /// different (root, shard) pairs to different honest parties, and each recipient's own check
+    /// still passes. Committing to a root lets every later mismatched root be rejected outright
+    /// rather than retained.
+    ///
+    pub accepted_root: Option<Vec<u8>>,
     pub fingerprint: HashMap<Vec<u8>, HashMap<usize, Vec<u8>>>, // Merkle root → (shard ID → Merkle proof/fingerprint).
     pub echo_senders: HashMap<usize, bool>, // Which parties sent ECHO (sender_id -> true)
     pub ready_senders: HashMap<usize, bool>, // Which parties sent READY (sender_id -> true)
@@ -236,6 +244,7 @@ impl AvidStore {
     pub fn new() -> Self {
         AvidStore {
             shards: HashMap::new(),
+            accepted_root: None,
             fingerprint: HashMap::new(),
             echo_senders: HashMap::new(),
             ready_senders: HashMap::new(),
@@ -299,6 +308,14 @@ impl AvidStore {
         shard: Vec<u8>,
         data_shards: usize,
     ) -> Result<(), ShardError> {
+        if let Some(accepted) = &self.accepted_root {
+            if accepted != &root {
+                return Err(ShardError::Config(
+                    "Equivocation detected: mismatched Merkle roots for this session".to_string(),
+                ));
+            }
+        }
+
         let max_shard_size = (MAX_PAYLOAD_SIZE + 8 + data_shards - 1) / data_shards;
         if shard.len() > max_shard_size {
             return Err(ShardError::Config(format!(
@@ -324,6 +341,36 @@ impl AvidStore {
     /// Returns the set of shards associated with a given Merkle root.
     pub fn get_shards_for_root(&self, root: &Vec<u8>) -> HashMap<usize, Vec<u8>> {
         self.shards.get(root).cloned().unwrap_or_else(HashMap::new)
+    }
+
+    /// Commits the session to `root` if enough distinct senders have now backed it, and discards
+    /// every competing root's state once that happens.
+    ///
+    /// `corroboration_threshold` must be the intersection-guaranteeing quorum (`> (n + t) / 2`,
+    /// e.g. `max((n + t + 2) / 2, k)`), not merely `t + 1`. `t + 1` only proves at least one honest
+    /// party saw this root — it does not prove *uniqueness*, so under dealer equivocation two
+    /// disjoint honest observers could each independently reach `t + 1` backing for two different
+    /// roots and both commit, permanently diverging. The strong quorum guarantees any two
+    /// quorum-sized sender sets share at least one honest member, who can only have backed one
+    /// root. ECHO and READY tallies are compared separately rather than summed, because a single
+    /// sender may contribute to both and a sum would let `t` Byzantine parties reach `2t`.
+    ///
+    /// Returns true if the session is committed to `root` after this call.
+    pub fn try_commit_root(&mut self, root: &[u8], corroboration_threshold: usize) -> bool {
+        if let Some(accepted) = &self.accepted_root {
+            return accepted == root;
+        }
+        let backing = self.get_echo_count(root).max(self.get_ready_count(root));
+        if backing < corroboration_threshold {
+            return false;
+        }
+
+        self.accepted_root = Some(root.to_vec());
+        self.shards.retain(|r, _| r == root);
+        self.fingerprint.retain(|r, _| r == root);
+        self.echo_count.retain(|r, _| r == root);
+        self.ready_count.retain(|r, _| r == root);
+        true
     }
 }
 
@@ -637,5 +684,131 @@ impl AcsStore {
     /// Sets ended flag to true
     pub fn mark_ended(&mut self) {
         self.ended = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_shard_accepts_same_root_from_multiple_senders() {
+        let mut store = AvidStore::new();
+        let root = vec![1u8; 32];
+        store
+            .insert_shard(root.clone(), 0, vec![0u8; 10], 2)
+            .unwrap();
+        store
+            .insert_shard(root.clone(), 1, vec![0u8; 10], 2)
+            .unwrap();
+        assert_eq!(store.shards.get(&root).unwrap().len(), 2);
+    }
+
+    /// Once a root is committed, a mismatched root is equivocation and must be rejected outright.
+    #[test]
+    fn insert_shard_rejects_mismatched_root_after_commit() {
+        let mut store = AvidStore::new();
+        let root_a = vec![1u8; 32];
+        let root_b = vec![2u8; 32];
+
+        // Two senders back root_a, which commits the session at t = 1.
+        for sender in 0..2 {
+            store
+                .insert_shard(root_a.clone(), sender, vec![0u8; 10], 2)
+                .unwrap();
+            store.increment_echo(&root_a);
+        }
+        assert!(store.try_commit_root(&root_a, 2), "root_a must commit");
+
+        let result = store.insert_shard(root_b.clone(), 2, vec![0u8; 10], 2);
+        assert!(result.is_err(), "mismatched root must be rejected");
+        assert!(
+            !store.shards.contains_key(&root_b),
+            "rejected root's shard must not be stored"
+        );
+        assert_eq!(
+            store.shards.get(&root_a).unwrap().len(),
+            2,
+            "the committed root's data must be unaffected"
+        );
+    }
+
+    /// A lone sender must not be able to commit the session to a root of its choosing. Binding on
+    /// first arrival let any single party stall an honest dealer's broadcast permanently by racing
+    /// one ECHO with a self-built tree; commitment requires multiple distinct backers instead (in
+    /// production, the caller passes the intersection-guaranteeing quorum — see `try_commit_root`).
+    #[test]
+    fn one_sender_cannot_commit_a_root() {
+        let mut store = AvidStore::new();
+        let forged = vec![9u8; 32];
+        let honest = vec![1u8; 32];
+
+        store
+            .insert_shard(forged.clone(), 3, vec![0u8; 10], 2)
+            .unwrap();
+        store.increment_echo(&forged);
+        assert!(
+            !store.try_commit_root(&forged, 2),
+            "a single backer must not commit a root"
+        );
+
+        // The honest root still gets in, and wins once corroborated.
+        for sender in 0..2 {
+            store
+                .insert_shard(honest.clone(), sender, vec![0u8; 10], 2)
+                .unwrap();
+            store.increment_echo(&honest);
+        }
+        assert!(
+            store.try_commit_root(&honest, 2),
+            "the corroborated root must commit"
+        );
+        assert_eq!(store.accepted_root.as_ref(), Some(&honest));
+        assert!(
+            !store.shards.contains_key(&forged),
+            "the losing root's state must be dropped on commit"
+        );
+    }
+
+    /// ECHO and READY tallies must not be summed: a single sender contributes to both, so a sum
+    /// would let `t` Byzantine parties reach `2t` backing and commit a root of their own.
+    #[test]
+    fn echo_and_ready_backing_is_not_summed() {
+        let mut store = AvidStore::new();
+        let forged = vec![9u8; 32];
+
+        store
+            .insert_shard(forged.clone(), 3, vec![0u8; 10], 2)
+            .unwrap();
+        store.increment_echo(&forged);
+        store.increment_ready(&forged);
+
+        assert!(
+            !store.try_commit_root(&forged, 2),
+            "one sender backing a root twice must not reach a threshold of 2"
+        );
+    }
+
+    /// Retention before commitment is bounded by the callers' per-sender dedup, not by the root
+    /// count: each sender contributes at most one ECHO and one READY shard, so competing roots
+    /// split a fixed `2n` budget rather than multiplying it.
+    #[test]
+    fn uncommitted_retention_is_bounded_by_sender_count() {
+        let n = 4;
+        let mut store = AvidStore::new();
+
+        // Worst case: every sender backs a distinct root via ECHO, and another via READY.
+        for sender in 0..n {
+            store
+                .insert_shard(vec![sender as u8; 32], sender, vec![0u8; 10], 2)
+                .unwrap();
+            store
+                .insert_shard(vec![(100 + sender) as u8; 32], sender, vec![0u8; 10], 2)
+                .unwrap();
+        }
+
+        let total: usize = store.shards.values().map(|m| m.len()).sum();
+        assert_eq!(total, 2 * n, "retention must be exactly 2n shards");
+        assert!(store.accepted_root.is_none(), "no root reached t + 1");
     }
 }

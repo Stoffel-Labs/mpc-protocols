@@ -288,7 +288,9 @@ async fn preprocessing_e2e() {
     let n_parties = 4;
     let t = 1;
     let no_of_randomshares = 4;
-    let no_of_triples = 4;
+    // Deliberately not a multiple of n_parties: preprocessing should generate
+    // the exact requested count in one vectorized triple batch.
+    let no_of_triples = 3;
     let instance_id = 111;
 
     //Setup
@@ -349,7 +351,7 @@ async fn preprocessing_e2e() {
         let (n_triples, n_v_shares) = node.preprocessing_material.lock().await.len();
 
         assert_eq!(n_v_shares, 4);
-        assert_eq!(n_triples, 4);
+        assert_eq!(n_triples, no_of_triples);
     }
 }
 
@@ -357,17 +359,18 @@ async fn preprocessing_e2e() {
 async fn mul_e2e() {
     setup_tracing();
     //----------------------------------------SETUP PARAMETERS----------------------------------------
-    let n_parties = 5;
+    let n_parties = 4;
     let t = 1;
     let mut rng = test_rng();
-    let no_of_multiplication = 2;
+    // Cross the 128-item wire batch boundary for the online multiplication phase.
+    let no_of_multiplication = 129;
     let ids: Vec<_> = (1..=n_parties).collect();
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
-    //Generate triples
-    let (_, triple) = construct_e2e_input_mul(n_parties, no_of_multiplication, t).await;
-
+    // Pre-build triples so this boundary test isolates online session batching;
+    // preprocessing batching is covered independently by preprocessing_e2e.
+    let (_, triples) = construct_e2e_input_mul(n_parties, no_of_multiplication, t).await;
     // Prepare inputs for multiplication
     let mut x_values = Vec::new();
     let mut y_values = Vec::new();
@@ -402,14 +405,7 @@ async fn mul_e2e() {
         FeldmanShamirShare<Fr, G>,
         FakeNetwork,
         G,
-    >(
-        n_parties,
-        t,
-        0,
-        no_of_multiplication,
-        111,
-        Duration::from_secs(30),
-    );
+    >(n_parties, t, 0, 0, 111, Duration::from_secs(30));
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
@@ -420,13 +416,12 @@ async fn mul_e2e() {
     );
 
     //----------------------------------------RUN PROTOCOL----------------------------------------
-    //Load the triples
     for pid in 0..n_parties {
-        let node = nodes[pid].clone();
-        node.preprocessing_material
+        nodes[pid]
+            .preprocessing_material
             .lock()
             .await
-            .add(Some(triple[pid].clone()), None);
+            .add(Some(triples[pid].clone()), None);
     }
 
     // init all nodes
@@ -461,9 +456,9 @@ async fn mul_e2e() {
             // check final_shares consist of correct shares
             for (id, mul_shares) in &final_results {
                 assert_eq!(mul_shares.len(), no_of_multiplication);
-                let _ = mul_shares.iter().map(|mul_share| {
+                mul_shares.iter().for_each(|mul_share| {
                     assert_eq!(mul_share.feldmanshare.degree, t);
-                    assert_eq!(mul_share.feldmanshare.id, *id);
+                    assert_eq!(mul_share.feldmanshare.id, *id + 1);
                 });
             }
             break;

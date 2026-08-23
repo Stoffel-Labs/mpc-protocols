@@ -39,11 +39,21 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+/// Keeps vectorized protocol rounds comfortably below the wire-size limit even
+/// at the maximum supported party count and threshold.
+const MAX_AVSS_BATCH_SIZE: usize = 128;
+
+// A dealing chunked at `MAX_AVSS_BATCH_SIZE` is decoded by `AvssNode::process`, which rejects
+// anything above its own `MAX_DEAL_BATCH`. If this chunk size ever exceeded that limit, honest
+// dealings would be silently rejected as malformed — so catch the drift at compile time.
+const _: () = assert!(MAX_AVSS_BATCH_SIZE <= crate::common::share::avss::MAX_DEAL_BATCH);
 
 pub mod input;
 pub mod mul;
 pub mod output;
 pub mod share_gen;
+#[cfg(feature = "statistics")]
+pub mod statistics;
 pub mod triple_gen;
 
 #[derive(Error, Debug)]
@@ -83,6 +93,8 @@ pub enum AvssMPCError {
     InvalidThreshold(usize, usize),
     #[error("Party size is too large")]
     InvalidPartySize,
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     #[error("error in Input: {0:?}")]
     InputError(#[from] AvssInputError),
     #[error("error in Output: {0:?}")]
@@ -304,6 +316,37 @@ pub struct AvssMPCNode<F: PrimeField, R: RBC, G: CurveGroup<ScalarField = F>> {
     pub input_server: AvssInputServer<F, R, G>,
     pub output_server: AvssOutputServer,
     pub counters: SubProtocolCounters,
+    /// Shared byte and message counters.  Updated by [`statistics::CountingNetwork`]
+    /// (sends) and by [`process`](Self::process) (receives).  Only present with the
+    /// `statistics` feature.
+    #[cfg(feature = "statistics")]
+    pub statistics_counters: std::sync::Arc<statistics::NodeStatisticsCounters>,
+}
+
+#[cfg(feature = "statistics")]
+impl<F, R, G> AvssMPCNode<F, R, G>
+where
+    F: PrimeField,
+    R: RBC<Id = AvssSessionId>,
+    G: CurveGroup<ScalarField = F>,
+{
+    /// Wraps `inner` in a [`statistics::CountingNetwork`] that shares this node's
+    /// statistics counters.  Pass the resulting wrapper (or an `Arc` of it) wherever
+    /// the protocol accepts `Arc<N>` to automatically record outbound bytes and
+    /// message types.  Received bytes and message types are recorded by
+    /// [`process`](Self::process).
+    ///
+    /// Only available with the `statistics` cargo feature.
+    pub fn counting_network<N: Network>(&self, inner: N) -> statistics::CountingNetwork<N> {
+        statistics::CountingNetwork::new(inner, std::sync::Arc::clone(&self.statistics_counters))
+    }
+
+    /// Returns a best-effort snapshot of all statistics counters.
+    ///
+    /// Only available with the `statistics` cargo feature.
+    pub fn statistics_snapshot(&self) -> statistics::NodeStatisticsSnapshot {
+        self.statistics_counters.snapshot()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -404,6 +447,8 @@ where
             input_server,
             output_server,
             counters: SubProtocolCounters::new(),
+            #[cfg(feature = "statistics")]
+            statistics_counters: std::sync::Arc::new(statistics::NodeStatisticsCounters::default()),
         })
     }
 
@@ -419,6 +464,15 @@ where
             .allow_trailing_bytes()
             .with_limit(MAX_MESSAGE_SIZE)
             .deserialize(&raw_msg)?;
+
+        #[cfg(feature = "statistics")]
+        {
+            self.statistics_counters
+                .bytes_received
+                .fetch_add(raw_msg.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            statistics::record_received(&wrapped, &self.statistics_counters.received);
+        }
+
         match wrapped {
             AvssWrappedMessage::Rbc(rbc_msg) => {
                 if sender_id != rbc_msg.sender_id {
@@ -493,15 +547,20 @@ where
     where
         N: 'async_trait,
     {
-        // Both lists must have the same length.
-        assert_eq!(x.len(), y.len());
+        if x.len() != y.len() {
+            return Err(AvssMPCError::InvalidInput(
+                "multiplication input lengths must match".to_string(),
+            ));
+        }
 
         let (no_triples, _) = {
             let store = self.preprocessing_material.lock().await;
             store.len()
         };
         if no_triples < x.len() {
-            //Run preprocessing
+            // Replenish for the actual online batch, even when it is larger than
+            // the pool target supplied at setup.
+            self.params.n_triples = self.params.n_triples.max(x.len());
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(network.clone(), &mut rng).await?;
         }
@@ -513,21 +572,43 @@ where
             .await
             .take_triples(x.len())?;
 
-        let session_id = AvssSessionId::new(
-            ProtocolType::Mul,
-            AvssSessionId::pack_slot(self.counters.mul_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
+        let mut output = Vec::with_capacity(x.len());
+        for ((x_batch, y_batch), triple_batch) in x
+            .chunks(MAX_AVSS_BATCH_SIZE)
+            .zip(y.chunks(MAX_AVSS_BATCH_SIZE))
+            .zip(beaver_triples.chunks(MAX_AVSS_BATCH_SIZE))
+        {
+            let session_id = AvssSessionId::new(
+                ProtocolType::Mul,
+                AvssSessionId::pack_slot(self.counters.mul_counter.get_next().await?, 0, 0),
+                self.params.instance_id,
+            );
 
-        // Call the mul function
-        self.mul_node
-            .init(session_id, x, y, beaver_triples, network)
-            .await?;
+            self.mul_node
+                .init(
+                    session_id,
+                    x_batch.to_vec(),
+                    y_batch.to_vec(),
+                    triple_batch.to_vec(),
+                    network.clone(),
+                )
+                .await?;
+            let batch_result = self
+                .mul_node
+                .wait_for_result(session_id, self.params.timeout)
+                .await;
 
-        self.mul_node
-            .wait_for_result(session_id, self.params.timeout)
-            .await
-            .map_err(AvssMPCError::from)
+            if !self.mul_node.clear_store(session_id).await {
+                warn!(
+                    ?session_id,
+                    "failed to clear completed AVSS multiplication protocol state"
+                );
+            }
+
+            let mut batch_output = batch_result?;
+            output.append(&mut batch_output);
+        }
+        Ok(output)
     }
 
     /// Generates a random element.
@@ -537,7 +618,7 @@ where
             store.len()
         };
         if no_rand.1 == 0 {
-            //Run preprocessing
+            self.params.n_v_random_shares = self.params.n_v_random_shares.max(1);
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(network.clone(), &mut rng).await?;
         }
@@ -574,47 +655,25 @@ where
             store.len()
         };
 
-        // Desired total counts from protocol parameters
-        let mut no_of_triples = self.params.n_triples;
-        let mut no_of_random_shares = self.params.n_v_random_shares;
+        // Generate the exact pool shortfall. Triple generation itself is
+        // vectorized and does not require a multiple of the party count.
+        let total_triples_to_generate = self.params.n_triples.saturating_sub(no_of_triples_avail);
+        let random_pool_shortfall = self
+            .params
+            .n_v_random_shares
+            .saturating_sub(no_of_random_shares_avail);
+        let total_random_shares_to_generate = random_pool_shortfall
+            .checked_add(
+                total_triples_to_generate
+                    .checked_mul(2)
+                    .ok_or(AvssMPCError::LimitError)?,
+            )
+            .ok_or(AvssMPCError::LimitError)?;
 
-        let group_size = self.params.n_parties;
-        let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
-            no_of_triples = 0;
-            0
-        } else {
-            ((no_of_triples - no_of_triples_avail + group_size - 1) / group_size) * group_size
-        };
-
-        let total_random_shares_to_generate = if total_triples_to_generate > 0 {
-            // Always add 2× per triple group
-            let baseline = if no_of_random_shares_avail < no_of_random_shares {
-                no_of_random_shares - no_of_random_shares_avail
-            } else {
-                no_of_random_shares = 0;
-                0
-            };
-            baseline + 2 * total_triples_to_generate
-        } else if no_of_random_shares_avail < no_of_random_shares {
-            no_of_random_shares - no_of_random_shares_avail
-        } else {
-            no_of_random_shares = 0;
-            0
-        };
-
-        if no_of_triples == 0 && no_of_random_shares == 0 {
+        if total_triples_to_generate == 0 && total_random_shares_to_generate == 0 {
             info!("There are enough Random shares and Beaver triples");
-            // return Ok(());
+            return Ok(());
         } else {
-            let mut triple_counter = self.counters.triple_counter.get_next().await?;
-            // exec_id is 64-bit, so remaining capacity (exec slots × 255 round slots) is effectively
-            // unbounded; compute in u128 to avoid underflow/overflow vs the old u8 `256 - counter`.
-            if (u64::MAX - triple_counter) as u128 * 255u128
-                < (total_triples_to_generate / group_size) as u128
-            {
-                return Err(AvssMPCError::LimitError);
-            }
-
             // ------------------------
             // Step 1. Ensure random shares
             // ------------------------
@@ -638,20 +697,27 @@ where
                 .await
                 .take_v_random_shares(total_triples_to_generate)?;
 
-            let a_chunks = random_shares_a.chunks_exact(group_size);
-            let b_chunks = random_shares_b.chunks_exact(group_size);
-            let mut round_id = 0u8;
+            let a_chunks = random_shares_a.chunks(MAX_AVSS_BATCH_SIZE);
+            let b_chunks = random_shares_b.chunks(MAX_AVSS_BATCH_SIZE);
 
             for (a, b) in a_chunks.zip(b_chunks) {
+                let triple_counter = self.counters.triple_counter.get_next().await?;
                 let sessionid = AvssSessionId::new(
                     ProtocolType::Triple,
-                    AvssSessionId::pack_slot(triple_counter, 0, round_id),
+                    AvssSessionId::pack_slot(triple_counter, 0, 0),
                     self.params.instance_id,
                 );
-                let triples = self
+                let result = self
                     .triple_gen
                     .gen_triple(sessionid, a.to_vec(), b.to_vec(), rng, network.clone())
-                    .await?;
+                    .await;
+
+                if !self.triple_gen.clear_store(sessionid).await {
+                    warn!(
+                        ?sessionid,
+                        "failed to clear AVSS triple generation protocol state"
+                    );
+                }
 
                 // ------------------------
                 // Step 4. Collect triples
@@ -660,13 +726,7 @@ where
                     self.preprocessing_material
                         .lock()
                         .await
-                        .add(Some(triples), None);
-                }
-                if round_id == 255 {
-                    triple_counter = self.counters.triple_counter.get_next().await.unwrap();
-                    round_id = 0;
-                } else {
-                    round_id += 1;
+                        .add(Some(result?), None);
                 }
             }
         }
@@ -690,47 +750,44 @@ where
         N: Network + Send + Sync + 'static,
         G: Rng + Send,
     {
-        // Outputs in batches of (n-2t)
-        let batch = self.params.n_parties - 2 * self.params.threshold;
-        let run = (needed + batch - 1) / batch; // ceil(missing / batch)
-        let mut round_id = 0u8;
-        let mut v_ran_sha_counter = self.counters.ran_sha_avss_counter.get_next().await?;
-
-        // exec_id is 64-bit; remaining capacity is effectively unbounded (see triple-counter check).
-        if (u64::MAX - v_ran_sha_counter) as u128 * 255u128 < run as u128 {
-            return Err(AvssMPCError::LimitError);
+        if needed == 0 {
+            return Ok(());
         }
 
-        for i in 0..run {
-            info!("Verifiable random share generation run {}", i);
+        // One vectorized AVSS round produces `n - 2t` random sharings for
+        // every secret dealt by each party.
+        let outputs_per_secret = self.params.n_parties - 2 * self.params.threshold;
+        let mut dealer_secrets_remaining = needed.div_ceil(outputs_per_secret);
+        while dealer_secrets_remaining > 0 {
+            let dealer_batch_size = dealer_secrets_remaining.min(MAX_AVSS_BATCH_SIZE);
+            let exec_id = self.counters.ran_sha_avss_counter.get_next().await?;
             let sessionid = AvssSessionId::new(
                 ProtocolType::Avss,
-                AvssSessionId::pack_slot(v_ran_sha_counter, 0, round_id),
+                AvssSessionId::pack_slot(exec_id, 0, 0),
                 self.params.instance_id,
             );
 
-            // Run ShareGen protocol
             self.share_gen_avss
-                .init(sessionid, rng, network.clone())
+                .init_batch(sessionid, dealer_batch_size, rng, network.clone())
                 .await?;
-
-            // Collect its output
-            let output = self
+            let result = self
                 .share_gen_avss
                 .wait_for_result(sessionid, self.params.timeout)
-                .await?;
-            {
-                self.preprocessing_material
-                    .lock()
-                    .await
-                    .add(None, Some(output));
+                .await;
+
+            if !self.share_gen_avss.clear_store(sessionid).await {
+                warn!(
+                    ?sessionid,
+                    "failed to clear completed AVSS share generation protocol state"
+                );
             }
-            if round_id == 255 {
-                v_ran_sha_counter = self.counters.ran_sha_avss_counter.get_next().await?;
-                round_id = 0;
-            } else {
-                round_id += 1;
-            }
+
+            self.preprocessing_material
+                .lock()
+                .await
+                .add(None, Some(result?));
+
+            dealer_secrets_remaining -= dealer_batch_size;
         }
         Ok(())
     }
@@ -832,6 +889,10 @@ impl ProtocolSessionId for AvssSessionId {
         (self.0 >> 32) & ((1u128 << 80) - 1)
     }
 
+    fn dealer_id(self) -> u8 {
+        self.sub_id()
+    }
+
     fn instance_id(self) -> u32 {
         self.0 as u32
     }
@@ -879,10 +940,11 @@ where
         return Err(SerializationError::InvalidData);
     }
     let (head, tail) = r.split_at(8);
-    let len = u64::from_le_bytes(head.try_into().unwrap()) as usize;
-    if len > max_outer {
+    let len = u64::from_le_bytes(head.try_into().unwrap());
+    if len > max_outer as u64 {
         return Err(SerializationError::InvalidData);
     }
+    let len = len as usize;
     *r = tail;
     (0..len)
         .map(|_| {

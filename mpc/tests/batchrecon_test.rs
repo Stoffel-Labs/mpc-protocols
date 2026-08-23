@@ -164,11 +164,7 @@ mod tests {
                     Err(e) => warn!(id =i,error = ?e,"Sending failure"),
                 }
                 // Lock the session store to update the session state.
-                let session_store = node
-                    .get_or_create_store(session_id, node.id)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let session_store = node.get_or_create_store(session_id, node.id).await.unwrap();
 
                 while {
                     let s = session_store.lock().await;
@@ -208,5 +204,83 @@ mod tests {
 
             assert_eq!(batch_recon_result[..secrets.len()], secrets[..]);
         }
+    }
+
+    /// A Byzantine sender that wins the race with a bogus-width `EvalBatch` must not be able to
+    /// prevent honest parties' correctly-sized shares from being recorded (they used to be
+    /// rejected outright via an `existing.len() != values.len()` check keyed off whichever
+    /// message arrived first).
+    #[tokio::test]
+    async fn test_eval_batch_width_poisoning_does_not_reject_honest_shares() {
+        setup_tracing();
+        use std::sync::Arc;
+        use stoffelmpc_network::fake_network::{FakeNetwork, FakeNetworkConfig};
+
+        let n = 4;
+        let t = 1;
+        let degree = t; // matches Mul's BatchReconNode::new(id, n, threshold, threshold, ..)
+        let session_id = SessionId::new(
+            ProtocolType::BatchRecon,
+            SessionId::pack_slot(123, 0, 0),
+            111,
+        );
+
+        let config = FakeNetworkConfig::new(100);
+        let (inner, _receivers, _) = FakeInnerNetwork::new(n, None, config);
+        let net = Arc::new(FakeNetwork::new(0, inner));
+
+        let (batch_sender, _batch_receiver) = tokio::sync::mpsc::channel(200);
+        let mut victim = BatchReconNode::<Fr>::new(0, n, t, degree, batch_sender).unwrap();
+
+        // Byzantine sender 3 wins the race, arriving first with a bogus width (1 value instead
+        // of the real 2). Under the old first-message-wins logic this alone would be enough to
+        // get every subsequent honest (width-2) message rejected.
+        let poison_payload = {
+            let mut payload = Vec::new();
+            vec![Fr::from(999u64)]
+                .serialize_compressed(&mut payload)
+                .unwrap();
+            payload
+        };
+        let poison_msg =
+            BatchReconMsg::new(3, session_id, BatchReconMsgType::EvalBatch, poison_payload);
+        victim
+            .process(poison_msg, net.clone())
+            .await
+            .expect("a well-formed (if bogus-width) EvalBatch must not itself error");
+
+        // An honest sender's correctly-sized (width-2) message must still be accepted and
+        // recorded, not rejected because of the poisoned entry that arrived first.
+        let honest_payload = {
+            let mut payload = Vec::new();
+            vec![Fr::from(1u64), Fr::from(2u64)]
+                .serialize_compressed(&mut payload)
+                .unwrap();
+            payload
+        };
+        let honest_msg =
+            BatchReconMsg::new(0, session_id, BatchReconMsgType::EvalBatch, honest_payload);
+        victim
+            .process(honest_msg, net.clone())
+            .await
+            .expect("honest EvalBatch must not be rejected due to the earlier poisoned width");
+
+        let session_store = victim
+            .get_or_create_store(session_id, victim.id)
+            .await
+            .unwrap();
+        let store = session_store.lock().await;
+        assert_eq!(
+            store.batch_evals_received.len(),
+            2,
+            "both the poisoned and the honest entry should be recorded (not error-rejected)"
+        );
+        assert!(
+            store
+                .batch_evals_received
+                .iter()
+                .any(|(id, v)| *id == 0 && v.len() == 2),
+            "the honest sender's width-2 entry must be present"
+        );
     }
 }

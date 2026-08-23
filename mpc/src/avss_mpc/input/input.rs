@@ -1,7 +1,6 @@
 use crate::avss_mpc::input::{AvssInputError, AvssInputMessage};
 use crate::avss_mpc::{deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, ProtocolType};
-use crate::common::share::avss::verify_feldman;
-use crate::common::share::feldman::FeldmanShamirShare;
+use crate::common::share::{avss::verify_feldman, feldman::FeldmanShamirShare};
 use crate::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -419,9 +418,9 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                 "Payload too short".to_string(),
             ));
         }
-        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap()) as usize;
+        let declared_len = u64::from_le_bytes(msg.payload[..8].try_into().unwrap());
         let input_len = self.client_data.lock().await.inputs.len();
-        if declared_len != input_len {
+        if declared_len != input_len as u64 {
             return Err(AvssInputError::InvalidInput(
                 "Mismatch in input and share length".to_string(),
             ));
@@ -439,7 +438,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             ));
         }
 
-        // Verify Feldman commitments on received shares
+        // Validate degrees and each Feldman equation.
         for share in &shares {
             if share.feldmanshare.degree != self.t {
                 return Err(AvssInputError::InvalidInput(format!(
@@ -447,7 +446,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                     msg.sender_id
                 )));
             }
-            if !verify_feldman(share.clone()) {
+            if !verify_feldman(share.clone(), msg.sender_id + 1) {
                 return Err(AvssInputError::VerificationFailed(format!(
                     "Feldman verification failed for share from server {}",
                     msg.sender_id

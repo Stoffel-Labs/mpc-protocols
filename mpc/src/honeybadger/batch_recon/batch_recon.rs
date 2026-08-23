@@ -1,4 +1,5 @@
 use super::*;
+use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde},
@@ -11,10 +12,12 @@ use crate::{
     },
 };
 use ark_ff::FftField;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::CanonicalSerialize;
 use futures::lock::Mutex;
+use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
-use std::{collections::HashMap, marker::PhantomData};
+use std::time::Instant;
 use stoffelnet::network_utils::Network;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
@@ -35,13 +38,34 @@ use tracing::{debug, error, info, warn};
 /// 4. Using the reconstructed y-values, parties robustly
 ///    interpolate to recover the original secrets [x₁, ..., x_{t+1}].
 
+/// Returns the payload width shared by at least `threshold` distinct senders, if any.
+///
+/// Used instead of trusting whichever `EvalBatch`/`RevealBatch` message happens to arrive
+/// first to define a session's width — a lone Byzantine sender could otherwise win that race
+/// with a bogus length and get every honest party's correctly-sized share rejected. `threshold`
+/// is the same `degree + t + 1` Byzantine-safe majority the protocol already requires to
+/// reconstruct, so a width can only reach it if at least one honest sender reported it.
+fn agreeing_width<F>(entries: &[(usize, Vec<F>)], threshold: usize) -> Option<usize> {
+    let mut counts: HashMap<usize, usize> = HashMap::new();
+    for (_, values) in entries {
+        let count = counts.entry(values.len()).or_insert(0);
+        *count += 1;
+        if *count >= threshold {
+            return Some(values.len());
+        }
+    }
+    None
+}
+const MAX_BATCH_RECON_SESSIONS: usize = 256;
+
 #[derive(Clone, Debug)]
 pub struct BatchReconNode<F: FftField> {
     pub id: usize, // This node's unique identifier
     pub n: usize,  // Total number of nodes/shares
     pub t: usize,
     pub degree: usize,
-    pub store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<BatchReconStore<F>>>)>>>, // Number of malicious parties
+    pub store:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<BatchReconStore<F>>>)>>>, // Number of malicious parties
     pub output_sender: Sender<SessionId>,
 }
 
@@ -54,7 +78,7 @@ impl<F: FftField> BatchReconNode<F> {
         degree: usize,
         output_sender: Sender<SessionId>,
     ) -> Result<Self, BatchReconError> {
-        let store = Arc::new(Mutex::new(HashMap::new()));
+        let store = Arc::new(Mutex::new(SessionStore::with_default_cap()));
         Ok(Self {
             id,
             n,
@@ -67,12 +91,12 @@ impl<F: FftField> BatchReconNode<F> {
 
     pub async fn clear_entire_store(&self) {
         let mut store = self.store.lock().await;
-        store.clear();
+        store.clear_all();
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
         let mut store = self.store.lock().await;
-        store.remove(&session_id).is_some()
+        store.retire(session_id)
     }
 
     pub async fn store_len(&self) -> usize {
@@ -82,7 +106,7 @@ impl<F: FftField> BatchReconNode<F> {
     pub async fn get_store(&self, session_id: SessionId) -> Result<Vec<u8>, BatchReconError> {
         let store = self.store.lock().await;
 
-        let (_, output_arc) = store.get(&session_id).ok_or_else(|| {
+        let (_, _, output_arc) = store.get(&session_id).ok_or_else(|| {
             BatchReconError::InvalidInput("Session ID does not exist".to_string())
         })?;
 
@@ -193,6 +217,13 @@ impl<F: FftField> BatchReconNode<F> {
         msg: BatchReconMsg,
         net: Arc<N>,
     ) -> Result<(), BatchReconError> {
+        if msg.sender_id >= self.n {
+            return Err(BatchReconError::InvalidInput(format!(
+                "sender id {} is out of range: expected 0 <= id < n (n = {})",
+                msg.sender_id, self.n
+            )));
+        }
+
         match msg.msg_type {
             BatchReconMsgType::Eval => {
                 debug!(
@@ -205,8 +236,7 @@ impl<F: FftField> BatchReconNode<F> {
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
                 // Lock the session store to update the session state.
-                let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await?
+                let Some(session_store) = self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
@@ -278,8 +308,7 @@ impl<F: FftField> BatchReconNode<F> {
                     .map_err(|e| BatchReconError::ArkDeserialization(e))?;
 
                 // Lock the session store to update the session state.
-                let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await?
+                let Some(session_store) = self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
@@ -345,21 +374,18 @@ impl<F: FftField> BatchReconNode<F> {
                     ));
                 }
 
-                let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await?
+                let Some(session_store) = self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
                 let mut store = session_store.lock().await;
 
-                if let Some((_, existing)) = store.batch_evals_received.first() {
-                    if existing.len() != values.len() {
-                        return Err(BatchReconError::InvalidInput(
-                            "inconsistent EvalBatch width".to_string(),
-                        ));
-                    }
-                }
-
+                // Don't infer the session's width from whichever message happens to arrive
+                // first — a Byzantine sender could win that race with a bogus length and
+                // permanently reject every honest party's correctly-sized share. Instead,
+                // store whatever arrives (deduped per sender, so this is naturally capped at
+                // `n` entries regardless of width) and only reconstruct once `degree + t + 1`
+                // entries — a Byzantine-safe majority — agree on the same width.
                 if !store
                     .batch_evals_received
                     .iter()
@@ -368,44 +394,44 @@ impl<F: FftField> BatchReconNode<F> {
                     store.batch_evals_received.push((sender_id, values));
                 }
 
-                if store.batch_evals_received.len() >= self.degree + self.t + 1
-                    && store.y_j_batch.is_none()
-                {
-                    // Decode all chunks in one shot: the Lagrange basis depends only on the sender
-                    // ids (identical across every chunk), so build it once and reuse instead of
-                    // rebuilding `A(x)` and the per-point divisions per chunk. Each chunk is still
-                    // verified against all evaluations and falls back to robust `recover_secret`
-                    // (OEC/Gao) on disagreement, so `t`-fault tolerance is unchanged.
-                    //
-                    // Borrow the received evaluations directly (no clone): `batch_recover_secret`
-                    // only reads them through internal `&Vec<F>` references, and we hold the session
-                    // lock for the whole call. The prior `.clone()` deep-copied every sender's
-                    // evaluation vector on the threshold message of every round.
-                    let decoded = batch_recover_secret(
-                        &store.batch_evals_received,
-                        self.n,
-                        self.degree,
-                        self.t,
-                    )?;
-                    // The opened value per chunk is the constant term P(0).
-                    let y_j_values: Vec<F> = decoded.into_iter().map(|coeffs| coeffs[0]).collect();
+                if store.y_j_batch.is_none() {
+                    let threshold = self.degree + self.t + 1;
+                    if let Some(width) = agreeing_width(&store.batch_evals_received, threshold) {
+                        // Decode all chunks in one shot: the Lagrange basis depends only on the
+                        // sender ids (identical across every chunk), so build it once and reuse
+                        // instead of rebuilding `A(x)` and the per-point divisions per chunk.
+                        // Each chunk is still verified against all evaluations and falls back to
+                        // robust `recover_secret` (OEC/Gao) on disagreement, so `t`-fault
+                        // tolerance is unchanged. Only the entries agreeing on the majority width
+                        // are fed in — mismatched (Byzantine) entries are excluded.
+                        let agreeing: Vec<(usize, Vec<F>)> = store
+                            .batch_evals_received
+                            .iter()
+                            .filter(|(_, v)| v.len() == width)
+                            .cloned()
+                            .collect();
+                        let decoded = batch_recover_secret(&agreeing, self.n, self.degree, self.t)?;
+                        // The opened value per chunk is the constant term P(0).
+                        let y_j_values: Vec<F> =
+                            decoded.into_iter().map(|coeffs| coeffs[0]).collect();
 
-                    store.y_j_batch = Some(y_j_values.clone());
-                    drop(store);
+                        store.y_j_batch = Some(y_j_values.clone());
+                        drop(store);
 
-                    let mut payload = Vec::new();
-                    y_j_values.serialize_compressed(&mut payload)?;
-                    let new_msg = BatchReconMsg::new(
-                        self.id,
-                        msg.session_id,
-                        BatchReconMsgType::RevealBatch,
-                        payload,
-                    );
+                        let mut payload = Vec::new();
+                        y_j_values.serialize_compressed(&mut payload)?;
+                        let new_msg = BatchReconMsg::new(
+                            self.id,
+                            msg.session_id,
+                            BatchReconMsgType::RevealBatch,
+                            payload,
+                        );
 
-                    let wrapped = WrappedMessage::BatchRecon(new_msg);
-                    let encoded = bincode::serialize(&wrapped)
-                        .map_err(BatchReconError::SerializationError)?;
-                    let _ = net.broadcast(&encoded).await?;
+                        let wrapped = WrappedMessage::BatchRecon(new_msg);
+                        let encoded = bincode::serialize(&wrapped)
+                            .map_err(BatchReconError::SerializationError)?;
+                        let _ = net.broadcast(&encoded).await?;
+                    }
                 }
                 Ok(())
             }
@@ -416,7 +442,8 @@ impl<F: FftField> BatchReconNode<F> {
                     "Received RevealBatch message"
                 );
                 let sender_id = msg.sender_id;
-                let values = Vec::<F>::deserialize_compressed(msg.payload.as_slice())
+                let mut payload_slice = msg.payload.as_slice();
+                let values = deser_bounded_vec::<F>(&mut payload_slice, msg.payload.len())
                     .map_err(BatchReconError::ArkDeserialization)?;
 
                 if values.is_empty() {
@@ -425,21 +452,16 @@ impl<F: FftField> BatchReconNode<F> {
                     ));
                 }
 
-                let Some(session_store) =
-                    self.get_or_create_store(msg.session_id, sender_id).await?
+                let Some(session_store) = self.get_or_create_store(msg.session_id, sender_id).await
                 else {
                     return Ok(()); // late message for an already-terminated session — dropped
                 };
                 let mut store = session_store.lock().await;
 
-                if let Some((_, existing)) = store.batch_reveals_received.first() {
-                    if existing.len() != values.len() {
-                        return Err(BatchReconError::InvalidInput(
-                            "inconsistent RevealBatch width".to_string(),
-                        ));
-                    }
-                }
-
+                // Same rationale as the EvalBatch arm: never trust a single (possibly
+                // Byzantine) sender to define the width. Store whatever arrives — naturally
+                // capped at `n` entries by the per-sender dedup — and only reconstruct once a
+                // Byzantine-safe majority agrees on one width.
                 if !store
                     .batch_reveals_received
                     .iter()
@@ -448,34 +470,36 @@ impl<F: FftField> BatchReconNode<F> {
                     store.batch_reveals_received.push((sender_id, values));
                 }
 
-                if store.batch_reveals_received.len() >= self.degree + self.t + 1
-                    && store.secrets.is_none()
-                {
-                    // Batched decode (see the EvalBatch arm): one Lagrange basis for all chunks,
-                    // verified per chunk with robust `recover_secret` (OEC/Gao) fallback. Borrow the
-                    // received reveals directly (no clone) — same rationale as the EvalBatch arm.
-                    let decoded = batch_recover_secret(
-                        &store.batch_reveals_received,
-                        self.n,
-                        self.degree,
-                        self.t,
-                    )?;
-                    let mut result = Vec::with_capacity(decoded.len() * (self.degree + 1));
-                    for coeffs in decoded {
-                        // `batch_recover_secret` already resizes each chunk to `degree + 1`.
-                        result.extend(coeffs);
+                if store.secrets.is_none() {
+                    let threshold = self.degree + self.t + 1;
+                    if let Some(width) = agreeing_width(&store.batch_reveals_received, threshold) {
+                        // Batched decode (see the EvalBatch arm): one Lagrange basis for all
+                        // chunks, verified per chunk with robust `recover_secret` (OEC/Gao)
+                        // fallback. Only entries agreeing on the majority width are fed in.
+                        let agreeing: Vec<(usize, Vec<F>)> = store
+                            .batch_reveals_received
+                            .iter()
+                            .filter(|(_, v)| v.len() == width)
+                            .cloned()
+                            .collect();
+                        let decoded = batch_recover_secret(&agreeing, self.n, self.degree, self.t)?;
+                        let mut result = Vec::with_capacity(decoded.len() * (self.degree + 1));
+                        for coeffs in decoded {
+                            // `batch_recover_secret` already resizes each chunk to `degree + 1`.
+                            result.extend(coeffs);
+                        }
+
+                        let mut bytes_message = Vec::new();
+                        result.serialize_compressed(&mut bytes_message)?;
+
+                        store.secrets = Some(bytes_message);
+                        drop(store);
+
+                        self.output_sender
+                            .send(msg.session_id)
+                            .await
+                            .map_err(|_| BatchReconError::SendError)?;
                     }
-
-                    let mut bytes_message = Vec::new();
-                    result.serialize_compressed(&mut bytes_message)?;
-
-                    store.secrets = Some(bytes_message);
-                    drop(store);
-
-                    self.output_sender
-                        .send(msg.session_id)
-                        .await
-                        .map_err(|_| BatchReconError::SendError)?;
                 }
                 Ok(())
             }
@@ -494,31 +518,31 @@ impl<F: FftField> BatchReconNode<F> {
         &self,
         session_id: SessionId,
         sender_id: usize,
-    ) -> Result<Option<Arc<Mutex<BatchReconStore<F>>>>, BatchReconError> {
+    ) -> Option<Arc<Mutex<BatchReconStore<F>>>> {
         let store_lock = {
             let mut storage = self.store.lock().await;
-
-            // TODO: restore session limits
-            // if !storage.contains_key(&session_id) {
-            //     if storage.len() >= MAX_BATCH_RECON_SESSIONS {
-            //         return Err(BatchReconError::InvalidInput(
-            //             "Session limit reached".into(),
-            //         ));
-            //     }
-            //     let per_peer_limit = MAX_BATCH_RECON_SESSIONS / self.n;
-            //     let peer_count = storage.values().filter(|(id, _)| *id == sender_id).count();
-            //     if peer_count >= per_peer_limit {
-            //         return Err(BatchReconError::InvalidInput(
-            //             "Per-peer session limit reached".into(),
-            //         ));
-            //     }
-            // }
-
-            storage
-                .entry(session_id)
-                .or_insert_with(|| (sender_id, Arc::new(Mutex::new(BatchReconStore::empty()))))
-                .1
-                .clone()
+            let admitted = storage.get_or_admit(
+                session_id,
+                sender_id,
+                MAX_BATCH_RECON_SESSIONS,
+                MAX_BATCH_RECON_SESSIONS / self.n,
+                || Arc::new(Mutex::new(BatchReconStore::empty())),
+            );
+            match admitted {
+                Admission::Got(arc) => arc,
+                // Both a retired session and a cap-rejected new one are late/over-quota
+                // stragglers either way — drop them quietly and let the caller's existing
+                // "no store" fallback handle it, same as an already-terminated session below.
+                Admission::Retired => return None,
+                Admission::Rejected => {
+                    warn!(
+                        self_id = self.id,
+                        ?session_id,
+                        "batch-recon session limit reached, dropping message"
+                    );
+                    return None;
+                }
+            }
         };
 
         {
@@ -533,10 +557,56 @@ impl<F: FftField> BatchReconNode<F> {
                     ?session_id,
                     "dropping late message for already-terminated batch-recon session"
                 );
-                return Ok(None);
+                return None;
             }
         }
 
-        Ok(Some(store_lock))
+        Some(store_lock)
+    }
+}
+
+#[cfg(test)]
+mod width_poisoning_tests {
+    use super::agreeing_width;
+
+    #[test]
+    fn ignores_a_minority_bogus_width_arriving_first() {
+        // Byzantine sender 3 arrives first with width 1; three honest senders (0, 1, 2) then
+        // report the genuine width 2. Threshold 3 (Byzantine-safe majority for t=1) must
+        // resolve to the honest width, not the one that happened to arrive first.
+        let entries: Vec<(usize, Vec<u32>)> = vec![
+            (3, vec![999]),
+            (0, vec![1, 2]),
+            (1, vec![3, 4]),
+            (2, vec![5, 6]),
+        ];
+        assert_eq!(agreeing_width(&entries, 3), Some(2));
+    }
+
+    #[test]
+    fn returns_none_below_threshold() {
+        let entries: Vec<(usize, Vec<u32>)> = vec![(0, vec![1, 2]), (1, vec![3, 4])];
+        assert_eq!(agreeing_width(&entries, 3), None);
+    }
+
+    #[test]
+    fn a_lone_byzantine_width_can_never_reach_threshold_on_its_own() {
+        // t=1 in an n=4 (n = 3t+1) session admits at most 1 Byzantine party, so a fake width
+        // can appear at most once — never enough to reach the threshold of 3 by itself.
+        let entries: Vec<(usize, Vec<u32>)> = vec![(0, vec![999])];
+        assert_eq!(agreeing_width(&entries, 3), None);
+    }
+
+    #[test]
+    fn picks_the_first_width_to_reach_threshold_when_multiple_qualify() {
+        let entries: Vec<(usize, Vec<u32>)> = vec![
+            (0, vec![1, 2]),
+            (1, vec![1, 2]),
+            (2, vec![1, 2]),
+            (3, vec![9, 9, 9]),
+            (4, vec![9, 9, 9]),
+            (5, vec![9, 9, 9]),
+        ];
+        assert_eq!(agreeing_width(&entries, 3), Some(2));
     }
 }
