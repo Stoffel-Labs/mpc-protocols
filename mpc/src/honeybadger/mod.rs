@@ -849,6 +849,18 @@ where
                 self.params.n_parties,
             ));
         }
+        // A client input broadcast must actually come from client id space: a consensus
+        // node's own id must never be treated as an authenticated client, even transiently.
+        if is_client_input_broadcast && sender_id < self.params.n_parties {
+            warn!(
+                "Rejecting client input broadcast: sender {} is a consensus node id, not a client id",
+                sender_id
+            );
+            return Err(HoneyBadgerError::UnauthorizedSender(
+                sender_id,
+                self.params.n_parties,
+            ));
+        }
 
         match wrapped {
             WrappedMessage::Rbc(rbc_msg) => {

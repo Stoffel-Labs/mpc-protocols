@@ -107,6 +107,9 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         t: usize,
         input_ids: Vec<ClientId>,
     ) -> Result<Self, InputError> {
+        if let Some(&overlapping) = input_ids.iter().find(|&&cid| cid < n) {
+            return Err(InputError::InvalidClientId(overlapping, n));
+        }
         let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
         let rbc = R::new(
             id,
