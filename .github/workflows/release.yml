@@ -104,6 +104,23 @@ jobs:
           echo "----- SHA256SUMS -----"
           cat "$RUNNER_TEMP/SHA256SUMS"
           echo "sha_file=$RUNNER_TEMP/SHA256SUMS" >> "$GITHUB_OUTPUT"
+          
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: 'v3.1.3'
+          
+      - name: Check Cosign install!
+        run: cosign version
+
+      - name: Sign packaged crate
+        id: sign
+        run: |
+          bundle="$RUNNER_TEMP/${{ steps.meta.outputs.name }}-${{ steps.meta.outputs.version }}.crate.bundle"
+          cosign sign-blob --yes \
+            --bundle "$bundle" \
+            "${{ steps.checksum.outputs.crate }}"
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
 
       - name: Check whether this version is already published
         id: published
@@ -156,4 +173,5 @@ jobs:
           gh release upload "${{ steps.ref.outputs.tag }}" \
             target/package/*.crate \
             "${{ steps.checksum.outputs.sha_file }}" \
+            "${{ steps.sign.outputs.bundle }}" \
             --clobber
