@@ -12,6 +12,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+
 
 jobs:
   release:
@@ -113,14 +115,24 @@ jobs:
       - name: Check Cosign install!
         run: cosign version
 
-      - name: Sign packaged crate
+      - name: Sign packaged crates
         id: sign
         run: |
-          bundle="$RUNNER_TEMP/${{ steps.meta.outputs.name }}-${{ steps.meta.outputs.version }}.crate.bundle"
-          cosign sign-blob --yes \
-            --bundle "$bundle" \
-            "${{ steps.checksum.outputs.crate }}"
-          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+          bundle_dir="$RUNNER_TEMP/bundles"
+          mkdir -p "$bundle_dir"
+          for name in ${{ steps.meta.outputs.names }}; do
+            base="$name-${{ steps.meta.outputs.version }}.crate"
+            crate="target/package/$base"
+            if [ ! -f "$crate" ]; then
+              echo "Expected $crate but it is not there" >&2
+              exit 1
+            fi
+            echo "Signing $base"
+            cosign sign-blob --yes \
+              --bundle "$bundle_dir/$base.bundle" \
+              "$crate"
+          done
+          echo "bundle_dir=$bundle_dir" >> "$GITHUB_OUTPUT"
 
       - name: Check whether this version is already published
         id: published
@@ -173,5 +185,5 @@ jobs:
           gh release upload "${{ steps.ref.outputs.tag }}" \
             target/package/*.crate \
             "${{ steps.checksum.outputs.sha_file }}" \
-            "${{ steps.sign.outputs.bundle }}" \
+            "${{ steps.sign.outputs.bundle_dir }}"/*.bundle \
             --clobber
