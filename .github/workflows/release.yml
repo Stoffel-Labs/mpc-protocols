@@ -96,6 +96,27 @@ jobs:
           # path dependency is missing a version. Does not need the token.
           cargo publish --workspace --dry-run
 
+      - name: Stage release artifacts
+        id: stage
+        run: |
+          stage="$RUNNER_TEMP/artifacts"
+          mkdir -p "$stage"
+ 
+          for name in ${{ steps.meta.outputs.names }}; do
+            base="$name-${{ steps.meta.outputs.version }}.crate"
+            src="target/package/$base"
+            if [ ! -f "$src" ]; then
+              echo "Expected $src but it is not there" >&2
+              exit 1
+            fi
+            cp "$src" "$stage/$base"
+          done
+ 
+          echo "----- staged -----"
+          ls -1 "$stage"
+ 
+          echo "dir=$stage" >> "$GITHUB_OUTPUT"
+
       - name: Compute crate checksums
         id: checksum
         run: |
@@ -133,6 +154,23 @@ jobs:
               "$crate"
           done
           echo "bundle_dir=$bundle_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Verify signatures before publishing
+        run: |
+          stage="${{ steps.stage.outputs.dir }}"
+          bundles="${{ steps.sign.outputs.bundle_dir }}"
+ 
+          for name in ${{ steps.meta.outputs.names }}; do
+            base="$name-${{ steps.meta.outputs.version }}.crate"
+            echo "Verifying $base"
+            cosign verify-blob \
+              --bundle "$bundles/$base.bundle" \
+              --certificate-identity-regexp "^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/(tags|heads)/.+$" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$stage/$base"
+          done
+ 
+          ( cd "$stage" && sha256sum -c SHA256SUMS )
 
       - name: Check whether this version is already published
         id: published
@@ -183,7 +221,7 @@ jobs:
           fi
 
           gh release upload "${{ steps.ref.outputs.tag }}" \
-            target/package/*.crate \
+            "${{ steps.stage.outputs.dir }}"/*.crate \
             "${{ steps.checksum.outputs.sha_file }}" \
             "${{ steps.sign.outputs.bundle_dir }}"/*.bundle \
             --clobber
