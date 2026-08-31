@@ -2,6 +2,7 @@ use ark_bls12_381::Fr;
 use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField, UniformRand};
 use ark_std::rand::Rng;
 use ark_std::test_rng;
+use itertools::izip;
 use stoffelcrypto::common::SecretSharingScheme;
 use stoffelcrypto::honeybadger::bitwise::{
     kor_cs::KOrCSPrep, AppRecPrep, PRandMPrep, PreBitLTPrep, PreMod2mPrep, PreMulCPrep,
@@ -242,10 +243,12 @@ pub fn make_apprec_prep(
 
 /// FXDiv preprocessing for a k-bit, f-fractional-bit division: AppRec's own
 /// prep (step 2), 2 triples for the step-3/4 batch, PRandM material for
-/// step 3's TruncPr (m = f), and one `FpDivIterPrep` per refinement-loop
-/// iteration (`fpdiv_theta(k).saturating_sub(1)` of them), each carrying 2
-/// Round-A triples, 1 Round-B triple, and 3 independent PRandM sets
-/// (m = 2f) for steps 6/7/8's truncations.
+/// step 3's TruncPr (m = f), one `FpDivIterPrep` per refinement-loop
+/// iteration (`fpdiv_theta(k).saturating_sub(1)` of them, each carrying 2
+/// Round-A triples and 2 independent PRandM sets (m = 2f) for steps 6/7's
+/// truncations), and finally the one-shot step 8 (Round B) material — 1
+/// triple and one PRandM(m = 2f) set — which runs once after the loop, not
+/// once per iteration.
 pub fn make_fpdiv_prep(
     dp_bits: usize,
     k: usize,
@@ -262,39 +265,45 @@ pub fn make_fpdiv_prep(
         (0..n).map(|_| Vec::with_capacity(num_iters)).collect();
     for _ in 0..num_iters {
         let round_a_triples = make_triples(n, t, 2);
-        let round_b_triple = make_triples(n, t, 1);
         let step6_prandm = make_prandm_prep(dp_bits, 2 * f, n, t);
         let step7_prandm = make_prandm_prep(dp_bits, 2 * f, n, t);
-        let step8_prandm = make_prandm_prep(dp_bits, 2 * f, n, t);
         for p in 0..n {
             iters_per_party[p].push(FpDivIterPrep {
                 round_a_triples: round_a_triples[p].clone(),
-                round_b_triple: round_b_triple[p].clone(),
                 step6_trunc_r_bits: step6_prandm[p].r_prime_bits.clone(),
                 step6_trunc_r_int: step6_prandm[p].r_double_prime.clone(),
                 step7_trunc_r_bits: step7_prandm[p].r_prime_bits.clone(),
                 step7_trunc_r_int: step7_prandm[p].r_double_prime.clone(),
-                step8_trunc_r_bits: step8_prandm[p].r_prime_bits.clone(),
-                step8_trunc_r_int: step8_prandm[p].r_double_prime.clone(),
             });
         }
     }
 
-    app_rec_prep
-        .into_iter()
-        .zip(step3_4_triples)
-        .zip(step3_trunc_prandm)
-        .zip(iters_per_party)
-        .map(
-            |(((app_rec_prep, step3_4_triples), step3_trunc), iters)| FpDivPrep {
+    let round_b_triple = make_triples(n, t, 1);
+    let step8_prandm = make_prandm_prep(dp_bits, 2 * f, n, t);
+
+    izip!(
+        app_rec_prep,
+        step3_4_triples,
+        step3_trunc_prandm,
+        iters_per_party,
+        round_b_triple,
+        step8_prandm,
+    )
+    .map(
+        |(app_rec_prep, step3_4_triples, step3_trunc, iters, round_b_triple, step8_trunc)| {
+            FpDivPrep {
                 app_rec_prep,
                 step3_4_triples,
                 step3_trunc_r_bits: step3_trunc.r_prime_bits,
                 step3_trunc_r_int: step3_trunc.r_double_prime,
                 iters,
-            },
-        )
-        .collect()
+                round_b_triple,
+                step8_trunc_r_bits: step8_trunc.r_prime_bits,
+                step8_trunc_r_int: step8_trunc.r_double_prime,
+            }
+        },
+    )
+    .collect()
 }
 
 /// Shares a k-bit signed integer `u_bar` (two's-complement-style field

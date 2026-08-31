@@ -3414,6 +3414,17 @@ impl SessionId {
     pub fn pack_slot(exec_id: u64, sub_id: u8, round_id: u8) -> u128 {
         ((exec_id as u128) << 16) | ((sub_id as u128) << 8) | (round_id as u128)
     }
+
+    /// The 8 bits above `caller` (120..128)
+    pub fn extra_bits(self) -> u8 {
+        (self.0 >> 120) as u8
+    }
+
+    /// Returns a copy of this `SessionId` with its extra bits (120..128)
+    /// set to `extra_bits`, leaving every other field unchanged.
+    pub fn with_extra_bits(self, extra_bits: u8) -> Self {
+        SessionId((self.0 & !(0xFFu128 << 120)) | ((extra_bits as u128) << 120))
+    }
 }
 
 #[cfg(test)]

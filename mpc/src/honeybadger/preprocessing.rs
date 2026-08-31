@@ -597,21 +597,20 @@ where
         let mut iters = Vec::with_capacity(num_iters);
         for _ in 0..num_iters {
             let round_a_triples = self.take_beaver_triples(2)?;
-            let round_b_triple = self.take_beaver_triples(1)?;
             let step6 = self.take_prandm_prep(2 * f)?;
             let step7 = self.take_prandm_prep(2 * f)?;
-            let step8 = self.take_prandm_prep(2 * f)?;
             iters.push(FpDivIterPrep {
                 round_a_triples,
-                round_b_triple,
                 step6_trunc_r_bits: step6.r_prime_bits,
                 step6_trunc_r_int: step6.r_double_prime,
                 step7_trunc_r_bits: step7.r_prime_bits,
                 step7_trunc_r_int: step7.r_double_prime,
-                step8_trunc_r_bits: step8.r_prime_bits,
-                step8_trunc_r_int: step8.r_double_prime,
             });
         }
+
+        // Step 8 (Round B) runs once, after the loop — not per iteration.
+        let round_b_triple = self.take_beaver_triples(1)?;
+        let step8 = self.take_prandm_prep(2 * f)?;
 
         Ok(FpDivPrep {
             app_rec_prep,
@@ -619,6 +618,9 @@ where
             step3_trunc_r_bits: step3_trunc_prandm.r_prime_bits,
             step3_trunc_r_int: step3_trunc_prandm.r_double_prime,
             iters,
+            round_b_triple,
+            step8_trunc_r_bits: step8.r_prime_bits,
+            step8_trunc_r_int: step8.r_double_prime,
         })
     }
 }

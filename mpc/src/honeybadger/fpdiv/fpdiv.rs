@@ -9,10 +9,10 @@
 //! ([w], [z]) ← AppRec([b], k, f)
 //! [c] ← Div2mP([a]*[w], 2k, f)
 //! [d] ← α − [b]*[w]
-//! for i in 1..θ:
+//! for i in 1..θ-1:
 //!     [c] ← Div2mP([c]*(α+[d]), 2k, 2f)
 //!     [d] ← Div2mP([d]*[d], 2k, 2f)
-//!     [c] ← Div2mP([c]*(α+[d]), 2k, 2f)
+//! [c] ← Div2mP([c]*(α+[d]), 2k, 2f)
 //! return ([c], [z])
 //! `α = 2^{2f}` exactly — no rounding, unlike AppRec's `2.9142` constant.
 
@@ -59,22 +59,19 @@ pub enum FpDivError {
     PrepLengthMismatch { expected: usize, got: usize },
 }
 
-/// One refinement-loop iteration's preprocessing (steps 6-8 of Protocol 7).
+/// One refinement-loop iteration's preprocessing (steps 6-7 of Protocol 7 —
+/// one plain Goldschmidt step). Step 8 runs once, after the loop, and its
+/// preprocessing lives on `FpDivPrep` directly, not here.
 #[derive(Clone, Debug)]
 pub struct FpDivIterPrep<F: FftField> {
     /// 2 triples for Round A: `c*(α+d)` (step 6) and `d*d` (step 7).
     pub round_a_triples: Vec<ShamirBeaverTriple<F>>,
-    /// 1 triple for Round B: `c_new1*(α+d_new)` (step 8).
-    pub round_b_triple: Vec<ShamirBeaverTriple<F>>,
     /// Step 6's TruncPr randomness (m = 2f).
     pub step6_trunc_r_bits: Vec<RobustShare<F>>,
     pub step6_trunc_r_int: RobustShare<F>,
     /// Step 7's TruncPr randomness (m = 2f).
     pub step7_trunc_r_bits: Vec<RobustShare<F>>,
     pub step7_trunc_r_int: RobustShare<F>,
-    /// Step 8's TruncPr randomness (m = 2f).
-    pub step8_trunc_r_bits: Vec<RobustShare<F>>,
-    pub step8_trunc_r_int: RobustShare<F>,
 }
 
 /// All preprocessing material required for one FXDiv execution.
@@ -90,6 +87,12 @@ pub struct FpDivPrep<F: FftField> {
     /// One entry per loop iteration; length must equal
     /// `fpdiv_theta(k).saturating_sub(1)`.
     pub iters: Vec<FpDivIterPrep<F>>,
+    /// 1 triple for the final, one-shot Round B: `c*(α+d)` (step 8), run
+    /// once after the refinement loop — not per iteration.
+    pub round_b_triple: Vec<ShamirBeaverTriple<F>>,
+    /// Step 8's TruncPr randomness (m = 2f).
+    pub step8_trunc_r_bits: Vec<RobustShare<F>>,
+    pub step8_trunc_r_int: RobustShare<F>,
 }
 
 #[derive(Clone, Debug)]
@@ -200,14 +203,16 @@ impl<F: PrimeField + FftField> FpDivNode<F> {
             .await?;
 
         // ── Steps 3/4: batched a*w, b*w ───────────────────────────────────
-        let mul_a_session = SessionId::new(
+        let base_mul_a_session = SessionId::new(
             ProtocolType::FpDivMulA,
             SessionId::pack_slot(session.exec_id(), 0, 0),
             session.instance_id(),
         );
+        let mul_a_session_for = |call_index: u8| base_mul_a_session.with_extra_bits(call_index);
+
         let step3_4_products = self
             .mul_round(
-                mul_a_session,
+                mul_a_session_for(0),
                 vec![a, b],
                 vec![w.clone(), w],
                 prep.step3_4_triples,
@@ -245,18 +250,26 @@ impl<F: PrimeField + FftField> FpDivNode<F> {
         let neg_bw = (bw * (-F::one()))?;
         let mut d = (neg_bw + alpha)?;
 
-        // ── Steps 5-9: θ-1 refinement iterations ──────────────────────────
+        // ── Steps 5-7: θ-1 refinement iterations, one plain Goldschmidt
+        // step each: c_n = c_{n-1}(1+d_{n-1}), d_n = d_{n-1}^2 ────────────
         let mul_b_session = SessionId::new(
             ProtocolType::FpDivMulB,
             SessionId::pack_slot(session.exec_id(), 0, 0),
             session.instance_id(),
         );
 
-        for iter_prep in prep.iters {
+        for (iter_index, iter_prep) in prep.iters.into_iter().enumerate() {
+            let call_index = u8::try_from(iter_index + 1).map_err(|_| {
+                FpDivError::InvalidInput(format!(
+                    "k={k} needs too many refinement iterations ({iter_index_plus_1}) for the \
+                     mul_a_session_for per-call extra_bits encoding (max 255)",
+                    iter_index_plus_1 = iter_index + 1
+                ))
+            })?;
             let alpha_plus_d = (d.clone() + alpha)?;
             let round_a_products = self
                 .mul_round(
-                    mul_a_session,
+                    mul_a_session_for(call_index),
                     vec![c.clone(), d.clone()],
                     vec![alpha_plus_d, d.clone()],
                     iter_prep.round_a_triples,
@@ -267,7 +280,7 @@ impl<F: PrimeField + FftField> FpDivNode<F> {
             let c_prod = round_a_products[0].clone();
             let d_prod = round_a_products[1].clone();
 
-            let c_new1 = self
+            c = self
                 .trunc_round(
                     trunc_session(session.exec_id(), session.instance_id(), trunc_round_id),
                     c_prod,
@@ -281,7 +294,7 @@ impl<F: PrimeField + FftField> FpDivNode<F> {
                 .await?;
             trunc_round_id += 1;
 
-            let d_new = self
+            d = self
                 .trunc_round(
                     trunc_session(session.exec_id(), session.instance_id(), trunc_round_id),
                     d_prod,
@@ -294,35 +307,34 @@ impl<F: PrimeField + FftField> FpDivNode<F> {
                 )
                 .await?;
             trunc_round_id += 1;
-
-            let alpha_plus_d_new = (d_new.clone() + alpha)?;
-            let round_b_products = self
-                .mul_round(
-                    mul_b_session,
-                    vec![c_new1],
-                    vec![alpha_plus_d_new],
-                    iter_prep.round_b_triple,
-                    Arc::clone(&network),
-                    duration,
-                )
-                .await?;
-            let c8_prod = round_b_products[0].clone();
-
-            c = self
-                .trunc_round(
-                    trunc_session(session.exec_id(), session.instance_id(), trunc_round_id),
-                    c8_prod,
-                    2 * k,
-                    2 * f,
-                    iter_prep.step8_trunc_r_bits,
-                    iter_prep.step8_trunc_r_int,
-                    Arc::clone(&network),
-                    duration,
-                )
-                .await?;
-            trunc_round_id += 1;
-            d = d_new;
         }
+
+        // ── Step 8: one final half-step, run ONCE
+        let alpha_plus_d = (d + alpha)?;
+        let round_b_products = self
+            .mul_round(
+                mul_b_session,
+                vec![c],
+                vec![alpha_plus_d],
+                prep.round_b_triple,
+                Arc::clone(&network),
+                duration,
+            )
+            .await?;
+        let c8_prod = round_b_products[0].clone();
+
+        let c = self
+            .trunc_round(
+                trunc_session(session.exec_id(), session.instance_id(), trunc_round_id),
+                c8_prod,
+                2 * k,
+                2 * f,
+                prep.step8_trunc_r_bits,
+                prep.step8_trunc_r_int,
+                Arc::clone(&network),
+                duration,
+            )
+            .await?;
 
         Ok((
             SecretFixedPoint::new_with_precision(c, FixedPointPrecision::new(k, f)),

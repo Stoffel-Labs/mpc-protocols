@@ -214,14 +214,16 @@ impl<F: FftField> Multiply<F> {
                 session_id.calling_protocol().unwrap(),
                 SessionId::pack_slot(session_id.exec_id(), 0, 1),
                 session_id.instance_id(),
-            );
+            )
+            .with_extra_bits(session_id.extra_bits());
             self.batch_recon.clear_store(session_id1).await;
 
             let session_id2 = SessionId::new(
                 session_id.calling_protocol().unwrap(),
                 SessionId::pack_slot(session_id.exec_id(), 1, 1),
                 session_id.instance_id(),
-            );
+            )
+            .with_extra_bits(session_id.extra_bits());
             self.batch_recon.clear_store(session_id2).await;
         }
 
@@ -353,7 +355,8 @@ impl<F: FftField> Multiply<F> {
                 session_id.calling_protocol().unwrap(),
                 SessionId::pack_slot(session_id.exec_id(), 0, 1),
                 session_id.instance_id(),
-            );
+            )
+            .with_extra_bits(session_id.extra_bits());
             self.batch_recon
                 .init_batch_reconstruct_many(a_full, session_id1, Arc::clone(&network))
                 .await?;
@@ -364,7 +367,8 @@ impl<F: FftField> Multiply<F> {
                 session_id.calling_protocol().unwrap(),
                 SessionId::pack_slot(session_id.exec_id(), 1, 1),
                 session_id.instance_id(),
-            );
+            )
+            .with_extra_bits(session_id.extra_bits());
             self.batch_recon
                 .init_batch_reconstruct_many(b_full, session_id2, Arc::clone(&network))
                 .await?;
@@ -382,7 +386,8 @@ impl<F: FftField> Multiply<F> {
                 session_id.calling_protocol().unwrap(),
                 SessionId::pack_slot(session_id.exec_id(), self.id as u8, 2),
                 session_id.instance_id(),
-            );
+            )
+            .with_extra_bits(session_id.extra_bits());
 
             let mult_msg = MultMessage::new(self.id, sessionid, bytes_rec_message);
             let wrapped = WrappedMessage::Mult(mult_msg);
@@ -426,7 +431,8 @@ impl<F: FftField> Multiply<F> {
             calling_proto,
             SessionId::pack_slot(sid.exec_id(), 0, 0),
             sid.instance_id(),
-        );
+        )
+        .with_extra_bits(sid.extra_bits());
 
         // 1.
         let storage_bind = self.get_or_create_mult_storage(session_id, sender).await?;
