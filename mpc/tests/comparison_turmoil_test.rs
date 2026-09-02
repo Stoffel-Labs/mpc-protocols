@@ -52,7 +52,11 @@ use tracing::warn;
 // dispatch table, already validated by that file's FakeNetwork-based
 // correctness tests), adapted to TurmoilNetwork's single pre-fanned-in
 // receiver instead of FakeNetwork's per-peer inboxes.
-async fn run_ltz_receiver(mut rx: Receiver<(SenderId, Vec<u8>)>, mut node: LTZNode<Fr>, net: Arc<TurmoilNetwork>) {
+async fn run_ltz_receiver(
+    mut rx: Receiver<(SenderId, Vec<u8>)>,
+    mut node: LTZNode<Fr>,
+    net: Arc<TurmoilNetwork>,
+) {
     while let Some((_sender, bytes)) = rx.recv().await {
         let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
             Ok(m) => m,
@@ -63,7 +67,10 @@ async fn run_ltz_receiver(mut rx: Receiver<(SenderId, Vec<u8>)>, mut node: LTZNo
         };
         match wrapped {
             WrappedMessage::PreMod2m(msg) => {
-                node.pre_mod2m.process(msg).await.expect("pre_mod2m process failed");
+                node.pre_mod2m
+                    .process(msg)
+                    .await
+                    .expect("pre_mod2m process failed");
             }
             WrappedMessage::Mod2(msg) => {
                 node.pre_mod2m
@@ -153,7 +160,13 @@ async fn run_ltz_receiver(mut rx: Receiver<(SenderId, Vec<u8>)>, mut node: LTZNo
     }
 }
 
-fn ltz_e2e_turmoil(u_bar: i128, k: usize, dp_bits: usize, latency: Option<(u64, u64)>, slow_node: Option<(usize, Duration)>) {
+fn ltz_e2e_turmoil(
+    u_bar: i128,
+    k: usize,
+    dp_bits: usize,
+    latency: Option<(u64, u64)>,
+    slow_node: Option<(usize, Duration)>,
+) {
     setup_tracing();
     let n = 5;
     let t = 1;
@@ -226,7 +239,11 @@ fn ltz_e2e_turmoil(u_bar: i128, k: usize, dp_bits: usize, latency: Option<(u64, 
     }
 
     let (_, s) = RobustShare::recover_secret(&s_shares, n, t).unwrap();
-    let expected = if u_bar < 0 { Fr::from(1u64) } else { Fr::from(0u64) };
+    let expected = if u_bar < 0 {
+        Fr::from(1u64)
+    } else {
+        Fr::from(0u64)
+    };
     assert_eq!(s, expected, "ltz mismatch: u_bar={u_bar}, k={k}");
 }
 
@@ -260,7 +277,11 @@ fn ltz_e2e_turmoil_with_slow_node() {
 // ── EQZ ──────────────────────────────────────────────────────────────────
 
 // Mirrors `spawn_eqz_receiver_tasks` in `comparison_test.rs` exactly.
-async fn run_eqz_receiver(mut rx: Receiver<(SenderId, Vec<u8>)>, mut node: EQZNode<Fr>, net: Arc<TurmoilNetwork>) {
+async fn run_eqz_receiver(
+    mut rx: Receiver<(SenderId, Vec<u8>)>,
+    mut node: EQZNode<Fr>,
+    net: Arc<TurmoilNetwork>,
+) {
     while let Some((_sender, bytes)) = rx.recv().await {
         let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
             Ok(m) => m,
@@ -309,20 +330,31 @@ async fn run_eqz_receiver(mut rx: Receiver<(SenderId, Vec<u8>)>, mut node: EQZNo
                         .await
                         .expect("kor_cs mul process failed");
                 }
-                _ => panic!("eqz turmoil: unexpected calling protocol for Mult: {:?}", msg.session_id),
+                _ => panic!(
+                    "eqz turmoil: unexpected calling protocol for Mult: {:?}",
+                    msg.session_id
+                ),
             },
             WrappedMessage::Eqz(msg) => {
                 node.process(msg).await.expect("eqz process failed");
             }
             WrappedMessage::KOrCl(msg) => {
-                node.kor_cl.process(msg).await.expect("kor_cl process failed");
+                node.kor_cl
+                    .process(msg)
+                    .await
+                    .expect("kor_cl process failed");
             }
             _ => warn!("eqz turmoil: unexpected message type"),
         }
     }
 }
 
-fn eqz_e2e_turmoil(a_val: u64, k: usize, latency: Option<(u64, u64)>, slow_node: Option<(usize, Duration)>) {
+fn eqz_e2e_turmoil(
+    a_val: u64,
+    k: usize,
+    latency: Option<(u64, u64)>,
+    slow_node: Option<(usize, Duration)>,
+) {
     setup_tracing();
     let n = 5;
     let t = 1;
@@ -366,7 +398,10 @@ fn eqz_e2e_turmoil(a_val: u64, k: usize, latency: Option<(u64, u64)>, slow_node:
                     run_eqz_receiver(rx, recv_node, recv_net).await;
                 });
 
-                match node.run(a_s, k, pp, kl_pp, ks_pp, session, network, duration).await {
+                match node
+                    .run(a_s, k, pp, kl_pp, ks_pp, session, network, duration)
+                    .await
+                {
                     Ok(s) => {
                         let _ = tx.send(Ok(s));
                     }
@@ -404,7 +439,10 @@ fn eqz_e2e_turmoil(a_val: u64, k: usize, latency: Option<(u64, u64)>, slow_node:
 
     let (_, result) = RobustShare::recover_secret(&result_shares, n, t).unwrap();
     let expected = Fr::from(if a_val == 0 { 1u64 } else { 0u64 });
-    assert_eq!(result, expected, "eqz({a_val}, k={k}) expected {expected:?}, got {result:?}");
+    assert_eq!(
+        result, expected,
+        "eqz({a_val}, k={k}) expected {expected:?}, got {result:?}"
+    );
 }
 
 #[test]

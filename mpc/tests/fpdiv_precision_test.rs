@@ -36,8 +36,8 @@ use std::sync::Arc;
 use stoffelcrypto::{
     common::{types::fixed::FixedPointPrecision, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
-        fpdiv::fpdiv::FpDivNode, robust_interpolate::robust_interpolate::RobustShare,
-        ProtocolType, SessionId, WrappedMessage,
+        fpdiv::fpdiv::FpDivNode, robust_interpolate::robust_interpolate::RobustShare, ProtocolType,
+        SessionId, WrappedMessage,
     },
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
@@ -78,9 +78,16 @@ fn spawn_fpdiv_receiver_tasks(
                     WrappedMessage::Trunc(msg) => {
                         let proto = msg.session_id.calling_protocol();
                         if proto == Some(ProtocolType::FpDivTrunc) {
-                            node.trunc.process(msg).await.expect("fpdiv trunc process failed");
+                            node.trunc
+                                .process(msg)
+                                .await
+                                .expect("fpdiv trunc process failed");
                         } else {
-                            node.app_rec.trunc.process(msg).await.expect("apprec trunc process failed");
+                            node.app_rec
+                                .trunc
+                                .process(msg)
+                                .await
+                                .expect("apprec trunc process failed");
                         }
                     }
                     WrappedMessage::PreMod2m(msg) => {

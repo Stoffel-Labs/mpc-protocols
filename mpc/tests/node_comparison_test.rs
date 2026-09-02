@@ -271,3 +271,326 @@ async fn eq_int_cases() {
     )
     .await;
 }
+
+// ── Fixed-point comparison ────────────────────────────────────────────────────
+//
+// A `SecretFixedPoint` at precision (K, F_BITS) stores `round(v * 2^F_BITS)` as
+// a K-bit signed integer, so these exercise the same LTZ/EQZ protocols the
+// integer ops use. Results come back as fixed-point `0.0` / `1.0`.
+
+use stoffelcrypto::common::types::fixed::{FixedPointPrecision, SecretFixedPoint};
+
+const F_BITS: usize = 4;
+
+type Sfix = SecretFixedPoint<Fr, RobustShare<Fr>>;
+
+fn precision() -> FixedPointPrecision {
+    FixedPointPrecision::new(K, F_BITS)
+}
+
+/// Shares `v` (a real number) at the test precision.
+fn share_fixed(v: f64, n: usize, t: usize) -> Vec<Sfix> {
+    let scaled = (v * (1u64 << F_BITS) as f64).round() as i128;
+    share_signed_fixed(scaled, n, t)
+        .into_iter()
+        .map(|s| SecretFixedPoint::new_with_precision(s, precision()))
+        .collect()
+}
+
+/// Reconstructs a fixed-point comparison result, which must be exactly 0.0 or 1.0.
+async fn reconstruct_fixed_bit(outputs: Vec<Sfix>) -> bool {
+    let shares: Vec<_> = outputs.iter().map(|s| s.value().clone()).collect();
+    let (_, val) = RobustShare::recover_secret(&shares, N_PARTIES, T).expect("interpolate failed");
+    let one = Fr::from(1u64 << F_BITS as u64);
+    if val == one {
+        true
+    } else if val == Fr::from(0u64) {
+        false
+    } else {
+        panic!("comparison result was neither 0.0 nor 1.0 (raw {val:?})");
+    }
+}
+
+/// Nodes provisioned for one unary comparison at width K and one binary at K+1
+/// (a binary op compares `a - b`, which needs the extra bit).
+fn make_fixed_nodes() -> (Vec<Node>, Vec<Arc<FakeNetwork>>) {
+    let (network, receivers, _, _) = test_setup(N_PARTIES, vec![]);
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        N_PARTIES,
+        T,
+        555,
+        0,
+        0,
+        Duration::from_secs(30),
+        vec![],
+    );
+    for node in nodes.iter_mut() {
+        node.params.add_ltz_ops(K, 1);
+        node.params.add_ltz_ops(K + 1, 1);
+    }
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+    (nodes, network)
+}
+
+async fn run_unary_fixed<Op, Fut>(name: &str, cases: &[(f64, bool)], op: Op)
+where
+    Op: Fn(Node, Sfix, Arc<FakeNetwork>) -> Fut + Copy + Send + 'static,
+    Fut: std::future::Future<Output = Sfix> + Send + 'static,
+{
+    setup_tracing();
+    for &(x, expected) in cases {
+        let (nodes, network) = make_fixed_nodes();
+        let shares = share_fixed(x, N_PARTIES, T);
+        let mut handles = Vec::new();
+        for pid in 0..N_PARTIES {
+            handles.push(tokio::spawn(op(
+                nodes[pid].clone(),
+                shares[pid].clone(),
+                network[pid].clone(),
+            )));
+        }
+        let outputs: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.expect("task panicked"))
+            .collect();
+        assert_eq!(
+            reconstruct_fixed_bit(outputs).await,
+            expected,
+            "{name}({x}) should be {expected}"
+        );
+    }
+}
+
+async fn run_binary_fixed<Op, Fut>(name: &str, cases: &[(f64, f64, bool)], op: Op)
+where
+    Op: Fn(Node, Sfix, Sfix, Arc<FakeNetwork>) -> Fut + Copy + Send + 'static,
+    Fut: std::future::Future<Output = Sfix> + Send + 'static,
+{
+    setup_tracing();
+    for &(a_val, b_val, expected) in cases {
+        let (nodes, network) = make_fixed_nodes();
+        let a = share_fixed(a_val, N_PARTIES, T);
+        let b = share_fixed(b_val, N_PARTIES, T);
+        let mut handles = Vec::new();
+        for pid in 0..N_PARTIES {
+            handles.push(tokio::spawn(op(
+                nodes[pid].clone(),
+                a[pid].clone(),
+                b[pid].clone(),
+                network[pid].clone(),
+            )));
+        }
+        let outputs: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.expect("task panicked"))
+            .collect();
+        assert_eq!(
+            reconstruct_fixed_bit(outputs).await,
+            expected,
+            "{name}({a_val}, {b_val}) should be {expected}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ltz_fixed_cases() {
+    run_unary_fixed(
+        "ltz_fixed",
+        &[
+            (-1.5, true),
+            (-0.25, true),
+            (0.0, false),
+            (0.25, false),
+            (3.0, false),
+        ],
+        |mut node, x, net| async move { node.ltz_fixed(x, net).await.expect("ltz_fixed failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn gtz_fixed_cases() {
+    run_unary_fixed(
+        "gtz_fixed",
+        &[(1.5, true), (0.25, true), (0.0, false), (-0.25, false)],
+        |mut node, x, net| async move { node.gtz_fixed(x, net).await.expect("gtz_fixed failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn lez_gez_fixed_cases() {
+    run_unary_fixed(
+        "lez_fixed",
+        &[(-1.5, true), (0.0, true), (0.25, false)],
+        |mut node, x, net| async move { node.lez_fixed(x, net).await.expect("lez_fixed failed") },
+    )
+    .await;
+    run_unary_fixed(
+        "gez_fixed",
+        &[(1.5, true), (0.0, true), (-0.25, false)],
+        |mut node, x, net| async move { node.gez_fixed(x, net).await.expect("gez_fixed failed") },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn lt_gt_fixed_cases() {
+    run_binary_fixed(
+        "lt_fixed",
+        &[(0.5, 1.25, true), (1.25, 0.5, false), (0.5, 0.5, false), (-2.0, -0.5, true)],
+        |mut node, a, b, net| async move {
+            node.lt_fixed(a, b, net).await.expect("lt_fixed failed")
+        },
+    )
+    .await;
+    run_binary_fixed(
+        "gt_fixed",
+        &[(1.25, 0.5, true), (0.5, 1.25, false), (0.5, 0.5, false), (0.5, -0.5, true)],
+        |mut node, a, b, net| async move {
+            node.gt_fixed(a, b, net).await.expect("gt_fixed failed")
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn le_ge_fixed_cases() {
+    run_binary_fixed(
+        "le_fixed",
+        &[(0.5, 1.25, true), (0.5, 0.5, true), (1.25, 0.5, false)],
+        |mut node, a, b, net| async move {
+            node.le_fixed(a, b, net).await.expect("le_fixed failed")
+        },
+    )
+    .await;
+    run_binary_fixed(
+        "ge_fixed",
+        &[(1.25, 0.5, true), (0.5, 0.5, true), (0.5, 1.25, false)],
+        |mut node, a, b, net| async move {
+            node.ge_fixed(a, b, net).await.expect("ge_fixed failed")
+        },
+    )
+    .await;
+}
+
+// ── Tolerance-based equality ──────────────────────────────────────────────────
+//
+// `|x| < 2^tol_bits` in scaled units, as a two-sided comparison: two LTZ calls
+// at `width`, combined locally. With f = 4, tol_bits = 2 admits differences
+// strictly below 4 scaled units = 0.25.
+
+const TOL_BITS: usize = 2; // 2^2 scaled units = 0.25
+
+/// Nodes for a tolerance test: two LTZ at `width`, nothing else — the two
+/// comparison bits are combined without a multiplication.
+fn make_tolerance_nodes(width: usize) -> (Vec<Node>, Vec<Arc<FakeNetwork>>) {
+    let (network, receivers, _, _) = test_setup(N_PARTIES, vec![]);
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        N_PARTIES,
+        T,
+        666,
+        0,
+        0,
+        Duration::from_secs(30),
+        vec![],
+    );
+    for node in nodes.iter_mut() {
+        node.params.add_ltz_ops(width, 2);
+    }
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+    (nodes, network)
+}
+
+#[tokio::test]
+async fn eqz_fixed_tolerance_cases() {
+    setup_tracing();
+    // (value, |value| < 0.25)
+    for &(x, expected) in &[
+        (0.0, true),
+        (0.125, true),
+        (-0.125, true),
+        (0.25, false), // exactly at the tolerance is not "equal"
+        (-0.25, false),
+        (1.0, false),
+        (-1.0, false),
+    ] {
+        let (nodes, network) = make_tolerance_nodes(K + 1);
+        let shares = share_fixed(x, N_PARTIES, T);
+        let mut handles = Vec::new();
+        for pid in 0..N_PARTIES {
+            let mut node = nodes[pid].clone();
+            let s = shares[pid].clone();
+            let net = network[pid].clone();
+            handles.push(tokio::spawn(async move {
+                node.eqz_fixed(s, TOL_BITS, net)
+                    .await
+                    .expect("eqz_fixed failed")
+            }));
+        }
+        let outputs: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.expect("task panicked"))
+            .collect();
+        assert_eq!(
+            reconstruct_fixed_bit(outputs).await,
+            expected,
+            "eqz_fixed({x}) should be {expected}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn eq_fixed_tolerance_cases() {
+    setup_tracing();
+    // (a, b, |a - b| < 0.25). Cases come in swapped pairs: the window is
+    // symmetric, so the result cannot depend on operand order.
+    for &(a_val, b_val, expected) in &[
+        (1.0, 1.0, true),
+        (1.0, 1.125, true),
+        (1.125, 1.0, true),
+        (1.0, 1.25, false), // difference is exactly the tolerance
+        (1.25, 1.0, false), // ... and the same with the operands swapped
+        (1.0, 1.5, false),
+        (-1.0, -1.0, true),
+        (-1.0, 1.0, false),
+    ] {
+        let (nodes, network) = make_tolerance_nodes(K + 2);
+        let a = share_fixed(a_val, N_PARTIES, T);
+        let b = share_fixed(b_val, N_PARTIES, T);
+        let mut handles = Vec::new();
+        for pid in 0..N_PARTIES {
+            let mut node = nodes[pid].clone();
+            let (x, y) = (a[pid].clone(), b[pid].clone());
+            let net = network[pid].clone();
+            handles.push(tokio::spawn(async move {
+                node.eq_fixed(x, y, TOL_BITS, net)
+                    .await
+                    .expect("eq_fixed failed")
+            }));
+        }
+        let outputs: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.expect("task panicked"))
+            .collect();
+        assert_eq!(
+            reconstruct_fixed_bit(outputs).await,
+            expected,
+            "eq_fixed({a_val}, {b_val}) should be {expected}"
+        );
+    }
+}

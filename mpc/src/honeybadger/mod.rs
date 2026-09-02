@@ -1924,61 +1924,8 @@ where
     /// x<0 Integer comparison (int8/16/32/64)
     async fn ltz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
         let k = x.bit_length();
-        if k < 3 {
-            return Err(HoneyBadgerError::LTZError(LTZError::InvalidInput(format!(
-                "k must be >= 3 (got {k}); PreMod2m requires m = k-1 >= 2"
-            ))));
-        }
-        // LTZ runs PreMod2m(a, k, m = k-1); its inner PreBitLT operates on m
-        // bits and needs one PreMulC bundle sized at exactly pk = m.
-        let m = k - 1;
-        let pk = m;
-
-        // Top up if the pool is short, mirroring `mul`. The sizing itself lives
-        // in `PreprocDemand` and is applied by `run_preprocessing` from the
-        // declared workload (`add_ltz_ops`) — nothing is computed or configured
-        // here, so the online path stays a pure draw whenever the offline phase
-        // was provisioned correctly.
-        let need = demand_for_ltz(k);
-        let short = {
-            let store = self.preprocessing_material.lock().await;
-            let len = store.length();
-            len.beaver_triples < need.triples
-                || len.prandbit < need.prandbit
-                || len.prandint < need.prandint
-                || store.premulc_len(pk) < 1
-        };
-        if short {
-            let mut rng = StdRng::from_rng(OsRng).unwrap();
-            self.run_preprocessing(net.clone(), &mut rng).await?;
-        }
-
-        let prep = {
-            let mut store = self.preprocessing_material.lock().await;
-            let suf_mul_inv_prep = store.take_premulc_prep(pk)?;
-            store.build_premod2m_prep(m, suf_mul_inv_prep)?
-        };
-
-        let session = SessionId::new(
-            ProtocolType::LTZ,
-            SessionId::pack_slot(self.counters.ltz_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
-
-        let result_share = self
-            .type_ops
-            .ltz
-            .run(
-                x.share().clone(),
-                k,
-                prep,
-                session,
-                net,
-                self.params.timeout,
-            )
-            .await?;
-
-        Ok(SecretInt::new(result_share, k))
+        let bit = self.ltz_on_share(x.share().clone(), k, net).await?;
+        Ok(SecretInt::new(bit, k))
     }
     async fn gtz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
         let k = x.bit_length();
@@ -2043,67 +1990,8 @@ where
     }
     async fn eqz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
         let k = x.bit_length();
-        if k == 0 {
-            return Err(HoneyBadgerError::EQZError(EQZError::LengthError));
-        }
-        let m = (k as u32).ilog2() as usize + 1;
-
-        // Top up if short — see the note in `ltz_int`. EQZ needs no PreMulC
-        // bundle; its derived material is the ([r],[r^-1]) pairs KOrCS consumes.
-        let need = demand_for_eqz(k);
-        let short = {
-            let store = self.preprocessing_material.lock().await;
-            let len = store.length();
-            len.beaver_triples < need.triples
-                || len.prandbit < need.prandbit
-                || len.prandint < need.prandint
-                || len.rand_inv_pairs < need.rand_inv_pairs
-        };
-        if short {
-            let mut rng = StdRng::from_rng(OsRng).unwrap();
-            self.run_preprocessing(net.clone(), &mut rng).await?;
-        }
-
-        let (eqz_prandm, kor_cl_prandm, kor_cs_prep) = {
-            let mut store = self.preprocessing_material.lock().await;
-            let rand_inv_pairs = store.take_rand_inv_pairs(m)?;
-            let triples_round1 = store.take_beaver_triples(m.saturating_sub(1))?;
-            let triples_round2 = store.take_beaver_triples(m)?;
-            let eqz_prandm = store.take_prandm_prep(k)?;
-            let kor_cl_prandm = store.take_prandm_prep(m)?;
-            (
-                eqz_prandm,
-                kor_cl_prandm,
-                KOrCSPrep {
-                    rand_inv_pairs,
-                    triples_round1,
-                    triples_round2,
-                },
-            )
-        };
-
-        let session = SessionId::new(
-            ProtocolType::EQZ,
-            SessionId::pack_slot(self.counters.eqz_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
-
-        let result_share = self
-            .type_ops
-            .eqz
-            .run(
-                x.share().clone(),
-                k,
-                eqz_prandm,
-                kor_cl_prandm,
-                kor_cs_prep,
-                session,
-                net,
-                self.params.timeout,
-            )
-            .await?;
-
-        Ok(SecretInt::new(result_share, k))
+        let bit = self.eqz_on_share(x.share().clone(), k, net).await?;
+        Ok(SecretInt::new(bit, k))
     }
 
     async fn eq_int(
@@ -2113,6 +2001,137 @@ where
         net: Arc<N>,
     ) -> Result<Self::Sint, Self::Error> {
         self.eqz_int((a - b)?, net).await
+    }
+
+    // ── Fixed-point comparison ────────────────────────────────────────────────
+    //
+    // Each of these is the corresponding integer comparison run on the
+    // underlying scaled integer: at a shared precision (k, f), `a < b` holds
+    // exactly when the stored k-bit integers compare that way. The result bit is
+    // scaled by `2^f` on the way out so `true` reads as `1.0`.
+
+    async fn ltz_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error> {
+        let precision = *x.precision();
+        let bit = self
+            .ltz_on_share(x.value().clone(), precision.k(), net)
+            .await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn gtz_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error> {
+        let precision = *x.precision();
+        let neg = (x.value().clone() * (-F::one()))?;
+        let bit = self.ltz_on_share(neg, precision.k(), net).await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn lez_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error> {
+        // x <= 0  <=>  not (x > 0)  <=>  not ltz(-x)
+        let precision = *x.precision();
+        let neg = (x.value().clone() * (-F::one()))?;
+        let bit = self.ltz_on_share(neg, precision.k(), net).await?;
+        let bit = ((bit * (-F::one()))? + F::one())?; // NOT
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn gez_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error> {
+        let precision = *x.precision();
+        let bit = self
+            .ltz_on_share(x.value().clone(), precision.k(), net)
+            .await?;
+        let bit = ((bit * (-F::one()))? + F::one())?; // NOT
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn lt_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        let diff = (a - b)?;
+        let precision = *diff.precision();
+        let bit = self
+            .ltz_on_share(diff.value().clone(), precision.k() + 1, net)
+            .await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn gt_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        let diff = (b - a)?;
+        let precision = *diff.precision();
+        let bit = self
+            .ltz_on_share(diff.value().clone(), precision.k() + 1, net)
+            .await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn le_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        // a <= b  <=>  not (b < a)
+        let diff = (b - a)?;
+        let precision = *diff.precision();
+        let bit = self
+            .ltz_on_share(diff.value().clone(), precision.k() + 1, net)
+            .await?;
+        let bit = ((bit * (-F::one()))? + F::one())?; // NOT
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn ge_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        let diff = (a - b)?;
+        let precision = *diff.precision();
+        let bit = self
+            .ltz_on_share(diff.value().clone(), precision.k() + 1, net)
+            .await?;
+        let bit = ((bit * (-F::one()))? + F::one())?; // NOT
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn eqz_fixed(
+        &mut self,
+        x: Self::Sfix,
+        tol_bits: usize,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        // The two comparisons inside evaluate `x -/+ 2^tol_bits`, one bit wider
+        // than `x` itself.
+        let precision = *x.precision();
+        let bit = self
+            .abs_below_pow2(x.value().clone(), precision.k() + 1, tol_bits, net)
+            .await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn eq_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        tol_bits: usize,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        // `a - b` spans one more bit than either operand, and the comparisons
+        // inside add one more on top of that.
+        let diff = (a - b)?;
+        let precision = *diff.precision();
+        let bit = self
+            .abs_below_pow2(diff.value().clone(), precision.k() + 2, tol_bits, net)
+            .await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
     }
 }
 
@@ -2324,6 +2343,181 @@ where
     F: PrimeField,
     R: RBC<Id = SessionId>,
 {
+    /// LTZ over a raw share: returns a share of 1 if `x < 0`, else 0.
+    ///
+    /// `k` is the signed width the operand is known to occupy. Shared by the
+    /// integer and fixed-point entry points, which differ only in where `k`
+    /// comes from and how the resulting bit is wrapped.
+    pub(crate) async fn ltz_on_share<N>(
+        &mut self,
+        x: RobustShare<F>,
+        k: usize,
+        net: Arc<N>,
+    ) -> Result<RobustShare<F>, HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        Self: PreprocessingMPCProtocol<F, RobustShare<F>, N, Error = HoneyBadgerError>,
+    {
+        if k < 3 {
+            return Err(HoneyBadgerError::LTZError(LTZError::InvalidInput(format!(
+                "k must be >= 3 (got {k}); PreMod2m requires m = k-1 >= 2"
+            ))));
+        }
+        // LTZ runs PreMod2m(a, k, m = k-1); its inner PreBitLT operates on m
+        // bits and needs one PreMulC bundle sized at exactly pk = m.
+        let m = k - 1;
+        let pk = m;
+
+        // Top up if the pool is short, mirroring `mul`. The sizing itself lives
+        // in `PreprocDemand` and is applied by `run_preprocessing` from the
+        // declared workload (`add_ltz_ops`) — nothing is computed or configured
+        // here, so the online path stays a pure draw whenever the offline phase
+        // was provisioned correctly.
+        let need = demand_for_ltz(k);
+        let short = {
+            let store = self.preprocessing_material.lock().await;
+            let len = store.length();
+            len.beaver_triples < need.triples
+                || len.prandbit < need.prandbit
+                || len.prandint < need.prandint
+                || store.premulc_len(pk) < 1
+        };
+        if short {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        let prep = {
+            let mut store = self.preprocessing_material.lock().await;
+            let suf_mul_inv_prep = store.take_premulc_prep(pk)?;
+            store.build_premod2m_prep(m, suf_mul_inv_prep)?
+        };
+
+        let session = SessionId::new(
+            ProtocolType::LTZ,
+            SessionId::pack_slot(self.counters.ltz_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        Ok(self
+            .type_ops
+            .ltz
+            .run(x, k, prep, session, net, self.params.timeout)
+            .await?)
+    }
+
+    /// EQZ over a raw share: returns a share of 1 if `x == 0` (mod 2^k), else 0.
+    pub(crate) async fn eqz_on_share<N>(
+        &mut self,
+        x: RobustShare<F>,
+        k: usize,
+        net: Arc<N>,
+    ) -> Result<RobustShare<F>, HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        Self: PreprocessingMPCProtocol<F, RobustShare<F>, N, Error = HoneyBadgerError>,
+    {
+        if k == 0 {
+            return Err(HoneyBadgerError::EQZError(EQZError::LengthError));
+        }
+        let m = (k as u32).ilog2() as usize + 1;
+
+        // Top up if short — see the note in `ltz_on_share`. EQZ needs no PreMulC
+        // bundle; its derived material is the ([r],[r^-1]) pairs KOrCS consumes.
+        let need = demand_for_eqz(k);
+        let short = {
+            let store = self.preprocessing_material.lock().await;
+            let len = store.length();
+            len.beaver_triples < need.triples
+                || len.prandbit < need.prandbit
+                || len.prandint < need.prandint
+                || len.rand_inv_pairs < need.rand_inv_pairs
+        };
+        if short {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        let (eqz_prandm, kor_cl_prandm, kor_cs_prep) = {
+            let mut store = self.preprocessing_material.lock().await;
+            let rand_inv_pairs = store.take_rand_inv_pairs(m)?;
+            let triples_round1 = store.take_beaver_triples(m.saturating_sub(1))?;
+            let triples_round2 = store.take_beaver_triples(m)?;
+            let eqz_prandm = store.take_prandm_prep(k)?;
+            let kor_cl_prandm = store.take_prandm_prep(m)?;
+            (
+                eqz_prandm,
+                kor_cl_prandm,
+                KOrCSPrep {
+                    rand_inv_pairs,
+                    triples_round1,
+                    triples_round2,
+                },
+            )
+        };
+
+        let session = SessionId::new(
+            ProtocolType::EQZ,
+            SessionId::pack_slot(self.counters.eqz_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        Ok(self
+            .type_ops
+            .eqz
+            .run(
+                x,
+                k,
+                eqz_prandm,
+                kor_cl_prandm,
+                kor_cs_prep,
+                session,
+                net,
+                self.params.timeout,
+            )
+            .await?)
+    }
+
+    /// `|x| < 2^p` for a raw share, as a 0/1 share.
+    ///
+    /// Two-sided by construction: `(x - 2^p < 0) AND (-x - 2^p < 0)`. The AND
+    /// is free — see below — so the cost is exactly two LTZ calls.
+    /// `k` is the width the two LTZ calls run at, so it must cover `x - 2^p`:
+    /// one bit wider than `x`'s own width. The tolerance is a power of two
+    /// because that is the natural notion for fixed-point — "equal once the low
+    /// `p` bits are ignored".
+    pub(crate) async fn abs_below_pow2<N>(
+        &mut self,
+        x: RobustShare<F>,
+        k: usize,
+        p: usize,
+        net: Arc<N>,
+    ) -> Result<RobustShare<F>, HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        Self: PreprocessingMPCProtocol<F, RobustShare<F>, N, Error = HoneyBadgerError>,
+    {
+        if p + 1 >= k {
+            return Err(HoneyBadgerError::LTZError(LTZError::InvalidInput(format!(
+                "tolerance exponent p={p} needs p+1 < k (k={k})"
+            ))));
+        }
+
+        let two_p = F::from(2u64).pow([p as u64]);
+        let neg_x = (x.clone() * (-F::one()))?;
+
+        // x < 2^p
+        let below = self.ltz_on_share((x - two_p)?, k, net.clone()).await?;
+        // -x < 2^p, i.e. x > -2^p
+        let above = self.ltz_on_share((neg_x - two_p)?, k, net.clone()).await?;
+
+        // The two half-lines `x < 2^p` and `x > -2^p` overlap, so their
+        // indicators are never both 0: that would need `2^p <= x <= -2^p`, i.e.
+        // `2^{p+1} <= 0`. The sum is therefore 1 or 2 and the intersection is
+        // `below + above - 1` — no multiplication, no triple, no extra round.
+        Ok(((below + above)? - F::one())?)
+    }
+
     /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
     async fn ensure_random_shares<G, N>(
         &mut self,

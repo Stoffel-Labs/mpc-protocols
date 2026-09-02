@@ -102,9 +102,16 @@ async fn run_fpdiv_receiver(
             WrappedMessage::Trunc(msg) => {
                 let proto = msg.session_id.calling_protocol();
                 if proto == Some(ProtocolType::FpDivTrunc) {
-                    node.trunc.process(msg).await.expect("fpdiv trunc process failed");
+                    node.trunc
+                        .process(msg)
+                        .await
+                        .expect("fpdiv trunc process failed");
                 } else {
-                    node.app_rec.trunc.process(msg).await.expect("apprec trunc process failed");
+                    node.app_rec
+                        .trunc
+                        .process(msg)
+                        .await
+                        .expect("apprec trunc process failed");
                 }
             }
             WrappedMessage::PreMod2m(msg) => {
@@ -127,7 +134,10 @@ async fn run_fpdiv_receiver(
             }
             WrappedMessage::Mult(msg) => {
                 let proto = msg.session_id.calling_protocol();
-                if matches!(proto, Some(ProtocolType::FpDivMulA) | Some(ProtocolType::FpDivMulB)) {
+                if matches!(
+                    proto,
+                    Some(ProtocolType::FpDivMulA) | Some(ProtocolType::FpDivMulB)
+                ) {
                     node.mul
                         .process(msg.sender, msg.session_id, msg.payload)
                         .await
@@ -143,7 +153,9 @@ async fn run_fpdiv_receiver(
                         .expect("nested pre_bitlt.mul process failed");
                 } else if matches!(
                     proto,
-                    Some(ProtocolType::PreBitMul) | Some(ProtocolType::PreBitMul1) | Some(ProtocolType::PreBitMul2)
+                    Some(ProtocolType::PreBitMul)
+                        | Some(ProtocolType::PreBitMul1)
+                        | Some(ProtocolType::PreBitMul2)
                 ) {
                     node.app_rec
                         .mul
@@ -174,13 +186,19 @@ async fn run_fpdiv_receiver(
             WrappedMessage::BatchRecon(msg) => {
                 let proto = msg.session_id.calling_protocol();
                 let round = msg.session_id.round_id();
-                if matches!(proto, Some(ProtocolType::FpDivMulA) | Some(ProtocolType::FpDivMulB)) {
+                if matches!(
+                    proto,
+                    Some(ProtocolType::FpDivMulA) | Some(ProtocolType::FpDivMulB)
+                ) {
                     node.mul
                         .batch_recon
                         .process(msg, net.clone())
                         .await
                         .expect("fpdiv mul batch_recon process failed");
-                    node.mul.drain_batch_recon_output().await.expect("fpdiv mul drain failed");
+                    node.mul
+                        .drain_batch_recon_output()
+                        .await
+                        .expect("fpdiv mul drain failed");
                 } else if proto == Some(ProtocolType::PreBitMul3) {
                     node.app_rec
                         .bit_dec
@@ -201,7 +219,9 @@ async fn run_fpdiv_receiver(
                         .expect("nested pre_bitlt.mul drain failed");
                 } else if matches!(
                     proto,
-                    Some(ProtocolType::PreBitMul) | Some(ProtocolType::PreBitMul1) | Some(ProtocolType::PreBitMul2)
+                    Some(ProtocolType::PreBitMul)
+                        | Some(ProtocolType::PreBitMul1)
+                        | Some(ProtocolType::PreBitMul2)
                 ) {
                     node.app_rec
                         .mul
@@ -209,7 +229,11 @@ async fn run_fpdiv_receiver(
                         .process(msg, net.clone())
                         .await
                         .expect("apprec mul batch_recon process failed");
-                    node.app_rec.mul.drain_batch_recon_output().await.expect("apprec mul drain failed");
+                    node.app_rec
+                        .mul
+                        .drain_batch_recon_output()
+                        .await
+                        .expect("apprec mul drain failed");
                 } else if proto == Some(ProtocolType::SufOr) {
                     if round == 0 {
                         node.app_rec
@@ -219,7 +243,12 @@ async fn run_fpdiv_receiver(
                             .process(msg, net.clone())
                             .await
                             .expect("sufor batch_recon process failed");
-                        node.app_rec.suf_or.inner.drain_batch_recon_output().await.expect("sufor drain failed");
+                        node.app_rec
+                            .suf_or
+                            .inner
+                            .drain_batch_recon_output()
+                            .await
+                            .expect("sufor drain failed");
                     } else {
                         node.app_rec
                             .suf_or
@@ -310,7 +339,8 @@ fn fpdiv_e2e_turmoil(
     let prep = make_fpdiv_prep(dp_bits, k, f, n, t);
 
     let (mut sim, inner) = turmoil_setup(n, vec![], latency);
-    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(RobustShare<Fr>, RobustShare<Fr>), String>>();
+    let (tx, rx_done) =
+        std::sync::mpsc::channel::<Result<(RobustShare<Fr>, RobustShare<Fr>), String>>();
 
     for (id, p) in prep.into_iter().enumerate() {
         let inner = inner.clone();
@@ -538,25 +568,47 @@ async fn run_session_reuse_scenario(
 
     // Dealers 1 and 2 deliver promptly; dealer 4 ("slow") does not deliver
     // its iteration-0 share yet.
-    deliver_direct_open_share(&node, iter0_session, 1, a1_shares[1].clone(), b1_shares[1].clone())
-        .await
-        .unwrap();
-    deliver_direct_open_share(&node, iter0_session, 2, a1_shares[2].clone(), b1_shares[2].clone())
-        .await
-        .unwrap();
+    deliver_direct_open_share(
+        &node,
+        iter0_session,
+        1,
+        a1_shares[1].clone(),
+        b1_shares[1].clone(),
+    )
+    .await
+    .unwrap();
+    deliver_direct_open_share(
+        &node,
+        iter0_session,
+        2,
+        a1_shares[2].clone(),
+        b1_shares[2].clone(),
+    )
+    .await
+    .unwrap();
 
     // Only 2 of the 2t+1=3 dealers needed have delivered: iteration 0 is
     // legitimately still pending at this node.
 
     // ---- Dealer 4's iteration-0 share finally arrives, LATE ----
-    let iter0_late =
-        deliver_direct_open_share(&node, iter0_session, 4, a1_shares[4].clone(), b1_shares[4].clone()).await;
+    let iter0_late = deliver_direct_open_share(
+        &node,
+        iter0_session,
+        4,
+        a1_shares[4].clone(),
+        b1_shares[4].clone(),
+    )
+    .await;
     let iter0_result = match iter0_late {
         Ok(()) => node
             .wait_for_result(iter0_session, Duration::from_secs(2))
             .await
             .expect("iteration 0 should complete once its 3rd dealer share lands"),
-        Err(e) => return Err(format!("iteration 0's own delivery unexpectedly failed: {e:?}")),
+        Err(e) => {
+            return Err(format!(
+                "iteration 0's own delivery unexpectedly failed: {e:?}"
+            ))
+        }
     };
     if iter0_result.len() != 1 {
         return Err("iteration 0 returned the wrong number of results".to_string());
@@ -589,12 +641,24 @@ async fn run_session_reuse_scenario(
 
     // Dealers 1 and 2 deliver their genuine iteration-1 shares. That's only
     // 2 of the 3 needed -- legitimately incomplete.
-    deliver_direct_open_share(&node, iter1_session, 1, a2_shares[1].clone(), b2_shares[1].clone())
-        .await
-        .unwrap();
-    deliver_direct_open_share(&node, iter1_session, 2, a2_shares[2].clone(), b2_shares[2].clone())
-        .await
-        .unwrap();
+    deliver_direct_open_share(
+        &node,
+        iter1_session,
+        1,
+        a2_shares[1].clone(),
+        b2_shares[1].clone(),
+    )
+    .await
+    .unwrap();
+    deliver_direct_open_share(
+        &node,
+        iter1_session,
+        2,
+        a2_shares[2].clone(),
+        b2_shares[2].clone(),
+    )
+    .await
+    .unwrap();
 
     // Dealer 4 has NOT sent an iteration-1 share yet. But dealer 4's stale
     // iteration-0 direct-open message was already fully absorbed above
@@ -605,8 +669,14 @@ async fn run_session_reuse_scenario(
     // `iter0_session`'s key. Simulate that directly by delivering an
     // iteration-0-shaped share (dealer 4, values a1/b1) tagged with
     // `iter0_session` again.
-    let stale_delivery =
-        deliver_direct_open_share(&node, iter0_session, 4, a1_shares[4].clone(), b1_shares[4].clone()).await;
+    let stale_delivery = deliver_direct_open_share(
+        &node,
+        iter0_session,
+        4,
+        a1_shares[4].clone(),
+        b1_shares[4].clone(),
+    )
+    .await;
     if let Err(e) = stale_delivery {
         // When `iter0_session == iter1_session` (no `extra_bits`), this
         // stale delivery IS iteration 1's 3rd dealer share as far as
@@ -621,11 +691,20 @@ async fn run_session_reuse_scenario(
     }
 
     // Dealer 4's genuine iteration-1 share, finally.
-    deliver_direct_open_share(&node, iter1_session, 4, a2_shares[4].clone(), b2_shares[4].clone())
-        .await
-        .unwrap();
+    deliver_direct_open_share(
+        &node,
+        iter1_session,
+        4,
+        a2_shares[4].clone(),
+        b2_shares[4].clone(),
+    )
+    .await
+    .unwrap();
 
-    match node.wait_for_result(iter1_session, Duration::from_secs(2)).await {
+    match node
+        .wait_for_result(iter1_session, Duration::from_secs(2))
+        .await
+    {
         Ok(shares) => {
             let expected = x2 * y2;
             if shares[0].share[0] == expected {
@@ -659,7 +738,8 @@ fn run_session_reuse_test(iter0_session: SessionId, iter1_session: SessionId, ex
         let tx = tx.clone();
         async move {
             let (_network, _rx) = TurmoilNetwork::new(SenderId::Node(node_id), inner).await;
-            let outcome = run_session_reuse_scenario(node_id, n, t, iter0_session, iter1_session).await;
+            let outcome =
+                run_session_reuse_scenario(node_id, n, t, iter0_session, iter1_session).await;
             let _ = tx.send(outcome);
             Ok(())
         }
