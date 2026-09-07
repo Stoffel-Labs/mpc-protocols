@@ -2,6 +2,7 @@ use crate::utils::test_utils::{
     construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
     fan_in_inboxes, generate_independent_shares, initialize_global_nodes_randousha,
     initialize_global_nodes_ransha, receive, receive_client, setup_tracing, test_setup,
+    unused_precision,
 };
 use ark_bls12_381::Fr;
 use ark_ff::{AdditiveGroup, Field, UniformRand};
@@ -16,7 +17,6 @@ use futures::future::join_all;
 use std::collections::HashMap;
 use stoffelcrypto::{
     common::{
-        math::goldilocks::GoldilocksField,
         rbc::rbc::Avid,
         types::{
             fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
@@ -26,12 +26,11 @@ use stoffelcrypto::{
         ShamirShare,
     },
     honeybadger::{
-        fpmul::f256::Gf256,
         input::input::InputClient,
         ran_dou_sha::RanDouShaState,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         share_gen::RanShaState,
-        ProtocolType, SessionId, WrappedMessage,
+        ProtocolType, SessionId, WrappedMessage, MIN_STATISTICAL_SECURITY,
     },
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
@@ -68,8 +67,8 @@ async fn randousha_e2e() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -146,8 +145,8 @@ async fn ransha_e2e() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -218,8 +217,8 @@ async fn test_input_protocol_e2e() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         clientid.clone(),
     );
@@ -319,8 +318,8 @@ async fn gen_masks_for_input_e2e() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         clientid.clone(),
     );
@@ -489,8 +488,8 @@ async fn mul_e2e() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -508,14 +507,10 @@ async fn mul_e2e() {
     //Load the triples
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        node.preprocessing_material.lock().await.add(
-            Some(triple[pid].clone()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        node.preprocessing_material
+            .lock()
+            .await
+            .add(Some(triple[pid].clone()), None, None, None);
     }
 
     // init all nodes
@@ -604,8 +599,8 @@ async fn mul_e2e_with_preprocessing() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![clientid[0]],
     );
@@ -771,12 +766,10 @@ async fn preprocessing_e2e() {
     //----------------------------------------SETUP PARAMETERS----------------------------------------
     let n_parties = 4;
     let t = 1;
-    let l = 8;
-    let k = 4;
     let no_of_triples = 7;
     let no_of_randomshares = 4;
     let instance_id = 111;
-    let n_prandbit = 4;
+    let n_randbit = 4;
     let n_prandint = 4;
 
     //Setup
@@ -790,10 +783,10 @@ async fn preprocessing_e2e() {
         no_of_triples,
         no_of_randomshares,
         instance_id,
-        n_prandbit,
+        n_randbit,
         n_prandint,
-        l,
-        k,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -837,13 +830,17 @@ async fn preprocessing_e2e() {
         let len = node.preprocessing_material.lock().await.length();
         let n_triples = len.beaver_triples;
         let n_shares = len.random_shr;
-        let n_prandbit = len.prandbit;
+        let n_randbit = len.randbit;
         let n_prandint = len.prandint;
-        // no_of_triples=7 is rounded up to a multiple of group_size (2t+1=3) -> 9.
-        // no_of_randomshares=4 remain after triple generation consumes its share pool.
-        assert_eq!(n_triples, 9); //>no_of_triples
-        assert_eq!(n_shares, 4); //>no_of_randomshares
-        assert_eq!(n_prandbit, 4);
+        // no_of_triples=7 is rounded up to a multiple of group_size (2t+1=3) -> 9. RandBit now
+        // squares via MulPub rather than a Beaver triple, so it consumes no triples at all --
+        // all 9 survive. It still draws one random share per output from the shared pool (no
+        // auto top-up), leaving 4-4=0 random shares behind. Its degree-2t zero-sharings are
+        // topped up by `ensure_zero_shares` and fully consumed, so that pool ends empty too.
+        assert_eq!(n_triples, 9);
+        assert_eq!(n_shares, 0);
+        assert_eq!(len.zero_shares, 0);
+        assert_eq!(n_randbit, 4);
         assert_eq!(n_prandint, 4);
     }
 }
@@ -861,17 +858,23 @@ async fn test_rand_bit() {
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
-    // The construction of triples is same as that of mul.
-    // RandBit operates in the small (Goldilocks) field, so the input shares and
-    // Beaver triples must be over `GoldilocksField`.
-    let (_, per_party_triples) =
-        construct_e2e_input_mul::<GoldilocksField>(n_parties, no_of_rand_bits, t);
+    // RandBit runs directly in the node's field `F` (`Fr` here) and squares via MulPub, so each
+    // bit needs a degree-`2t` sharing of zero to re-randomise the opening of `a^2` rather than a
+    // Beaver triple.
+    let mut per_party_zero_shares: Vec<Vec<RobustShare<Fr>>> = vec![Vec::new(); n_parties];
+    for _ in 0..no_of_rand_bits {
+        let zero_shares =
+            RobustShare::compute_shares(Fr::from(0u64), n_parties, 2 * t, None, &mut rng).unwrap();
+        for pid in 0..n_parties {
+            per_party_zero_shares[pid].push(zero_shares[pid].clone());
+        }
+    }
 
     // assumes each party holds shares of some secrets
     let mut a = Vec::new();
     let mut shares_a = Vec::new();
     for _ in 0..no_of_rand_bits {
-        let a_value = GoldilocksField::rand(&mut rng);
+        let a_value = Fr::rand(&mut rng);
         a.push(a_value);
         let shares = RobustShare::compute_shares(a_value, n_parties, t, None, &mut rng).unwrap();
         shares_a.push(shares);
@@ -887,8 +890,8 @@ async fn test_rand_bit() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -906,7 +909,7 @@ async fn test_rand_bit() {
     let mut handles = Vec::new();
     for pid in 0..n_parties {
         let node = nodes[pid].clone();
-        let mut prand_bit_node = node.preprocess.small_field_preproc.rand_bit;
+        let mut rand_bit_node = node.preprocess.rand_bit;
         let net = network[pid].clone();
 
         // Prepare the input shares for this party
@@ -916,14 +919,14 @@ async fn test_rand_bit() {
         }
         assert!(a_value.len() == no_of_rand_bits);
 
-        let mult_triple = per_party_triples[pid].clone().clone();
+        let zero_shares = per_party_zero_shares[pid].clone();
 
         let handle = tokio::spawn(async move {
             {
-                prand_bit_node
+                rand_bit_node
                     .init(
                         a_value,
-                        mult_triple,
+                        zero_shares,
                         session_id,
                         Duration::from_secs(30),
                         net.clone(),
@@ -946,7 +949,6 @@ async fn test_rand_bit() {
         let node = nodes[pid].clone();
         let store = node
             .preprocess
-            .small_field_preproc
             .rand_bit
             .storage
             .lock()
@@ -971,14 +973,14 @@ async fn test_rand_bit() {
         .1;
     println!("recovered bit: {}", bit0);
     // check if bit is 0 or 1
-    assert!(bit0 == GoldilocksField::ZERO || bit0 == GoldilocksField::ONE);
+    assert!(bit0 == Fr::ZERO || bit0 == Fr::ONE);
 
     let bit1 = RobustShare::recover_secret(&bit_share1, n_parties, t)
         .unwrap()
         .1;
     println!("recovered bit: {}", bit1);
     // check if bit is 0 or 1
-    assert!(bit1 == GoldilocksField::ZERO || bit1 == GoldilocksField::ONE);
+    assert!(bit1 == Fr::ZERO || bit1 == Fr::ONE);
 }
 //----------------------------------------MUL----------------------------------------
 
@@ -1025,7 +1027,7 @@ async fn fpmul_e2e() {
         let x = RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
             .unwrap();
         for (i, share) in x.iter().enumerate() {
-            r_bits[i].push((share.clone(), Gf256::one()));
+            r_bits[i].push(share.clone());
         }
     }
     //----------------------------------------SETUP NODES----------------------------------------
@@ -1038,8 +1040,8 @@ async fn fpmul_e2e() {
         111,
         0,
         0,
-        28,
-        0,
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1059,8 +1061,6 @@ async fn fpmul_e2e() {
         let node = nodes[pid].clone();
         node.preprocessing_material.lock().await.add(
             Some(triple[pid].clone()),
-            None,
-            None,
             None,
             Some(r_bits[pid].clone()),
             Some(vec![r_int[pid].clone()]),
@@ -1118,10 +1118,8 @@ async fn fpmul_e2e_with_preprocessing() {
     let precision = FixedPointPrecision::new(k, m);
     let n_triples = 1 + m; // 1 (fpmul) + m(no of random bits)
     let n_random_shares = m; // no of random bits
-    let n_prandbit = m;
+    let n_randbit = m;
     let n_prandint = 1;
-    let bound_l = 28;
-    let security_k = 4;
 
     //Setup
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
@@ -1156,10 +1154,10 @@ async fn fpmul_e2e_with_preprocessing() {
         n_triples,
         n_random_shares,
         instance_id,
-        n_prandbit,
+        n_randbit,
         n_prandint,
-        bound_l,
-        security_k,
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1256,8 +1254,8 @@ async fn add_fixed_e2e() {
         instance_id,
         0,
         0,
-        8,
-        4,
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1331,8 +1329,8 @@ async fn sub_fixed_e2e() {
         instance_id,
         0,
         0,
-        8,
-        4,
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1395,8 +1393,8 @@ async fn add_int_e2e() {
         instance_id,
         0,
         0,
-        8,
-        4,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1459,8 +1457,8 @@ async fn sub_int_e2e() {
         instance_id,
         0,
         0,
-        8,
-        4,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1519,10 +1517,10 @@ async fn mul_int_e2e_with_preprocessing() {
         /*beaver triples*/ 2, // safe for one mul
         /*random shares */ 2,
         instance_id,
-        /*prandbit*/ 0,
+        /*randbit*/ 0,
         /*prandint*/ 0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1632,14 +1630,14 @@ async fn fpdiv_const_e2e() {
     // PRandInt
     let r_int = RobustShare::compute_shares(Fr::from(3u64), n_parties, t, None, &mut rng).unwrap();
 
-    // PRandBits: m bits
+    // RandBits: m bits
     let mut r_bits = vec![Vec::new(); n_parties];
     for j in 0..m {
         let bit_shares =
             RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
                 .unwrap();
         for (i, share) in bit_shares.iter().enumerate() {
-            r_bits[i].push((share.clone(), Gf256::one()));
+            r_bits[i].push(share.clone());
         }
     }
 
@@ -1652,10 +1650,11 @@ async fn fpdiv_const_e2e() {
         222,
         0,
         0,
-        // `l` must cover the 2k-bit value fed into TruncPr after truncating `m` bits,
-        // otherwise the PRandInt mask is narrower than the value it has to hide.
-        2 * k - m,
-        k,
+        // Sizing the mask pool from the precision is what makes it cover the `2k - m`-bit value
+        // `div_with_const_fixed` feeds into TruncPr; passing a narrower precision here is the
+        // misconfiguration `fpdiv_const_rejects_undersized_prandint_mask` exercises.
+        precision,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1674,9 +1673,7 @@ async fn fpdiv_const_e2e() {
         node.preprocessing_material.lock().await.add(
             None, // No Beaver triple needed
             None,
-            None,
-            None,
-            Some(r_bits[pid].clone()),      // PRandBit[]
+            Some(r_bits[pid].clone()),      // RandBit[]
             Some(vec![r_int[pid].clone()]), // PRandInt[]
         );
     }
@@ -1723,8 +1720,12 @@ async fn fpdiv_const_e2e() {
 
 /// `div_with_const_fixed` feeds a 2k-bit value into TruncPr, which broadcasts
 /// `b + 2^m*r_int + r'` in the clear. `r_int` is the only thing hiding `b` above bit `m`, so a
-/// PRandInt parameter narrower than `2k - f` leaks rather than failing — the arithmetic stays
-/// correct either way, which is exactly why this went unnoticed until it was checked for.
+/// mask pool narrower than `2k - f` leaks rather than failing — the arithmetic stays correct
+/// either way, which is exactly why this went unnoticed until it was checked for.
+///
+/// The pool is sized from `params.precision` before any value exists, so the way to get it wrong
+/// is now to configure the node for a *different* precision than the values it is handed. That
+/// is what this sets up, and what `check_mask_security` has to catch.
 ///
 /// Guard the guard: without this test the width check can be deleted and every existing fpdiv
 /// test still passes.
@@ -1740,11 +1741,13 @@ async fn fpdiv_const_rejects_undersized_prandint_mask() {
     let k = 16;
     let m = 4;
     let precision = FixedPointPrecision::new(k, m);
-    let required = 2 * k - m;
+    let value_bits = 2 * k - m;
 
-    // One bit short of the requirement. The check runs before any preprocessing or network
-    // activity, so no protocol material is needed to reach it.
-    let too_narrow = required - 1;
+    // Size the node for one extra fractional bit: `2k - (m + 1)` is exactly one bit shy of the
+    // `2k - m` the values actually carry, so the pool delivers `MIN_STATISTICAL_SECURITY - 1`.
+    // The check runs before any preprocessing or network activity, so no protocol material is
+    // needed to reach it.
+    let too_narrow = FixedPointPrecision::new(k, m + 1);
     let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
@@ -1754,7 +1757,7 @@ async fn fpdiv_const_rejects_undersized_prandint_mask() {
         0,
         0,
         too_narrow,
-        k,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![],
     );
@@ -1767,15 +1770,101 @@ async fn fpdiv_const_rejects_undersized_prandint_mask() {
     let err = node
         .div_with_const_fixed(a, denom, network[0].clone())
         .await
-        .expect_err("division must refuse to run with a mask narrower than 2k - f");
+        .expect_err("division must refuse to run below the statistical security floor");
 
     let rendered = format!("{err:?}");
     assert!(
-        rendered.contains("NotEnoughBitsPrep"),
-        "expected NotEnoughBitsPrep, got {rendered}"
+        rendered.contains("InsufficientStatisticalSecurity"),
+        "expected InsufficientStatisticalSecurity, got {rendered}"
+    );
+    // One bit short, so exactly one bit below the floor -- and the error must say so rather
+    // than just naming a width, since the delivered margin is the thing that matters.
+    assert!(
+        rendered.contains(&format!("delivered: {}", MIN_STATISTICAL_SECURITY - 1)),
+        "error should report the delivered margin, got {rendered}"
     );
     assert!(
-        rendered.contains(&required.to_string()),
-        "error should report the required width {required}, got {rendered}"
+        rendered.contains(&format!("value_bits: {value_bits}")),
+        "error should report the value width {value_bits}, got {rendered}"
     );
+}
+
+/// PRSS key setup end to end: one RISS run establishes the keys, after which every party derives
+/// its PRandInt masks locally and they still reconstruct as a valid degree-`t` sharing.
+///
+/// This is the property the whole PRSS change rests on — that RISS, run once, produces key
+/// material good enough that no further communication is needed for masks.
+#[tokio::test]
+async fn prss_setup_from_riss_then_local_masks() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+    let instance_id = 111;
+
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        instance_id,
+        0,
+        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    // Key setup: the one and only time these nodes talk about PRandInt.
+    let mut handles = Vec::new();
+    for (pid, node) in nodes.iter().enumerate() {
+        let mut node = node.clone();
+        let net = network[pid].clone();
+        handles.push(tokio::spawn(async move {
+            node.setup_prss_keys(net).await.expect("prss setup");
+            node
+        }));
+    }
+    for (pid, handle) in handles.into_iter().enumerate() {
+        nodes[pid] = handle.await.unwrap();
+        assert!(nodes[pid].prss_keys_installed(), "node {pid} has no keys");
+    }
+
+    // From here on, masks are derived with no messages at all.
+    let count = 5;
+    let bits = nodes[0].params.mask_bits();
+    let per_party: Vec<Vec<RobustShare<Fr>>> = nodes
+        .iter()
+        .map(|node| {
+            node.preprocess
+                .prand_int
+                .generate_prss_at(instance_id, 0, count, bits)
+                .unwrap()
+        })
+        .collect();
+
+    for i in 0..count {
+        let shares: Vec<RobustShare<Fr>> =
+            (0..n_parties).map(|p| per_party[p][i].clone()).collect();
+        let (coeffs, secret) = RobustShare::recover_secret(&shares, n_parties, t)
+            .unwrap_or_else(|e| panic!("mask {i} failed to reconstruct: {e:?}"));
+        assert!(coeffs.len() <= t + 1, "mask {i} is not a degree-t sharing");
+        assert_eq!(coeffs[0], secret);
+    }
+
+    // Two distinct sets of keys must not collide: a second instance derives different masks.
+    let other = nodes[0]
+        .preprocess
+        .prand_int
+        .generate_prss_at(instance_id + 1, 0, count, bits)
+        .unwrap();
+    assert_ne!(other, per_party[0]);
 }

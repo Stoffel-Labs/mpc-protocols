@@ -1,118 +1,42 @@
 use crate::common::session_store::{Admission, SessionStore};
 use crate::{
-    common::{share::ShareError, ProtocolSessionId, SecretSharingScheme, RBC},
+    common::{share::ShareError, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
         fpmul::{
             mod_pow_2_from_field, pow2_f, TruncPrError, TruncPrMessage, TruncPrStore, TruncState,
         },
-        robust_interpolate::robust_interpolate::RobustShare,
-        SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
+        robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
+        SessionId, WrappedMessage,
     },
 };
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use bincode::Options;
 use std::sync::Arc;
 use std::time::Instant;
 use stoffelnet::network_utils::Network;
 use tokio::{
-    sync::{
-        mpsc::{self, Receiver},
-        Mutex,
-    },
+    sync::Mutex,
     time::{timeout, Duration},
 };
 use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
-pub struct TruncPrNode<F: PrimeField, R: RBC> {
+pub struct TruncPrNode<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
     pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<TruncPrStore<F>>>)>>>,
-    pub rbc: R,
-    pub rbc_output: Arc<Mutex<Receiver<SessionId>>>,
 }
 const MAX_TRUNCPR_SESSIONS: usize = 1024;
 
-impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
+impl<F: PrimeField> TruncPrNode<F> {
     pub fn new(id: usize, n: usize, t: usize) -> Result<Self, TruncPrError> {
-        let (rbc_sender, rbc_receiver) = mpsc::channel(200);
-
-        let rbc = R::new(
-            id,
-            n,
-            t,
-            t + 1,
-            rbc_sender,
-            Arc::new(WrappedMessage::rbc_wrap),
-        )?;
         Ok(Self {
             id,
             n,
             t,
             store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
-            rbc,
-            rbc_output: Arc::new(Mutex::new(rbc_receiver)),
         })
-    }
-
-    pub async fn drain_rbc_output(&mut self) -> Result<(), TruncPrError> {
-        info!(node_id = self.id, "TruncPr is draining RBC output");
-        loop {
-            let id = {
-                let mut rx = self.rbc_output.lock().await;
-                match rx.try_recv() {
-                    Ok(id) => id,
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        error!(
-                            node_id = self.id,
-                            "Channel for RBC in TruncPr is disconnected"
-                        );
-                        return Err(TruncPrError::Abort);
-                    }
-                }
-            };
-
-            let output = self.rbc.get_store(id).await?;
-            let mut msg: TruncPrMessage = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_limit(MAX_MESSAGE_SIZE)
-                .deserialize(&output)?;
-            let authenticated_sender = id.sub_id() as usize;
-            if msg.sender_id != authenticated_sender {
-                warn!(
-                    "Dropping RBC output: inner sender_id {} does not match session round_id {}",
-                    msg.sender_id, authenticated_sender
-                );
-                continue;
-            }
-            if msg.session_id.exec_id() != id.exec_id()
-                || msg.session_id.instance_id() != id.instance_id()
-            {
-                warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
-                continue;
-            }
-            if msg.session_id.round_id() != id.round_id() || msg.session_id.sub_id() != 0 {
-                warn!("Dropping RBC output: inner session metadata does not match RBC session metadata");
-                continue;
-            }
-
-            msg.sender_id = authenticated_sender;
-            info!(
-                node_id = self.id,
-                "TruncPr received RBC output for open handler"
-            );
-            match self.handle_open(msg).await {
-                Ok(()) => {}
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
     }
 
     pub async fn get_or_create_store(
@@ -141,17 +65,6 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     }
 
     pub async fn clear_store(&self, session_id: SessionId) -> bool {
-        if let Some(calling_proto) = session_id.calling_protocol() {
-            for party_id in 0..self.n {
-                let rbc_session_id = SessionId::new(
-                    calling_proto,
-                    SessionId::pack_slot(session_id.exec_id(), party_id as u8, 0),
-                    session_id.instance_id(),
-                );
-                self.rbc.clear_session(rbc_session_id).await;
-            }
-        }
-
         let mut store = self.store.lock().await;
         store.retire(session_id)
     }
@@ -214,7 +127,12 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
         };
 
         // ---- phase 2: compute outside lock ----
-        let (_, c) = RobustShare::recover_secret(&shares, self.n, self.t)?;
+        let have_all = shares.len() >= self.n;
+        let c = match RobustShare::recover_secret(&shares, self.n, self.t) {
+            Ok((_, c)) => c,
+            Err(InterpolateError::DecodingError(_)) if !have_all => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
         let c_mod = mod_pow_2_from_field::<F>(c, m);
 
         let a_prime = RobustShare::from_scalar_sub(c_mod, &r_dash);
@@ -261,12 +179,16 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
     ) -> Result<(), TruncPrError> {
         info!(node_id = self.id, session_id = ?session, "TruncPr start");
 
-        let calling_proto = match session.calling_protocol() {
-            Some(proto) => proto,
-            None => {
-                return Err(TruncPrError::SessionIdError(session));
-            }
-        };
+        if session.calling_protocol().is_none() {
+            return Err(TruncPrError::SessionIdError(session));
+        }
+
+        if r_bits.len() < m {
+            return Err(TruncPrError::InsufficientRandBits {
+                needed: m,
+                got: r_bits.len(),
+            });
+        }
 
         let store = match self.get_or_create_store(session, self.id).await {
             Some(s) => s,
@@ -291,38 +213,34 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
             (r_dash, b)
         };
 
-        if self.try_finalize(session, store.clone()).await? {
-            return Ok(());
-        }
-
         // [r] = 2^m [r''] + [r']
         let r = ((r_int * pow2_f::<F>(m))? + r_dash)?;
 
         // share of (b + r)
         let open_share = (b + r)?;
 
-        // serialize and broadcast
+        // Broadcast our own opening unconditionally, before attempting to finalize.
+        // Other parties may already be blocked waiting on it: at the minimum BFT config
+        // (n = 3t+1) every other party needs *all* n-1 other openings to ever reach
+        // 2t+1, so a party that happens to already have enough *other* shares buffered
+        // to finish locally must not skip sending its own share just because it doesn't
+        // need it for its own output. Serialize and broadcast directly (point-to-point);
+        // robust reconstruction in `try_finalize` tolerates up to `t` bad shares among
+        // the received ones, so this doesn't need RBC's reliable-broadcast agreement.
         let mut payload = Vec::new();
         open_share.serialize_compressed(&mut payload)?;
-        let wrapped = TruncPrMessage::new(self.id, session, payload);
+        let trunc_msg = TruncPrMessage::new(self.id, session, payload);
+        let wrapped = WrappedMessage::Trunc(trunc_msg);
         let bytes_wrapped = bincode::serialize(&wrapped)?;
 
-        let session_id = SessionId::new(
-            calling_proto,
-            SessionId::pack_slot(session.exec_id(), self.id as u8, 0),
-            session.instance_id(),
-        );
-        self.rbc
-            .init(
-                bytes_wrapped,
-                session_id, // A unique session id per node
-                Arc::clone(&network),
-            )
-            .await?;
+        network.broadcast(&bytes_wrapped).await?;
+
+        self.try_finalize(session, store).await?;
+
         Ok(())
     }
 
-    async fn handle_open(&mut self, msg: TruncPrMessage) -> Result<(), TruncPrError> {
+    pub async fn process(&mut self, msg: TruncPrMessage) -> Result<(), TruncPrError> {
         info!(
             node_id = self.id,
             sender = msg.sender_id,
@@ -379,16 +297,128 @@ impl<F: PrimeField, R: RBC<Id = SessionId>> TruncPrNode<F, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::rbc::rbc::Avid;
+    use crate::common::SecretSharingScheme;
     use crate::honeybadger::fpmul::{TruncPrError, TruncPrMessage};
     use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-    use crate::honeybadger::SessionId;
+    use crate::honeybadger::{ProtocolType, SessionId};
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
+    use ark_std::test_rng;
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+
+    /// Regression test for the corrupt-early-opening deadlock: at n=4, t=1 every party
+    /// needs *all* n-1=3 other openings to ever reach 2t+1, so there is zero slack.
+    /// Party 3 calls `init` after parties 0, 1, 2 have already broadcast, with party
+    /// 0's opening corrupted. `try_finalize`'s decode attempt over exactly those 2t+1=3
+    /// buffered shares (one bad) fails -- not because anything is actually broken, but
+    /// because 3 shares with 1 bad one isn't enough evidence to error-correct yet.
+    ///
+    /// Before the fix: that failure propagated out of `init` via `?` *before* the
+    /// broadcast, so party 3 never sent its own opening -- permanently starving parties
+    /// 0, 1, 2 of the one share they all still needed, and failing party 3's own
+    /// operation even though the value was in fact recoverable once more shares arrived.
+    #[tokio::test]
+    async fn honest_late_init_still_broadcasts_despite_early_corrupt_open() {
+        let n = 4;
+        let t = 1;
+        let k = 8;
+        let m = 3;
+        let session_id = SessionId::new(ProtocolType::Trunc, SessionId::pack_slot(1, 0, 0), 55);
+
+        let mut rng = test_rng();
+        let honest_shares =
+            RobustShare::compute_shares(Fr::from(77u64), n, t, None, &mut rng).unwrap();
+
+        let mut node3 = TruncPrNode::<Fr>::new(3, n, t).unwrap();
+
+        // Exactly what `process` would have buffered before `init` was ever called:
+        // parties 1 and 2's honest openings, plus party 0's corrupted one (same id/
+        // degree, wrong value -- indistinguishable from honest on the wire).
+        let store = node3.get_or_create_store(session_id, 3).await.unwrap();
+        {
+            let mut s = store.lock().await;
+            s.open_buf
+                .insert(0, RobustShare::new(Fr::from(999u64), 0, t));
+            s.open_buf.insert(1, honest_shares[1].clone());
+            s.open_buf.insert(2, honest_shares[2].clone());
+        }
+
+        let (inner, mut inboxes, _) = FakeInnerNetwork::new(n, None, FakeNetworkConfig::new(10));
+        let net3 = Arc::new(FakeNetwork::new(3, inner));
+
+        let a = RobustShare::new(Fr::from(5u64), 3, t);
+        let r_bits = vec![RobustShare::new(Fr::from(0u64), 3, t); m];
+        let r_int = RobustShare::new(Fr::from(2u64), 3, t);
+
+        node3
+            .init(a, k, m, r_bits, r_int, session_id, net3)
+            .await
+            .expect(
+                "init must not fail on a merely-pending decode: 2t+1 shares buffered, \
+                 one bad, isn't enough evidence to conclude anything is broken -- only \
+                 that finalizing isn't possible yet",
+            );
+
+        // The real assertion: party 3 must broadcast its own opening regardless of
+        // whether it could finalize locally from what was already buffered.
+        let msg = inboxes[0][3]
+            .try_recv()
+            .expect("party 3 must broadcast its own opening even when it can't finalize yet");
+        let wrapped: WrappedMessage = bincode::deserialize(&msg).unwrap();
+        match wrapped {
+            WrappedMessage::Trunc(trunc_msg) => assert_eq!(trunc_msg.sender_id, 3),
+            other => panic!("expected a Trunc open message, got {other:?}"),
+        }
+    }
+
+    /// Regression test for the undersized-mask info leak: `init` must reject a short
+    /// `r_bits` vector rather than silently building `r_dash` from fewer than `m` bits
+    /// and leaking the low `m` bits of `a` in the clear opening.
+    ///
+    /// With k=8, m=3, a=5, r_int=2, r_bits=[]: `r_dash` would be 0 (no masking at all),
+    /// and the opened value `2^(k-1) + a + 2^m*r_int` = 128 + 5 + 16 = 149, whose low 3
+    /// bits (149 mod 8 = 5) are exactly `a`.
+    #[tokio::test]
+    async fn init_rejects_undersized_rand_bits_mask() {
+        let n = 4;
+        let t = 1;
+        let k = 8;
+        let m = 3;
+        let session_id = SessionId::new(ProtocolType::Trunc, SessionId::pack_slot(2, 0, 0), 55);
+
+        let mut node = TruncPrNode::<Fr>::new(0, n, t).unwrap();
+        let (inner, mut inboxes, _) = FakeInnerNetwork::new(n, None, FakeNetworkConfig::new(10));
+        let net = Arc::new(FakeNetwork::new(0, inner));
+
+        let a = RobustShare::new(Fr::from(5u64), 0, t);
+        let r_int = RobustShare::new(Fr::from(2u64), 0, t);
+
+        let err = node
+            .init(a, k, m, vec![], r_int, session_id, net)
+            .await
+            .expect_err(
+            "init must reject r_bits shorter than m instead of silently masking with fewer bits",
+        );
+
+        match err {
+            TruncPrError::InsufficientRandBits { needed, got } => {
+                assert_eq!(needed, m);
+                assert_eq!(got, 0);
+            }
+            other => panic!("expected InsufficientRandBits, got {other:?}"),
+        }
+
+        // Rejection must happen before any broadcast -- otherwise the leaking payload
+        // would already be on the wire regardless of what `init` returns.
+        assert!(
+            inboxes[1][0].try_recv().is_err(),
+            "rejected init must not broadcast a payload that would leak a's low bits"
+        );
+    }
 
     #[tokio::test]
     async fn test_truncpr_handle_open_invalid_sub_id() {
-        let mut node = TruncPrNode::<Fr, Avid<SessionId>>::new(0, 5, 1).unwrap();
+        let mut node = TruncPrNode::<Fr>::new(0, 5, 1).unwrap();
 
         // Create a session id with sub_id != 0
         let session_id = SessionId::new(
@@ -405,7 +435,7 @@ mod tests {
         let msg = TruncPrMessage::new(0, session_id, payload);
 
         // Should return a SessionIdError due to sub_id != 0
-        let result = node.handle_open(msg).await;
+        let result = node.process(msg).await;
         match result {
             Err(TruncPrError::SessionIdError(sid)) => assert_eq!(sid, session_id),
             _ => panic!("Expected SessionIdError for invalid sub_id"),

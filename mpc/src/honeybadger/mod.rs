@@ -23,18 +23,20 @@ pub mod fpdiv;
 pub mod fpmul;
 pub mod input;
 pub mod mul;
+pub mod mul_pub;
 pub mod output;
 pub mod preprocessing;
+pub mod prss;
 pub mod share_gen;
 #[cfg(feature = "statistics")]
 pub mod statistics;
+pub mod zero_share;
 
 use crate::{
     common::{
-        math::goldilocks::GoldilocksField,
         rbc::{rbc_store::Msg, RbcError},
         types::{
-            fixed::{ClearFixedPoint, SecretFixedPoint},
+            fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
             integer::{ClearInt, SecretInt},
             TypeError,
         },
@@ -47,24 +49,27 @@ use crate::{
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
             fpmul::{FPError, FPMulNode},
-            prandbitd::PRandBitDNode,
+            prandint::PRandIntNode,
             rand_bit::RandBit,
-            PRandBitDEchoMessage, PRandBitDMessage, PRandError, RandBitError, TruncPrError,
+            PRandIntError, PRandIntMessage, RandBitError, TruncPrError, TruncPrMessage,
         },
         input::{
             input::{InputClient, InputServer},
             InputError, InputMessage,
         },
-        mul::{multiplication::Multiply, MulError},
+        mul::{multiplication::Multiply, MulError, MultMessage},
+        mul_pub::MulPubError,
         output::{
             output::{OutputClient, OutputServer},
             OutputError, OutputMessage,
         },
         preprocessing::HoneyBadgerMPCNodePreprocMaterial,
+        prss::prss::{PrssKeys, PRSS_KEY_ENTROPY_BITS},
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
         triple_gen::TripleGenError,
+        zero_share::{zero_share::ZeroShaNode, ZeroShaError},
     },
 };
 use ark_ff::{FftField, PrimeField};
@@ -86,6 +91,8 @@ use triple_gen::triple_generation::TripleGenNode;
 /// Maximum number of bytes accepted from a single network message before deserialization.
 /// Rejects payloads that would cause multi-gigabyte allocations via a crafted length prefix.
 const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+/// Minimum statistical security parameter
+pub const MIN_STATISTICAL_SECURITY: usize = 40;
 
 fn preprocessing_trace_enabled() -> bool {
     std::env::var("HMPC_PREPROCESSING_TRACE")
@@ -127,6 +134,15 @@ pub enum HoneyBadgerError {
     NetworkError(#[from] NetworkError),
     #[error("error in share generation: {0:?}")]
     RanShaError(#[from] RanShaError),
+    #[error(
+        "statistical security parameter {requested} is below the minimum {minimum}: leakage at a \
+         TruncPr opening is bounded by 2^-kappa, so this delivers no meaningful privacy"
+    )]
+    InsufficientStatisticalSecurity { requested: usize, minimum: usize },
+    #[error("error in ZeroSha: {0:?}")]
+    ZeroShaError(#[from] ZeroShaError),
+    #[error("error in MulPub: {0:?}")]
+    MulPubError(#[from] MulPubError),
     #[error("error in Input share generation: {0:?}")]
     InputError(#[from] InputError),
     #[error("error in faulty double share generation: {0:?}")]
@@ -148,7 +164,7 @@ pub enum HoneyBadgerError {
     #[error("error in random bit generation: {0:?}")]
     RandBitError(#[from] RandBitError),
     #[error("error in Prand bit generation: {0:?}")]
-    PRandError(#[from] PRandError),
+    PRandIntError(#[from] PRandIntError),
     #[error("error in FPMul: {0:?}")]
     FPError(#[from] FPError),
     #[error("error in FPDiv_Const: {0:?}")]
@@ -254,8 +270,8 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     // Preprocessing parameters.
     pub params: HoneyBadgerMPCNodeOpts,
     pub preprocess: PreprocessNodes<F, R>,
-    pub operations: Operation<F, R>,
-    pub type_ops: TypeOperations<F, R>,
+    pub operations: Operation<F>,
+    pub type_ops: TypeOperations<F>,
     pub output: OutputServer,
     pub counters: SubProtocolCounters,
     /// Shared byte and message counters.  Updated by [`CountingNetwork`] (sends)
@@ -291,27 +307,119 @@ where
     pub fn statistics_snapshot(&self) -> statistics::NodeStatisticsSnapshot {
         self.statistics_counters.snapshot()
     }
+    /// Establishes this party's PRSS keys by running RISS **once**, then switches PRandInt to
+    /// local derivation.
+    pub async fn setup_prss_keys<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
+        if self.preprocess.prand_int.has_prss_keys() {
+            info!("PRSS keys already installed");
+            return Ok(());
+        }
+
+        // Each folded `r_T` hides at least `k + l` bits from the parties inside `T`, so take as
+        // many as the entropy target needs. Sized from the parameters rather than hardcoded:
+        // a small `k + l` would otherwise silently yield a low-entropy key.
+        let bits_per_value = self.params.mask_bits().max(1);
+        let batch_size = PRSS_KEY_ENTROPY_BITS.div_ceil(bits_per_value);
+
+        // The setup session is a real RISS session, so a counter is safe here — a mismatch makes
+        // messages fail to assemble and surfaces as a timeout. That is exactly the property the
+        // derivation path lacks, which is why its exec id is fixed instead.
+        let sessionid = SessionId::new(
+            ProtocolType::PRandInt,
+            SessionId::pack_slot(self.counters.prand_int_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        self.preprocess
+            .prand_int
+            .generate_riss(
+                sessionid,
+                self.params.mask_bits(),
+                batch_size,
+                network.clone(),
+            )
+            .await?;
+
+        // Waiting on the share output is how we learn the fold completed; the shares themselves
+        // are discarded, only `r_T` matters for keys.
+        let _ = self
+            .preprocess
+            .prand_int
+            .wait_for_int_result(sessionid, self.params.timeout)
+            .await?;
+
+        let keys = self.preprocess.prand_int.take_riss_keys(sessionid).await?;
+
+        if !self.preprocess.prand_int.clear_store(sessionid).await {
+            warn!(?sessionid, "failed to clear PRSS setup session state");
+        }
+
+        let keys = PrssKeys::<F>::new(self.id, self.params.n_parties, self.params.threshold, &keys)
+            .map_err(PRandIntError::from)?;
+        self.preprocess.prand_int.install_prss_keys(keys);
+        info!("PRSS key setup complete");
+        Ok(())
+    }
+
+    pub fn prss_keys_installed(&self) -> bool {
+        self.preprocess.prand_int.has_prss_keys()
+    }
+
+    /// TruncPr opens `b + r` in the clear, so its privacy rests on one inequality
+    /// (Damgård–Thorbek §3.2): a value in `[0, 2^l)` needs a mask drawn from `[0, 2^(l+k))`.
+    ///
+    /// ```text
+    /// mask_bits  >=  value_bits + statistical_security
+    /// ```
+    ///
+    /// `value_bits` is the width of *this* value — taken from the value's own precision, not the
+    /// node's, since `SecretFixedPoint::new_with_precision` lets them differ. The pool was sized
+    /// once for `max_masked_width(params.precision)`, so this catches both a value carrying a
+    /// wider precision than configured and an operation masking something the sizing function
+    /// does not account for.
+    ///
+    /// This used to compare against a configured `params.l`, with `l` and `k` as separate knobs.
+    /// Only their sum ever mattered, so splitting them invited one specific misconfiguration:
+    /// passing the *precision* into the security slot, which reads plausibly and silently
+    /// delivers whatever margin happens to be left over.
+    fn check_mask_security(&self, value_bits: usize) -> Result<(), HoneyBadgerError> {
+        let mask_bits = self.params.mask_bits();
+        let delivered = mask_bits.saturating_sub(value_bits);
+        if delivered < self.params.statistical_security {
+            return Err(HoneyBadgerError::FPError(
+                FPError::InsufficientStatisticalSecurity {
+                    delivered,
+                    required: self.params.statistical_security,
+                    mask_bits,
+                    value_bits,
+                },
+            ));
+        }
+        Ok(())
+    }
 
     pub async fn debug_store_sizes(&self) -> String {
         let len = self.preprocessing_material.lock().await.length();
         let triples = len.beaver_triples;
         let random_shares = len.random_shr;
-        let prandbit = len.prandbit;
+        let randbit = len.randbit;
         let prandint = len.prandint;
         format!(
-            "material=(triples:{triples},random:{random_shares},prandbit:{prandbit},prandint:{prandint}) \
-             stores=(share_gen:{},dou_sha:{},ran_dou_sha:{},triple:{},triple_batch_recon:{},mul:{},rand_bit:{},rand_bit_mul:{},rand_bit_batch_recon:{},prand_bit:{},prand_bit_batch_recon:{},fpmul_mul:{},fpmul_trunc:{})",
+            "material=(triples:{triples},random:{random_shares},randbit:{randbit},prandint:{prandint}) \
+             stores=(share_gen:{},dou_sha:{},ran_dou_sha:{},triple:{},triple_batch_recon:{},mul:{},rand_bit:{},rand_bit_mul_pub:{},zero_sha:{},prand_int:{},fpmul_mul:{},fpmul_trunc:{})",
             self.preprocess.share_gen.store_len().await,
             self.preprocess.dou_sha.store_len().await,
             self.preprocess.ran_dou_sha.store_len().await,
             self.preprocess.triple_gen.store_len().await,
             self.preprocess.triple_gen.batch_recon_node.store_len().await,
             self.operations.mul.store_len().await,
-            self.preprocess.small_field_preproc.rand_bit.store_len().await,
-            self.preprocess.small_field_preproc.rand_bit.mult_node.store_len().await,
-            self.preprocess.small_field_preproc.rand_bit.batch_recon.store_len().await,
-            self.preprocess.prand_bit.store_len().await,
-            self.preprocess.prand_bit.batch_recon.store_len().await,
+            self.preprocess.rand_bit.store_len().await,
+            self.preprocess.rand_bit.mul_pub.store_len().await,
+            self.preprocess.zero_sha.store_len().await,
+            self.preprocess.prand_int.store_len().await,
             self.type_ops.fpmul.mult_node.store_len().await,
             self.type_ops.fpmul.trunc_node.store_len().await,
         )
@@ -319,14 +427,14 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct Operation<F: FftField, R: RBC> {
-    pub mul: Multiply<F, R>,
+pub struct Operation<F: FftField> {
+    pub mul: Multiply<F>,
 }
 
 #[derive(Clone, Debug)]
-pub struct TypeOperations<F: PrimeField, R: RBC> {
-    pub fpmul: FPMulNode<F, R>,
-    pub fpdiv_const: FPDivConstNode<F, R>,
+pub struct TypeOperations<F: PrimeField> {
+    pub fpmul: FPMulNode<F>,
+    pub fpdiv_const: FPDivConstNode<F>,
 }
 
 #[derive(Clone, Debug)]
@@ -337,21 +445,12 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub dou_sha: DoubleShareNode<F>,
     pub ran_dou_sha: RanDouShaNode<F, R>,
     pub triple_gen: TripleGenNode<F>,
-    /// PRandBit node is generic over (small field, big field). Following dev's Goldilocks design,
-    /// the small field is `GoldilocksField` and the big field is the node's field `F`.
-    pub prand_bit: PRandBitDNode<GoldilocksField, F>,
-    /// Nodes for small field (Goldilocks) preprocessing.
-    pub small_field_preproc: PreprocNodesSmallField<R>,
-}
-
-/// Nodes for the small field (Goldilocks) preprocessing.
-#[derive(Clone, Debug)]
-pub struct PreprocNodesSmallField<R: RBC> {
-    pub share_gen: RanShaNode<GoldilocksField, R>,
-    pub triple_gen: TripleGenNode<GoldilocksField>,
-    pub rand_bit: RandBit<GoldilocksField, R>,
-    pub ran_dou_sha: RanDouShaNode<GoldilocksField, R>,
-    pub dou_sha: DoubleShareNode<GoldilocksField>,
+    /// Generates PRandInt shares via the distributed RISS protocol.
+    pub prand_int: PRandIntNode<F, R>,
+    /// Generates RandBit shares directly in `F` (see `ensure_randbit_shares`).
+    pub rand_bit: RandBit<F>,
+    /// Produces the degree-`2t` zero-sharings that re-randomise RandBit's MulPub opening.
+    pub zero_sha: ZeroShaNode<F, R>,
 }
 
 #[derive(Clone, Debug)]
@@ -394,16 +493,10 @@ pub struct SubProtocolCounters {
     pub dou_sha_counter: SubProtocolCounter,
     pub mul_counter: SubProtocolCounter,
     pub rand_bit_counter: SubProtocolCounter,
-    pub prand_bit_counter: SubProtocolCounter,
     pub prand_int_counter: SubProtocolCounter,
     pub fpmul_counter: SubProtocolCounter,
     pub fpdiv_const_counter: SubProtocolCounter,
-    // Small field (Goldilocks) counters.
-    pub ran_sha_small_field_counter: SubProtocolCounter,
-    pub triple_small_field_counter: SubProtocolCounter,
-    pub rand_bit_small_field_counter: SubProtocolCounter,
-    pub dou_sha_small_field_counter: SubProtocolCounter,
-    pub ran_dou_sha_small_field_counter: SubProtocolCounter,
+    pub zero_sha_counter: SubProtocolCounter,
 }
 
 impl SubProtocolCounters {
@@ -416,15 +509,10 @@ impl SubProtocolCounters {
             dou_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             mul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             rand_bit_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            prand_bit_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             prand_int_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             fpmul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             fpdiv_const_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            ran_sha_small_field_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            triple_small_field_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            rand_bit_small_field_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            dou_sha_small_field_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
-            ran_dou_sha_small_field_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            zero_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -444,14 +532,28 @@ pub struct HoneyBadgerMPCNodeOpts {
     pub n_random_shares: usize,
     /// Instance ID
     pub instance_id: u32,
-    ///Number of Prandbit shares
-    pub n_prandbit: usize,
+    ///Number of RandBit shares
+    pub n_randbit: usize,
     ///Number of PrandInt shares
     pub n_prandint: usize,
-    ///Security parameter
-    pub k: usize,
-    ///Bit size for fixed point
-    pub l: usize,
+    /// Number of degree-`2t` zero-sharings to generate. Its own preprocessing material with its
+    /// own `ensure_zero_shares` phase, not derived at point of use. `new` seeds it from
+    /// `n_randbit` because RandBit's MulPub squaring is the only consumer today (one per bit);
+    /// set it directly when another protocol starts drawing from the pool.
+    pub n_zero_shares: usize,
+    /// Fixed-point precision this node's preprocessing is sized for.
+    ///
+    /// The mask pool is generated once, before any value exists, so its width has to be decided
+    /// here. Operations still check their own value's precision at use time — a value carrying a
+    /// wider precision than this is rejected rather than silently under-masked.
+    pub precision: FixedPointPrecision,
+    /// Statistical security parameter κ: leakage at a TruncPr opening is bounded by `2^-κ`.
+    ///
+    /// Policy-level and operation-independent — this is Damgård–Thorbek's `k`. The companion
+    /// parameter `l` from that paper is *not* configurable: it is the width of the value being
+    /// masked, so it is derived from `precision` rather than chosen. Letting it float free of the
+    /// value is what silently decouples the configured κ from the delivered one.
+    pub statistical_security: usize,
     pub timeout: Duration,
 }
 
@@ -463,10 +565,10 @@ impl HoneyBadgerMPCNodeOpts {
         n_triples: usize,
         n_random_shares: usize,
         instance_id: u32,
-        n_prandbit: usize,
+        n_randbit: usize,
         n_prandint: usize,
-        l: usize,
-        k: usize,
+        precision: FixedPointPrecision,
+        statistical_security: usize,
         timeout: Duration,
     ) -> Result<Self, HoneyBadgerError> {
         //No of parties should not exceed 255
@@ -477,21 +579,54 @@ impl HoneyBadgerMPCNodeOpts {
             // ceil(n / 3)
             return Err(HoneyBadgerError::InvalidThreshold(threshold, n_parties));
         }
+        // Reject a κ too small to mean anything here, rather than letting it surface later as an
+        // undersized mask at the first fixed-point operation.
+        if statistical_security < MIN_STATISTICAL_SECURITY {
+            return Err(HoneyBadgerError::InsufficientStatisticalSecurity {
+                requested: statistical_security,
+                minimum: MIN_STATISTICAL_SECURITY,
+            });
+        }
         Ok(Self {
             n_parties,
             threshold,
             n_triples,
             n_random_shares,
             instance_id,
-            n_prandbit,
+            n_randbit,
             n_prandint,
-            k,
-            l,
+            n_zero_shares: n_randbit,
+            precision,
+            statistical_security,
             timeout,
         })
     }
     pub fn set_timeout(&mut self, secs: u64) {
         self.timeout = Duration::from_secs(secs)
+    }
+
+    /// Width of TruncPr's high mask `r''`, in bits: the widest value any supported fixed-point
+    /// operation feeds into TruncPr at this precision, plus the statistical margin.
+    ///
+    /// Damgård–Thorbek §3.2: to mask a value in `[0, 2^l)` the mask must be drawn from
+    /// `[0, 2^(l+k))`. Derived, never configured — see [`Self::max_masked_width`].
+    pub fn mask_bits(&self) -> usize {
+        Self::max_masked_width(self.precision) + self.statistical_security
+    }
+
+    /// The widest value any supported fixed-point operation masks at this precision.
+    ///
+    /// `mul_fixed` and `div_with_const_fixed` both truncate a `2k`-bit product by `f` bits, so
+    /// `2k - f` covers both. **A new operation that masks something wider belongs here** —
+    /// otherwise `check_mask_security` rejects it at first use rather than under-masking it
+    /// silently. Sizing one pool for the widest consumer is deliberate: an over-wide mask costs
+    /// only keystream bytes during derivation, while a short one leaks.
+    pub fn max_masked_width(precision: FixedPointPrecision) -> usize {
+        (2usize * precision.k()).saturating_sub(precision.f())
+    }
+    /// Override the zero-sharing pool size, which `new` seeds from `n_randbit`.
+    pub fn set_n_zero_shares(&mut self, n_zero_shares: usize) {
+        self.n_zero_shares = n_zero_shares
     }
 }
 
@@ -515,7 +650,8 @@ where
         }
         // Create nodes for preprocessing.
         let dousha_node = DoubleShareNode::new(id, params.n_parties, params.threshold);
-        let prand_bit_node = PRandBitDNode::new(id, params.n_parties, params.threshold)?;
+        let prand_int_node =
+            PRandIntNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
         let ran_dou_sha_node =
             RanDouShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
@@ -527,24 +663,9 @@ where
         let fpdiv_const_node = FPDivConstNode::new(id, params.n_parties, params.threshold)?;
         let input = InputServer::new(id, params.n_parties, params.threshold, input_ids)?;
         let output = OutputServer::new(id, params.n_parties)?;
-
-        // Small field (Goldilocks) nodes.
-        let triple_gen_small_field_node =
-            TripleGenNode::new(id, params.n_parties, params.threshold)?;
-        let share_gen_small_field =
-            RanShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
         let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold)?;
-        let ran_dou_sha_small_field =
-            RanDouShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
-        let dousha_node_small_field = DoubleShareNode::new(id, params.n_parties, params.threshold);
-
-        let small_field_preproc = PreprocNodesSmallField {
-            triple_gen: triple_gen_small_field_node,
-            rand_bit: rand_bit_node,
-            share_gen: share_gen_small_field,
-            ran_dou_sha: ran_dou_sha_small_field,
-            dou_sha: dousha_node_small_field,
-        };
+        let zero_sha_node =
+            ZeroShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
         Ok(Self {
             id,
@@ -558,8 +679,9 @@ where
                 dou_sha: dousha_node,
                 ran_dou_sha: ran_dou_sha_node,
                 triple_gen: triple_gen_node,
-                prand_bit: prand_bit_node,
-                small_field_preproc,
+                prand_int: prand_int_node,
+                rand_bit: rand_bit_node,
+                zero_sha: zero_sha_node,
             },
             operations: Operation { mul: mul_node },
             type_ops: TypeOperations {
@@ -712,6 +834,8 @@ where
             WrappedMessage::Rbc(m) => {
                 m.msg_type.is_dealer_message()
                     && m.session_id.calling_protocol() == Some(ProtocolType::Input)
+                    && m.session_id.exec_id() == 0
+                    && m.session_id.round_id() == 0
             }
             _ => false,
         };
@@ -719,6 +843,18 @@ where
             warn!(
                 "Rejecting message from sender {}: not a member of the {}-party node set",
                 sender_id, self.params.n_parties
+            );
+            return Err(HoneyBadgerError::UnauthorizedSender(
+                sender_id,
+                self.params.n_parties,
+            ));
+        }
+        // A client input broadcast must actually come from client id space: a consensus
+        // node's own id must never be treated as an authenticated client, even transiently.
+        if is_client_input_broadcast && sender_id < self.params.n_parties {
+            warn!(
+                "Rejecting client input broadcast: sender {} is a consensus node id, not a client id",
+                sender_id
             );
             return Err(HoneyBadgerError::UnauthorizedSender(
                 sender_id,
@@ -756,90 +892,25 @@ where
                             .await?;
                         self.preprocess.ran_dou_sha.drain_rbc_output().await?;
                     }
-                    Some(ProtocolType::RanDouShaSmallField) => {
-                        self.preprocess
-                            .small_field_preproc
-                            .ran_dou_sha
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.preprocess
-                            .small_field_preproc
-                            .ran_dou_sha
-                            .drain_rbc_output()
-                            .await?;
-                    }
                     Some(ProtocolType::Ransha) => {
                         self.preprocess.share_gen.rbc.process(rbc_msg, net).await?;
                         self.preprocess.share_gen.drain_rbc_output().await?;
-                    }
-                    Some(ProtocolType::RanShaSmallField) => {
-                        self.preprocess
-                            .small_field_preproc
-                            .share_gen
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.preprocess
-                            .small_field_preproc
-                            .share_gen
-                            .drain_rbc_output()
-                            .await?;
                     }
                     Some(ProtocolType::Input) => {
                         self.preprocess.input.rbc.process(rbc_msg, net).await?;
                         self.preprocess.input.drain_rbc_output().await?;
                     }
-                    Some(ProtocolType::Mul) => {
-                        self.operations.mul.rbc.process(rbc_msg, net).await?;
-                        self.operations.mul.drain_rbc_output().await?;
+                    Some(ProtocolType::ZeroSha) => {
+                        self.preprocess.zero_sha.rbc.process(rbc_msg, net).await?;
+                        self.preprocess.zero_sha.drain_rbc_output().await?;
                     }
-                    Some(ProtocolType::RandBit) => {
+                    Some(ProtocolType::PRandInt) => {
                         self.preprocess
-                            .small_field_preproc
-                            .rand_bit
-                            .mult_node
+                            .prand_int
                             .rbc
-                            .process(rbc_msg, net)
+                            .process(rbc_msg, net.clone())
                             .await?;
-                        self.preprocess
-                            .small_field_preproc
-                            .rand_bit
-                            .mult_node
-                            .drain_rbc_output()
-                            .await?;
-                    }
-                    Some(ProtocolType::FpMul) => {
-                        if rbc_msg.session_id.round_id() == 0 {
-                            self.type_ops
-                                .fpmul
-                                .trunc_node
-                                .rbc
-                                .process(rbc_msg, net)
-                                .await?;
-                            self.type_ops.fpmul.trunc_node.drain_rbc_output().await?;
-                        } else {
-                            self.type_ops
-                                .fpmul
-                                .mult_node
-                                .rbc
-                                .process(rbc_msg, net)
-                                .await?;
-                            self.type_ops.fpmul.mult_node.drain_rbc_output().await?;
-                        }
-                    }
-                    Some(ProtocolType::FpDivConst) => {
-                        self.type_ops
-                            .fpdiv_const
-                            .trunc_node
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.type_ops
-                            .fpdiv_const
-                            .trunc_node
-                            .drain_rbc_output()
-                            .await?;
+                        self.preprocess.prand_int.drain_rbc_output(net).await?;
                     }
                     _ => {
                         warn!(
@@ -859,15 +930,7 @@ where
                         rs_msg.session_id.instance_id(),
                     ));
                 }
-                if let Some(ProtocolType::RanShaSmallField) = rs_msg.session_id.calling_protocol() {
-                    self.preprocess
-                        .small_field_preproc
-                        .share_gen
-                        .process(rs_msg, net)
-                        .await?;
-                } else {
-                    self.preprocess.share_gen.process(rs_msg, net).await?;
-                }
+                self.preprocess.share_gen.process(rs_msg, net).await?;
             }
             WrappedMessage::Dousha(ds_msg) => {
                 if sender_id != ds_msg.sender_id {
@@ -878,15 +941,7 @@ where
                         ds_msg.session_id.instance_id(),
                     ));
                 }
-                if let Some(ProtocolType::DouShaSmallField) = ds_msg.session_id.calling_protocol() {
-                    self.preprocess
-                        .small_field_preproc
-                        .dou_sha
-                        .process(ds_msg)
-                        .await?;
-                } else {
-                    self.preprocess.dou_sha.process(ds_msg).await?;
-                }
+                self.preprocess.dou_sha.process(ds_msg).await?;
             }
             WrappedMessage::RanDouSha(rds_msg) => {
                 if sender_id != rds_msg.sender_id {
@@ -897,17 +952,7 @@ where
                         rds_msg.session_id.instance_id(),
                     ));
                 }
-                if let Some(ProtocolType::RanDouShaSmallField) =
-                    rds_msg.session_id.calling_protocol()
-                {
-                    self.preprocess
-                        .small_field_preproc
-                        .ran_dou_sha
-                        .process(rds_msg, net)
-                        .await?;
-                } else {
-                    self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
-                }
+                self.preprocess.ran_dou_sha.process(rds_msg, net).await?;
             }
             WrappedMessage::BatchRecon(batch_msg) => {
                 if sender_id != batch_msg.sender_id {
@@ -938,56 +983,18 @@ where
                             .drain_batch_recon_output()
                             .await?
                     }
-                    Some(ProtocolType::TripleSmallField) => {
-                        self.preprocess
-                            .small_field_preproc
-                            .triple_gen
-                            .batch_recon_node
-                            .process(batch_msg, net)
-                            .await?;
-                        self.preprocess
-                            .small_field_preproc
-                            .triple_gen
-                            .drain_batch_recon_output()
-                            .await?
-                    }
                     Some(ProtocolType::RandBit) => {
-                        if batch_msg.session_id.round_id() == 0 {
-                            self.preprocess
-                                .small_field_preproc
-                                .rand_bit
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess
-                                .small_field_preproc
-                                .rand_bit
-                                .drain_batch_recon_output()
-                                .await?;
-                        } else {
-                            self.preprocess
-                                .small_field_preproc
-                                .rand_bit
-                                .mult_node
-                                .batch_recon
-                                .process(batch_msg, net)
-                                .await?;
-                            self.preprocess
-                                .small_field_preproc
-                                .rand_bit
-                                .mult_node
-                                .drain_batch_recon_output()
-                                .await?;
-                        }
-                    }
-                    Some(ProtocolType::PRandBit) => {
                         self.preprocess
-                            .prand_bit
+                            .rand_bit
+                            .mul_pub
                             .batch_recon
                             .process(batch_msg, net)
                             .await?;
-
-                        self.preprocess.prand_bit.drain_batch_recon_output().await?;
+                        self.preprocess
+                            .rand_bit
+                            .mul_pub
+                            .drain_batch_recon_output()
+                            .await?;
                     }
                     Some(ProtocolType::FpMul) => {
                         self.type_ops
@@ -1010,7 +1017,7 @@ where
                     }
                 }
             }
-            WrappedMessage::PRandBitD(prand_message) => {
+            WrappedMessage::PRandInt(prand_message) => {
                 if sender_id != prand_message.sender_id {
                     return Err(HoneyBadgerError::InvalidPartyId);
                 }
@@ -1019,24 +1026,77 @@ where
                         prand_message.session_id.instance_id(),
                     ));
                 }
-                self.preprocess
-                    .prand_bit
-                    .process(prand_message, net)
-                    .await?;
+                self.preprocess.prand_int.process(prand_message).await?;
             }
-            WrappedMessage::PRandBitDEcho(echo_msg) => {
-                if sender_id != echo_msg.echoer_id {
+            WrappedMessage::Mult(mult_msg) => {
+                if sender_id != mult_msg.sender {
                     return Err(HoneyBadgerError::InvalidPartyId);
                 }
-                if echo_msg.session_id.instance_id() != self.params.instance_id {
+                if mult_msg.session_id.instance_id() != self.params.instance_id {
                     return Err(HoneyBadgerError::InstanceIdError(
-                        echo_msg.session_id.instance_id(),
+                        mult_msg.session_id.instance_id(),
                     ));
                 }
-                self.preprocess
-                    .prand_bit
-                    .process_echo(echo_msg, net)
-                    .await?;
+                match mult_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::Mul) => {
+                        self.operations
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::FpMul) => {
+                        self.type_ops
+                            .fpmul
+                            .mult_node
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} for direct Mult open",
+                            mult_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::Trunc(trunc_msg) => {
+                if sender_id != trunc_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if trunc_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        trunc_msg.session_id.instance_id(),
+                    ));
+                }
+                match trunc_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::FpMul) => {
+                        self.type_ops.fpmul.trunc_node.process(trunc_msg).await?;
+                    }
+                    Some(ProtocolType::FpDivConst) => {
+                        self.type_ops
+                            .fpdiv_const
+                            .trunc_node
+                            .process(trunc_msg)
+                            .await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} for direct Trunc open",
+                            trunc_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::ZeroSha(zs_msg) => {
+                if sender_id != zs_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if zs_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        zs_msg.session_id.instance_id(),
+                    ));
+                }
+                self.preprocess.zero_sha.process(zs_msg, net).await?;
             }
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
@@ -1100,17 +1160,11 @@ where
         if x.precision() != y.precision() {
             return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
-        // Checks if the PRandInt parameter has enough bits to mask the fixed point numbers.
-        if self.params.l < 2 * x.precision().k() - x.precision().f() {
-            return Err(HoneyBadgerError::FPError(FPError::NotEnoughBitsPrep {
-                current: self.params.l,
-                required: 2 * x.precision().k() - x.precision().f(),
-            }));
-        }
+        self.check_mask_security(HoneyBadgerMPCNodeOpts::max_masked_width(*x.precision()))?;
 
         let (no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;
-            (store.length().prandbit, store.length().prandint)
+            (store.length().randbit, store.length().prandint)
         };
         if no_rand_bit < x.precision().f() || no_rand_int == 0 {
             //Run preprocessing
@@ -1123,11 +1177,11 @@ where
             .lock()
             .await
             .take_beaver_triples(1)?;
-        let r_bits_vec = self
+        let r_bits = self
             .preprocessing_material
             .lock()
             .await
-            .take_prandbit_shares(x.precision().f())?;
+            .take_randbit_shares(x.precision().f())?;
         let r_int = self
             .preprocessing_material
             .lock()
@@ -1139,7 +1193,6 @@ where
             SessionId::pack_slot(self.counters.fpmul_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
-        let r_bits = r_bits_vec.iter().map(|(a, _)| a.clone()).collect();
 
         // Call the fpmul function
         self.type_ops
@@ -1171,23 +1224,14 @@ where
             ));
         }
 
-        // Checks if the PRandInt parameter has enough bits to mask the fixed point numbers.
         // `fpdiv_const` multiplies the secret by a public f-scaled reciprocal and feeds the
-        // resulting 2k-bit value into TruncPr (`k_twice` in `FPDivConstNode::init`), truncating
-        // f bits — the same magnitude `mul_fixed` produces, so it needs the same mask width.
-        // Without this the PRandInt mask can be narrower than the value it is meant to hide,
-        // which leaks rather than merely failing.
-        if self.params.l < 2 * x.precision().k() - x.precision().f() {
-            return Err(HoneyBadgerError::FPError(FPError::NotEnoughBitsPrep {
-                current: self.params.l,
-                required: 2 * x.precision().k() - x.precision().f(),
-            }));
-        }
+        // resulting 2k-bit value into TruncPr, so it needs the same mask margin as `mul_fixed`.
+        self.check_mask_security(HoneyBadgerMPCNodeOpts::max_masked_width(*x.precision()))?;
 
         // 2. Check preprocessing inventory --------------------------------
         let (no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;
-            (store.length().prandbit, store.length().prandint)
+            (store.length().randbit, store.length().prandint)
         };
 
         // Need f random bits and 1 random integer for truncation
@@ -1198,23 +1242,17 @@ where
         }
 
         // 3. Pull preprocessing randomness --------------------------------
-        let r_bits_vec = self
+        let r_bits = self
             .preprocessing_material
             .lock()
             .await
-            .take_prandbit_shares(x.precision().f())?;
+            .take_randbit_shares(x.precision().f())?;
 
         let r_int = self
             .preprocessing_material
             .lock()
             .await
             .take_prandint_shares(1)?;
-
-        // Extract just the shares (drop F2_8 auxiliary)
-        let r_bits_only = r_bits_vec
-            .iter()
-            .map(|(a, _)| a.clone())
-            .collect::<Vec<_>>();
 
         // 4. Prepare SessionId --------------------------------------------
         let session_id = SessionId::new(
@@ -1229,7 +1267,7 @@ where
             .init(
                 x,
                 y,
-                r_bits_only,
+                r_bits,
                 r_int[0].clone(),
                 self.params.timeout,
                 session_id,
@@ -1333,12 +1371,17 @@ where
     F: PrimeField,
     R: RBC<Id = SessionId>,
 {
-    /// Runs preprocessing to produce Random shares and Beaver triples
+    /// Runs preprocessing to produce Random shares and Beaver triples.
     /// Steps:
-    /// 1. Ensure enough random shares are available = No of inputs + No of PRandbit
+    /// 1. Ensure enough random shares are available (per `n_random_shares`).
     /// 2. Generate double shares if missing.
     /// 3. Generate RanDouSha pairs if missing.
-    /// 4. Generate Beaver triples from all the above. No of Multiplications + No of Multiplication of PRandbit
+    /// 4. Generate Beaver triples from all the above (per `n_triples`).
+    /// 5. Generate RandBit shares, drawing directly from the triple/random-share pool filled by
+    ///    steps 1-4 (one of each per RandBit output) -- `n_triples`/`n_random_shares` must be
+    ///    sized to cover this demand too, or this step errors with `NotEnoughPreprocessing`.
+    /// 6. Generate PRandInt shares via the RISS protocol (self-contained; doesn't draw from the
+    ///    triple/random-share pool).
     async fn run_preprocessing<G>(
         &mut self,
         network: Arc<N>,
@@ -1348,6 +1391,18 @@ where
         N: 'async_trait,
         G: Rng + Send,
     {
+        // ------------------------
+        // Step 0. Establish PRSS keys (once)
+        // ------------------------
+        // Idempotent, and safe to run here rather than as a separate call by the application:
+        // every party reaches `run_preprocessing` together, so the setup's RISS session runs in
+        // lockstep — and RISS is loud if it does not.
+        if !self.preprocess.prand_int.has_prss_keys() {
+            let phase_start = Instant::now();
+            self.setup_prss_keys(network.clone()).await?;
+            trace_preprocessing_phase(self.id, "prss_setup", 1, phase_start);
+        }
+
         // Get how many triples and random shares are already available
         let (no_of_triples_avail, no_of_random_shares_avail) = {
             let store = self.preprocessing_material.lock().await;
@@ -1490,30 +1545,40 @@ where
                         "failed to clear triple generation protocol state"
                     );
                 }
-                self.preprocessing_material.lock().await.add(
-                    Some(result?),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
+                self.preprocessing_material
+                    .lock()
+                    .await
+                    .add(Some(result?), None, None, None);
             }
             trace_preprocessing_phase(self.id, "triples", total_triples_to_generate, phase_start);
         }
         // ------------------------
-        // Step 5. Generate Random bits
+        // Step 5. Generate zero shares (degree-2t zero-sharings)
         // ------------------------
         let phase_start = Instant::now();
-        self.ensure_prandbit_shares(rng, network.clone()).await?;
-        trace_preprocessing_phase(self.id, "prandbit", self.params.n_prandbit, phase_start);
-        info!("PrandBit share generation done");
+        self.ensure_zero_shares(network.clone(), rng, self.params.n_zero_shares)
+            .await?;
+        trace_preprocessing_phase(
+            self.id,
+            "zero_shares",
+            self.params.n_zero_shares,
+            phase_start,
+        );
+        info!("Zero share generation done");
 
         // ------------------------
-        // Step 6. Generate Random Int
+        // Step 6. Generate Random bits
         // ------------------------
         let phase_start = Instant::now();
-        self.ensure_prandint_shares(network.clone()).await?;
+        self.ensure_randbit_shares(network.clone()).await?;
+        trace_preprocessing_phase(self.id, "randbit", self.params.n_randbit, phase_start);
+        info!("RandBit share generation done");
+
+        // ------------------------
+        // Step 7. Generate Random Int
+        // ------------------------
+        let phase_start = Instant::now();
+        self.ensure_prandint_shares().await?;
         trace_preprocessing_phase(self.id, "prandint", self.params.n_prandint, phase_start);
         info!("PrandInt share generation done");
 
@@ -1594,14 +1659,10 @@ where
                 );
             }
             let output = result?;
-            self.preprocessing_material.lock().await.add(
-                None,
-                None,
-                Some(output),
-                None,
-                None,
-                None,
-            );
+            self.preprocessing_material
+                .lock()
+                .await
+                .add(None, Some(output), None, None);
         }
         Ok(())
     }
@@ -1729,589 +1790,179 @@ where
         Ok(pair)
     }
 
-    /// Ensure we have enough random shares in the small (Goldilocks) field.
-    async fn ensure_random_shares_small_field<G, N>(
+    /// Ensure the pool holds at least `target` degree-`2t` zero-sharings.
+    async fn ensure_zero_shares<G, N>(
         &mut self,
         network: Arc<N>,
         rng: &mut G,
-        needed: usize,
+        target: usize,
     ) -> Result<(), HoneyBadgerError>
     where
-        N: Network + Send + Sync + 'static,
         G: Rng + Send,
-    {
-        if needed == 0 {
-            return Ok(());
-        }
-        // Outputs in batches of (n-2t)
-        let output_per_column = self.params.n_parties - 2 * self.params.threshold;
-        let columns_needed = (needed + output_per_column - 1) / output_per_column;
-        let max_columns_per_run = 2048usize;
-        let run = (columns_needed + max_columns_per_run - 1) / max_columns_per_run;
-        let mut round_id = 0u8;
-        let mut ran_sha_counter = self.counters.ran_sha_small_field_counter.get_next().await?;
-
-        for i in 0..run {
-            info!("Random share generation (small field) run {}", i);
-            let columns_remaining = columns_needed - i * max_columns_per_run;
-            let batch_size = columns_remaining.min(max_columns_per_run);
-
-            let sessionid = SessionId::new(
-                ProtocolType::RanShaSmallField,
-                SessionId::pack_slot(ran_sha_counter, 0, round_id),
-                self.params.instance_id,
-            );
-
-            // Run ShareGen protocol in the small field.
-            self.preprocess
-                .small_field_preproc
-                .share_gen
-                .init_batch(sessionid, batch_size, rng, network.clone())
-                .await?;
-
-            let result = self
-                .preprocess
-                .small_field_preproc
-                .share_gen
-                .wait_for_result(sessionid, self.params.timeout)
-                .await;
-            if !self
-                .preprocess
-                .small_field_preproc
-                .share_gen
-                .clear_store(sessionid)
-                .await
-            {
-                warn!(
-                    ?sessionid,
-                    "failed to clear small-field share generation protocol state"
-                );
-            }
-
-            self.preprocessing_material.lock().await.add(
-                None,
-                None,
-                None,
-                Some(result?),
-                None,
-                None,
-            );
-
-            if round_id == 255 {
-                ran_sha_counter = self
-                    .counters
-                    .ran_sha_small_field_counter
-                    .get_next()
-                    .await
-                    .unwrap();
-                round_id = 0;
-            } else {
-                round_id += 1;
-            }
-        }
-
-        // Clear RBC store
-        self.preprocess
-            .small_field_preproc
-            .share_gen
-            .rbc
-            .clear_store()
-            .await;
-        Ok(())
-    }
-
-    /// Ensure we have enough Beaver triples in the small (Goldilocks) field.
-    async fn ensure_beaver_triples_small_field<G, N>(
-        &mut self,
-        network: Arc<N>,
-        rng: &mut G,
-        needed: usize,
-    ) -> Result<(), HoneyBadgerError>
-    where
         N: Network + Send + Sync + 'static,
-        G: Rng + Send,
     {
-        // Take existing number of small field triples.
-        let current_triples = {
-            let guard = self.preprocessing_material.lock().await;
-            guard.length().beaver_triples_small_field
+        let no_have = {
+            let store = self.preprocessing_material.lock().await;
+            store.length().zero_shares
         };
-
-        let missing_triples = needed.saturating_sub(current_triples);
-        if missing_triples == 0 {
+        if no_have >= target {
             return Ok(());
         }
-
-        // Each triple group produces (2t + 1) triples.
-        let group_size = 2 * self.params.threshold + 1;
-        let total_triples_to_generate =
-            ((missing_triples + group_size - 1) / group_size) * group_size;
-
-        // SAFETY: The required small-field random shares are ensured before calling this.
-        let random_shares_a = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares_small_field(total_triples_to_generate)?;
-        let random_shares_b = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares_small_field(total_triples_to_generate)?;
-
-        // Ensure and take RanDouSha pairs in the small field.
-        let ran_dou_sha_pair = self
-            .ensure_ran_dou_sha_pair_small_field(network.clone(), rng, total_triples_to_generate)
-            .await?;
-
-        let mut triple_counter = self.counters.triple_small_field_counter.get_next().await?;
-
-        let mut round_id = 0u8;
-        let mut group_index = 0;
-        let total_groups = total_triples_to_generate / group_size;
-        let max_batch_groups = triple_batch_groups_limit();
-
-        while group_index < total_groups {
-            let batch_groups = (total_groups - group_index).min(max_batch_groups);
-            let share_start = group_index * group_size;
-            let share_end = share_start + batch_groups * group_size;
-
-            let sessionid = SessionId::new(
-                ProtocolType::TripleSmallField,
-                SessionId::pack_slot(triple_counter, 0, round_id),
-                self.params.instance_id,
-            );
-
-            self.preprocess
-                .small_field_preproc
-                .triple_gen
-                .init_batch(
-                    random_shares_a[share_start..share_end].to_vec(),
-                    random_shares_b[share_start..share_end].to_vec(),
-                    ran_dou_sha_pair[share_start..share_end].to_vec(),
-                    sessionid,
-                    network.clone(),
-                )
-                .await?;
-
-            let result = self
-                .preprocess
-                .small_field_preproc
-                .triple_gen
-                .wait_for_result(sessionid, self.params.timeout)
-                .await;
-            if !self
-                .preprocess
-                .small_field_preproc
-                .triple_gen
-                .clear_store(sessionid)
-                .await
-            {
-                warn!(
-                    ?sessionid,
-                    "failed to clear small-field triple generation protocol state"
-                );
-            }
-            self.preprocessing_material.lock().await.add(
-                None,
-                Some(result?),
-                None,
-                None,
-                None,
-                None,
-            );
-
-            if round_id == 255 {
-                triple_counter = self
-                    .counters
-                    .triple_small_field_counter
-                    .get_next()
-                    .await
-                    .unwrap();
-                round_id = 0;
-            } else {
-                round_id += 1;
-            }
-            group_index += batch_groups;
-        }
-
-        Ok(())
-    }
-
-    /// Ensure we have a RanDouSha pair available in the Goldilocks field.
-    async fn ensure_ran_dou_sha_pair_small_field<G, N>(
-        &mut self,
-        network: Arc<N>,
-        rng: &mut G,
-        needed: usize,
-    ) -> Result<Vec<DoubleShamirShare<GoldilocksField>>, HoneyBadgerError>
-    where
-        N: Network + Send + Sync + 'static,
-        G: Rng + Send,
-    {
-        let mut pair = Vec::new();
-
-        // Each batched column produces (t + 1) double shares.
-        let output_per_column = self.params.threshold + 1;
-        let columns_needed = (needed + output_per_column - 1) / output_per_column;
-        let max_columns_per_run = ran_dou_sha_batch_columns_limit();
-        let run = (columns_needed + max_columns_per_run - 1) / max_columns_per_run;
-        let mut round_id = 0u8;
-        let mut ran_dou_sha_counter = self
-            .counters
-            .ran_dou_sha_small_field_counter
-            .get_next()
-            .await?;
-
-        for i in 0..run {
-            let columns_remaining = columns_needed - i * max_columns_per_run;
-            let batch_size = columns_remaining.min(max_columns_per_run);
-            let sessionid = SessionId::new(
-                ProtocolType::RanDouShaSmallField,
-                SessionId::pack_slot(ran_dou_sha_counter, 0, round_id),
-                self.params.instance_id,
-            );
-
-            let double_shares = self
-                .ensure_double_shares_small_field(sessionid, batch_size, network.clone(), rng)
-                .await?;
-
-            let mut shares_deg_t_by_batch = Vec::with_capacity(batch_size);
-            let mut shares_deg_2t_by_batch = Vec::with_capacity(batch_size);
-            for double_share_batch in double_shares.chunks_exact(self.params.n_parties) {
-                let (shares_deg_t, shares_deg_2t) = double_share_batch
-                    .iter()
-                    .cloned()
-                    .map(|d| (d.degree_t, d.degree_2t))
-                    .unzip();
-                shares_deg_t_by_batch.push(shares_deg_t);
-                shares_deg_2t_by_batch.push(shares_deg_2t);
-            }
-
-            // Run RanDouSha in the small field.
-            self.preprocess
-                .small_field_preproc
-                .ran_dou_sha
-                .init_batch(
-                    shares_deg_t_by_batch,
-                    shares_deg_2t_by_batch,
-                    sessionid,
-                    network.clone(),
-                )
-                .await?;
-
-            let result = self
-                .preprocess
-                .small_field_preproc
-                .ran_dou_sha
-                .wait_for_result(sessionid, self.params.timeout)
-                .await;
-            if !self
-                .preprocess
-                .small_field_preproc
-                .ran_dou_sha
-                .clear_store(sessionid)
-                .await
-            {
-                warn!(
-                    ?sessionid,
-                    "failed to clear small-field RanDouSha protocol state"
-                );
-            }
-            pair.extend(result?);
-
-            if round_id == 255 {
-                ran_dou_sha_counter = self
-                    .counters
-                    .ran_dou_sha_small_field_counter
-                    .get_next()
-                    .await
-                    .unwrap();
-                round_id = 0;
-            } else {
-                round_id += 1;
-            }
-        }
-        // Clear RBC store
-        self.preprocess
-            .small_field_preproc
-            .ran_dou_sha
-            .rbc
-            .clear_store()
-            .await;
-        Ok(pair)
-    }
-
-    /// Ensure we have double shares available in the small (Goldilocks) field.
-    async fn ensure_double_shares_small_field<G, N>(
-        &mut self,
-        sessionid: SessionId,
-        batch_size: usize,
-        network: Arc<N>,
-        rng: &mut G,
-    ) -> Result<Vec<DoubleShamirShare<GoldilocksField>>, HoneyBadgerError>
-    where
-        N: Network + Send + Sync + 'static,
-        G: Rng + Send,
-    {
-        let dou_sha_session_id = SessionId::new(
-            ProtocolType::DouShaSmallField,
-            SessionId::pack_slot(
-                sessionid.exec_id(),
-                sessionid.sub_id(),
-                sessionid.round_id(),
-            ),
+        let missing = target - no_have;
+        let out_per_call = self.params.n_parties - 2 * self.params.threshold;
+        let batch_size = missing.div_ceil(out_per_call);
+        let zsha_session = SessionId::new(
+            ProtocolType::ZeroSha,
+            SessionId::pack_slot(self.counters.zero_sha_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
-
         self.preprocess
-            .small_field_preproc
-            .dou_sha
-            .init_batch(dou_sha_session_id, batch_size, rng, network.clone())
+            .zero_sha
+            .init_batch(zsha_session, batch_size, rng, network.clone())
             .await?;
-
         let result = self
             .preprocess
-            .small_field_preproc
-            .dou_sha
-            .wait_for_result(dou_sha_session_id, self.params.timeout)
+            .zero_sha
+            .wait_for_result(zsha_session, self.params.timeout)
             .await;
-        if !self
-            .preprocess
-            .small_field_preproc
-            .dou_sha
-            .clear_store(dou_sha_session_id)
-            .await
-        {
-            warn!(
-                sessionid = ?dou_sha_session_id,
-                "failed to clear small-field double share protocol state"
-            );
+        if !self.preprocess.zero_sha.clear_store(zsha_session).await {
+            warn!(?zsha_session, "failed to clear ZeroSha protocol state");
         }
-
-        Ok(result?)
+        let shares = result?;
+        self.preprocessing_material
+            .lock()
+            .await
+            .add_zero_shares(shares);
+        Ok(())
     }
 
-    /// Generate PRandBit shares using the Goldilocks small-field pipeline.
+    /// Generate RandBit shares by running RandBit directly in the node's field `F`.
     ///
-    /// Following dev's design: small-field random shares + small-field Beaver triples feed
-    /// `RandBit` (in the Goldilocks field), whose output feeds `PRandBitDNode` to produce
-    /// the final `(RobustShare<F>, Gf256)` prandbit shares used by fixed-point truncation.
-    async fn ensure_prandbit_shares<N, G>(
-        &mut self,
-        rng: &mut G,
-        network: Arc<N>,
-    ) -> Result<(), HoneyBadgerError>
+    /// RandBit used to route through a Goldilocks small-field RandBit run followed by a
+    /// RISS-based field-conversion step (`PRandIntNode::generate_riss`), whose only reason for
+    /// existing was to additionally produce a `Gf256` view of the bit -- a view nothing
+    /// downstream ever consumed (`mul_fixed`/`div_with_const_fixed` both discarded it). Running
+    /// RandBit directly in `F` produces the same `RobustShare<F>` bit shares without that detour,
+    /// and shares its random-share pool with the rest of the node instead of requiring a
+    /// dedicated small-field preprocessing pipeline.
+    async fn ensure_randbit_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
-        G: Rng + Send,
     {
         // How many shares are already present?
         let no_shares = {
             let store = self.preprocessing_material.lock().await;
-            store.length().prandbit
+            store.length().randbit
         };
 
-        if no_shares >= self.params.n_prandbit {
-            info!("There are enough PRandBit shares");
+        if no_shares >= self.params.n_randbit {
+            info!("There are enough RandBit shares");
             return Ok(());
         }
 
-        // Computing the amount of needed shares.
-        let missing = self.params.n_prandbit.saturating_sub(no_shares);
-        let batch = self.params.threshold + 1;
-        let total_randbit_to_generate = ((missing + batch - 1) / batch) * batch;
+        // Computing the amount of needed shares. MulPub pads its last `2t+1`-wide group
+        // internally, so the count no longer has to be a multiple of anything.
+        let total_to_generate = self.params.n_randbit.saturating_sub(no_shares);
 
-        // The RandBit protocol runs in the small (Goldilocks) field. Its output is a vector of
-        // Goldilocks shares that PRandBitDNode<GoldilocksField, F> consumes.
-        let mut randbit_output: Vec<ShamirShare<GoldilocksField, 1, Robust>> = Vec::new();
+        // MulPub sends a whole session's groups in one batch-reconstruction message per
+        // recipient, so it caps how much a single `init` may open. Ask it rather than
+        // recomputing the group arithmetic here.
+        let max_per_session = self.preprocess.rand_bit.mul_pub.max_batch_size();
 
-        let randbit_sessionid = SessionId::new(
-            ProtocolType::RandBit,
-            SessionId::pack_slot(self.counters.rand_bit_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
+        for chunk in chunk_sizes(total_to_generate, max_per_session) {
+            // One random share (RandBit's `a` input) and one degree-`2t` zero-sharing
+            // (re-randomising the MulPub opening) per output bit, both drawn from the shared
+            // pools. Sizing (`n_random_shares`/`n_zero_shares`) is expected to already account
+            // for this demand; this does not top either pool up itself, so an under-sized config
+            // surfaces as `NotEnoughPreprocessing` here instead of silently generating more.
+            let random_shares_a = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_random_shares(chunk)?;
 
-        // PRandBit session id.
-        let prandbit_sessionid = SessionId::new(
-            ProtocolType::PRandBit,
-            SessionId::pack_slot(self.counters.prand_bit_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
+            let zero_shares = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_zero_shares(chunk)?;
 
-        // Ensure small-field random shares: one for each randbit, plus 2 per small-field triple.
-        let current_triples = {
-            let guard = self.preprocessing_material.lock().await;
-            guard.length().beaver_triples_small_field
-        };
-        let missing_triples = total_randbit_to_generate.saturating_sub(current_triples);
-        let group_size = 2 * self.params.threshold + 1;
-        let total_triples_to_generate =
-            ((missing_triples + group_size - 1) / group_size) * group_size;
-        let random_shares_for_triples = 2 * total_triples_to_generate;
-
-        self.ensure_random_shares_small_field(
-            network.clone(),
-            rng,
-            total_randbit_to_generate + random_shares_for_triples,
-        )
-        .await?;
-
-        // One small-field random share per randbit.
-        let random_shares_a = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_random_shares_small_field(total_randbit_to_generate)?;
-
-        // Ensure small-field Beaver triples (one per randbit).
-        self.ensure_beaver_triples_small_field(network.clone(), rng, total_randbit_to_generate)
-            .await?;
-
-        let beaver_triples = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_beaver_triples_small_field(total_randbit_to_generate)?;
-
-        // Run RandBit in the small field. The current branch has no batched RandBit API, so run
-        // it single-shot (matching dev's reference) over the whole batch.
-        self.preprocess
-            .small_field_preproc
-            .rand_bit
-            .init(
-                random_shares_a,
-                beaver_triples,
-                randbit_sessionid,
-                self.params.timeout,
-                network.clone(),
-            )
-            .await?;
-
-        let result = self
-            .preprocess
-            .small_field_preproc
-            .rand_bit
-            .wait_for_result(randbit_sessionid, self.params.timeout)
-            .await;
-
-        if !self
-            .preprocess
-            .small_field_preproc
-            .rand_bit
-            .clear_store(randbit_sessionid)
-            .await
-        {
-            warn!(
-                sessionid = ?randbit_sessionid,
-                "failed to clear RandBit protocol state"
+            let session_id = SessionId::new(
+                ProtocolType::RandBit,
+                SessionId::pack_slot(self.counters.rand_bit_counter.get_next().await?, 0, 0),
+                self.params.instance_id,
             );
+
+            self.preprocess
+                .rand_bit
+                .init(
+                    random_shares_a,
+                    zero_shares,
+                    session_id,
+                    self.params.timeout,
+                    network.clone(),
+                )
+                .await?;
+
+            let result = self
+                .preprocess
+                .rand_bit
+                .wait_for_result(session_id, self.params.timeout)
+                .await;
+
+            if !self.preprocess.rand_bit.clear_store(session_id).await {
+                warn!(?session_id, "failed to clear RandBit protocol state");
+            }
+
+            self.preprocessing_material
+                .lock()
+                .await
+                .add(None, None, Some(result?), None);
         }
-        randbit_output.extend(result?);
-
-        // PRandBit share generation (big field F output via PRandBitDNode<GoldilocksField, F>).
-        info!(id = self.id, "PRandbit share generation");
-        self.preprocess
-            .prand_bit
-            .generate_riss(
-                prandbit_sessionid,
-                randbit_output,
-                self.params.l,
-                self.params.k,
-                total_randbit_to_generate,
-                network,
-            )
-            .await?;
-
-        let result = self
-            .preprocess
-            .prand_bit
-            .wait_for_bit_result(prandbit_sessionid, self.params.timeout)
-            .await;
-
-        if !self
-            .preprocess
-            .prand_bit
-            .clear_store(prandbit_sessionid)
-            .await
-        {
-            warn!(
-                sessionid = ?prandbit_sessionid,
-                "failed to clear PRandBit protocol state"
-            );
-        }
-
-        self.preprocessing_material
-            .lock()
-            .await
-            .add(None, None, None, None, Some(result?), None);
 
         Ok(())
     }
 
-    async fn ensure_prandint_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
-    where
-        N: Network + Send + Sync + 'static,
-    {
-        // How many shares are already present?
+    /// Tops the PRandInt mask pool up to `n_prandint`, deriving locally from PRSS keys.
+    ///
+    /// No network: the keys were established once by [`Self::setup_prss_keys`], and every mask
+    /// after that is a local PRF evaluation. Masks are addressed by `prandint_cursor` — the total
+    /// number ever generated — rather than by current pool depth: depth shrinks as shares are
+    /// consumed, and deriving from it would eventually rewind the PRF position and hand out a
+    /// mask some earlier, already-opened operation already used. The cursor only advances, so a
+    /// position is never issued twice. Nor is it a per-invocation counter reset on retry — it is
+    /// driven purely by how much has been generated so far, which every honest party computes
+    /// identically; a counter that drifted between parties would silently yield shares of
+    /// different secrets, with no message exchange left to catch it.
+    async fn ensure_prandint_shares(&mut self) -> Result<(), HoneyBadgerError> {
         let no_shares = {
             let store = self.preprocessing_material.lock().await;
             store.length().prandint
         };
 
         if no_shares >= self.params.n_prandint {
-            info!("There are enough prandbit shares");
+            info!("There are enough PRandInt shares");
             return Ok(());
         }
 
-        // How many more do we need?
         let missing = self.params.n_prandint.saturating_sub(no_shares);
-
-        // PRandInt share generation.
         info!("PRandInt share generation");
 
-        let max_prandint_batch = 64 * (self.params.threshold + 1);
-        let mut prandint_output = Vec::with_capacity(missing);
-        for batch_size in chunk_sizes(missing, max_prandint_batch) {
-            let sessionid = SessionId::new(
-                ProtocolType::PRandInt,
-                SessionId::pack_slot(self.counters.prand_int_counter.get_next().await?, 0, 0),
-                self.params.instance_id,
-            );
-
-            // Run PRandInt protocol. PRandBitDNode<GoldilocksField, F> produces big-field (F)
-            // shares here; the small-field bits argument is empty for PRandInt.
-            self.preprocess
-                .prand_bit
-                .generate_riss(
-                    sessionid,
-                    vec![],
-                    self.params.l,
-                    self.params.k,
-                    batch_size,
-                    network.clone(),
-                )
-                .await?;
-
-            let result = self
-                .preprocess
-                .prand_bit
-                .wait_for_int_result(sessionid, self.params.timeout)
-                .await;
-
-            if !self.preprocess.prand_bit.clear_store(sessionid).await {
-                warn!(?sessionid, "failed to clear PRandInt protocol state");
-            }
-            prandint_output.extend(result?);
-        }
-        self.preprocessing_material.lock().await.add(
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(prandint_output),
-        );
+        let bits = self.params.mask_bits();
+        let cursor = {
+            let store = self.preprocessing_material.lock().await;
+            store.prandint_cursor()
+        };
+        let output = self.preprocess.prand_int.generate_prss_at(
+            self.params.instance_id,
+            cursor,
+            missing,
+            bits,
+        )?;
+        self.preprocessing_material
+            .lock()
+            .await
+            .add(None, None, None, Some(output));
         Ok(())
     }
 }
@@ -2339,8 +1990,15 @@ pub enum WrappedMessage {
     RanSha(RanShaMessage),
     Dousha(DouShaMessage),
     Output(OutputMessage),
-    PRandBitD(PRandBitDMessage),
-    PRandBitDEcho(PRandBitDEchoMessage),
+    PRandInt(PRandIntMessage),
+    /// Direct point-to-point opening of a multiplication's `(a - x)`/`(b - y)` remainder shares
+    /// (used when the batch size isn't a multiple of `t + 1`). Robust interpolation tolerates up
+    /// to `t` bad shares, so this doesn't need RBC's reliable-broadcast agreement — same trust
+    /// model as `BatchRecon`'s point-to-point `Eval`/`Reveal` messages.
+    Mult(MultMessage),
+    /// Direct point-to-point opening of a TruncPr share of `(b + r)`. Same rationale as `Mult`.
+    Trunc(TruncPrMessage),
+    ZeroSha(zero_share::ZeroShaMessage),
 }
 
 impl WrappedMessage {
@@ -2365,16 +2023,11 @@ pub enum ProtocolType {
     Dousha = 7,
     Mul = 8,
     PRandInt = 9,
-    PRandBit = 10,
     RandBit = 11,
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
-    // Small field (Goldilocks) sub-protocols. Encoding matches dev's reference layout.
-    TripleSmallField = 15,
-    RanShaSmallField = 16,
-    RanDouShaSmallField = 17,
-    DouShaSmallField = 18,
+    ZeroSha = 15,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -2396,15 +2049,11 @@ impl ProtocolTag for ProtocolType {
             7 => Some(Self::Dousha),
             8 => Some(Self::Mul),
             9 => Some(Self::PRandInt),
-            10 => Some(Self::PRandBit),
             11 => Some(Self::RandBit),
             12 => Some(Self::FpMul),
             13 => Some(Self::Trunc),
             14 => Some(Self::FpDivConst),
-            15 => Some(Self::TripleSmallField),
-            16 => Some(Self::RanShaSmallField),
-            17 => Some(Self::RanDouShaSmallField),
-            18 => Some(Self::DouShaSmallField),
+            15 => Some(Self::ZeroSha),
             _ => None,
         }
     }
@@ -2512,9 +2161,6 @@ impl ProtocolTag for ProtocolType {
 /// RandBit (n=2):
 ///   - calls multiplication once, so no execution ID 1 needed
 ///   - round ID = execution ID 2
-/// PRandBit (n=1):
-///   - round ID = execution ID 1
-///   - sub ID = 0
 /// PRandInt (n=1):
 ///   - round ID = execution ID 1
 ///   - sub ID = 0

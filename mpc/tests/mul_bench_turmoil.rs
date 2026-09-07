@@ -12,7 +12,9 @@
 pub mod utils;
 
 use crate::utils::{
-    test_utils::{construct_e2e_input_mul, create_global_nodes, setup_quiet_tracing},
+    test_utils::{
+        construct_e2e_input_mul, create_global_nodes, setup_quiet_tracing, unused_precision,
+    },
     turmoil::turmoil_setup,
 };
 use ark_bls12_381::Fr;
@@ -21,7 +23,9 @@ use ark_std::test_rng;
 use std::{sync::Arc, time::Instant};
 use stoffelcrypto::{
     common::{rbc::rbc::Avid, MPCProtocol, SecretSharingScheme},
-    honeybadger::{robust_interpolate::robust_interpolate::RobustShare, SessionId},
+    honeybadger::{
+        robust_interpolate::robust_interpolate::RobustShare, SessionId, MIN_STATISTICAL_SECURITY,
+    },
 };
 use stoffelmpc_network::{fake_network::SenderId, turmoil_network::TurmoilNetwork};
 use tokio::sync::Barrier;
@@ -78,8 +82,8 @@ fn run_config(n: usize, t: usize, n_muls: usize, lat: Option<(u64, u64)>) {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         std::time::Duration::from_secs(120),
         vec![],
     );
@@ -91,8 +95,6 @@ fn run_config(n: usize, t: usize, n_muls: usize, lat: Option<(u64, u64)>) {
             for pid in 0..n {
                 nodes[pid].preprocessing_material.lock().await.add(
                     Some(triples[pid].clone()),
-                    None,
-                    None,
                     None,
                     None,
                     None,

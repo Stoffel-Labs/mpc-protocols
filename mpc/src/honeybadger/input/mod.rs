@@ -2,7 +2,7 @@ use crate::{common::rbc::RbcError, honeybadger::robust_interpolate::InterpolateE
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::NetworkError;
+use stoffelnet::network_utils::{ClientId, NetworkError};
 use thiserror::Error;
 use tokio::{sync::watch::error::RecvError, time::error::Elapsed};
 
@@ -32,6 +32,8 @@ pub enum InputError {
     Timeout(#[from] Elapsed),
     #[error("Channel closed")]
     Abort,
+    #[error("client id {0} overlaps the consensus node id range 0..{1}")]
+    InvalidClientId(ClientId, usize),
 }
 
 /// Message sent in the Random Double Sharing protocol.

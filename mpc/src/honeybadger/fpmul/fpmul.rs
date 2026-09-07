@@ -1,5 +1,5 @@
 use crate::{
-    common::{types::fixed::SecretFixedPoint, RBC},
+    common::types::fixed::SecretFixedPoint,
     honeybadger::{
         fpmul::{truncpr::TruncPrNode, TruncPrError},
         mul::{multiplication::Multiply, MulError},
@@ -31,25 +31,34 @@ pub enum FPError {
         "the preprocessing does not have enough bits, current: {current}, required: {required}"
     )]
     NotEnoughBitsPrep { current: usize, required: usize },
+    #[error(
+        "TruncPr mask delivers only {delivered} bits of statistical security, need at least \
+         {required}: the {mask_bits}-bit mask must cover the {value_bits}-bit value plus the \
+         margin -- size the node for the precision these values carry"
+    )]
+    InsufficientStatisticalSecurity {
+        delivered: usize,
+        required: usize,
+        mask_bits: usize,
+        value_bits: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
-pub struct FPMulNode<F, R>
+pub struct FPMulNode<F>
 where
     F: PrimeField,
-    R: RBC,
 {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub mult_node: Multiply<F, R>,
-    pub trunc_node: TruncPrNode<F, R>,
+    pub mult_node: Multiply<F>,
+    pub trunc_node: TruncPrNode<F>,
 }
 
-impl<F, R> FPMulNode<F, R>
+impl<F> FPMulNode<F>
 where
     F: PrimeField,
-    R: RBC<Id = SessionId>,
 {
     pub fn new(id: usize, n_parties: usize, threshold: usize) -> Result<Self, FPError> {
         let trunc_node = TruncPrNode::new(id, n_parties, threshold)?;

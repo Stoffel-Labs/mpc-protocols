@@ -504,6 +504,9 @@ where
                         self.triple_gen.avss.rbc.process(rbc_msg, net).await?;
                         self.triple_gen.avss.drain_rbc_output().await?;
                     }
+                    Some(ProtocolType::TripleCheck) => {
+                        self.triple_gen.rbc.process(rbc_msg, net).await?;
+                    }
                     Some(ProtocolType::Mul) => {
                         self.mul_node.rbc.process(rbc_msg, net).await?;
                         self.mul_node.drain_rbc_output().await?;
@@ -658,6 +661,11 @@ where
         // Generate the exact pool shortfall. Triple generation itself is
         // vectorized and does not require a multiple of the party count.
         let total_triples_to_generate = self.params.n_triples.saturating_sub(no_of_triples_avail);
+        // Every real triple needs its own dedicated, single-use sacrifice triple for the
+        // post-generation correctness check (gen_triple's Step 4) — a sacrifice shared
+        // across multiple candidates would let their `a`/`b` values be correlated via the
+        // shared mask, so this cannot be amortized below 1-to-1. That doubles the (a,b)
+        // random-share requirement.
         let random_pool_shortfall = self
             .params
             .n_v_random_shares
@@ -666,6 +674,7 @@ where
             .checked_add(
                 total_triples_to_generate
                     .checked_mul(2)
+                    .and_then(|v| v.checked_mul(2))
                     .ok_or(AvssMPCError::LimitError)?,
             )
             .ok_or(AvssMPCError::LimitError)?;
@@ -696,20 +705,42 @@ where
                 .lock()
                 .await
                 .take_v_random_shares(total_triples_to_generate)?;
+            // One dedicated, single-use sacrifice (a,b) pair per real triple (see
+            // `TripleGenNode::gen_triple`'s sacrifice check — this cannot be amortized
+            // to fewer than 1-to-1 without correlating candidates' masks).
+            let sacrifice_shares_a = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_v_random_shares(total_triples_to_generate)?;
+            let sacrifice_shares_b = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_v_random_shares(total_triples_to_generate)?;
 
             let a_chunks = random_shares_a.chunks(MAX_AVSS_BATCH_SIZE);
             let b_chunks = random_shares_b.chunks(MAX_AVSS_BATCH_SIZE);
+            let sacrifice_a_chunks = sacrifice_shares_a.chunks(MAX_AVSS_BATCH_SIZE);
+            let sacrifice_b_chunks = sacrifice_shares_b.chunks(MAX_AVSS_BATCH_SIZE);
 
-            for (a, b) in a_chunks.zip(b_chunks) {
+            for (a, b, sacrifice_a, sacrifice_b) in
+                itertools::izip!(a_chunks, b_chunks, sacrifice_a_chunks, sacrifice_b_chunks)
+            {
                 let triple_counter = self.counters.triple_counter.get_next().await?;
                 let sessionid = AvssSessionId::new(
                     ProtocolType::Triple,
                     AvssSessionId::pack_slot(triple_counter, 0, 0),
                     self.params.instance_id,
                 );
+                let mut a_batch = a.to_vec();
+                a_batch.extend_from_slice(sacrifice_a);
+                let mut b_batch = b.to_vec();
+                b_batch.extend_from_slice(sacrifice_b);
+
                 let result = self
                     .triple_gen
-                    .gen_triple(sessionid, a.to_vec(), b.to_vec(), rng, network.clone())
+                    .gen_triple(sessionid, a_batch, b_batch, rng, network.clone())
                     .await;
 
                 if !self.triple_gen.clear_store(sessionid).await {
@@ -827,6 +858,7 @@ pub enum ProtocolType {
     Mul = 4,
     Input = 5,
     Output = 6,
+    TripleCheck = 7,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -845,6 +877,7 @@ impl ProtocolTag for ProtocolType {
             4 => Some(Self::Mul),
             5 => Some(Self::Input),
             6 => Some(Self::Output),
+            7 => Some(Self::TripleCheck),
 
             _ => None,
         }

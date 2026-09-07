@@ -24,6 +24,9 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerSuccess,
     HoneyBadgerNetworkError,
     HoneyBadgerRanShaError,
+    HoneyBadgerZeroShaError,
+    HoneyBadgerInsufficientStatisticalSecurity,
+    HoneyBadgerMulPubError,
     HoneyBadgerInputError,
     HoneyBadgerDouShaError,
     HoneyBadgerRanDouShaError,
@@ -38,7 +41,7 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerChannelClosed,
     HoneyBadgerOutputNotReady,
     HoneyBadgerRandBitError,
-    HoneyBadgerPRandError,
+    HoneyBadgerPRandIntError,
     HoneyBadgerFPMulError,
     HoneyBadgerTruncPrError,
     HoneyBadgerFPDivConstError,
@@ -58,6 +61,11 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
         match value {
             HoneyBadgerError::NetworkError(_) => Self::HoneyBadgerNetworkError,
             HoneyBadgerError::RanShaError(_) => Self::HoneyBadgerRanShaError,
+            HoneyBadgerError::ZeroShaError(_) => Self::HoneyBadgerZeroShaError,
+            HoneyBadgerError::InsufficientStatisticalSecurity { .. } => {
+                Self::HoneyBadgerInsufficientStatisticalSecurity
+            }
+            HoneyBadgerError::MulPubError(_) => Self::HoneyBadgerMulPubError,
             HoneyBadgerError::InputError(_) => Self::HoneyBadgerInputError,
             HoneyBadgerError::DouShaError(_) => Self::HoneyBadgerDouShaError,
             HoneyBadgerError::RanDouShaError(_) => Self::HoneyBadgerRanDouShaError,
@@ -73,7 +81,7 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::JoinError => Self::HoneyBadgerJoinError,
             HoneyBadgerError::ChannelClosed => Self::HoneyBadgerChannelClosed,
             HoneyBadgerError::RandBitError(_) => Self::HoneyBadgerRandBitError,
-            HoneyBadgerError::PRandError(_) => Self::HoneyBadgerPRandError,
+            HoneyBadgerError::PRandIntError(_) => Self::HoneyBadgerPRandIntError,
             HoneyBadgerError::FPError(_) => Self::HoneyBadgerFPMulError,
             HoneyBadgerError::TruncPrError(_) => Self::HoneyBadgerTruncPrError,
             HoneyBadgerError::FPDivConstError(_) => Self::HoneyBadgerFPDivConstError,

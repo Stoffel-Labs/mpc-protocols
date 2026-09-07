@@ -1,6 +1,6 @@
 use crate::common::session_store::{Admission, SessionStore};
 use ark_ff::FftField;
-use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
+use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use bincode::Options;
@@ -627,12 +627,24 @@ where
 
             drop(store);
 
+            // Quorum is n, not 2t+1, so the OEC decoder below has t errors' worth of
+            // slack to *correct* rather than merely detect. A verifier must not accept
+            // a repair: if the decoded polynomial disagrees with any received share,
+            // that share was corrupted by the dealer and must fail verification rather
+            // than be silently patched over.
+            let domain = crate::common::get_or_create_evaluation_domain::<F>(self.n_parties);
+
             let mut ok = true;
             for shares in shares_by_batch {
                 match RobustShare::recover_secret(&shares, self.n_parties, self.threshold) {
                     Ok(r) => {
                         let poly = DensePolynomial::from_coefficients_slice(&r.0);
-                        if poly.degree() != self.threshold {
+                        let consistent = domain.as_ref().is_some_and(|domain| {
+                            shares
+                                .iter()
+                                .all(|s| poly.evaluate(&domain.element(s.id)) == s.share[0])
+                        });
+                        if poly.degree() != self.threshold || !consistent {
                             ok = false;
                             break;
                         }
