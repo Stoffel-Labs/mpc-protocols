@@ -1,5 +1,5 @@
 use ark_ff::FftField;
-use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
+use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use bincode::Options;
@@ -496,13 +496,25 @@ where
             }
             drop(store);
 
+            // Quorum is n, giving the OEC decoder room to *correct* errors rather than
+            // merely detect them. Currently unreachable at degree 2t with n = 3t+1 (OEC
+            // needs 3t+2 points to attempt a repair), but a verifier must not rely on
+            // that arithmetic accident: reject if the decoded polynomial disagrees with
+            // any received share, since that disagreement means the dealer corrupted it.
+            let domain = crate::common::get_or_create_evaluation_domain::<F>(self.n_parties);
+
             let mut ok = true;
             // recover at degree 2t AND check secret is zero, for every batch item
             for shares in shares_by_batch {
                 match RobustShare::recover_secret(&shares, self.n_parties, self.threshold) {
                     Ok(r) => {
                         let poly = DensePolynomial::from_coefficients_slice(&r.0);
-                        if !(poly.degree() == 2 * self.threshold && r.1.is_zero()) {
+                        let consistent = domain.as_ref().is_some_and(|domain| {
+                            shares
+                                .iter()
+                                .all(|s| poly.evaluate(&domain.element(s.id)) == s.share[0])
+                        });
+                        if !(poly.degree() == 2 * self.threshold && r.1.is_zero()) || !consistent {
                             ok = false;
                             break;
                         }

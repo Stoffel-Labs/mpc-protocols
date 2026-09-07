@@ -166,6 +166,156 @@ async fn test_reconstruct_handler_incorrect_share() {
     assert_eq!(store.state, RanShaState::Reconstruction);
 }
 
+/// Regression test: a dealer that corrupts exactly `t` of the `n` shares it deals
+/// produces a valid-looking degree-t codeword plus a weight-t error vector. With the
+/// verifier's quorum raised to `n`, the OEC decoder in `RobustShare::recover_secret`
+/// has exactly enough slack to *repair* those `t` errors rather than report them,
+/// so `poly.degree() == t` passes even though the shares themselves were corrupted.
+/// The reconstruction handler must additionally check the decoded polynomial against
+/// every received share and reject on any mismatch, not just accept a clean-looking
+/// repair.
+#[tokio::test]
+async fn test_reconstruct_handler_dealer_poisons_exactly_t_shares() {
+    setup_tracing();
+    let n_parties = 10;
+    let t = 3;
+    let session_id = SessionId::new(ProtocolType::Ransha, SessionId::pack_slot(123, 0, 0), 111);
+
+    let (network, mut receivers, _, _) = test_setup(n_parties, vec![]);
+    let secret = Fr::from(1234);
+    let degree_t = 3;
+
+    let receiver_id = t + 2;
+
+    let mut rng = test_rng();
+    let mut shares_ri_t =
+        RobustShare::compute_shares(secret, n_parties, degree_t, None, &mut rng).unwrap();
+
+    // Corrupt exactly t shares: within the decoder's correction radius, so an
+    // uncorrected check would previously have accepted the repaired polynomial.
+    let corruption_indices = [0, 1, 2];
+    assert_eq!(corruption_indices.len(), t);
+    for &i in &corruption_indices {
+        shares_ri_t[i].share[0] += Fr::from(7u64);
+    }
+
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        111,
+        0,
+        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    let mut ransha_node = nodes.get(receiver_id).unwrap().clone();
+
+    {
+        let binding = ransha_node
+            .preprocess
+            .share_gen
+            .get_or_create_store(session_id, receiver_id)
+            .await
+            .unwrap();
+        let mut store = binding.lock().await;
+        store.computed_r_shares = shares_ri_t.clone();
+        store.batch_size = 1;
+    }
+
+    for i in 0..n_parties {
+        let mut bytes_rec_message = Vec::new();
+        shares_ri_t[i]
+            .clone()
+            .serialize_compressed(&mut bytes_rec_message)
+            .map_err(RanShaError::ArkSerialization)
+            .unwrap();
+        let message = RanShaMessage::new(
+            i,
+            RanShaMessageType::ReconstructMessage,
+            session_id,
+            RanShaPayload::Reconstruct(bytes_rec_message),
+        );
+
+        ransha_node
+            .preprocess
+            .share_gen
+            .reconstruction_handler(message, network[i].clone())
+            .await
+            .unwrap();
+    }
+
+    let mut set = JoinSet::new();
+    for i in 0..n_parties {
+        let receiver = receivers.remove(0);
+        let mut ransha_node = nodes[i].clone();
+        let net = network[i].clone();
+        let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| (SenderId::Node(i), r))
+            .collect();
+        let mut merged_rx = fan_in_inboxes(inbox);
+
+        set.spawn(async move {
+            let _ = timeout(Duration::from_secs(1), async {
+                while let Some(received) = merged_rx.recv().await {
+                    let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
+                        Ok(w) => w,
+                        Err(_) => continue,
+                    };
+                    match wrapped {
+                        WrappedMessage::RanSha(_) => {}
+                        WrappedMessage::Rbc(msg) => {
+                            if let Err(e) = ransha_node
+                                .preprocess
+                                .share_gen
+                                .rbc
+                                .process(msg, Arc::clone(&net))
+                                .await
+                            {
+                                warn!("Rbc processing error: {e}");
+                            }
+                            if let Err(e) =
+                                ransha_node.preprocess.share_gen.drain_rbc_output().await
+                            {
+                                warn!("RBC output handling error: {e}");
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+            })
+            .await;
+        });
+    }
+
+    while let Some(res) = set.join_next().await {
+        res.expect("Task panicked");
+    }
+
+    // The dealer's t-share corruption must be detected, not silently repaired: no
+    // party should have accepted an Ok verdict for this session.
+    let binding = ransha_node
+        .preprocess
+        .share_gen
+        .get_or_create_store(session_id, ransha_node.id)
+        .await
+        .unwrap();
+    let store = binding.lock().await;
+    assert_eq!(store.received_r_shares.len(), n_parties);
+    assert_eq!(
+        store.received_ok_msg.len(),
+        0,
+        "dealer's t-share corruption was silently repaired instead of detected"
+    );
+    assert_eq!(store.state, RanShaState::Reconstruction);
+}
+
 #[tokio::test]
 async fn test_output_handler() {
     setup_tracing();

@@ -7,9 +7,9 @@ description: Review a new or modified MPC sub-protocol in this repo (mpc/src/hon
 
 Checklist for reviewing a new or modified MPC sub-protocol against failure modes that
 have recurred repeatedly across this codebase (see AVID equivocation, AVID commit-quorum,
-unsolicited-RBC-session-DoS, and state-corruption/DoS findings in project history — this
-list exists because these bug classes keep coming back in new protocol code, not because
-they're hypothetical).
+unsolicited-RBC-session-DoS, state-corruption/DoS, and RanSha/ZeroSha silent-repair
+findings in project history — this list exists because these bug classes keep coming back
+in new protocol code, not because they're hypothetical).
 
 ## Scope
 
@@ -167,12 +167,45 @@ correct either way, which is why this class of bug survives testing. Also flag a
 consumer whose width isn't reflected in the pool-sizing function: the check then rejects it at first
 use (correct) but the operation cannot be configured at all until sizing is updated.
 
+### 12. A correcting decoder must not double as a verifier
+
+`RobustShare::recover_secret` (`robust_interpolate.rs`) is a Reed–Solomon decoder: given
+enough shares it will *correct* up to `t` errors via `oec_decode`
+([robust_interpolate.rs:589-627](mpc/src/honeybadger/robust_interpolate/robust_interpolate.rs#L589-L627)),
+not just detect them. Correction is exactly the right behavior for opening a value online.
+It is exactly wrong for a session that's verifying a dealer's proof-of-consistency, because
+a repaired result destroys the evidence the check exists to find.
+
+- Raising a verifier's reconstruction quorum toward `n` (from `2t+1`) hands the decoder
+  slack it will spend on repair, not detection. RanSha and ZeroSha did exactly this —
+  [share_gen.rs:618](mpc/src/honeybadger/share_gen/share_gen.rs#L618) and
+  [zero_share.rs:488](mpc/src/honeybadger/zero_share/zero_share.rs#L488) both call
+  `RobustShare::recover_secret` at quorum `n_parties` and check only `poly.degree() ==
+  t`/`2t` on the result. A dealer corrupting exactly `t` of its own dealt shares got
+  silently corrected: the check passed, and up to `t` honest parties kept shares off the
+  true polynomial permanently, with no verdict ever recording it.
+- Any `recover_secret` call made for verification (not opening) must evaluate the
+  returned polynomial back against every share that went into it and reject on any
+  mismatch — an honest dealer's shares already lie exactly on the decoded polynomial; if
+  the decoder had to fix one, that disagreement *is* the finding.
+- Don't reach for `NonRobustShare::recover_secret` (full Lagrange interpolation,
+  correctly used as a genuine detector in
+  [ran_dou_sha/mod.rs:645,650](mpc/src/honeybadger/ran_dou_sha/mod.rs#L645)) as a drop-in
+  fix without checking the cost: it has no optimistic fast path and is O(n²)-O(n³) per
+  call, measured 12x-369x slower than `RobustShare`'s optimistic path as `n` grows from
+  10 to 100. Prefer the per-share consistency check above — it keeps the fast path and
+  costs only an O(n) scan.
+
+Red flag: a consistency-check/verifier path that calls a correcting decoder and inspects
+only the final polynomial's degree or value — never whether the decoder had to correct
+anything to get there.
+
 ## How to run the review
 
 1. Identify the module(s) in scope (new/changed files, or what the user points at).
 2. Read the module's `process`/`init`/`drain_*`/`get_or_create_store`/`clear_store`
    functions in full.
-3. Walk items 1-11 against that code. For each, either confirm the pattern matches the
+3. Walk items 1-12 against that code. For each, either confirm the pattern matches the
    referenced known-good example or record a finding.
 4. Use grep to sanity-check adjacent evidence, e.g.:
    - `grep -n "get_or_admit\|get_or_create_store" <file>`
@@ -182,6 +215,9 @@ use (correct) but the operation cannot be configured at all until sizing is upda
    - `grep -n "MAX_.*SESSIONS\|deser_bounded_vec" <file>`
    - `grep -n "\.unwrap()\|\.expect(" <file>`
    - `grep -n "take_prandint_shares\|check_mask_security\|max_masked_width" <file>`
+   - `grep -n "recover_secret" <file>` — for each hit, confirm it's either an online-phase
+     opening (correction is fine) or a verifier that checks per-share consistency, not
+     just degree/value (item 12)
 5. Report findings with the `ReportFindings` tool, most severe first (liveness/DoS/
    soundness breaks before style issues). Use the checklist item's topic as `category`
    (e.g. `session-admission`, `drain-wiring`, `sender-auth`, `panic-safety`,
