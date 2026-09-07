@@ -21,6 +21,17 @@ pub mod triple_gen;
 
 pub mod fpdiv;
 pub mod fpmul;
+
+/// GF(2^k) equivalent of `batch_recon`
+pub mod gf_batch_recon;
+/// GF(2^k) equivalent of `double_share` (non-robust paired-degree dealing)
+pub mod gf_double_share;
+/// GF(2^k) equivalent of `ran_dou_sha` (hyperinvertible-matrix extraction + checksum)
+pub mod gf_ran_dou_sha;
+/// GF(2^k) equivalent of `share_gen` (RanSha)
+pub mod gf_share_gen;
+/// GF(2^k) equivalent of `triple_gen` (Beaver triple generation)
+pub mod gf_triple_gen;
 pub mod input;
 pub mod mul;
 pub mod mul_pub;
@@ -1100,6 +1111,18 @@ where
             }
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
+            WrappedMessage::GfRansha(_) => {
+                warn!("GfRansha message received, but not yet wired into this node's dispatch");
+            }
+            WrappedMessage::GfBatchRecon(_) => {
+                warn!("GfBatchRecon message received, but not yet wired into this node's dispatch");
+            }
+            WrappedMessage::GfDousha(_) => {
+                warn!("GfDousha message received, but not yet wired into this node's dispatch");
+            }
+            WrappedMessage::GfRanDouSha(_) => {
+                warn!("GfRanDouSha message received, but not yet wired into this node's dispatch");
+            }
         }
 
         Ok(())
@@ -1999,6 +2022,14 @@ pub enum WrappedMessage {
     /// Direct point-to-point opening of a TruncPr share of `(b + r)`. Same rationale as `Mult`.
     Trunc(TruncPrMessage),
     ZeroSha(zero_share::ZeroShaMessage),
+    /// GF(2^k) equivalent of `RanSha`, see `gf_share_gen`.
+    GfRansha(gf_share_gen::GfRanShaMessage),
+    /// GF(2^k) equivalent of `BatchRecon`, see `gf_batch_recon`.
+    GfBatchRecon(gf_batch_recon::GfBatchReconMsg),
+    /// GF(2^k) equivalent of `Dousha`, see `gf_double_share`.
+    GfDousha(gf_double_share::GfDouShaMessage),
+    /// GF(2^k) equivalent of `RanDouSha`, see `gf_ran_dou_sha`.
+    GfRanDouSha(gf_ran_dou_sha::GfRanDouShaMessage),
 }
 
 impl WrappedMessage {
@@ -2023,11 +2054,16 @@ pub enum ProtocolType {
     Dousha = 7,
     Mul = 8,
     PRandInt = 9,
+    GfRansha = 10,
     RandBit = 11,
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
     ZeroSha = 15,
+    GfBatchRecon = 16,
+    GfDousha = 17,
+    GfRandousha = 18,
+    GfTriple = 19,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -2049,11 +2085,16 @@ impl ProtocolTag for ProtocolType {
             7 => Some(Self::Dousha),
             8 => Some(Self::Mul),
             9 => Some(Self::PRandInt),
+            10 => Some(Self::GfRansha),
             11 => Some(Self::RandBit),
             12 => Some(Self::FpMul),
             13 => Some(Self::Trunc),
             14 => Some(Self::FpDivConst),
             15 => Some(Self::ZeroSha),
+            16 => Some(Self::GfBatchRecon),
+            17 => Some(Self::GfDousha),
+            18 => Some(Self::GfRandousha),
+            19 => Some(Self::GfTriple),
             _ => None,
         }
     }

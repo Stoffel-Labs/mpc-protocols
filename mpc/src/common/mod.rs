@@ -9,6 +9,9 @@ pub mod session_store;
 /// into the StoffelVM, you must implement the Share type.
 pub mod share;
 
+/// A GF(2^k) Shamir-sharing domain, parallel to the `F: FftField` domain above.
+pub mod gf2k;
+
 /// Implementation of the hbACSS protocol from https://eprint.iacr.org/2021/159.
 pub mod acss;
 
@@ -101,7 +104,7 @@ pub struct ShamirShare<F: FftField, const N: usize, P> {
     pub _sharetype: PhantomData<fn() -> P>,
 }
 
-pub trait SecretSharingScheme<F: FftField>:
+pub trait SecretSharingScheme<F>:
     Sized
     + Add<Output = Result<Self, ShareError>>
     + Sub<Output = Result<Self, ShareError>>

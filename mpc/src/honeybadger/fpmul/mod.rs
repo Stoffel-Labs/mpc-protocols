@@ -19,7 +19,6 @@ use stoffelnet::network_utils::NetworkError;
 use thiserror::Error;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
 
-pub mod f256;
 pub mod fpmul;
 pub mod prandint;
 pub mod rand_bit;

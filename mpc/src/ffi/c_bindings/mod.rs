@@ -115,6 +115,13 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
             crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
             crate::honeybadger::ProtocolType::ZeroSha => ProtocolType::ZeroSha,
+            // Not yet exposed over FFI (no SDK-facing GF(2^k) surface exists yet) — map to the
+            // inert `None` tag rather than panicking, since this conversion must stay total.
+            crate::honeybadger::ProtocolType::GfRansha => ProtocolType::None,
+            crate::honeybadger::ProtocolType::GfBatchRecon => ProtocolType::None,
+            crate::honeybadger::ProtocolType::GfDousha => ProtocolType::None,
+            crate::honeybadger::ProtocolType::GfRandousha => ProtocolType::None,
+            crate::honeybadger::ProtocolType::GfTriple => ProtocolType::None,
         }
     }
 }
