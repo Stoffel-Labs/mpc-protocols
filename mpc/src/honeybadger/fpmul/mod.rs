@@ -351,6 +351,10 @@ pub enum TruncPrError {
     Timeout(SessionId),
     #[error("Store Limit")]
     LimitError,
+    /// `r_dash = sum_{i=0}^{m-1} 2^i r_i` needs exactly `m` random bit shares to mask the
+    /// low `m` bits of the opened value; fewer than that leaves those bits unmasked.
+    #[error("TruncPr needs {needed} random mask bits, got {got}")]
+    InsufficientRandBits { needed: usize, got: usize },
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

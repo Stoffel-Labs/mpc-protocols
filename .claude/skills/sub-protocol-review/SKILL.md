@@ -167,6 +167,56 @@ correct either way, which is why this class of bug survives testing. Also flag a
 consumer whose width isn't reflected in the pool-sizing function: the check then rejects it at first
 use (correct) but the operation cannot be configured at all until sizing is updated.
 
+- **Every masking-material vector needs its own length check, not just the aggregate margin.**
+  `check_mask_security` validates that `r_int`'s width carries enough statistical security margin —
+  it says nothing about a *separate* masking vector being long enough to build from. TruncPr's `init`
+  consumed `r_bits` via `.iter().take(m)`: with a short (or empty) `r_bits`, `r_dash` is built from
+  fewer than `m` bits — down to zero — and the opened value leaks `a`'s low `m` bits in the clear,
+  with no error at all ([truncpr.rs](mpc/src/honeybadger/fpmul/truncpr.rs), fixed by rejecting
+  `r_bits.len() < m` before any state mutation or broadcast). Any `.take(n)`/`.zip()` consuming a
+  masking-material vector needs a preceding `if v.len() < n { return Err(...) }` — the loop construct
+  itself will never signal that it ran short.
+
+Red flag: `.iter().take(` or `.zip(` applied directly to a masking/randomness parameter with no
+preceding `.len()` check against the count the computation actually needs.
+
+### 13. Own broadcast must not be gated behind an early local-finalize attempt
+
+A party's outbound contribution (its opened share, echo, or reveal) must be sent
+unconditionally — never ordered after, or short-circuited by, an eager attempt to
+finalize locally from whatever peer messages already happen to be buffered. Two
+failure shapes, both hit in this codebase's TruncPr:
+
+- **Early success skips the broadcast.** If enough peer messages are already buffered
+  when `init` runs, an eager finalize call placed before the broadcast can succeed and
+  return early — so this party's own contribution never goes out, even though the rest
+  of the group still needs it. At the minimum BFT config (`n = 3t+1`), every other party
+  needs *all* `n-1` others' contributions to ever reach `2t+1`: zero slack. No
+  corruption required — an ordinary async timing where this party happens to call
+  `init` last is enough.
+- **Early failure aborts before the broadcast.** If a corrupted peer message is among
+  what's buffered early, the same eager finalize attempt can instead *fail* — not
+  enough evidence yet to error-correct past it — and if that failure propagates via `?`
+  before the broadcast line, the effect is identical: the share never goes out, and the
+  failure is spurious (the value may well be recoverable once more messages arrive).
+
+Fix shape: compute and send the outbound message first, unconditionally; only then
+attempt to finalize with whatever's buffered, including messages that arrived before
+`init` was called — and treat "not enough evidence yet" as pending (not terminal)
+distinctly from a genuine BFT-assumption violation. See
+[truncpr.rs](mpc/src/honeybadger/fpmul/truncpr.rs) `init`/`try_finalize`.
+
+This is the outbound half of a pattern this codebase has already fixed on the inbound
+side: `buffers_batch_reconstruction_that_finishes_before_local_init` in
+[mul_pub.rs](mpc/src/honeybadger/mul_pub/mul_pub.rs) and
+[triple_generation.rs](mpc/src/honeybadger/triple_gen/triple_generation.rs) guard
+against *dropping* an early peer message; TruncPr's bug shows the *own send* needs the
+same guarding. Check both halves on any new "gather quorum, then finalize" protocol.
+
+Red flag: an `init`/entry-point function that calls a local finalize/decode helper
+before the line that broadcasts or sends this party's own contribution — especially
+if that helper's `Result` is propagated with `?`.
+
 ### 12. A correcting decoder must not double as a verifier
 
 `RobustShare::recover_secret` (`robust_interpolate.rs`) is a Reed–Solomon decoder: given
@@ -205,7 +255,7 @@ anything to get there.
 1. Identify the module(s) in scope (new/changed files, or what the user points at).
 2. Read the module's `process`/`init`/`drain_*`/`get_or_create_store`/`clear_store`
    functions in full.
-3. Walk items 1-12 against that code. For each, either confirm the pattern matches the
+3. Walk items 1-13 against that code. For each, either confirm the pattern matches the
    referenced known-good example or record a finding.
 4. Use grep to sanity-check adjacent evidence, e.g.:
    - `grep -n "get_or_admit\|get_or_create_store" <file>`
@@ -215,9 +265,13 @@ anything to get there.
    - `grep -n "MAX_.*SESSIONS\|deser_bounded_vec" <file>`
    - `grep -n "\.unwrap()\|\.expect(" <file>`
    - `grep -n "take_prandint_shares\|check_mask_security\|max_masked_width" <file>`
+   - `grep -n "\.iter()\.take(\|\.zip(" <file>` — for masking/randomness parameters,
+     confirm a length check precedes consumption (item 11)
    - `grep -n "recover_secret" <file>` — for each hit, confirm it's either an online-phase
      opening (correction is fine) or a verifier that checks per-share consistency, not
      just degree/value (item 12)
+   - In `init`/entry-point functions: confirm any local finalize/decode helper call is
+     ordered *after* this party's own broadcast/send, not before (item 13)
 5. Report findings with the `ReportFindings` tool, most severe first (liveness/DoS/
    soundness breaks before style issues). Use the checklist item's topic as `category`
    (e.g. `session-admission`, `drain-wiring`, `sender-auth`, `panic-safety`,
