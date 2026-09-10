@@ -75,6 +75,9 @@ pub fn create_nodes(
         FixedPointPrecision::new(32, 16),
         MIN_STATISTICAL_SECURITY,
         timeout,
+        // These benches don't exercise GF(2^k) operations.
+        0,
+        0,
     )
     .unwrap();
 

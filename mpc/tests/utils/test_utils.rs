@@ -557,6 +557,10 @@ where
         precision,
         statistical_security,
         timeout,
+        // None of these F-domain tests touch GF(2^k) operations, so no GF preprocessing is
+        // needed. Tests that do exercise gf_mul build their own HoneyBadgerMPCNodeOpts directly.
+        0,
+        0,
     )
     .unwrap();
     (0..n_parties)

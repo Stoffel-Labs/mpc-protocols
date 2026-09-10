@@ -122,6 +122,7 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::GfDousha => ProtocolType::None,
             crate::honeybadger::ProtocolType::GfRandousha => ProtocolType::None,
             crate::honeybadger::ProtocolType::GfTriple => ProtocolType::None,
+            crate::honeybadger::ProtocolType::GfMul => ProtocolType::None,
         }
     }
 }

@@ -54,6 +54,14 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerInstanceIdError,
     // Appended last to keep the existing discriminants ABI-stable for current SDK consumers.
     HoneyBadgerUnauthorizedSenderError,
+    HoneyBadgerGfRanShaError,
+    HoneyBadgerGfDouShaError,
+    HoneyBadgerGfRanDouShaError,
+    HoneyBadgerGfBatchReconError,
+    HoneyBadgerGfTripleGenError,
+    HoneyBadgerGfMulError,
+    HoneyBadgerShareError,
+    HoneyBadgerGfPreprocessingError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -93,6 +101,14 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::UnauthorizedSender(_, _) => Self::HoneyBadgerUnauthorizedSenderError,
             HoneyBadgerError::InvalidPartySize => Self::HoneyBadgerInvalidPartySizeError,
             HoneyBadgerError::InvalidPartyId => Self::HoneyBadgerInvalidPartyIdError,
+            HoneyBadgerError::GfRanShaError(_) => Self::HoneyBadgerGfRanShaError,
+            HoneyBadgerError::GfDouShaError(_) => Self::HoneyBadgerGfDouShaError,
+            HoneyBadgerError::GfRanDouShaError(_) => Self::HoneyBadgerGfRanDouShaError,
+            HoneyBadgerError::GfBatchReconError(_) => Self::HoneyBadgerGfBatchReconError,
+            HoneyBadgerError::GfTripleGenError(_) => Self::HoneyBadgerGfTripleGenError,
+            HoneyBadgerError::GfMulError(_) => Self::HoneyBadgerGfMulError,
+            HoneyBadgerError::ShareError(_) => Self::HoneyBadgerShareError,
+            HoneyBadgerError::GfPreprocessingError(_) => Self::HoneyBadgerGfPreprocessingError,
         }
     }
 }

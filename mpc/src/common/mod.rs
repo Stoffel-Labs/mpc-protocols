@@ -20,6 +20,7 @@ pub mod types;
 pub mod utils;
 
 use crate::common::{
+    gf2k::field::BinaryField,
     rbc::{rbc_store::Msg, RbcError},
     share::ShareError,
 };
@@ -401,6 +402,46 @@ where
     S: SecretSharingScheme<F>,
 {
     async fn run_preprocessing<R>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut R,
+    ) -> Result<(), Self::Error>
+    where
+        N: 'async_trait,
+        R: Rng + Send;
+}
+
+/// GF(2^k) analogue of `MPCProtocol`, bound to `K: BinaryField` instead of `F: FftField`.
+#[async_trait]
+pub trait GfMPCProtocol<K, S, N>
+where
+    K: BinaryField,
+    S: SecretSharingScheme<K>,
+    N: Network,
+{
+    type Error: std::fmt::Debug;
+
+    /// Local GF(2^k) addition — no network round.
+    fn gf_add(&self, x: Vec<S>, y: Vec<S>) -> Result<Vec<S>, Self::Error>;
+
+    /// Local GF(2^k) subtraction — no network round.
+    fn gf_sub(&self, x: Vec<S>, y: Vec<S>) -> Result<Vec<S>, Self::Error>;
+
+    /// Secure GF(2^k) Beaver multiplication.
+    async fn gf_mul(&mut self, x: Vec<S>, y: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
+    where
+        N: 'async_trait;
+}
+
+/// GF(2^k) analogue of `PreprocessingMPCProtocol` 
+#[async_trait]
+pub trait GfPreprocessingMPCProtocol<K, S, N>: GfMPCProtocol<K, S, N>
+where
+    K: BinaryField,
+    S: SecretSharingScheme<K>,
+    N: Network,
+{
+    async fn run_gf_preprocessing<R>(
         &mut self,
         network: Arc<N>,
         rng: &mut R,

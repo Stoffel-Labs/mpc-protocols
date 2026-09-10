@@ -26,6 +26,10 @@ pub mod fpmul;
 pub mod gf_batch_recon;
 /// GF(2^k) equivalent of `double_share` (non-robust paired-degree dealing)
 pub mod gf_double_share;
+/// GF(2^k) equivalent of `mul` (secure Beaver multiplication)
+pub mod gf_mul;
+/// GF(2^k) equivalent of `preprocessing`
+pub mod gf_preprocessing;
 /// GF(2^k) equivalent of `ran_dou_sha` (hyperinvertible-matrix extraction + checksum)
 pub mod gf_ran_dou_sha;
 /// GF(2^k) equivalent of `share_gen` (RanSha)
@@ -45,14 +49,16 @@ pub mod zero_share;
 
 use crate::{
     common::{
+        gf2k::{field::Gf256, share::GfShare},
         rbc::{rbc_store::Msg, RbcError},
+        share::ShareError,
         types::{
             fixed::{ClearFixedPoint, FixedPointPrecision, SecretFixedPoint},
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        MPCProtocol, MPCTypeOps, PreprocessingMPCProtocol, ProtocolSessionId, ProtocolTag,
-        ShamirShare, RBC,
+        GfMPCProtocol, GfPreprocessingMPCProtocol, MPCProtocol, MPCTypeOps,
+        PreprocessingMPCProtocol, ProtocolSessionId, ProtocolTag, ShamirShare, RBC,
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
@@ -64,6 +70,13 @@ use crate::{
             rand_bit::RandBit,
             PRandIntError, PRandIntMessage, RandBitError, TruncPrError, TruncPrMessage,
         },
+        gf_batch_recon::GfBatchReconError,
+        gf_double_share::{gf_double_share_generation::GfDoubleShareNode, GfDouShaError},
+        gf_mul::{gf_multiplication::GfMultiply, GfMulError},
+        gf_preprocessing::GfHoneyBadgerMPCNodePreprocMaterial,
+        gf_ran_dou_sha::{gf_ran_dou_sha::GfRanDouShaNode, GfRanDouShaError},
+        gf_share_gen::{gf_share_gen::GfRanShaNode, GfRanShaError},
+        gf_triple_gen::{gf_triple_generation::GfTripleGenNode, GfTripleGenError},
         input::{
             input::{InputClient, InputServer},
             InputError, InputMessage,
@@ -205,6 +218,22 @@ pub enum HoneyBadgerError {
     UnauthorizedSender(PartyId, usize),
     #[error("the protocol cannot be executed any more")]
     LimitError,
+    #[error("error in GF(2^k) share generation: {0:?}")]
+    GfRanShaError(#[from] GfRanShaError),
+    #[error("error in GF(2^k) double share generation: {0:?}")]
+    GfDouShaError(#[from] GfDouShaError),
+    #[error("error in GF(2^k) random double share generation: {0:?}")]
+    GfRanDouShaError(#[from] GfRanDouShaError),
+    #[error("error in GF(2^k) batch reconstruction: {0:?}")]
+    GfBatchReconError(#[from] GfBatchReconError),
+    #[error("error in GF(2^k) triple generation: {0:?}")]
+    GfTripleGenError(#[from] GfTripleGenError),
+    #[error("error in GF(2^k) multiplication: {0:?}")]
+    GfMulError(#[from] GfMulError),
+    #[error("share error: {0:?}")]
+    ShareError(#[from] ShareError),
+    #[error("error in GF(2^k) preprocessing: {0:?}")]
+    GfPreprocessingError(#[from] crate::honeybadger::gf_preprocessing::GfPreprocessingError),
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -285,6 +314,12 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     pub type_ops: TypeOperations<F>,
     pub output: OutputServer,
     pub counters: SubProtocolCounters,
+    /// GF(2^k) preprocessing material, parallel to `preprocessing_material` above — fixed to
+    /// `Gf256` for now 
+    pub gf_preprocessing_material: Arc<Mutex<GfHoneyBadgerMPCNodePreprocMaterial<Gf256>>>,
+    /// GF(2^k) sub-protocol nodes that feed `gf_preprocessing_material`. 
+    pub gf_preprocess: GfPreprocessNodes<R>,
+    pub gf_operations: GfOperation,
     /// Shared byte and message counters.  Updated by [`CountingNetwork`] (sends)
     /// and by [`process`] (receives).  Only present with the `statistics` feature.
     #[cfg(feature = "statistics")]
@@ -465,6 +500,22 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
 }
 
 #[derive(Clone, Debug)]
+pub struct GfOperation {
+    pub mul: GfMultiply<Gf256>,
+}
+
+/// GF(2^k) sub-protocol nodes needed to keep `gf_preprocessing_material` topped up:
+/// random-share generation for the triple's `a`/`b`, double-share dealing + RanDouSha for the
+/// mask, and triple generation itself. 
+#[derive(Clone, Debug)]
+pub struct GfPreprocessNodes<R: RBC> {
+    pub gf_share_gen: GfRanShaNode<Gf256, R>,
+    pub gf_dou_sha: GfDoubleShareNode<Gf256>,
+    pub gf_ran_dou_sha: GfRanDouShaNode<Gf256, R>,
+    pub gf_triple_gen: GfTripleGenNode<Gf256>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SubProtocolCounter(Arc<Mutex<Option<u64>>>);
 
 trait GetNext<T> {
@@ -508,6 +559,11 @@ pub struct SubProtocolCounters {
     pub fpmul_counter: SubProtocolCounter,
     pub fpdiv_const_counter: SubProtocolCounter,
     pub zero_sha_counter: SubProtocolCounter,
+    pub gf_ran_sha_counter: SubProtocolCounter,
+    pub gf_dou_sha_counter: SubProtocolCounter,
+    pub gf_ran_dou_sha_counter: SubProtocolCounter,
+    pub gf_triple_counter: SubProtocolCounter,
+    pub gf_mul_counter: SubProtocolCounter,
 }
 
 impl SubProtocolCounters {
@@ -524,6 +580,11 @@ impl SubProtocolCounters {
             fpmul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             fpdiv_const_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             zero_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            gf_ran_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            gf_dou_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            gf_ran_dou_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            gf_triple_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            gf_mul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -566,6 +627,11 @@ pub struct HoneyBadgerMPCNodeOpts {
     /// value is what silently decouples the configured κ from the delivered one.
     pub statistical_security: usize,
     pub timeout: Duration,
+    /// Number of GF(2^k) Beaver triples that need to be generated.
+    pub n_gf_triples: usize,
+    /// Number of GF(2^k) random shares needed. Same rule of thumb as `n_random_shares`: at least
+    /// `2 * n_gf_triples` (the `a`/`b` inputs to every triple), plus any GF(2^k) inputs.
+    pub n_gf_random_shares: usize,
 }
 
 impl HoneyBadgerMPCNodeOpts {
@@ -581,6 +647,8 @@ impl HoneyBadgerMPCNodeOpts {
         precision: FixedPointPrecision,
         statistical_security: usize,
         timeout: Duration,
+        n_gf_triples: usize,
+        n_gf_random_shares: usize,
     ) -> Result<Self, HoneyBadgerError> {
         //No of parties should not exceed 255
         if n_parties > 255 {
@@ -610,6 +678,8 @@ impl HoneyBadgerMPCNodeOpts {
             precision,
             statistical_security,
             timeout,
+            n_gf_triples,
+            n_gf_random_shares,
         })
     }
     pub fn set_timeout(&mut self, secs: u64) {
@@ -678,6 +748,15 @@ where
         let zero_sha_node =
             ZeroShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
+        // GF(2^k) nodes, parallel to the F-domain ones above.
+        let gf_dou_sha_node = GfDoubleShareNode::new(id, params.n_parties, params.threshold);
+        let gf_ran_dou_sha_node =
+            GfRanDouShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
+        let gf_triple_gen_node = GfTripleGenNode::new(id, params.n_parties, params.threshold)?;
+        let gf_mul_node = GfMultiply::new(id, params.n_parties, params.threshold)?;
+        let gf_share_gen_node =
+            GfRanShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
+
         Ok(Self {
             id,
             preprocessing_material: Arc::new(
@@ -695,6 +774,16 @@ where
                 zero_sha: zero_sha_node,
             },
             operations: Operation { mul: mul_node },
+            gf_preprocessing_material: Arc::new(Mutex::new(
+                GfHoneyBadgerMPCNodePreprocMaterial::empty(),
+            )),
+            gf_preprocess: GfPreprocessNodes {
+                gf_share_gen: gf_share_gen_node,
+                gf_dou_sha: gf_dou_sha_node,
+                gf_ran_dou_sha: gf_ran_dou_sha_node,
+                gf_triple_gen: gf_triple_gen_node,
+            },
+            gf_operations: GfOperation { mul: gf_mul_node },
             type_ops: TypeOperations {
                 fpmul: fpmul_node,
                 fpdiv_const: fpdiv_const_node,
@@ -923,6 +1012,22 @@ where
                             .await?;
                         self.preprocess.prand_int.drain_rbc_output(net).await?;
                     }
+                    Some(ProtocolType::GfRansha) => {
+                        self.gf_preprocess
+                            .gf_share_gen
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?;
+                        self.gf_preprocess.gf_share_gen.drain_rbc_output().await?;
+                    }
+                    Some(ProtocolType::GfRandousha) => {
+                        self.gf_preprocess
+                            .gf_ran_dou_sha
+                            .rbc
+                            .process(rbc_msg, net)
+                            .await?;
+                        self.gf_preprocess.gf_ran_dou_sha.drain_rbc_output().await?;
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} in RBC",
@@ -1111,17 +1216,102 @@ where
             }
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
-            WrappedMessage::GfRansha(_) => {
-                warn!("GfRansha message received, but not yet wired into this node's dispatch");
+            WrappedMessage::GfRansha(rs_msg) => {
+                if sender_id != rs_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if rs_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        rs_msg.session_id.instance_id(),
+                    ));
+                }
+                self.gf_preprocess.gf_share_gen.process(rs_msg, net).await?;
             }
-            WrappedMessage::GfBatchRecon(_) => {
-                warn!("GfBatchRecon message received, but not yet wired into this node's dispatch");
+            WrappedMessage::GfDousha(ds_msg) => {
+                if sender_id != ds_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if ds_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        ds_msg.session_id.instance_id(),
+                    ));
+                }
+                self.gf_preprocess.gf_dou_sha.process(ds_msg).await?;
             }
-            WrappedMessage::GfDousha(_) => {
-                warn!("GfDousha message received, but not yet wired into this node's dispatch");
+            WrappedMessage::GfRanDouSha(rds_msg) => {
+                if sender_id != rds_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if rds_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        rds_msg.session_id.instance_id(),
+                    ));
+                }
+                self.gf_preprocess
+                    .gf_ran_dou_sha
+                    .process(rds_msg, net)
+                    .await?;
             }
-            WrappedMessage::GfRanDouSha(_) => {
-                warn!("GfRanDouSha message received, but not yet wired into this node's dispatch");
+            WrappedMessage::GfBatchRecon(batch_msg) => {
+                if sender_id != batch_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if batch_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        batch_msg.session_id.instance_id(),
+                    ));
+                }
+                match batch_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::GfMul) => {
+                        self.gf_operations
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.gf_operations.mul.drain_batch_recon_output().await?
+                    }
+                    Some(ProtocolType::GfTriple) => {
+                        self.gf_preprocess
+                            .gf_triple_gen
+                            .batch_recon_node
+                            .process(batch_msg, net)
+                            .await?;
+                        self.gf_preprocess
+                            .gf_triple_gen
+                            .drain_batch_recon_output()
+                            .await?
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} at GF(2^k) Batch reconstruction",
+                            batch_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::GfMult(mult_msg) => {
+                if sender_id != mult_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if mult_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        mult_msg.session_id.instance_id(),
+                    ));
+                }
+                match mult_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::GfMul) => {
+                        self.gf_operations
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} for direct GF(2^k) Mult open",
+                            mult_msg.session_id
+                        );
+                    }
+                }
             }
         }
 
@@ -1859,6 +2049,121 @@ where
         Ok(())
     }
 
+    /// GF(2^k) analogue of `ensure_random_shares`. Simplified to a single session — no multi-run
+    /// pipelining across a `max_columns_per_run` cap, since the GF track doesn't need that scale
+    /// yet;
+    async fn ensure_gf_random_shares<G, N>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+        needed: usize,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng + Send,
+    {
+        if needed == 0 {
+            return Ok(());
+        }
+        let sessionid = SessionId::new(
+            ProtocolType::GfRansha,
+            SessionId::pack_slot(self.counters.gf_ran_sha_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+        self.gf_preprocess
+            .gf_share_gen
+            .init_batch(sessionid, needed, rng, network)
+            .await?;
+        let result = self
+            .gf_preprocess
+            .gf_share_gen
+            .wait_for_result(sessionid, self.params.timeout)
+            .await;
+        if !self.gf_preprocess.gf_share_gen.clear_store(sessionid).await {
+            warn!(?sessionid, "failed to clear GF(2^k) share generation protocol state");
+        }
+        self.gf_preprocessing_material
+            .lock()
+            .await
+            .add(None, Some(result?));
+        Ok(())
+    }
+
+    /// GF(2^k) analogue of `ensure_ran_dou_sha_pair`. Same simplification as
+    /// `ensure_gf_random_shares` — one DoubleShare session and one RanDouSha session, not a
+    /// pipelined run. 
+    async fn ensure_gf_ran_dou_sha_pair<G, N>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+        needed: usize,
+    ) -> Result<Vec<crate::honeybadger::gf_double_share::GfDoubleShamirShare<Gf256>>, HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng + Send,
+    {
+        if needed == 0 {
+            return Ok(Vec::new());
+        }
+        let output_per_column = self.params.threshold + 1;
+        let columns_needed = needed.div_ceil(output_per_column);
+
+        let dou_sha_session = SessionId::new(
+            ProtocolType::GfDousha,
+            SessionId::pack_slot(self.counters.gf_dou_sha_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+        self.gf_preprocess
+            .gf_dou_sha
+            .init_batch(dou_sha_session, columns_needed, rng, network.clone())
+            .await?;
+        let double_shares = self
+            .gf_preprocess
+            .gf_dou_sha
+            .wait_for_result(dou_sha_session, self.params.timeout)
+            .await;
+        if !self.gf_preprocess.gf_dou_sha.clear_store(dou_sha_session).await {
+            warn!(?dou_sha_session, "failed to clear GF(2^k) double share protocol state");
+        }
+        let double_shares = double_shares?;
+
+        let mut shares_deg_t_by_batch = Vec::with_capacity(columns_needed);
+        let mut shares_deg_2t_by_batch = Vec::with_capacity(columns_needed);
+        for chunk in double_shares.chunks_exact(self.params.n_parties) {
+            let (shares_deg_t, shares_deg_2t) = chunk
+                .iter()
+                .cloned()
+                .map(|d| (d.degree_t, d.degree_2t))
+                .unzip();
+            shares_deg_t_by_batch.push(shares_deg_t);
+            shares_deg_2t_by_batch.push(shares_deg_2t);
+        }
+
+        let rds_session = SessionId::new(
+            ProtocolType::GfRandousha,
+            SessionId::pack_slot(self.counters.gf_ran_dou_sha_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+        self.gf_preprocess
+            .gf_ran_dou_sha
+            .init_batch(
+                shares_deg_t_by_batch,
+                shares_deg_2t_by_batch,
+                rds_session,
+                network,
+            )
+            .await?;
+        let result = self
+            .gf_preprocess
+            .gf_ran_dou_sha
+            .wait_for_result(rds_session, self.params.timeout)
+            .await;
+        if !self.gf_preprocess.gf_ran_dou_sha.clear_store(rds_session).await {
+            warn!(?rds_session, "failed to clear GF(2^k) RanDouSha protocol state");
+        }
+        Ok(result?)
+    }
+
     /// Generate RandBit shares by running RandBit directly in the node's field `F`.
     ///
     /// RandBit used to route through a Goldilocks small-field RandBit run followed by a
@@ -1990,6 +2295,206 @@ where
     }
 }
 
+#[async_trait]
+impl<F, R, N> GfMPCProtocol<Gf256, GfShare<Gf256>, N> for HoneyBadgerMPCNode<F, R>
+where
+    N: Network + Send + Sync + 'static,
+    F: PrimeField,
+    R: RBC<Id = SessionId>,
+{
+    type Error = HoneyBadgerError;
+
+    /// Local GF(2^k) addition — no network round, mirroring how `+` on `GfShare` itself is free.
+    fn gf_add(
+        &self,
+        x: Vec<GfShare<Gf256>>,
+        y: Vec<GfShare<Gf256>>,
+    ) -> Result<Vec<GfShare<Gf256>>, HoneyBadgerError> {
+        x.into_iter()
+            .zip(y)
+            .map(|(a, b)| (a + b).map_err(HoneyBadgerError::from))
+            .collect()
+    }
+
+    /// Local GF(2^k) subtraction — no network round, mirroring how `-` on `GfShare` itself is
+    /// free.
+    fn gf_sub(
+        &self,
+        x: Vec<GfShare<Gf256>>,
+        y: Vec<GfShare<Gf256>>,
+    ) -> Result<Vec<GfShare<Gf256>>, HoneyBadgerError> {
+        x.into_iter()
+            .zip(y)
+            .map(|(a, b)| (a - b).map_err(HoneyBadgerError::from))
+            .collect()
+    }
+
+    /// GF(2^k) analogue of `mul` — Beaver multiplication over `Gf256`, drawing triples from
+    /// `gf_preprocessing_material` (topping it up via `run_gf_preprocessing` if short) and
+    /// running one `GfMultiply` session. Simplified relative to `mul`: a single session (no
+    /// chunking across `max_mul_pairs_per_session`, no multi-session pipelining) — the GF track
+    /// doesn't need that scale yet.
+    async fn gf_mul(
+        &mut self,
+        x: Vec<GfShare<Gf256>>,
+        y: Vec<GfShare<Gf256>>,
+        network: Arc<N>,
+    ) -> Result<Vec<GfShare<Gf256>>, HoneyBadgerError>
+    where
+        N: 'async_trait,
+    {
+        assert_eq!(x.len(), y.len());
+        if x.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let no_triples = {
+            let store = self.gf_preprocessing_material.lock().await;
+            store.length().beaver_triples
+        };
+        if no_triples < x.len() {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_gf_preprocessing(network.clone(), &mut rng).await?;
+        }
+
+        let beaver_triples = self
+            .gf_preprocessing_material
+            .lock()
+            .await
+            .take_beaver_triples(x.len())?;
+
+        let session_id = SessionId::new(
+            ProtocolType::GfMul,
+            SessionId::pack_slot(self.counters.gf_mul_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        self.gf_operations
+            .mul
+            .init(session_id, x, y, beaver_triples, network)
+            .await?;
+
+        let result = self
+            .gf_operations
+            .mul
+            .wait_for_result(session_id, self.params.timeout)
+            .await;
+        if !self.gf_operations.mul.clear_store(session_id).await {
+            warn!(?session_id, "failed to clear GF(2^k) multiplication protocol state");
+        }
+        Ok(result?)
+    }
+}
+
+#[async_trait]
+impl<F, R, N> GfPreprocessingMPCProtocol<Gf256, GfShare<Gf256>, N> for HoneyBadgerMPCNode<F, R>
+where
+    N: Network + Send + Sync + 'static,
+    F: PrimeField,
+    R: RBC<Id = SessionId>,
+{
+    /// GF(2^k) analogue of `run_preprocessing`, producing random shares and Beaver triples only
+    async fn run_gf_preprocessing<G>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: 'async_trait,
+        G: Rng + Send,
+    {
+        let (no_of_triples_avail, no_of_random_shares_avail) = {
+            let store = self.gf_preprocessing_material.lock().await;
+            let len = store.length();
+            (len.beaver_triples, len.random_shr)
+        };
+
+        let mut no_of_triples = self.params.n_gf_triples;
+        let mut no_of_random_shares = self.params.n_gf_random_shares;
+        let group_size = 2 * self.params.threshold + 1;
+        let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
+            no_of_triples = 0;
+            0
+        } else {
+            (no_of_triples - no_of_triples_avail).div_ceil(group_size) * group_size
+        };
+
+        let total_random_shares_to_generate = if total_triples_to_generate > 0 {
+            let baseline = if no_of_random_shares_avail < no_of_random_shares {
+                no_of_random_shares - no_of_random_shares_avail
+            } else {
+                no_of_random_shares = 0;
+                0
+            };
+            baseline + 2 * total_triples_to_generate
+        } else if no_of_random_shares_avail < no_of_random_shares {
+            no_of_random_shares - no_of_random_shares_avail
+        } else {
+            no_of_random_shares = 0;
+            0
+        };
+
+        if no_of_triples == 0 && no_of_random_shares == 0 {
+            info!("There is enough GF(2^k) random shares and Beaver triples");
+            return Ok(());
+        }
+
+        self.ensure_gf_random_shares(network.clone(), rng, total_random_shares_to_generate)
+            .await?;
+
+        let mut ran_dou_sha_pair = self
+            .ensure_gf_ran_dou_sha_pair(network.clone(), rng, total_triples_to_generate)
+            .await?;
+        // `ensure_gf_ran_dou_sha_pair` may over-produce (ceil-rounded to a whole column) — only
+        // the exact multiple-of-`group_size` prefix `GfTripleGenNode::init_batch` requires.
+        ran_dou_sha_pair.truncate(total_triples_to_generate);
+
+        if total_triples_to_generate == 0 {
+            return Ok(());
+        }
+
+        let random_shares_a = self
+            .gf_preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(total_triples_to_generate)?;
+        let random_shares_b = self
+            .gf_preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(total_triples_to_generate)?;
+
+        let session_id = SessionId::new(
+            ProtocolType::GfTriple,
+            SessionId::pack_slot(self.counters.gf_triple_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+        self.gf_preprocess
+            .gf_triple_gen
+            .init_batch(
+                random_shares_a,
+                random_shares_b,
+                ran_dou_sha_pair,
+                session_id,
+                network,
+            )
+            .await?;
+        let result = self
+            .gf_preprocess
+            .gf_triple_gen
+            .wait_for_result(session_id, self.params.timeout)
+            .await;
+        if !self.gf_preprocess.gf_triple_gen.clear_store(session_id).await {
+            warn!(?session_id, "failed to clear GF(2^k) triple generation protocol state");
+        }
+        self.gf_preprocessing_material
+            .lock()
+            .await
+            .add(Some(result?), None);
+        Ok(())
+    }
+}
+
 fn chunk_sizes(total: usize, max_chunk_size: usize) -> impl Iterator<Item = usize> {
     let max_chunk_size = max_chunk_size.max(1);
     (0..total)
@@ -2030,6 +2535,8 @@ pub enum WrappedMessage {
     GfDousha(gf_double_share::GfDouShaMessage),
     /// GF(2^k) equivalent of `RanDouSha`, see `gf_ran_dou_sha`.
     GfRanDouSha(gf_ran_dou_sha::GfRanDouShaMessage),
+    /// GF(2^k) equivalent of `Mult`, see `gf_mul`.
+    GfMult(gf_mul::GfMultMessage),
 }
 
 impl WrappedMessage {
@@ -2064,6 +2571,7 @@ pub enum ProtocolType {
     GfDousha = 17,
     GfRandousha = 18,
     GfTriple = 19,
+    GfMul = 20,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -2095,6 +2603,7 @@ impl ProtocolTag for ProtocolType {
             17 => Some(Self::GfDousha),
             18 => Some(Self::GfRandousha),
             19 => Some(Self::GfTriple),
+            20 => Some(Self::GfMul),
             _ => None,
         }
     }
