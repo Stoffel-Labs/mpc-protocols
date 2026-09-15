@@ -627,7 +627,10 @@ where
                 match GfShare::recover_secret(&shares, self.n_parties, self.threshold) {
                     Ok((coeffs, _)) => {
                         let poly = Poly::from_coeffs(coeffs);
-                        if poly.degree() != self.threshold {
+                        // An honest random polynomial's top coefficient can be zero, giving a true
+                        // degree below `threshold`; that's still a valid t-sharing, not cheating.
+                        // Only a degree *above* threshold proves the dealer misbehaved.
+                        if poly.degree() > self.threshold {
                             ok = false;
                             break;
                         }
