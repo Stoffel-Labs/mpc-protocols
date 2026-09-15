@@ -533,8 +533,10 @@ where
                         (Ok(reconstructed_r_t), Ok(reconstructed_r_2t)) => {
                             let poly1 = Poly::from_coeffs(reconstructed_r_t.0);
                             let poly2 = Poly::from_coeffs(reconstructed_r_2t.0);
-                            if self.threshold != poly1.degree()
-                                || 2 * self.threshold != poly2.degree()
+                            // A random top coefficient can honestly be zero, giving a true degree
+                            // below the target; only a degree *above* it proves the dealer cheated.
+                            if poly1.degree() > self.threshold
+                                || poly2.degree() > 2 * self.threshold
                                 || reconstructed_r_t.1 != reconstructed_r_2t.1
                             {
                                 ok = false;
