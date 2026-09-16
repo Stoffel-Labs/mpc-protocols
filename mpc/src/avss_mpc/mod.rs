@@ -15,7 +15,7 @@ use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
         share::{
-            avss::{AvssError, AvssMessage},
+            avss::{AvssAgreementMessage, AvssError, AvssMessage},
             feldman::FeldmanShamirShare,
             shamir::Shamirshare,
         },
@@ -497,12 +497,20 @@ where
 
                 match rbc_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Avss) => {
-                        self.share_gen_avss.avss.rbc.process(rbc_msg, net).await?;
-                        self.share_gen_avss.avss.drain_rbc_output().await?;
+                        self.share_gen_avss
+                            .avss
+                            .rbc
+                            .process(rbc_msg, net.clone())
+                            .await?;
+                        self.share_gen_avss.avss.drain_rbc_output(net).await?;
                     }
                     Some(ProtocolType::Triple) => {
-                        self.triple_gen.avss.rbc.process(rbc_msg, net).await?;
-                        self.triple_gen.avss.drain_rbc_output().await?;
+                        self.triple_gen
+                            .avss
+                            .rbc
+                            .process(rbc_msg, net.clone())
+                            .await?;
+                        self.triple_gen.avss.drain_rbc_output(net).await?;
                     }
                     Some(ProtocolType::TripleCheck) => {
                         self.triple_gen.rbc.process(rbc_msg, net).await?;
@@ -534,6 +542,35 @@ where
             }
             AvssWrappedMessage::Output(_) => {
                 warn!("Incorrect message received at process function (Output)");
+            }
+            AvssWrappedMessage::Agreement(agreement_msg) => {
+                if sender_id != agreement_msg.claimed_sender() {
+                    return Err(AvssMPCError::InvalidPartyId);
+                }
+                let session_id = agreement_msg.session_id();
+                if session_id.instance_id() != self.params.instance_id {
+                    return Err(AvssMPCError::InstanceIdError(session_id.instance_id()));
+                }
+                match session_id.calling_protocol() {
+                    Some(ProtocolType::Avss) => {
+                        self.share_gen_avss
+                            .avss
+                            .process_agreement(agreement_msg, net)
+                            .await?;
+                    }
+                    Some(ProtocolType::Triple) => {
+                        self.triple_gen
+                            .avss
+                            .process_agreement(agreement_msg, net)
+                            .await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in Agreement",
+                            session_id
+                        );
+                    }
+                }
             }
         }
 
@@ -832,6 +869,7 @@ pub enum AvssWrappedMessage {
     Mul(MultMessage),
     Input(AvssInputMessage),
     Output(AvssOutputMessage),
+    Agreement(AvssAgreementMessage<AvssSessionId>),
 }
 
 impl AvssWrappedMessage {
@@ -844,6 +882,12 @@ impl AvssWrappedMessage {
     /// Wraps an AVSS message.
     pub fn avss_wrap(msg: AvssMessage<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = AvssWrappedMessage::Avss(msg);
+        Ok(bincode::serialize(&wrapped)?)
+    }
+
+    /// Wraps an AVSS OK/READY/Reveal agreement message.
+    pub fn agreement_wrap(msg: AvssAgreementMessage<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
+        let wrapped = AvssWrappedMessage::Agreement(msg);
         Ok(bincode::serialize(&wrapped)?)
     }
 }

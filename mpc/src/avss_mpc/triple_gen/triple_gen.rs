@@ -70,6 +70,7 @@ where
             tx,
             Arc::new(AvssWrappedMessage::rbc_wrap),
             Arc::new(AvssWrappedMessage::avss_wrap),
+            Arc::new(AvssWrappedMessage::agreement_wrap),
         )?;
 
         let (rbc_sender, rbc_receiver) = mpsc::channel(MAX_PENDING_SESSIONS);

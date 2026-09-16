@@ -70,6 +70,7 @@ where
             avss_sender,
             Arc::new(AvssWrappedMessage::rbc_wrap),
             Arc::new(AvssWrappedMessage::avss_wrap),
+            Arc::new(AvssWrappedMessage::agreement_wrap),
         )?;
         Ok(Self {
             id,
