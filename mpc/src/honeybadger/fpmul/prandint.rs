@@ -19,7 +19,7 @@ use crate::{
 };
 use ark_ff::PrimeField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
-use ark_std::rand::{Rng, SeedableRng};
+use ark_std::rand::{CryptoRng, Rng, SeedableRng};
 use bincode::Options;
 use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
@@ -53,9 +53,9 @@ pub struct PRandIntNode<G: PrimeField, R: RBC> {
 
 const MAX_PRAND_SESSIONS: usize = 512;
 
-/// Aggregate byte budget for a session's `pending_riss_messages` while it is uninitialized (or
-/// waiting on a sender's commitment).
-const MAX_PENDING_RISS_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+/// Aggregate ceiling for one peer's pending-RISS-queue memory across every session it can hold
+/// open at once (`MAX_PRAND_SESSIONS / n`, the per-peer session cap enforced by `SessionStore`).
+const MAX_PENDING_RISS_BYTES_PER_PEER: usize = 8 * 1024 * 1024; // 8 MiB
 
 fn riss_msg_weight(msg: &PRandIntMessage) -> usize {
     msg.r_t
@@ -680,6 +680,9 @@ where
         if msg.session_id.calling_protocol().is_none() {
             return Err(PRandIntError::SessionIdError(msg.session_id));
         }
+        if msg.session_id.sub_id() != 0 || msg.session_id.round_id() != 0 {
+            return Err(PRandIntError::SessionIdError(msg.session_id));
+        }
 
         let binding = match self
             .get_or_create_store(msg.session_id, msg.sender_id)
@@ -736,7 +739,7 @@ where
                 )));
             }
             let weight = riss_msg_weight(&msg);
-            if store.pending_riss_bytes + weight > MAX_PENDING_RISS_BYTES {
+            if store.pending_riss_bytes + weight > self.max_pending_riss_bytes_per_session() {
                 return Err(PRandIntError::InvalidMessage(
                     "aggregate pending queue memory limit exceeded for uninitialized session"
                         .into(),
@@ -793,7 +796,7 @@ where
                 )));
             }
             let weight = riss_msg_weight(&msg);
-            if store.pending_riss_bytes + weight > MAX_PENDING_RISS_BYTES {
+            if store.pending_riss_bytes + weight > self.max_pending_riss_bytes_per_session() {
                 return Err(PRandIntError::InvalidMessage(
                     "aggregate pending queue memory limit exceeded while awaiting commitment"
                         .into(),
@@ -918,6 +921,14 @@ where
             }
         }
     }
+
+    /// Per-session slice of [`MAX_PENDING_RISS_BYTES_PER_PEER`]. Sessions-per-peer is already
+    /// capped at `MAX_PRAND_SESSIONS / n` by `SessionStore::admit`, so bounding each session to
+    /// this share bounds one peer's aggregate pending-queue memory to (approximately, rounding
+    /// down) `MAX_PENDING_RISS_BYTES_PER_PEER` regardless of how many sessions it spreads across.
+    fn max_pending_riss_bytes_per_session(&self) -> usize {
+        MAX_PENDING_RISS_BYTES_PER_PEER / (MAX_PRAND_SESSIONS / self.n)
+    }
 }
 
 /// Binding, hiding commitment to one party's contribution for one unqualified set.
@@ -968,7 +979,7 @@ fn log2_tsets_ceil(n: usize, t: usize) -> usize {
 /// probability `2^-L`, instead of being exact.
 fn gen_big_uint_range<R>(rng: &mut R, bound: &BigUint) -> BigUint
 where
-    R: Rng,
+    R: Rng + CryptoRng,
 {
     assert!(bound > &BigUint::ZERO, "empty range");
 

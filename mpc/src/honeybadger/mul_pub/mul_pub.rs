@@ -113,6 +113,13 @@ impl<F: FftField> MulPubNode<F> {
                 "zero shares must have degree 2t".into(),
             ));
         }
+        if a.iter().any(|s| s.degree != self.threshold)
+            || b.iter().any(|s| s.degree != self.threshold)
+        {
+            return Err(MulPubError::InvalidInput(
+                "a and b shares must have degree t".into(),
+            ));
+        }
         if k > self.max_batch_size() {
             return Err(MulPubError::BatchTooLarge {
                 requested: k,

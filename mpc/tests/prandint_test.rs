@@ -347,8 +347,13 @@ async fn riss_rejects_an_opening_that_does_not_match_its_commitment() {
 /// network frame cap, and the object-count cap alone (4096) would let a single sender hold ~40 GiB
 /// of queued openings hostage against one session before it engages. A single sender is limited to
 /// one message per distinct `tset` (duplicates are rejected), which at n=5, t=1 is only the four
-/// non-self singletons — nowhere near 4096 — so without a byte budget this queue would accept all
-/// four multi-megabyte messages below.
+/// non-self singletons — nowhere near 4096.
+///
+/// The per-session budget is itself a slice of a per-peer aggregate (`MAX_PENDING_RISS_BYTES_PER_PEER
+/// / (MAX_PRAND_SESSIONS / n)`, ~80 KiB at n=5), so each message here is kept deliberately modest
+/// (~30 KiB, far under that budget on its own) — what trips the cap is several of them
+/// accumulating, and it must trip before all four available tsets are exhausted, or this would
+/// just be exercising tset exhaustion instead of the byte budget.
 #[tokio::test]
 async fn riss_pending_queue_enforces_an_aggregate_byte_budget() {
     setup_tracing();
@@ -361,28 +366,37 @@ async fn riss_pending_queue_enforces_an_aggregate_byte_budget() {
     // "queue for retroactive validation" branch instead of being checked against real bounds.
     let mut node = PRandIntNode::<Fr, Avid<SessionId>>::new(0, n, t, t + 1).unwrap();
 
-    let big = BigUint::from_bytes_le(&vec![0xAAu8; 1_500_000]);
+    let chunk = BigUint::from_bytes_le(&vec![0xAAu8; 30_000]);
+    let mut accepted = 0;
     let mut last_result = Ok(());
     for tset_member in 1..n {
         let msg = PRandIntMessage::new(
             1,
             session_id,
             vec![tset_member],
-            vec![big.clone()],
+            vec![chunk.clone()],
             [0u8; PRANDINT_NONCE_LEN],
         );
         last_result = node.process(msg).await;
-        if last_result.is_err() {
-            break;
+        match &last_result {
+            Ok(()) => accepted += 1,
+            Err(_) => break,
         }
     }
 
     let err = last_result.expect_err(
-        "queuing three ~1.5 MiB messages for an uninitialized session must hit the aggregate byte \
-         budget long before the 4096-message count cap could ever engage",
+        "queuing same-sized ~30 KiB messages for an uninitialized session must hit the \
+         aggregate byte budget before all four available tsets are used",
     );
     assert!(
         format!("{err:?}").contains("aggregate pending queue memory limit"),
         "expected the aggregate pending-queue memory limit error, got {err:?}"
+    );
+    assert!(
+        accepted >= 1 && accepted < n - 1,
+        "expected the budget to accept at least one message and reject before exhausting the \
+         {} available tsets (proving it's the byte budget, not tset exhaustion, that fires), but \
+         accepted {accepted}",
+        n - 1
     );
 }

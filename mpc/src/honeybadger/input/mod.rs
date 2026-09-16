@@ -32,7 +32,10 @@ pub enum InputError {
     Timeout(#[from] Elapsed),
     #[error("Channel closed")]
     Abort,
-    #[error("client id {0} overlaps the consensus node id range 0..{1}")]
+    #[error(
+        "client id {0} is invalid: it must satisfy {1} <= id <= 255 (ids below {1} collide with \
+         consensus node ids; ids above 255 cannot fit the session id's 8-bit sub-id field)"
+    )]
     InvalidClientId(ClientId, usize),
 }
 

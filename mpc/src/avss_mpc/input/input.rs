@@ -80,6 +80,12 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         t: usize,
         input_ids: Vec<ClientId>,
     ) -> Result<Self, AvssInputError> {
+        if let Some(&overlapping) = input_ids
+            .iter()
+            .find(|&&cid| cid < n || cid > u8::MAX as usize)
+        {
+            return Err(AvssInputError::InvalidClientId(overlapping, n));
+        }
         let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
         let rbc = R::new(
             id,

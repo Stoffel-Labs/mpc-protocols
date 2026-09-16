@@ -134,6 +134,9 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         inputs: Vec<F>,
         input_len: usize,
     ) -> Result<Self, AvssMPCError> {
+        if id < n || id > u8::MAX as usize {
+            return Err(AvssInputError::InvalidClientId(id, n).into());
+        }
         let input = AvssInputClient::new(id, n, t, instance_id, inputs)?;
         let output = AvssOutputClient::new(id, n, t, input_len)?;
         Ok(Self { id, input, output })
@@ -482,6 +485,17 @@ where
                     return Err(AvssMPCError::InstanceIdError(
                         rbc_msg.session_id.instance_id(),
                     ));
+                }
+                let is_client_input_broadcast = rbc_msg.msg_type.is_dealer_message()
+                    && rbc_msg.session_id.calling_protocol() == Some(ProtocolType::Input)
+                    && rbc_msg.session_id.exec_id() == 0
+                    && rbc_msg.session_id.round_id() == 0;
+                if is_client_input_broadcast && sender_id < self.params.n_parties {
+                    warn!(
+                        "Rejecting client input broadcast: sender {} is a consensus node id, not a client id",
+                        sender_id
+                    );
+                    return Err(AvssMPCError::InvalidPartyId);
                 }
                 if rbc_msg.msg_type.is_dealer_message() {
                     let expected_dealer = rbc_msg.session_id.sub_id() as usize;

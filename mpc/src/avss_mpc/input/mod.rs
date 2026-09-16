@@ -4,7 +4,7 @@ use crate::common::{rbc::RbcError, share::ShareError};
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::NetworkError;
+use stoffelnet::network_utils::{ClientId, NetworkError};
 use thiserror::Error;
 use tokio::{sync::watch::error::RecvError, time::error::Elapsed};
 
@@ -32,6 +32,11 @@ pub enum AvssInputError {
     Timeout(#[from] Elapsed),
     #[error("Channel closed")]
     Abort,
+    #[error(
+        "client id {0:?} is invalid: it must satisfy {1} <= id <= 255 (ids below {1} collide with \
+         consensus node ids; ids above 255 cannot fit the session id's 8-bit sub-id field)"
+    )]
+    InvalidClientId(ClientId, usize),
 }
 
 /// Message sent in the AVSS Input protocol.

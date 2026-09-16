@@ -226,6 +226,9 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
         inputs: Vec<F>,
         input_len: usize,
     ) -> Result<Self, HoneyBadgerError> {
+        if id < n || id > u8::MAX as usize {
+            return Err(InputError::InvalidClientId(id, n).into());
+        }
         let input = InputClient::new(id, n, t, instance_id, inputs)?;
         let output = OutputClient::new(id, n, t, input_len)?;
         Ok(Self { id, input, output })
