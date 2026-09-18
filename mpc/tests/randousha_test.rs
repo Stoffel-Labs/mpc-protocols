@@ -74,7 +74,8 @@ async fn test_init_reconstruct_flow() {
                 .await
                 .expect("timed out waiting for reconstruct message")
                 .expect("channel closed");
-            let wrapped: WrappedMessage = bincode::deserialize(&received_message).unwrap();
+            let wrapped: WrappedMessage =
+                stoffelcrypto::common::wire_format::deserialize(&received_message).unwrap();
             let rdsmsg = match wrapped {
                 WrappedMessage::RanDouSha(ran_dou_sha_message) => ran_dou_sha_message,
                 _ => todo!(),
@@ -183,10 +184,11 @@ async fn test_reconstruct_handler() {
 
         set.spawn(async move {
             while let Some(received) = merged_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
-                    Ok(w) => w,
-                    Err(_) => continue,
-                };
+                let wrapped: WrappedMessage =
+                    match stoffelcrypto::common::wire_format::deserialize(&received.1) {
+                        Ok(w) => w,
+                        Err(_) => continue,
+                    };
 
                 match wrapped {
                     WrappedMessage::RanDouSha(msg) => {
@@ -301,10 +303,11 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
         set.spawn(async move {
             let _ = timeout(Duration::from_secs(1), async {
                 while let Some(received) = merged_rx.recv().await {
-                    let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
-                        Ok(w) => w,
-                        Err(_) => continue,
-                    };
+                    let wrapped: WrappedMessage =
+                        match stoffelcrypto::common::wire_format::deserialize(&received.1) {
+                            Ok(w) => w,
+                            Err(_) => continue,
+                        };
 
                     match wrapped {
                         WrappedMessage::RanDouSha(_) => {}

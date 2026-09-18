@@ -34,7 +34,8 @@ where
         let mut merge_rx = fan_in_inboxes(inbox);
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&bytes).unwrap();
+                let wrapped: WrappedMessage =
+                    stoffelcrypto::common::wire_format::deserialize(&bytes).unwrap();
                 match wrapped {
                     WrappedMessage::Trunc(msg) => match node.process(msg).await {
                         Ok(()) => {}

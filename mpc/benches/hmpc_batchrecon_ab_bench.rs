@@ -157,7 +157,7 @@ fn run(n: usize, t: usize, secrets: &[Fr], mode: Mode) -> (Duration, u64, Vec<Fr
                             match msg {
                                 Some((_sender, raw)) => {
                                     counter.fetch_add(1, Ordering::Relaxed);
-                                    let w: WrappedMessage = match bincode::deserialize(&raw) {
+                                    let w: WrappedMessage = match stoffelcrypto::common::wire_format::deserialize(&raw) {
                                         Ok(w) => w,
                                         Err(_) => continue,
                                     };

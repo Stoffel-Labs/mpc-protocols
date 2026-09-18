@@ -78,7 +78,9 @@ async fn test_multiple_clients_parallel_input() {
         let net_clone = client_net.remove(&cid).unwrap();
         tokio::spawn(async move {
             while let Some((_, raw)) = merged_rx.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&raw).ok().unwrap();
+                let wrapped: WrappedMessage = stoffelcrypto::common::wire_format::deserialize(&raw)
+                    .ok()
+                    .unwrap();
                 if let WrappedMessage::Input(msg) = wrapped {
                     client.process(msg, net_clone.clone()).await.ok();
                 }
@@ -164,7 +166,9 @@ async fn test_input_recovery_with_missing_server() {
     let net_clone = client_net.remove(&clientid).unwrap();
     tokio::spawn(async move {
         while let Some(received) = merged_rx.recv().await {
-            if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received.1) {
+            if let Ok(WrappedMessage::Input(msg)) =
+                stoffelcrypto::common::wire_format::deserialize(&received.1)
+            {
                 client.process(msg, net_clone.clone()).await.ok();
             }
         }
@@ -251,7 +255,9 @@ async fn test_input_with_too_many_faulty_shares() {
     let net_clone = client_net.remove(&client_id).unwrap();
     tokio::spawn(async move {
         while let Some(received) = merged_rx.recv().await {
-            if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received.1) {
+            if let Ok(WrappedMessage::Input(msg)) =
+                stoffelcrypto::common::wire_format::deserialize(&received.1)
+            {
                 // Client will fail internally when trying to decode faulty shares
                 let _ = client.process(msg, net_clone.clone()).await;
             }

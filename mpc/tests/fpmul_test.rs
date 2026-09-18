@@ -69,7 +69,8 @@ async fn prandint_r_reconstruction() {
 
         set.spawn(async move {
             while let Some(received) = merged_rx.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&received.1).unwrap();
+                let wrapped: WrappedMessage =
+                    stoffelcrypto::common::wire_format::deserialize(&received.1).unwrap();
                 match wrapped {
                     WrappedMessage::PRandInt(msg) => {
                         let _ = node.process(msg).await;
@@ -193,7 +194,8 @@ async fn test_truncpr_end_to_end() {
 
         set.spawn(async move {
             while let Some(received) = merged_rx.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&received.1).unwrap();
+                let wrapped: WrappedMessage =
+                    stoffelcrypto::common::wire_format::deserialize(&received.1).unwrap();
                 match wrapped {
                     WrappedMessage::Trunc(msg) => {
                         let _ = node.process(msg).await;

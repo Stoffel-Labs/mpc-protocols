@@ -51,13 +51,14 @@ pub fn spawn_receiver_tasks(
                     Some(msg) => msg,
                     None => break,
                 };
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg.1) {
-                    Ok(m) => m,
-                    Err(_) => {
-                        warn!("Malformed or unrecognized message format.");
-                        continue;
-                    }
-                };
+                let wrapped: WrappedMessage =
+                    match stoffelcrypto::common::wire_format::deserialize(&msg.1) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            warn!("Malformed or unrecognized message format.");
+                            continue;
+                        }
+                    };
                 let dousha_msg = match wrapped {
                     WrappedMessage::Dousha(dou_sha_message) => dou_sha_message,
                     _ => todo!(),

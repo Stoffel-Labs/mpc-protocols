@@ -34,8 +34,6 @@ use std::sync::{
 use async_trait::async_trait;
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId, VerifiedOrdering};
 
-use bincode::Options;
-
 use crate::honeybadger::WrappedMessage;
 
 const RELAX: Ordering = Ordering::Relaxed;
@@ -141,11 +139,7 @@ impl NodeStatisticsCounters {
     pub fn record_outbound(&self, data: &[u8], n_recipients: u64) {
         self.bytes_sent
             .fetch_add(data.len() as u64 * n_recipients, RELAX);
-        if let Ok(msg) = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .deserialize::<WrappedMessage>(data)
-        {
+        if let Ok(msg) = crate::common::wire_format::deserialize::<WrappedMessage>(data) {
             record_received(&msg, &self.sent);
         }
     }

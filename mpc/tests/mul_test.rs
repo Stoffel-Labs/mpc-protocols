@@ -136,13 +136,14 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
         set.spawn(async move {
             while let Some(msg_bytes) = merged_rx.recv().await {
                 // Attempt to deserialize into WrappedMessage
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg_bytes.1) {
-                    Ok(m) => m,
-                    Err(_) => {
-                        warn!("failed to deserialize into wrapped message");
-                        continue;
-                    }
-                };
+                let wrapped: WrappedMessage =
+                    match stoffelcrypto::common::wire_format::deserialize(&msg_bytes.1) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            warn!("failed to deserialize into wrapped message");
+                            continue;
+                        }
+                    };
                 // Match the message type and route it appropriately
                 match &wrapped {
                     WrappedMessage::Mult(msg) => {

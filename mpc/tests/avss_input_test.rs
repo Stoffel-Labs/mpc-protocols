@@ -86,7 +86,7 @@ async fn test_avss_input_e2e() {
     for _ in 0..(n - 1) {
         let (_, raw) = client_recv.recv().await.unwrap();
         let wrapped: AvssWrappedMessage =
-            bincode::deserialize(&raw).expect("deserialization error");
+            stoffelcrypto::common::wire_format::deserialize(&raw).expect("deserialization error");
         match wrapped {
             AvssWrappedMessage::Input(msg) => {
                 assert!(client
@@ -113,7 +113,8 @@ async fn test_avss_input_e2e() {
         tokio::spawn(async move {
             while let Some(raw_msg) = merged_rx.recv().await {
                 let wrapped: AvssWrappedMessage =
-                    bincode::deserialize(&raw_msg.1).expect("deserialization error");
+                    stoffelcrypto::common::wire_format::deserialize(&raw_msg.1)
+                        .expect("deserialization error");
                 match wrapped {
                     AvssWrappedMessage::Rbc(rbc_msg) => {
                         let _ = node.rbc.process(rbc_msg, network[i].clone()).await;

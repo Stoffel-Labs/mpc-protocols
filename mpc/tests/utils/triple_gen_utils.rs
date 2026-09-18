@@ -112,13 +112,14 @@ pub fn spawn_receiver_tasks(
                     Some(msg) => msg,
                     None => break,
                 };
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg.1) {
-                    Ok(m) => m,
-                    Err(_) => {
-                        warn!("Malformed or unrecognized message format.");
-                        continue;
-                    }
-                };
+                let wrapped: WrappedMessage =
+                    match stoffelcrypto::common::wire_format::deserialize(&msg.1) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            warn!("Malformed or unrecognized message format.");
+                            continue;
+                        }
+                    };
                 let mut node_bind = triple_gen_node.lock().await;
 
                 match wrapped {

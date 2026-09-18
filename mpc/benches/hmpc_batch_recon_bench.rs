@@ -66,7 +66,9 @@ async fn run_batch_recon(n_parties: usize, t: usize, n_secrets: usize) {
                     Ok(Some(v)) => v,
                     _ => continue,
                 };
-                if let Ok(WrappedMessage::BatchRecon(m)) = bincode::deserialize(&raw) {
+                if let Ok(WrappedMessage::BatchRecon(m)) =
+                    stoffelcrypto::common::wire_format::deserialize(&raw)
+                {
                     node.process(m, net.clone()).await.ok();
                 }
             }

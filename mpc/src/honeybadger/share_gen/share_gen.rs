@@ -3,7 +3,6 @@ use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
-use bincode::Options;
 use std::sync::Arc;
 use std::time::Instant;
 use stoffelnet::network_utils::{Network, PartyId};
@@ -83,11 +82,8 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let mut msg: RanShaMessage = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_limit(MAX_MESSAGE_SIZE)
-                .deserialize(&output)?;
+            let mut msg: RanShaMessage =
+                crate::common::wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE)?;
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(
@@ -284,7 +280,7 @@ where
                 session_id,
                 payload,
             ));
-            let bytes_generic_msg = bincode::serialize(&generic_message)?;
+            let bytes_generic_msg = crate::common::wire_format::serialize(&generic_message)?;
 
             info!("sending shares from {:?} to {:?}", self.id, recipient_id);
             network.send(recipient_id, &bytes_generic_msg).await?;
@@ -516,7 +512,7 @@ where
                 session_id,
                 payload,
             ));
-            let bytes = bincode::serialize(&message)?;
+            let bytes = crate::common::wire_format::serialize(&message)?;
             network.send(i, &bytes).await?;
         }
 
@@ -662,7 +658,7 @@ where
                 session_id,
                 RanShaPayload::Output(ok),
             );
-            let bytes = bincode::serialize(&result)?;
+            let bytes = crate::common::wire_format::serialize(&result)?;
             // Derive the caller from the parent session so the reconstruction RBC
             // routes to the correct (big- or small-field) share_gen instance.
             let caller = session_id

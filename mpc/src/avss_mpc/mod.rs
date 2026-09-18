@@ -31,7 +31,7 @@ use ark_std::rand::{
     Rng, SeedableRng,
 };
 use async_trait::async_trait;
-use bincode::{ErrorKind, Options};
+use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Duration};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
@@ -148,11 +148,8 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), AvssMPCError> {
-        let wrapped: AvssWrappedMessage = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .with_limit(MAX_MESSAGE_SIZE)
-            .deserialize(&raw_msg)?;
+        let wrapped: AvssWrappedMessage =
+            crate::common::wire_format::deserialize_limited(&raw_msg, MAX_MESSAGE_SIZE)?;
 
         match wrapped {
             AvssWrappedMessage::Input(input_msg) => {
@@ -462,11 +459,8 @@ where
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), Self::Error> {
-        let wrapped: AvssWrappedMessage = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .with_limit(MAX_MESSAGE_SIZE)
-            .deserialize(&raw_msg)?;
+        let wrapped: AvssWrappedMessage =
+            crate::common::wire_format::deserialize_limited(&raw_msg, MAX_MESSAGE_SIZE)?;
 
         #[cfg(feature = "statistics")]
         {
@@ -890,19 +884,19 @@ impl AvssWrappedMessage {
     /// Wraps an RBC message.
     pub fn rbc_wrap(msg: Msg<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = AvssWrappedMessage::Rbc(msg);
-        Ok(bincode::serialize(&wrapped)?)
+        Ok(crate::common::wire_format::serialize(&wrapped)?)
     }
 
     /// Wraps an AVSS message.
     pub fn avss_wrap(msg: AvssMessage<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = AvssWrappedMessage::Avss(msg);
-        Ok(bincode::serialize(&wrapped)?)
+        Ok(crate::common::wire_format::serialize(&wrapped)?)
     }
 
     /// Wraps an AVSS OK/READY/Reveal agreement message.
     pub fn agreement_wrap(msg: AvssAgreementMessage<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = AvssWrappedMessage::Agreement(msg);
-        Ok(bincode::serialize(&wrapped)?)
+        Ok(crate::common::wire_format::serialize(&wrapped)?)
     }
 }
 

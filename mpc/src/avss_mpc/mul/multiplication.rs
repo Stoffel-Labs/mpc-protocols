@@ -13,7 +13,6 @@ use crate::common::{ProtocolSessionId, SecretSharingScheme};
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
-use bincode::Options;
 use itertools::izip;
 use std::sync::Arc;
 use std::time::Instant;
@@ -94,11 +93,8 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
                 }
                 Err(e) => return Err(e.into()),
             };
-            let msg: MultMessage = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_limit(MAX_MESSAGE_SIZE)
-                .deserialize(&output)?;
+            let msg: MultMessage =
+                crate::common::wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE)?;
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender != authenticated_sender {
                 warn!(
@@ -198,7 +194,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
         );
 
         let wrapped = MultMessage::new(self.id, session_id, bytes_rec_message);
-        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        let bytes_wrapped = crate::common::wire_format::serialize(&wrapped)?;
 
         self.rbc
             .init(bytes_wrapped, rbc_sessionid, Arc::clone(&network))

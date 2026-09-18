@@ -48,7 +48,7 @@ impl AvssOutputServer {
         shares.serialize_compressed(&mut payload)?;
         let msg = AvssOutputMessage::new(self.id, payload);
         let wrapped = AvssWrappedMessage::Output(msg);
-        let bytes = bincode::serialize(&wrapped)?;
+        let bytes = crate::common::wire_format::serialize(&wrapped)?;
 
         net.send_to_client(client_id, &bytes).await?;
         info!(

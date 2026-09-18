@@ -191,13 +191,14 @@ fn bench_serialize(c: &mut Criterion) {
         payload,
     ));
     group.bench_function("wrapped_eval_bincode", |b| {
-        b.iter(|| bincode::serialize(black_box(&eval_msg)).unwrap())
+        b.iter(|| stoffelcrypto::common::wire_format::serialize(black_box(&eval_msg)).unwrap())
     });
     group.bench_function("wrapped_eval_bincode_deser", |b| {
-        let bytes = bincode::serialize(&eval_msg).unwrap();
+        let bytes = stoffelcrypto::common::wire_format::serialize(&eval_msg).unwrap();
         b.iter(|| {
             let _: WrappedMessage =
-                bincode::deserialize(black_box(&bytes)).expect("deserialize failed");
+                stoffelcrypto::common::wire_format::deserialize(black_box(&bytes))
+                    .expect("deserialize failed");
         })
     });
 

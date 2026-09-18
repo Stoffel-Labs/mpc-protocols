@@ -119,10 +119,11 @@ async fn test_reconstruct_handler_incorrect_share() {
         set.spawn(async move {
             let _ = timeout(Duration::from_secs(1), async {
                 while let Some(received) = merged_rx.recv().await {
-                    let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
-                        Ok(w) => w,
-                        Err(_) => continue,
-                    };
+                    let wrapped: WrappedMessage =
+                        match stoffelcrypto::common::wire_format::deserialize(&received.1) {
+                            Ok(w) => w,
+                            Err(_) => continue,
+                        };
                     match wrapped {
                         WrappedMessage::RanSha(_) => {}
                         WrappedMessage::Rbc(msg) => {
@@ -264,10 +265,11 @@ async fn test_reconstruct_handler_dealer_poisons_exactly_t_shares() {
         set.spawn(async move {
             let _ = timeout(Duration::from_secs(1), async {
                 while let Some(received) = merged_rx.recv().await {
-                    let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
-                        Ok(w) => w,
-                        Err(_) => continue,
-                    };
+                    let wrapped: WrappedMessage =
+                        match stoffelcrypto::common::wire_format::deserialize(&received.1) {
+                            Ok(w) => w,
+                            Err(_) => continue,
+                        };
                     match wrapped {
                         WrappedMessage::RanSha(_) => {}
                         WrappedMessage::Rbc(msg) => {

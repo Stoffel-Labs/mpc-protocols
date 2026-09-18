@@ -76,13 +76,14 @@ pub async fn spawn_parties<T, N>(
         let mut merge_rx = fan_in_inboxes(inbox);
         tokio::spawn(async move {
             while let Some(msg) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg.1) {
-                    Ok(m) => m,
-                    Err(_) => {
-                        warn!("Malformed or unrecognized message format.");
-                        continue;
-                    }
-                };
+                let wrapped: WrappedMessage =
+                    match stoffelcrypto::common::wire_format::deserialize(&msg.1) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            warn!("Malformed or unrecognized message format.");
+                            continue;
+                        }
+                    };
                 match wrapped {
                     WrappedMessage::RanDouSha(_) => todo!(),
                     WrappedMessage::Rbc(msg) => {
@@ -258,13 +259,14 @@ pub fn spawn_receiver_tasks(
         set.spawn(async move {
             while let Some(msg_bytes) = merge_rx.recv().await {
                 // Attempt to deserialize into WrappedMessage
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg_bytes.1) {
-                    Ok(m) => m,
-                    Err(_) => {
-                        warn!("Malformed or unrecognized message format.");
-                        continue;
-                    }
-                };
+                let wrapped: WrappedMessage =
+                    match stoffelcrypto::common::wire_format::deserialize(&msg_bytes.1) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            warn!("Malformed or unrecognized message format.");
+                            continue;
+                        }
+                    };
                 // Match the message type and route it appropriately
                 match &wrapped {
                     WrappedMessage::RanDouSha(rds) => {

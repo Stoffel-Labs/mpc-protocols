@@ -217,7 +217,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             shares.serialize_compressed(&mut payload)?;
             let msg = AvssInputMessage::new(self.id, payload);
             let wrapped = AvssWrappedMessage::Input(msg);
-            let bytes = bincode::serialize(&wrapped)?;
+            let bytes = crate::common::wire_format::serialize(&wrapped)?;
             net.send_to_client(client_id, &bytes).await?;
             info!("Server {} sent MaskShare to client {}", self.id, client_id);
         }

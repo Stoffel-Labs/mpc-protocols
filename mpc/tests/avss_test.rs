@@ -102,7 +102,8 @@ async fn test_avss_end_to_end() {
 
         set.spawn(async move {
             while let Some(received) = merged_rx.recv().await {
-                let wrapped: AvssWrappedMessage = bincode::deserialize(&received.1).unwrap();
+                let wrapped: AvssWrappedMessage =
+                    stoffelcrypto::common::wire_format::deserialize(&received.1).unwrap();
                 match wrapped {
                     AvssWrappedMessage::Rbc(msg) => {
                         node.rbc.process(msg, net.clone()).await.unwrap();
@@ -243,7 +244,8 @@ async fn test_avss_rejected_session_clears_rbc_store() {
 
         set.spawn(async move {
             while let Some(received) = merged_rx.recv().await {
-                let wrapped: AvssWrappedMessage = bincode::deserialize(&received.1).unwrap();
+                let wrapped: AvssWrappedMessage =
+                    stoffelcrypto::common::wire_format::deserialize(&received.1).unwrap();
                 match wrapped {
                     AvssWrappedMessage::Rbc(msg) => {
                         node.rbc.process(msg, net.clone()).await.unwrap();
@@ -370,7 +372,8 @@ async fn test_avss_full_output_channel_does_not_block() {
 
         set.spawn(async move {
             while let Some(received) = merged_rx.recv().await {
-                let wrapped: AvssWrappedMessage = bincode::deserialize(&received.1).unwrap();
+                let wrapped: AvssWrappedMessage =
+                    stoffelcrypto::common::wire_format::deserialize(&received.1).unwrap();
                 match wrapped {
                     AvssWrappedMessage::Rbc(msg) => {
                         node.rbc.process(msg, net.clone()).await.unwrap();
@@ -543,7 +546,7 @@ async fn test_avss_targeted_victim_recovers_via_reveal() {
     }
 
     let msg = AvssMessage::new(session_id, pk_d_bytes, public_commitments, encrypted_shares);
-    let bytes = bincode::serialize(&msg).unwrap();
+    let bytes = stoffelcrypto::common::wire_format::serialize(&msg).unwrap();
     // Broadcast directly through RBC — bypassing `AvssNode::init`, whose crypto always
     // produces a valid row for every party — so every party (including the victim)
     // receives this identical, partially-corrupted dealing, matching the real attack.
@@ -567,7 +570,8 @@ async fn test_avss_targeted_victim_recovers_via_reveal() {
 
         set.spawn(async move {
             while let Some(received) = merged_rx.recv().await {
-                let wrapped: AvssWrappedMessage = bincode::deserialize(&received.1).unwrap();
+                let wrapped: AvssWrappedMessage =
+                    stoffelcrypto::common::wire_format::deserialize(&received.1).unwrap();
                 match wrapped {
                     AvssWrappedMessage::Rbc(msg) => {
                         node.rbc.process(msg, net.clone()).await.unwrap();

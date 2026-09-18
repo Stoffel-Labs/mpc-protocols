@@ -92,6 +92,17 @@ on:
   length-prefixed `Vec`/allocation straight from attacker bytes.
 - Limits are enforced *before* the expensive work (allocation, crypto verification), not
   after.
+- Any new (de)serialization of a wire message goes through
+  `crate::common::wire_format::{serialize, deserialize, deserialize_limited}`, never
+  `bincode::serialize`/`bincode::deserialize`/`bincode::DefaultOptions::new()` called
+  directly. Every wire message type needs its serialize and deserialize sides to agree
+  on encoding (fixint vs. varint) — `wire_format` is the single place that's pinned, so a
+  stray direct `bincode::` call bypasses it and silently reverts to bincode's fixint
+  default, breaking compatibility with every other site decoding that same message type.
+
+  Red flag: `bincode::serialize(`, `bincode::deserialize(`, or
+  `bincode::DefaultOptions::new()` appearing in a new/changed file instead of a
+  `wire_format::` call.
 
 ### 6. RBC/batch-recon drain wired into the process loop
 
@@ -263,6 +274,8 @@ anything to get there.
    - `grep -n "authenticated_sender\|sender_id !=" <file>`
    - `grep -n "clear_store\|clear_session" <file>`
    - `grep -n "MAX_.*SESSIONS\|deser_bounded_vec" <file>`
+   - `grep -n "bincode::serialize\|bincode::deserialize\|DefaultOptions::new" <file>` —
+     any hit should be inside `wire_format.rs` itself, not a new call site (item 5)
    - `grep -n "\.unwrap()\|\.expect(" <file>`
    - `grep -n "take_prandint_shares\|check_mask_security\|max_masked_width" <file>`
    - `grep -n "\.iter()\.take(\|\.zip(" <file>` — for masking/randomness parameters,

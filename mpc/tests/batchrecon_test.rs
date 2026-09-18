@@ -175,13 +175,14 @@ mod tests {
                         Ok(Some(v)) => v,
                         _ => continue,
                     };
-                    let wrapped: WrappedMessage = match bincode::deserialize(&raw) {
-                        Ok(m) => m,
-                        Err(_) => {
-                            warn!("Malformed or unrecognized message format.");
-                            continue;
-                        }
-                    };
+                    let wrapped: WrappedMessage =
+                        match stoffelcrypto::common::wire_format::deserialize(&raw) {
+                            Ok(m) => m,
+                            Err(_) => {
+                                warn!("Malformed or unrecognized message format.");
+                                continue;
+                            }
+                        };
 
                     if let WrappedMessage::BatchRecon(m) = wrapped {
                         if let Err(e) = node.process(m, net_clone.clone()).await {

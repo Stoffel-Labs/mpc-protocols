@@ -397,7 +397,7 @@ where
         let round0_msg = TripleCheckMessage::new(self.id, session_id, bytes_rec_message);
         self.rbc
             .init(
-                bincode::serialize(&round0_msg)?,
+                crate::common::wire_format::serialize(&round0_msg)?,
                 round0_sid,
                 network.clone(),
             )
@@ -432,7 +432,7 @@ where
             }
             let round = id.round_id();
             let output = self.rbc.get_store(id).await?;
-            let msg: TripleCheckMessage = match bincode::deserialize(&output) {
+            let msg: TripleCheckMessage = match crate::common::wire_format::deserialize(&output) {
                 Ok(m) => m,
                 Err(_) => continue 'check,
             };
@@ -514,7 +514,7 @@ where
                         let round1_msg = TripleCheckMessage::new(self.id, session_id, bytes_check);
                         self.rbc
                             .init(
-                                bincode::serialize(&round1_msg)?,
+                                crate::common::wire_format::serialize(&round1_msg)?,
                                 round1_sid,
                                 network.clone(),
                             )

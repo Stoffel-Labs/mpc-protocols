@@ -7,7 +7,6 @@ use crate::common::{
     ProtocolSessionId, RbcWrapFn, RBC,
 };
 use async_trait::async_trait;
-use bincode;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use stoffelnet::network_utils::Network;
 use threshold_crypto::{
@@ -1785,7 +1784,8 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
         //Might be unsafe : We are exposing the secret key share
         //To do : Replace with a more controllablle crate
         let skshare: SerdeSecret<SecretKeyShare> =
-            bincode::deserialize(&sk_payload).map_err(|e| RbcError::SerializationError(e))?;
+            crate::common::wire_format::deserialize(&sk_payload)
+                .map_err(|e| RbcError::SerializationError(e))?;
 
         //Sign the session id with the secret key share and broadcast to others
         let signshare = skshare.sign(msg.round_id.to_be_bytes());
@@ -1865,7 +1865,7 @@ impl<Id: ProtocolSessionId + 'static> ABA<Id> {
                 }
             };
 
-            let pkset: PublicKeySet = match bincode::deserialize(&pkset_bytes) {
+            let pkset: PublicKeySet = match crate::common::wire_format::deserialize(&pkset_bytes) {
                 Ok(pk) => pk,
                 Err(e) => {
                     warn!("Failed to deserialize PublicKeySet");
@@ -1967,12 +1967,13 @@ impl Dealer {
         let skset = SecretKeySet::random(self.t, &mut rng);
         let pkset = skset.public_keys();
 
-        let pkset_serial = bincode::serialize(&pkset).expect("Failed to serialize pkset");
+        let pkset_serial =
+            crate::common::wire_format::serialize(&pkset).expect("Failed to serialize pkset");
 
         for i in 0..self.n {
             let skshare = SerdeSecret(skset.secret_key_share(i as i32));
-            let serialized_share =
-                bincode::serialize(&skshare).map_err(|e| RbcError::SerializationError(e))?;
+            let serialized_share = crate::common::wire_format::serialize(&skshare)
+                .map_err(|e| RbcError::SerializationError(e))?;
 
             let key_msg = Msg::new(
                 msg.sender_id,
@@ -2234,7 +2235,7 @@ mod tests {
 
     fn default_hb_rbc_wrap(msg: Msg<SessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = WrappedMessage::Rbc(msg);
-        Ok(bincode::serialize(&wrapped)?)
+        Ok(crate::common::wire_format::serialize(&wrapped)?)
     }
 
     #[test]

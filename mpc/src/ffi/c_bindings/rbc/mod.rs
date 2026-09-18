@@ -247,7 +247,7 @@ impl From<&GenericMsgType> for RbcMessageType {
 #[no_mangle]
 pub extern "C" fn deserialize_rbc_msg(msg: ByteSlice, output_rbc_msg: *mut RbcMsg) -> RbcErrorCode {
     let bytes = unsafe { slice::from_raw_parts(msg.pointer, msg.len) };
-    let wrapped: WrappedMessage = match bincode::deserialize(bytes) {
+    let wrapped: WrappedMessage = match crate::common::wire_format::deserialize(bytes) {
         Ok(m) => m,
         Err(_) => return RbcErrorCode::RbcSerializationError,
     };
@@ -290,7 +290,7 @@ pub extern "C" fn bracha_new(
 
     let rust_wrapper: RbcWrapFn<SessionId> = Arc::new(move |msg| {
         let wrapped = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrapped)?;
+        let encoded = crate::common::wire_format::serialize(&wrapped)?;
 
         let mut out_ptr = core::ptr::null_mut();
         let mut out_len = 0;
@@ -582,7 +582,7 @@ pub extern "C" fn avid_new(
 
     let rust_wrapper: RbcWrapFn<SessionId> = Arc::new(move |msg| {
         let wrapped = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrapped)?;
+        let encoded = crate::common::wire_format::serialize(&wrapped)?;
 
         let mut out_ptr = core::ptr::null_mut();
         let mut out_len = 0;
@@ -870,7 +870,7 @@ pub extern "C" fn aba_new(
 
     let rust_wrapper: RbcWrapFn<SessionId> = Arc::new(move |msg| {
         let wrapped = WrappedMessage::Rbc(msg);
-        let encoded = bincode::serialize(&wrapped)?;
+        let encoded = crate::common::wire_format::serialize(&wrapped)?;
 
         let mut out_ptr = core::ptr::null_mut();
         let mut out_len = 0;

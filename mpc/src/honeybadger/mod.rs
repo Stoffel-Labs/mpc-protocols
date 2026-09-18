@@ -76,7 +76,7 @@ use ark_ff::{FftField, PrimeField};
 use ark_std::rand::rngs::{OsRng, StdRng};
 use ark_std::rand::{Rng, SeedableRng};
 use async_trait::async_trait;
-use bincode::{ErrorKind, Options};
+use bincode::ErrorKind;
 use double_share_generation::DoubleShareNode;
 use ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use robust_interpolate::robust_interpolate::RobustShare;
@@ -239,11 +239,8 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), HoneyBadgerError> {
-        let wrapped: WrappedMessage = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .with_limit(MAX_MESSAGE_SIZE)
-            .deserialize(&raw_msg)?;
+        let wrapped: WrappedMessage =
+            crate::common::wire_format::deserialize_limited(&raw_msg, MAX_MESSAGE_SIZE)?;
 
         match wrapped {
             WrappedMessage::Input(input_msg) => {
@@ -819,11 +816,8 @@ where
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), Self::Error> {
-        let wrapped: WrappedMessage = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .with_limit(MAX_MESSAGE_SIZE)
-            .deserialize(&raw_msg)?;
+        let wrapped: WrappedMessage =
+            crate::common::wire_format::deserialize_limited(&raw_msg, MAX_MESSAGE_SIZE)?;
 
         #[cfg(feature = "statistics")]
         {
@@ -2007,7 +2001,7 @@ pub enum WrappedMessage {
 impl WrappedMessage {
     pub fn rbc_wrap(msg: Msg<SessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = WrappedMessage::Rbc(msg);
-        Ok(bincode::serialize(&wrapped)?)
+        Ok(crate::common::wire_format::serialize(&wrapped)?)
     }
 }
 

@@ -106,8 +106,9 @@ fn avss_e2e() {
                     loop {
                         match rx.recv().await {
                             Some((_, message)) => {
-                                let wrapped: AvssWrappedMessage = bincode::deserialize(&message)
-                                    .expect("The deserialization must work correctly");
+                                let wrapped: AvssWrappedMessage =
+                                    stoffelcrypto::common::wire_format::deserialize(&message)
+                                        .expect("The deserialization must work correctly");
                                 msg_count += 1;
                                 match wrapped {
                                     AvssWrappedMessage::Rbc(msg) => {

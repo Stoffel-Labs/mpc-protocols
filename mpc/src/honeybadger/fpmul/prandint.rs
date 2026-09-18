@@ -20,7 +20,6 @@ use crate::{
 use ark_ff::PrimeField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
 use ark_std::rand::{CryptoRng, Rng, SeedableRng};
-use bincode::Options;
 use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Instant};
@@ -212,11 +211,8 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: PRandIntCommitMessage = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_limit(MAX_MESSAGE_SIZE)
-                .deserialize(&output)?;
+            let msg: PRandIntCommitMessage =
+                crate::common::wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE)?;
 
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender || authenticated_sender >= self.n {
@@ -601,7 +597,7 @@ where
 
         self.rbc
             .init(
-                bincode::serialize(&commit_msg)?,
+                crate::common::wire_format::serialize(&commit_msg)?,
                 commit_session,
                 network.clone(),
             )
@@ -666,7 +662,7 @@ where
                         r_t_i.clone(),
                         nonce,
                     ));
-                    let bytes_msg = bincode::serialize(&msg)?;
+                    let bytes_msg = crate::common::wire_format::serialize(&msg)?;
                     network.send(j, &bytes_msg).await?;
                 }
             }

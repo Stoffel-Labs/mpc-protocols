@@ -231,7 +231,7 @@ impl<F: PrimeField> TruncPrNode<F> {
         open_share.serialize_compressed(&mut payload)?;
         let trunc_msg = TruncPrMessage::new(self.id, session, payload);
         let wrapped = WrappedMessage::Trunc(trunc_msg);
-        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        let bytes_wrapped = crate::common::wire_format::serialize(&wrapped)?;
 
         network.broadcast(&bytes_wrapped).await?;
 
@@ -364,7 +364,7 @@ mod tests {
         let msg = inboxes[0][3]
             .try_recv()
             .expect("party 3 must broadcast its own opening even when it can't finalize yet");
-        let wrapped: WrappedMessage = bincode::deserialize(&msg).unwrap();
+        let wrapped: WrappedMessage = crate::common::wire_format::deserialize(&msg).unwrap();
         match wrapped {
             WrappedMessage::Trunc(trunc_msg) => assert_eq!(trunc_msg.sender_id, 3),
             other => panic!("expected a Trunc open message, got {other:?}"),

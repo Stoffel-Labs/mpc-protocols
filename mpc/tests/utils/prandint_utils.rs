@@ -32,7 +32,8 @@ where
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&bytes).unwrap();
+                let wrapped: WrappedMessage =
+                    stoffelcrypto::common::wire_format::deserialize(&bytes).unwrap();
                 match wrapped {
                     WrappedMessage::PRandInt(msg) => {
                         node.process(msg).await.unwrap();

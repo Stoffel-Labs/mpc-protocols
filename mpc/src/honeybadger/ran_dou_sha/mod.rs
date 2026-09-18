@@ -16,7 +16,7 @@ use crate::{
 use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalSerialize, SerializationError};
-use bincode::{ErrorKind, Options};
+use bincode::ErrorKind;
 use messages::{RanDouShaMessage, ReconstructionMessage};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use thiserror::Error;
@@ -235,11 +235,8 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let mut msg: RanDouShaMessage = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_limit(MAX_MESSAGE_SIZE)
-                .deserialize(&output)?;
+            let mut msg: RanDouShaMessage =
+                crate::common::wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE)?;
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(
@@ -474,7 +471,7 @@ where
                 let rds_message = RanDouShaMessage::new(self.id, session_id, payload);
                 let wrapped = WrappedMessage::RanDouSha(rds_message);
 
-                let bytes_wrapped = bincode::serialize(&wrapped)?;
+                let bytes_wrapped = crate::common::wire_format::serialize(&wrapped)?;
                 // Sending the generic message to the network.
                 network.send(i, &bytes_wrapped).await?;
             }
@@ -675,7 +672,7 @@ where
                 let msg =
                     RanDouShaMessage::new(self.id, msg.session_id, RanDouShaPayload::Output(ok));
 
-                let bytes_msg = bincode::serialize(&msg)?;
+                let bytes_msg = crate::common::wire_format::serialize(&msg)?;
 
                 // if the verification succeeds, broadcast true (aka. OK)
                 // Derive the caller from the parent session so the reconstruction

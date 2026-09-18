@@ -152,8 +152,8 @@ impl<F: FftField> BatchReconNode<F> {
             //Wrap the msg in global enum
             let wrapped = WrappedMessage::BatchRecon(msg);
             //Send share y_j to each Party j
-            let encoded_msg =
-                bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
+            let encoded_msg = crate::common::wire_format::serialize(&wrapped)
+                .map_err(BatchReconError::SerializationError)?;
 
             let _ = net.send(j, &encoded_msg).await?;
         }
@@ -200,8 +200,8 @@ impl<F: FftField> BatchReconNode<F> {
             let msg =
                 BatchReconMsg::new(self.id, session_id, BatchReconMsgType::EvalBatch, payload);
             let wrapped = WrappedMessage::BatchRecon(msg);
-            let encoded_msg =
-                bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
+            let encoded_msg = crate::common::wire_format::serialize(&wrapped)
+                .map_err(BatchReconError::SerializationError)?;
 
             let _ = net.send(j, &encoded_msg).await?;
         }
@@ -282,7 +282,7 @@ impl<F: FftField> BatchReconNode<F> {
                             //Wrap the msg in global enum
                             let wrapped = WrappedMessage::BatchRecon(new_msg);
                             // Broadcast our computed `y_j` to all other parties.
-                            let encoded = bincode::serialize(&wrapped)
+                            let encoded = crate::common::wire_format::serialize(&wrapped)
                                 .map_err(BatchReconError::SerializationError)?;
                             let _ = net
                                 .broadcast(&encoded)
@@ -428,7 +428,7 @@ impl<F: FftField> BatchReconNode<F> {
                         );
 
                         let wrapped = WrappedMessage::BatchRecon(new_msg);
-                        let encoded = bincode::serialize(&wrapped)
+                        let encoded = crate::common::wire_format::serialize(&wrapped)
                             .map_err(BatchReconError::SerializationError)?;
                         let _ = net.broadcast(&encoded).await?;
                     }
