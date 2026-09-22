@@ -1127,15 +1127,57 @@ where
         if !dleq_verify(&proof, G::generator(), pk_party, pk_d.clone(), k_id.clone()) {
             return Ok(()); // fabricated or inconsistent — ignore
         }
+        if party_id >= encrypted_shares.len() {
+            return Ok(());
+        }
 
-        // A genuine reveal means some node needed one for this session. If our own row
-        // already verified, help by revealing our own key too (once) — cheap, since it only
-        // exposes our ECDH secret for *this one dealing*: the whole point of deriving it
-        // from a per-dealing ephemeral key rather than our long-term key (hbACSS §V-C) is to
-        // make that safe. Gating it on having actually observed a reveal (rather than doing
-        // it unconditionally) means a dealing that behaves for everyone never has anyone
-        // reveal anything.
-        if own_valid && !sent_reveal {
+        // Independently re-derive `party_id`'s row using the now-proven-genuine key, rather
+        // than trusting the Reveal's mere existence. The DLEQ proof above only shows the
+        // request genuinely comes from `party_id` — it says nothing about whether their row
+        // is actually broken, and any registered party can produce a valid Reveal about its
+        // own perfectly fine row at will. Feldman's binding property makes this check safe to
+        // trust regardless of *why* `party_id` revealed: the outcome is fixed by the dealer's
+        // original (RBC-agreed) ciphertext for `party_id`, not by anything the revealer
+        // controls.
+        let key = kdf_from_point(&k_id);
+        let cts = &encrypted_shares[party_id];
+        let mut row_valid = !cts.is_empty() && cts.len() == all_commitments.len();
+        let mut shares = Vec::with_capacity(cts.len());
+        if row_valid {
+            for (ct, commitments) in cts.iter().zip(all_commitments.iter()) {
+                let verified = decrypt(key, ct).ok().and_then(|pt| {
+                    let shamirshare =
+                        Shamirshare::<F>::deserialize_compressed(&pt[..]).ok()?;
+                    if shamirshare.id != self.ids[party_id] || shamirshare.degree != self.t {
+                        return None;
+                    }
+                    let share = FeldmanShamirShare {
+                        feldmanshare: shamirshare,
+                        commitments: commitments.clone(),
+                    };
+                    verify_feldman(share.clone(), self.ids[party_id]).then_some(share)
+                });
+                match verified {
+                    Some(share) => shares.push(share),
+                    None => {
+                        row_valid = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Only a confirmed-invalid row justifies disclosing our own key: a genuine Reveal
+        // alone doesn't prove `party_id` actually needs help, since the DLEQ proof above is
+        // satisfiable by any registered party for its own row at any time, valid or not.
+        // Gating on the row actually being broken (not merely on the Reveal being genuine)
+        // closes that — a party can no longer harvest every honest key by falsely crying
+        // recovery over a row that's perfectly fine. Also gated on having actually observed an
+        // invalid reveal (rather than doing it unconditionally) — cheap, since it only exposes
+        // our ECDH secret for *this one dealing*: the whole point of deriving it from a
+        // per-dealing ephemeral key rather than our long-term key (hbACSS §V-C) is to make
+        // that safe — so a dealing that behaves for everyone never has anyone reveal anything.
+        if own_valid && !row_valid && !sent_reveal {
             let already_sending = {
                 let mut agreement = self.agreement.lock().await;
                 match agreement.get_mut(&session_id) {
@@ -1151,41 +1193,10 @@ where
             }
         }
 
-        if own_valid {
-            return Ok(()); // we already have our own valid share — no need to track recovery
-        }
-        if party_id >= encrypted_shares.len() {
+        if own_valid || !row_valid {
+            // Either we already have our own valid share, or `party_id`'s row turned out to
+            // be fine too — nothing left to disclose or track either way.
             return Ok(());
-        }
-
-        // Re-derive `party_id`'s row using the now-proven-genuine key. Feldman's binding
-        // property makes this safe to trust regardless of *why* `party_id` revealed: the
-        // outcome is fixed by the dealer's original (RBC-agreed) ciphertext for `party_id`,
-        // not by anything the revealer controls.
-        let key = kdf_from_point(&k_id);
-        let cts = &encrypted_shares[party_id];
-        if cts.is_empty() || cts.len() != all_commitments.len() {
-            return Ok(());
-        }
-        let mut shares = Vec::with_capacity(cts.len());
-        for (ct, commitments) in cts.iter().zip(all_commitments.iter()) {
-            let Ok(pt) = decrypt(key, ct) else {
-                return Ok(()); // confirms party_id's own row was genuinely bad
-            };
-            let Ok(shamirshare) = Shamirshare::<F>::deserialize_compressed(&pt[..]) else {
-                return Ok(());
-            };
-            if shamirshare.id != self.ids[party_id] || shamirshare.degree != self.t {
-                return Ok(());
-            }
-            let share = FeldmanShamirShare {
-                feldmanshare: shamirshare,
-                commitments: commitments.clone(),
-            };
-            if !verify_feldman(share.clone(), self.ids[party_id]) {
-                return Ok(());
-            }
-            shares.push(share);
         }
 
         let finalize_input = {
@@ -1434,5 +1445,220 @@ mod dleq_tests {
         let fake_alpha = Fr::rand(&mut rng);
         let proof = dleq_prove(fake_alpha, g0, x, g1, y, &mut rng).unwrap();
         assert!(!dleq_verify(&proof, g0, x, g1, y));
+    }
+}
+
+#[cfg(test)]
+mod reveal_tests {
+    use super::*;
+    use crate::avss_mpc::{AvssSessionId, AvssWrappedMessage, ProtocolType};
+    use crate::common::rbc::rbc::Avid;
+    use ark_bls12_381::{Fr, G1Projective as G};
+    use ark_ec::PrimeGroup;
+    use ark_std::{test_rng, UniformRand};
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+    use tokio::sync::mpsc;
+
+    type TestNode = AvssNode<Fr, Avid<AvssSessionId>, G, AvssSessionId>;
+
+    /// Regression test for the row-key disclosure bug `apply_reveal` used to have: a
+    /// genuine `Reveal` (a correct DLEQ proof) is not by itself evidence that the
+    /// revealing party's row is broken — any registered party can produce one for its
+    /// own, perfectly valid row at will. Before the fix, every honest node with a valid
+    /// row treated *any* genuine `Reveal` as a real recovery request and responded by
+    /// broadcasting its own per-dealing key, letting a single dishonest-but-registered
+    /// party harvest every honest party's share on demand.
+    ///
+    /// This checks both directions with one dealing: party `victim`'s row is genuinely
+    /// corrupted by the dealer, everyone else's is genuinely fine. A gratuitous
+    /// self-Reveal from `attacker` (whose row is fine) must trigger no response, while
+    /// the following genuine Reveal for `victim`'s actually-broken row must still get
+    /// the legitimate recovery help.
+    #[tokio::test]
+    async fn self_reveal_over_a_valid_row_triggers_no_disclosure() {
+        let n = 4;
+        let t = 1;
+        let attacker = 3usize; // its own row will be perfectly valid
+        let victim = 2usize; // its own row will be genuinely corrupted
+        let mut rng = test_rng();
+
+        let mut sks = Vec::new();
+        let mut pks = Vec::new();
+        for _ in 0..n {
+            let sk = Fr::rand(&mut rng);
+            pks.push(G::generator() * sk);
+            sks.push(sk);
+        }
+        let pk_map = Arc::new(pks);
+
+        let config = FakeNetworkConfig::new(128);
+        let (inner, _receivers, _) = FakeInnerNetwork::new(n, None, config);
+        let net: Vec<_> = (0..n)
+            .map(|id| Arc::new(FakeNetwork::new(id, inner.clone())))
+            .collect();
+
+        let mut nodes: Vec<TestNode> = (0..n)
+            .map(|i| {
+                let (sender, _) = mpsc::channel(128);
+                AvssNode::new(
+                    i,
+                    n,
+                    (1..=n).collect(),
+                    t,
+                    sks[i],
+                    pk_map.clone(),
+                    sender,
+                    Arc::new(AvssWrappedMessage::rbc_wrap),
+                    Arc::new(AvssWrappedMessage::avss_wrap),
+                    Arc::new(AvssWrappedMessage::agreement_wrap),
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // Hand-craft a dealing exactly like an honest `AvssNode::init` would, except the
+        // victim's row is encrypted under an unrelated key — indistinguishable, from the
+        // victim's side, from a dealer that simply sent it garbage.
+        let secrets = vec![Fr::from(42)];
+        let ids: Vec<usize> = (1..=n).collect();
+        let shares: Vec<Vec<FeldmanShamirShare<Fr, G>>> =
+            FeldmanShamirShare::compute_shares_batch(&secrets, n, t, Some(&ids), &mut rng)
+                .unwrap();
+
+        let sk_d = Fr::rand(&mut rng);
+        let pk_d = G::generator() * sk_d;
+        let mut pk_d_bytes = Vec::new();
+        pk_d.serialize_compressed(&mut pk_d_bytes).unwrap();
+
+        let mut public_commitments = Vec::with_capacity(shares.len());
+        let mut encrypted_shares: Vec<Vec<Vec<u8>>> = vec![Vec::with_capacity(shares.len()); n];
+        for per_secret in &shares {
+            let commitment_bytes = per_secret[0]
+                .commitments
+                .iter()
+                .map(|c| {
+                    let mut b = Vec::new();
+                    c.serialize_compressed(&mut b).unwrap();
+                    b
+                })
+                .collect::<Vec<_>>();
+            public_commitments.push(commitment_bytes);
+
+            for (party_idx, share) in per_secret.iter().enumerate() {
+                let key = if party_idx == victim {
+                    kdf_from_point(&(pk_d * Fr::rand(&mut rng))) // wrong key
+                } else {
+                    kdf_from_point(&(pk_map[party_idx] * sk_d))
+                };
+                let mut pt = Vec::new();
+                share.feldmanshare.serialize_compressed(&mut pt).unwrap();
+                encrypted_shares[party_idx].push(encrypt(key, &pt, &mut rng).unwrap());
+            }
+        }
+
+        let session_id =
+            AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot(0, 0, 0), 999);
+        let msg = AvssMessage {
+            session_id,
+            dealer_pk: pk_d_bytes,
+            public_commitments,
+            encrypted_shares,
+        };
+
+        // Deliver the identical dealing directly to every node — `process` doesn't touch
+        // RBC on the success path, so this is equivalent to RBC having delivered it.
+        for i in 0..n {
+            nodes[i].process(msg.clone(), net[i].clone()).await.unwrap();
+        }
+
+        // --- Attack: a genuine self-Reveal over a row that is actually fine. ---
+        let attacker_k_id = pk_d * sks[attacker];
+        let mut attacker_k_id_bytes = Vec::new();
+        attacker_k_id
+            .serialize_compressed(&mut attacker_k_id_bytes)
+            .unwrap();
+        let attacker_proof = dleq_prove(
+            sks[attacker],
+            G::generator(),
+            pk_map[attacker],
+            pk_d,
+            attacker_k_id,
+            &mut rng,
+        )
+        .unwrap();
+        let fake_reveal = AvssAgreementMessage::Reveal {
+            session_id,
+            party_id: attacker,
+            k_id: attacker_k_id_bytes,
+            proof: attacker_proof,
+        };
+
+        for i in 0..n {
+            if i == attacker {
+                continue;
+            }
+            nodes[i]
+                .process_agreement(fake_reveal.clone(), net[i].clone())
+                .await
+                .unwrap();
+        }
+
+        for i in 0..n {
+            if i == attacker || i == victim {
+                continue; // victim's own row is genuinely bad; it has its own reasons to reveal
+            }
+            let agreement = nodes[i].agreement.lock().await;
+            let state = agreement.get(&session_id).unwrap();
+            assert!(
+                !state.sent_reveal,
+                "node {i} disclosed its own key in response to a gratuitous self-Reveal \
+                 from party {attacker}, whose row was actually fine"
+            );
+        }
+
+        // --- Sanity check: a Reveal over a genuinely broken row still gets legitimate
+        // help, so the fix above is a precise gate and not an overcorrection. ---
+        let victim_k_id = pk_d * sks[victim];
+        let mut victim_k_id_bytes = Vec::new();
+        victim_k_id
+            .serialize_compressed(&mut victim_k_id_bytes)
+            .unwrap();
+        let victim_proof = dleq_prove(
+            sks[victim],
+            G::generator(),
+            pk_map[victim],
+            pk_d,
+            victim_k_id,
+            &mut rng,
+        )
+        .unwrap();
+        let genuine_reveal = AvssAgreementMessage::Reveal {
+            session_id,
+            party_id: victim,
+            k_id: victim_k_id_bytes,
+            proof: victim_proof,
+        };
+
+        for i in 0..n {
+            if i == victim {
+                continue;
+            }
+            nodes[i]
+                .process_agreement(genuine_reveal.clone(), net[i].clone())
+                .await
+                .unwrap();
+        }
+
+        for i in 0..n {
+            if i == victim {
+                continue;
+            }
+            let agreement = nodes[i].agreement.lock().await;
+            let state = agreement.get(&session_id).unwrap();
+            assert!(
+                state.sent_reveal,
+                "node {i} did not help recover party {victim}'s genuinely broken row"
+            );
+        }
     }
 }
