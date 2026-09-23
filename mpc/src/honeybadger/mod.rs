@@ -2707,6 +2707,38 @@ pub enum ProtocolType {
     GfRandousha = 18,
     GfTriple = 19,
     GfMul = 20,
+    /// `PrssDaBitNode` and `EdaBitFilterNode` parent sessions.
+    ///
+    /// Carries **no wire traffic of its own**: PRSS daBit generation is local plus one Mod2
+    /// opening, which routes under [`Self::DaBitOpen`]. The `WrappedMessage::DaBit` variant it
+    /// once named is retained unreachable for wire-format stability.
+    DaBit = 21,
+    /// **RETIRED** with the dealt daBit protocol's `F`-side XOR fold, bit-ness products and
+    /// bucket XORs.
+    ///
+    /// Reserved, never reused and never renumbered: this enum is `#[repr(u8)]` and `from_u8` is a
+    /// wire contract, so re-pointing 22 at a different protocol would silently re-route an
+    /// upgraded peer's traffic. It is classified in `dn07::phase_of` like every other tag and is
+    /// routed nowhere.
+    DaBitMul = 22,
+    /// `Mod2Node::open` — the daBit's single degree-`t` `F`-side opening of
+    /// `c = S + 2r'' + r'_0`.
+    DaBitOpen = 23,
+    /// `EdaBitFilterNode::gf_mul` — the AND layers of the modulus-overflow (`r < p`) filter.
+    DaBitGfMul = 24,
+    /// `EdaBitFilterNode::gf_open` — the degree-`t` `K`-side opening of the overflow verdict.
+    DaBitGfOpen = 25,
+    /// `A2BNode::open` — the degree-`t` opening of the arithmetic mask `y = x - r`.
+    A2B = 26,
+    /// `A2BNode::gf_mul` — one session per AND layer/chunk of the A2B circuit.
+    A2BGfMul = 27,
+    /// `B2ANode::gf_open` — the single degree-`t` `K`-side opening of `c_i = x_i XOR r_i`.
+    B2A = 28,
+    /// `Dn07MulNode` — the `F`-side degree-`2t` opening behind a DN07 preprocessing
+    /// multiplication or exact-zero check. **Preprocessing only**; see `honeybadger::dn07`.
+    Dn07 = 29,
+    /// `GfDn07MulNode` — the `K`-side twin of [`ProtocolType::Dn07`]. **Preprocessing only.**
+    GfDn07 = 30,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -2739,6 +2771,16 @@ impl ProtocolTag for ProtocolType {
             18 => Some(Self::GfRandousha),
             19 => Some(Self::GfTriple),
             20 => Some(Self::GfMul),
+            21 => Some(Self::DaBit),
+            22 => Some(Self::DaBitMul),
+            23 => Some(Self::DaBitOpen),
+            24 => Some(Self::DaBitGfMul),
+            25 => Some(Self::DaBitGfOpen),
+            26 => Some(Self::A2B),
+            27 => Some(Self::A2BGfMul),
+            28 => Some(Self::B2A),
+            29 => Some(Self::Dn07),
+            30 => Some(Self::GfDn07),
             _ => None,
         }
     }
@@ -3010,6 +3052,69 @@ mod tests {
         assert_eq!(max_mul_pairs_per_session(1), 256);
         assert_eq!(max_mul_pairs_per_session(2), 384);
         assert_eq!(max_mul_pairs_per_session(3), 512);
+    }
+
+    /// Every tag in the enum must round-trip through `from_u8`.
+    ///
+    /// A variant present in `ProtocolType` but missing from `from_u8` does not fail loudly: it
+    /// resolves to `None` and every message carrying it lands in a dispatch `_ => warn!("Unknown
+    /// protocol ID")` arm and is silently dropped, so the protocol simply never completes. This
+    /// pins the two halves together for the eight conversion tags as well as the twenty-one that
+    /// came before them.
+    #[test]
+    fn every_protocol_tag_round_trips_through_from_u8() {
+        let all = [
+            ProtocolType::None,
+            ProtocolType::Randousha,
+            ProtocolType::Ransha,
+            ProtocolType::Input,
+            ProtocolType::Rbc,
+            ProtocolType::Triple,
+            ProtocolType::BatchRecon,
+            ProtocolType::Dousha,
+            ProtocolType::Mul,
+            ProtocolType::PRandInt,
+            ProtocolType::GfRansha,
+            ProtocolType::RandBit,
+            ProtocolType::FpMul,
+            ProtocolType::Trunc,
+            ProtocolType::FpDivConst,
+            ProtocolType::ZeroSha,
+            ProtocolType::GfBatchRecon,
+            ProtocolType::GfDousha,
+            ProtocolType::GfRandousha,
+            ProtocolType::GfTriple,
+            ProtocolType::GfMul,
+            ProtocolType::DaBit,
+            ProtocolType::DaBitMul,
+            ProtocolType::DaBitOpen,
+            ProtocolType::DaBitGfMul,
+            ProtocolType::DaBitGfOpen,
+            ProtocolType::A2B,
+            ProtocolType::A2BGfMul,
+            ProtocolType::B2A,
+            ProtocolType::Dn07,
+            ProtocolType::GfDn07,
+        ];
+        for tag in all {
+            assert_eq!(
+                ProtocolType::from_u8(tag.to_u8()),
+                Some(tag),
+                "tag {tag:?} does not round-trip"
+            );
+        }
+        // Every assigned discriminant is covered, with no gap in the middle.
+        for value in 0u8..=30 {
+            assert!(
+                ProtocolType::from_u8(value).is_some(),
+                "discriminant {value} is unmapped"
+            );
+        }
+        // The first unassigned discriminant stays unmapped, so a stale peer emitting it degrades
+        // to the "unknown protocol ID" warning rather than being routed somewhere. Move this
+        // number when a tag is added, and add the tag to `all` above in the same edit — the two
+        // together are what keep `from_u8` and the enum from drifting apart.
+        assert!(ProtocolType::from_u8(31).is_none());
     }
 
     /// The GF(2^k) multiplication track's chunking figures.

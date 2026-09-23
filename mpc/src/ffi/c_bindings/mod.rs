@@ -123,6 +123,20 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::GfRandousha => ProtocolType::None,
             crate::honeybadger::ProtocolType::GfTriple => ProtocolType::None,
             crate::honeybadger::ProtocolType::GfMul => ProtocolType::None,
+            // Share-conversion tags (daBit generation, A2B, B2A) are likewise internal to the
+            // node for now and carry no SDK-facing surface.
+            crate::honeybadger::ProtocolType::DaBit => ProtocolType::None,
+            crate::honeybadger::ProtocolType::DaBitMul => ProtocolType::None,
+            crate::honeybadger::ProtocolType::DaBitOpen => ProtocolType::None,
+            crate::honeybadger::ProtocolType::DaBitGfMul => ProtocolType::None,
+            crate::honeybadger::ProtocolType::DaBitGfOpen => ProtocolType::None,
+            crate::honeybadger::ProtocolType::A2B => ProtocolType::None,
+            crate::honeybadger::ProtocolType::A2BGfMul => ProtocolType::None,
+            crate::honeybadger::ProtocolType::B2A => ProtocolType::None,
+            // DN07 preprocessing multiplication is internal to the node and is preprocessing-only
+            // by construction; there is deliberately no SDK-facing way to name it.
+            crate::honeybadger::ProtocolType::Dn07 => ProtocolType::None,
+            crate::honeybadger::ProtocolType::GfDn07 => ProtocolType::None,
         }
     }
 }
