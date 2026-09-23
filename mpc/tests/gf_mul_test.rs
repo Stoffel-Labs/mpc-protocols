@@ -5,11 +5,15 @@ mod tests {
     use std::{collections::HashMap, sync::Arc, time::Duration};
     use stoffelcrypto::{
         common::{
-            gf2k::field::BinaryField, gf2k::field::Gf256, gf2k::share::GfShare, ProtocolSessionId,
+            gf2k::field::BinaryField,
+            gf2k::field::Gf256,
+            gf2k::share::{GfShare, GfShareWire},
+            ProtocolSessionId,
         },
         honeybadger::{
-            gf_mul::gf_multiplication::GfMultiply, gf_triple_gen::GfBeaverTriple, ProtocolType,
-            SessionId, WrappedMessage,
+            gf_mul::{gf_multiplication::GfMultiply, GfMultReconstructionMessage, OpeningPolicy},
+            gf_triple_gen::GfBeaverTriple,
+            ProtocolType, SessionId, WrappedMessage,
         },
     };
     use stoffelmpc_network::fake_network::{FakeNetworkConfig, SenderId};
@@ -61,6 +65,23 @@ mod tests {
     // node -> route both batch-recon and direct-open (remainder) traffic -> collect results ->
     // compare against x*y.
     async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
+        mul_e2e_with(n_parties, t, no_of_mul, OpeningPolicy::Batched, &[]).await
+    }
+
+    /// [`mul_e2e`] under an explicit [`OpeningPolicy`], with `corrupt` naming parties whose
+    /// direct-open shares are tampered with in flight.
+    ///
+    /// Tampering is applied at every recipient, which is the strongest form: one corrupt sender
+    /// broadcasting a share off the polynomial to everyone at once. `id` and `degree` are left
+    /// alone deliberately — `process` rejects a mismatch on either, so altering them would test
+    /// the sender-authentication check rather than the robustness of the decode.
+    async fn mul_e2e_with(
+        n_parties: usize,
+        t: usize,
+        no_of_mul: usize,
+        policy: OpeningPolicy,
+        corrupt: &[usize],
+    ) {
         setup_tracing();
         use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork};
 
@@ -96,7 +117,7 @@ mod tests {
         }
 
         let mut mul_nodes: Vec<_> = (0..n_parties)
-            .map(|id| GfMultiply::<Gf256>::new(id, n_parties, t).unwrap())
+            .map(|id| GfMultiply::<Gf256>::new_with_policy(id, n_parties, t, policy).unwrap())
             .collect();
 
         for i in 0..n_parties {
@@ -113,11 +134,17 @@ mod tests {
         }
         info!("nodes initialized");
 
+        // Proves the tamper really fired. Without it a typo in the corruption path would make the
+        // robustness test pass by never attacking anything.
+        let tampered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
         let mut set = JoinSet::new();
         for node in &mul_nodes {
             let mut mul_node = node.clone();
             let receiver = std::mem::take(&mut receivers[node.id]);
             let net_clone = network[node.id].clone();
+            let corrupt: Vec<usize> = corrupt.to_vec();
+            let tampered = Arc::clone(&tampered);
             let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = receiver
                 .into_iter()
                 .enumerate()
@@ -136,9 +163,31 @@ mod tests {
                     };
                     match &wrapped {
                         WrappedMessage::GfMult(msg) => {
-                            if let Err(e) = mul_node
-                                .process(msg.sender, msg.session_id, msg.payload.clone())
-                                .await
+                            let payload = if corrupt.contains(&msg.sender) {
+                                let inner: GfMultReconstructionMessage<Gf256> =
+                                    bincode::deserialize(&msg.payload)
+                                        .expect("direct-open payload");
+                                // Off the polynomial. The index and degree are no longer on the
+                                // wire to touch — the receiver derives them from the
+                                // authenticated sender and its own threshold — so the tampered
+                                // body is still attributed to this sender at the right degree
+                                // and reaches the decoder as a genuine error symbol.
+                                let bump = |w: &GfShareWire<Gf256>| {
+                                    GfShareWire::from_elements(
+                                        w.elements().iter().map(|&e| e + Gf256(1)).collect(),
+                                    )
+                                };
+                                let inner = GfMultReconstructionMessage::<Gf256> {
+                                    a_sub_x: bump(&inner.a_sub_x),
+                                    b_sub_y: bump(&inner.b_sub_y),
+                                };
+                                tampered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                bincode::serialize(&inner).expect("reserialize")
+                            } else {
+                                msg.payload.clone()
+                            };
+                            if let Err(e) =
+                                mul_node.process(msg.sender, msg.session_id, payload).await
                             {
                                 warn!("direct open processing error: {e}");
                             }
@@ -163,8 +212,15 @@ mod tests {
         }
         info!("receiver task spawned");
 
+        // Only honest parties owe an output: guaranteed output delivery is a promise to them.
+        let honest: Vec<usize> = (0..n_parties).filter(|p| !corrupt.contains(p)).collect();
+        assert!(
+            honest.len() >= 2 * t + 1,
+            "test must leave at least 2t+1 honest parties"
+        );
+
         let mut final_results = HashMap::<usize, Vec<GfShare<Gf256>>>::new();
-        for i in 0..n_parties {
+        for &i in &honest {
             let node = &mul_nodes[i];
             let final_shares = node
                 .wait_for_result(session_id, Duration::from_millis(1500))
@@ -179,8 +235,15 @@ mod tests {
             final_results.insert(node.id, final_shares);
         }
 
+        if !corrupt.is_empty() {
+            assert!(
+                tampered.load(std::sync::atomic::Ordering::Relaxed) > 0,
+                "no direct-open message was actually tampered with - the attack never fired"
+            );
+        }
+
         let mut per_multiplication_shares: Vec<Vec<GfShare<Gf256>>> = vec![Vec::new(); no_of_mul];
-        for pid in 0..n_parties {
+        for &pid in &honest {
             for i in 0..no_of_mul {
                 per_multiplication_shares[i].push(final_results.get(&pid).unwrap()[i].clone());
             }
@@ -212,5 +275,79 @@ mod tests {
     async fn gf_mul_e2e_only_remainder() {
         // 0x batch recon (no full chunk), 1x direct-open for the residue 3
         mul_e2e(10, 3, 3).await;
+    }
+
+    #[tokio::test]
+    async fn direct_policy_opens_a_whole_wave_all_to_all() {
+        // `OpeningPolicy::Direct` routes every value through the one-round path, including the
+        // full `t+1`-chunks that `Batched` would have packed into a batch reconstruction. 12 is a
+        // clean multiple of `t+1 = 4`, so under `Batched` the direct path would carry *nothing* —
+        // which is exactly why this is the case that pins the policy rather than the remainder.
+        let batched = OpeningPolicy::Batched.plan(10, 3, 12);
+        assert_eq!((batched.batched, batched.direct), (12, 0));
+        let direct = OpeningPolicy::Direct.plan(10, 3, 12);
+        assert_eq!((direct.batched, direct.direct), (0, 12));
+        mul_e2e_with(10, 3, 12, OpeningPolicy::Direct, &[]).await;
+    }
+
+    #[tokio::test]
+    async fn auto_sends_a_narrow_wave_direct_at_every_party_count() {
+        // The crossover is a **width**, not a threshold. A 12-wide wave is far below it at every
+        // `n` the crate is measured at, so `Auto` opens it in one round — including at `n = 10`,
+        // where the rule this replaced (`Direct` only at `t <= 1`) batched it into two rounds and
+        // 4n*49 = 1960 bytes/party against the direct path's 10*(52+24) = 760.
+        for (n, t) in [(4usize, 1usize), (7, 2), (10, 3), (13, 4)] {
+            let plan = OpeningPolicy::Auto.plan(n, t, 12);
+            assert_eq!((plan.batched, plan.direct), (0, 12), "n={n}");
+            assert_eq!(plan.rounds(), 1, "n={n}");
+        }
+        mul_e2e_with(4, 1, 8, OpeningPolicy::Auto, &[]).await;
+        mul_e2e_with(10, 3, 12, OpeningPolicy::Auto, &[]).await;
+    }
+
+    #[tokio::test]
+    async fn auto_batches_a_wide_wave_and_pads_its_last_group() {
+        // Past the crossover `Auto` batches — and never sends the sub-`t+1` remainder directly,
+        // which is the traffic that used to be 31% of A2B's online bytes at `n = 13` for 0.8% of
+        // its multiplications. 250 is past the crossover at `t = 3` (238) and is not a multiple
+        // of `t+1 = 4`, so this is the padding case: 252 values handed to batch reconstruction,
+        // the last two duplicates, 250 real ones returned.
+        let plan = OpeningPolicy::Auto.plan(10, 3, 250);
+        assert_eq!((plan.batched, plan.padded, plan.direct), (250, 252, 0));
+        assert_eq!(plan.rounds(), 2);
+        // The e2e run is the assertion that matters: it checks all 250 products, so a padding
+        // value that survived into the output, or a truncation that dropped a real one, is a
+        // wrong answer here rather than a silent shift. Corruption is not layered on top because
+        // this plan puts no direct-open message on the wire at all, which is the point of it —
+        // `mul_e2e_with`'s adversary tampers with direct messages and would never fire.
+        mul_e2e_with(10, 3, 250, OpeningPolicy::Auto, &[]).await;
+    }
+
+    #[tokio::test]
+    async fn direct_openings_are_robust_against_t_corrupt_openers() {
+        // The point of keeping the direct path at degree `t`: it is ROBUST, not detect-and-abort.
+        // Three corrupt parties send shares off the polynomial to everyone, and the honest seven
+        // must still finish with the right product and no abort - guaranteed output delivery.
+        //
+        // This is also the tightest possible OEC case, and the reason `process` must re-attempt
+        // the decode on every arrival rather than propagate the first failure: with `e = t = 3`
+        // errors, unique decoding needs `m >= (t+1) + 2e = 10` received shares, so every attempt
+        // at `m = 7, 8, 9` fails and only the one at `m = n = 10` succeeds.
+        //
+        // The corrupt parties are the *low* indices on purpose. The fan-in delivers roughly in
+        // sender order, so corrupting 0..2 puts all three error symbols inside the first `2t+1`
+        // arrivals and forces those failing attempts to happen; corrupting the high indices
+        // instead lets the first `2t+1` be all honest and the decode succeeds immediately,
+        // which passes without ever exercising the retry.
+        mul_e2e_with(10, 3, 12, OpeningPolicy::Direct, &[0, 1, 2]).await;
+    }
+
+    #[tokio::test]
+    async fn direct_openings_are_robust_at_n4() {
+        // The same argument at the party count where `Auto` opens directly at every width:
+        // `e = t = 1`, unique decoding needs `m >= 2 + 2 = 4 = n`, so again only the final
+        // arrival decodes. `Auto` here rather than `Direct` so this covers the configuration a
+        // four-party deployment actually gets without asking for it.
+        mul_e2e_with(4, 1, 8, OpeningPolicy::Auto, &[0]).await;
     }
 }

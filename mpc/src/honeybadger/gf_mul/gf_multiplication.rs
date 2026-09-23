@@ -3,10 +3,20 @@
 //! `(a, b, a*b)` and shares `[x]`, `[y]`, compute `d = a-x`, `e = b-y`, open both, then
 //! `[xy] = [a*b] - d*e - d*[y] - e*[x]`.
 //!
-//! Opening happens two ways: batch reconstruction (via [`GfBatchReconNode`]) for however many
-//! full `t+1`-chunks fit, and — for whatever doesn't fit evenly — direct point-to-point
-//! broadcast reconstructed robustly via `GfShare::recover_secret` (tolerating up to `t` bad
-//! shares among the received ones, so no RBC agreement is needed here either).
+//! Opening happens two ways: batch reconstruction (via [`GfBatchReconNode`]) over two rounds at
+//! `4n * (48 + ceil(w/(t+1)))` bytes per party for a wave of `w`, and direct point-to-point
+//! broadcast over one at `n * (52 + 2w)`, reconstructed robustly via `GfShare::recover_secret`
+//! (tolerating up to `t` bad shares among the received ones, so no RBC agreement is needed here
+//! either).
+//!
+//! Which one a given wave takes is [`OpeningPolicy`], not a fixed rule. Historically the split
+//! was hard-wired — full `t+1`-chunks batched, the sub-`t+1` remainder direct — and that is still
+//! [`OpeningPolicy::Batched`]. The default is [`OpeningPolicy::Auto`], which evaluates the two
+//! costs above at this wave's own width and takes the direct path while it is no more expensive
+//! than the batched one plus one round's allowance; when it does batch, it pads the last group
+//! rather than sending a remainder directly. Both paths open at degree `t` and both are robust
+//! and asynchronous; see [`OpeningPolicy`] for the model, for where each of its constants was
+//! measured, and for why a degree-`2t` opening must never be routed this way.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,7 +38,8 @@ use crate::common::session_store::{Admission, SessionStore};
 use crate::honeybadger::gf_batch_recon::gf_batch_recon::GfBatchReconNode;
 use crate::honeybadger::gf_batch_recon::GfBatchReconError;
 use crate::honeybadger::gf_mul::{
-    GfMulError, GfMultMessage, GfMultReconstructionMessage, GfMultStorage,
+    GfMulError, GfMultMessage, GfMultReconstructionMessage, GfMultStorage, OpeningPlan,
+    OpeningPolicy,
 };
 use crate::honeybadger::gf_triple_gen::GfBeaverTriple;
 use crate::honeybadger::mul::MultProtocolState;
@@ -58,15 +69,26 @@ fn concat_sorted<K: BinaryField>(map: &HashMap<u8, Vec<K>>) -> Vec<K> {
 
 // requires that GfMultiply::init has been called before and all chunks and remainder shares have
 // been received
-fn finalize_mul<K: BinaryField>(storage: &GfMultStorage<K>) -> Result<Vec<GfShare<K>>, GfMulError> {
+//
+// `batched` is [`OpeningPlan::batched`] — the number of *real* values in the batched run. The
+// batch-reconstruction child was handed `padded >= batched` of them, the tail being duplicates
+// that fill the last `t+1` group, and it opens every one it was given. Those duplicates are
+// dropped here, before the directly-opened values are appended, so the concatenation is the
+// wave's own order: batched values first, direct remainder after.
+fn finalize_mul<K: BinaryField>(
+    storage: &GfMultStorage<K>,
+    batched: usize,
+) -> Result<Vec<GfShare<K>>, GfMulError> {
     assert!(storage.openings.is_some()); // always ensured by the caller
 
     let openings = storage.openings.as_ref().unwrap();
 
     let mut concatenated_mult1: Vec<K> = concat_sorted(&storage.output_open_mult1);
+    concatenated_mult1.truncate(batched);
     concatenated_mult1.extend(openings.0.clone());
 
     let mut concatenated_mult2: Vec<K> = concat_sorted(&storage.output_open_mult2);
+    concatenated_mult2.truncate(batched);
     concatenated_mult2.extend(openings.1.clone());
 
     let expected_len = storage.share_mult_from_triple.len();
@@ -157,12 +179,33 @@ pub struct GfMultiply<K: BinaryField> {
         Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<GfMultStorage<K>>>)>>>,
     pub batch_recon: GfBatchReconNode<K>,
     pub batch_output: Arc<Mutex<Receiver<SessionId>>>,
+    /// Whether a wave of `(a-x)`/`(b-y)` openings is packed into a two-round batch reconstruction
+    /// or sent directly all-to-all in one round. See [`OpeningPolicy`]: it is a bytes-for-rounds
+    /// trade at a fixed degree `t`, never a change of threat model, and it is a pure function of
+    /// `(self.n, self.t, wave length)` so every honest party splits identically.
+    policy: OpeningPolicy,
 }
 
 const MAX_GF_MUL_SESSIONS: usize = 1024;
 
 impl<K: BinaryField> GfMultiply<K> {
     pub fn new(id: PartyId, n: usize, threshold: usize) -> Result<Self, GfMulError> {
+        Self::new_with_policy(id, n, threshold, OpeningPolicy::default())
+    }
+
+    /// [`GfMultiply::new`] under an explicit [`OpeningPolicy`].
+    ///
+    /// The policy is a **public deployment parameter**: every party must select the same one, for
+    /// the same reason every party must select the same prefix-adder topology. A split policy is
+    /// *detected* rather than silent — the parties that batched are waiting on a batch-recon
+    /// session the parties that went direct never opened — but it is a configuration error, and a
+    /// stall rather than a wrong answer.
+    pub fn new_with_policy(
+        id: PartyId,
+        n: usize,
+        threshold: usize,
+        policy: OpeningPolicy,
+    ) -> Result<Self, GfMulError> {
         let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(200);
         let batch_recon = GfBatchReconNode::<K>::new(id, n, threshold, threshold, batch_sender)?;
         Ok(Self {
@@ -172,7 +215,21 @@ impl<K: BinaryField> GfMultiply<K> {
             mult_storage: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             batch_recon,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
+            policy,
         })
+    }
+
+    /// The opening policy in force. Read it rather than re-deriving the split anywhere else: the
+    /// one place the prefix length is computed is [`OpeningPolicy::batched_prefix`], and `init`
+    /// and `process` must agree on it exactly.
+    pub fn opening_policy(&self) -> OpeningPolicy {
+        self.policy
+    }
+
+    /// How this node splits a wave of `len` openings. The one place the split is decided; every
+    /// other site calls this so `init` and `process` cannot drift apart.
+    fn plan(&self, len: usize) -> OpeningPlan {
+        self.policy.plan(self.n, self.t, len)
     }
 
     pub async fn drain_batch_recon_output(&mut self) -> Result<(), GfMulError> {
@@ -209,7 +266,11 @@ impl<K: BinaryField> GfMultiply<K> {
             match store.get(&session_id) {
                 Some(storage) => {
                     let storage = storage.2.lock().await;
-                    storage.no_of_mul.unwrap_or(0) / (self.t + 1)
+                    // Via `plan`, not `no_of_mul / (t+1)`: under `OpeningPolicy::Direct` no
+                    // batch-recon child was ever minted, and under a padding policy the child was
+                    // minted for a *padded* count. Cleaning up a session that does not exist is
+                    // how a store leak gets mistaken for a store that was tidied.
+                    self.plan(storage.no_of_mul.unwrap_or(0)).groups(self.t)
                 }
                 None => return false,
             }
@@ -265,8 +326,11 @@ impl<K: BinaryField> GfMultiply<K> {
         assert_eq!(session_id.round_id(), 0);
 
         let no_of_mul = x.len();
-        let no_of_batch = no_of_mul / (self.t + 1);
-        let share_len = x.len() % (self.t + 1);
+        // The one place the batched/direct split is decided. `process` re-derives it from the
+        // same `(policy, n, t, no_of_mul)` and must reach the same answer, so both call `plan`.
+        let plan = self.plan(no_of_mul);
+        let share_len = plan.direct;
+        let no_of_batch = plan.groups(self.t);
 
         let storage_bind = match self.get_or_create_mult_storage(session_id, self.id).await {
             Some(s) => s,
@@ -275,9 +339,9 @@ impl<K: BinaryField> GfMultiply<K> {
         let mut storage = storage_bind.lock().await;
 
         // Batch reconstruction is batched: one session for all a-x values (dealer/sub_id 0) and
-        // one for all b-y values (dealer/sub_id 1). When there are no full (t+1)-chunks
-        // (no_of_batch == 0), everything goes through the direct-open remainder path and these
-        // are vacuously satisfied.
+        // one for all b-y values (dealer/sub_id 1). When `no_of_batch == 0` - either because the
+        // wave is shorter than `t+1`, or because the policy sent all of it direct - everything
+        // goes through the direct-open path and these are vacuously satisfied.
         let have_batch_recon1 = no_of_batch == 0 || storage.output_open_mult1.contains_key(&0u8);
         let have_batch_recon2 = no_of_batch == 0 || storage.output_open_mult2.contains_key(&1u8);
 
@@ -302,7 +366,7 @@ impl<K: BinaryField> GfMultiply<K> {
         }
 
         if have_batch_recon1 && have_batch_recon2 && storage.openings.is_some() {
-            let shares_mult = finalize_mul(&storage)?;
+            let shares_mult = finalize_mul(&storage, plan.batched)?;
 
             storage.protocol_state = MultProtocolState::Finished;
             if let Some(sender) = storage.output_sender.take() {
@@ -326,9 +390,26 @@ impl<K: BinaryField> GfMultiply<K> {
             .map(|(y, triple)| triple.b.clone() - y.clone())
             .collect::<Result<Vec<GfShare<K>>, crate::common::share::ShareError>>()?;
 
-        let split_at = a_sub_x.len() - share_len;
-        let (a_full, remaining_a) = a_sub_x.split_at(split_at);
-        let (b_full, remaining_b) = b_sub_y.split_at(split_at);
+        // `plan.batched` by construction: `plan.direct` is the rest of the same split.
+        let (a_batched, remaining_a) = a_sub_x.split_at(plan.batched);
+        let (b_batched, remaining_b) = b_sub_y.split_at(plan.batched);
+
+        // `init_batch_reconstruct_many` takes a non-empty multiple of `t+1`, so a plan whose
+        // batched run ends mid-group fills it out with duplicates of that run's last share —
+        // exactly as `A2BNode::open_f` and `mul_pub` pad theirs. A duplicate is information-free:
+        // it opens to a value this same wave is already opening, and it is a genuine degree-`t`
+        // sharing, so the group stays decodable by the same OEC bound as the rest. The padding is
+        // a function of `(policy, n, t, len)` alone, so every honest party appends the same count
+        // and `finalize_mul` drops the same tail.
+        let mut a_full = a_batched.to_vec();
+        let mut b_full = b_batched.to_vec();
+        for _ in 0..plan.pad() {
+            // `plan.pad() > 0` implies `plan.batched > 0`, so both runs are non-empty here.
+            a_full.push(a_batched[plan.batched - 1].clone());
+            b_full.push(b_batched[plan.batched - 1].clone());
+        }
+        debug_assert_eq!(a_full.len(), plan.padded);
+        debug_assert_eq!(b_full.len(), plan.padded);
 
         let need_direct_open = storage.openings.is_none();
 
@@ -344,7 +425,7 @@ impl<K: BinaryField> GfMultiply<K> {
                 session_id.instance_id(),
             );
             self.batch_recon
-                .init_batch_reconstruct_many(a_full, session_id1, Arc::clone(&network))
+                .init_batch_reconstruct_many(&a_full, session_id1, Arc::clone(&network))
                 .await?;
         }
 
@@ -355,7 +436,7 @@ impl<K: BinaryField> GfMultiply<K> {
                 session_id.instance_id(),
             );
             self.batch_recon
-                .init_batch_reconstruct_many(b_full, session_id2, Arc::clone(&network))
+                .init_batch_reconstruct_many(&b_full, session_id2, Arc::clone(&network))
                 .await?;
         }
 
@@ -473,6 +554,26 @@ impl<K: BinaryField> GfMultiply<K> {
             }
 
             let open_message: GfMultReconstructionMessage<K> = deser_bounded(&payload)?;
+            // Locally-derived expected size, not the sender's claim. Once `init` has run this
+            // node knows exactly how many values the direct path carries, and a peer that claims
+            // a different number is rejected outright rather than parked in its slot to be
+            // skipped later by `reconstruct_remainder`. It matters more under
+            // `OpeningPolicy::Direct`, where the direct path carries the whole wave instead of a
+            // sub-`t+1` tail: a wrong-length message would otherwise occupy that sender's one
+            // slot, and the duplicate guard above would then drop the correct message behind it.
+            // Before `init` the expected length is not yet known, and `reconstruct_remainder`'s
+            // own length check remains the backstop for anything buffered until then.
+            if let Some(no_of_mul) = storage.no_of_mul {
+                let expected = self.plan(no_of_mul).direct;
+                if open_message.a_sub_x.len() != expected || open_message.b_sub_y.len() != expected
+                {
+                    return Err(GfMulError::InvalidInput(format!(
+                        "Sender {sender} sent {}/{} direct-open shares, expected {expected} of each",
+                        open_message.a_sub_x.len(),
+                        open_message.b_sub_y.len()
+                    )));
+                }
+            }
             // Evaluation index and degree are DERIVED, not read: `sender` is the transport
             // party id that `HoneyBadgerMPCNode::process_message` has already matched against
             // the envelope's `sender` field, and `self.t` is this session's opening degree.
@@ -488,8 +589,9 @@ impl<K: BinaryField> GfMultiply<K> {
             // init not called yet: buffer-only mode
             return Ok(());
         };
-        let no_of_batch = no_of_mul / (self.t + 1);
-        let share_len = no_of_mul % (self.t + 1);
+        let plan = self.plan(no_of_mul);
+        let share_len = plan.direct;
+        let no_of_batch = plan.groups(self.t);
 
         if storage.received_shares.len() >= 2 * self.t + 1 && storage.openings.is_none() {
             // `share_len != 0`, since some honest nodes have sent us their shares.
@@ -527,7 +629,7 @@ impl<K: BinaryField> GfMultiply<K> {
             return Ok(());
         }
 
-        let shares_mult = finalize_mul(&storage)?;
+        let shares_mult = finalize_mul(&storage, plan.batched)?;
 
         storage.protocol_state = MultProtocolState::Finished;
         if let Some(sender) = storage.output_sender.take() {
