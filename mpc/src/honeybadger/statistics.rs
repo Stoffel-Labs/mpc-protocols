@@ -472,12 +472,20 @@ pub(crate) fn record_received(msg: &WrappedMessage, counts: &DirectionalMsgCount
         WrappedMessage::Output(_) => {
             counts.output.fetch_add(1, RELAX);
         }
-        WrappedMessage::PRandBitD(_) => {
-            counts.prand_bit_d.fetch_add(1, RELAX);
-        }
-        WrappedMessage::PRandBitDEcho(_) => {
-            counts.prand_bit_d_echo.fetch_add(1, RELAX);
-        }
+        // Not yet broken out into their own counters. Listed **explicitly** rather than swept up
+        // by a `_` arm: `WrappedMessage` is an unversioned bincode enum whose variant order is the
+        // wire format, and this exhaustive match is the only compile-time forcing function that
+        // makes someone appending a variant come back here. A `_` arm would silently under-count
+        // every future protocol, which is how this table drifted out of date in the first place.
+        WrappedMessage::PRandInt(_)
+        | WrappedMessage::Mult(_)
+        | WrappedMessage::Trunc(_)
+        | WrappedMessage::ZeroSha(_)
+        | WrappedMessage::GfRansha(_)
+        | WrappedMessage::GfBatchRecon(_)
+        | WrappedMessage::GfDousha(_)
+        | WrappedMessage::GfRanDouSha(_)
+        | WrappedMessage::GfMult(_) => {}
     }
 }
 
