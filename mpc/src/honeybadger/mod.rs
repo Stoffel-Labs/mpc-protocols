@@ -1472,6 +1472,19 @@ where
                     }
                 }
             }
+            // UNREACHABLE by design. This variant belonged to the dealt daBit protocol, which
+            // PRSS daBits replaced; nothing sends one any more. The variant itself stays because
+            // `WrappedMessage` is an unversioned `bincode` enum whose variant *order* is the wire
+            // format — deleting it would silently renumber every variant after it, i.e. re-label
+            // A2B traffic as B2A traffic on an upgraded peer. Receiving one is therefore a peer
+            // sending retired traffic: it is dropped with a warning, never routed.
+            WrappedMessage::DaBit(dabit_msg) => {
+                warn!(
+                    ?sender_id,
+                    session_id = ?dabit_msg.session_id,
+                    "dropping a message for the retired dealt daBit protocol"
+                );
+            }
         }
 
         Ok(())
@@ -3283,7 +3296,75 @@ pub(crate) fn gf_mul_pipeline_depth(n_parties: usize) -> usize {
     (MAX_GF_BATCH_RECON_SESSIONS / n_parties.max(1) / 2).max(1)
 }
 
-///Used for routing messages to respective sub-protocols
+/// Used for routing messages to respective sub-protocols.
+///
+/// # Wire-format contract
+///
+/// This enum is serialized by `bincode` **without a version tag**, so two things are the wire
+/// format and neither can change silently:
+///
+/// 1. **The variant order**, which is the discriminant. New variants go at the very end, never
+///    in the middle; a retired one stays in place rather than being removed. See
+///    [`WrappedMessage::DaBit`], which is kept unreachable for exactly this reason.
+/// 2. **The byte shape of each variant's payload.** A peer that agrees on the discriminant but
+///    disagrees on the payload shape mis-parses rather than failing to decode.
+///
+/// ## Breaking changes on this branch, against `main`
+///
+/// This branch is already a deliberate wire reset against `main` and does not interoperate with
+/// it. Two independent breaks, recorded together so neither is discovered on a network:
+///
+/// * **Discriminants.** [`ProtocolType`] 10, 15, 16, 17 and 18 name different protocols than on
+///   `main` (`PRandBit` → `GfRansha`, `TripleSmallField` → `ZeroSha`, `RanShaSmallField` →
+///   `GfBatchRecon`, `RanDouShaSmallField` → `GfDousha`, `DouShaSmallField` → `GfRandousha`),
+///   and `WrappedMessage` itself is rewritten from position 8 onward. The retired protocols have
+///   no code left in the tree. A `main` node and a node from this branch will **mis-route** each
+///   other's traffic rather than reject it.
+/// * **Share payload shape** (this change). The two direct point-to-point openings —
+///   [`WrappedMessage::Mult`] and [`WrappedMessage::GfMult`] — used to carry whole share structs:
+///   a `GfShare<K>` serialised to `element + id: usize + degree: usize` = 17 bytes for one byte
+///   of secret, a `ShamirShare<F, 1, P>` to 24 for eight. They now carry
+///   [`GfShareWire`](crate::common::gf2k::share::GfShareWire) /
+///   [`ShamirShareWire`](crate::common::ShamirShareWire): **bare field elements only**, one `u64`
+///   count per run. `id` and `degree` are absent from the wire and are re-derived by the receiver
+///   from the authenticated envelope `sender` and its own `threshold`; they are not merely
+///   smaller, they are unrepresentable, so a peer can no longer state either. Exact sizes, with
+///   `m` shares per run:
+///
+///   | payload | before | after |
+///   |---|---|---|
+///   | `GfMultReconstructionMessage` (GF(2^8)) | `16 + 34m` | `16 + 2m` |
+///   | `ReconstructionMessage` (Goldilocks) | `16 + 48m` | `16 + 16m` |
+///
+///   An old-format body reaching a new node is **rejected**, not misread: the count prefix and
+///   the locally-derived expected share count disagree. A new-format body reaching an old node is
+///   likewise refused. Nothing else moved — every other variant's payload is byte-identical, and
+///   `BatchReconMsg` / `GfBatchReconMsg` already carried bare elements and are untouched.
+///
+/// ## What still carries a whole share struct, and why it was left
+///
+/// The conversion above covers the two openings on the A2B/B2A critical path. Five payloads
+/// still ship `element + id + degree` per share and were **deliberately not converted** — all
+/// are off that path, none is measured in the conversion cost model, and converting them would
+/// churn their hand-built test payloads for no measurable byte:
+///
+/// | payload | per share | why it was left |
+/// |---|---|---|
+/// | [`WrappedMessage::Trunc`] ([`TruncPrMessage`]) | 24 B for 8 | `fpmul`, not a conversion path; one share per message, so the 16 B rides a 52 B frame |
+/// | [`WrappedMessage::Dousha`] (`DouShaPayload`) | 48 B per `(t, 2t)` pair | `F` dealt double sharing, superseded by DN07/PRSS on this branch |
+/// | [`WrappedMessage::GfRansha`] (`GfRanShaPayload`) | 17 B for 1 | dealt GF path; per-A2B traffic went `1390 -> 0` when PRSS keys landed |
+/// | [`WrappedMessage::GfDousha`] (`GfDouShaPayload`) | 34 B per pair | same |
+/// | [`WrappedMessage::GfRanDouSha`] (`GfReconstructionMessage`) | 34 B per pair | same |
+///
+/// The last three are the **perfect-privacy fallback**: a deployment that declines PRSS key
+/// setup is their only caller, and they are then un-amortised at 17–34 bytes per byte of secret.
+/// That fallback is not currently viable above `n = 4` for an unrelated liveness reason, so the
+/// encoding is not costing anyone bytes today — but anyone who fixes that must re-measure it
+/// before quoting a cost, and converting these is the same mechanical change made here.
+///
+/// [`WrappedMessage::DaBit`]'s `MaskShares` blob also still names `Vec<RobustShare<F>>` /
+/// `Vec<GfShare<K>>`: that variant is unreachable and its shape is frozen as part of the
+/// discriminant contract above.
 #[derive(Serialize, Deserialize, Debug)]
 pub enum WrappedMessage {
     RanDouSha(RanDouShaMessage),
@@ -3312,6 +3393,15 @@ pub enum WrappedMessage {
     GfRanDouSha(gf_ran_dou_sha::GfRanDouShaMessage),
     /// GF(2^k) equivalent of `Mult`, see `gf_mul`.
     GfMult(gf_mul::GfMultMessage),
+    /// **UNREACHABLE.** The dealt daBit protocol's point-to-point mask shares and RBC'd deltas.
+    /// PRSS daBits replaced it and put nothing of their own on the wire; the dispatcher drops this
+    /// variant with a warning instead of routing it.
+    ///
+    /// APPEND-ONLY: this enum is serialized by `bincode` without a version tag, so the *order* of
+    /// these variants is the wire format. New variants go at the very end, never in the middle —
+    /// and a retired one stays in place rather than being removed, which is why this is still
+    /// here.
+    DaBit(dabit::DaBitMessage),
 }
 
 impl WrappedMessage {

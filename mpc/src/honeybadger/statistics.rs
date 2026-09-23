@@ -485,7 +485,8 @@ pub(crate) fn record_received(msg: &WrappedMessage, counts: &DirectionalMsgCount
         | WrappedMessage::GfBatchRecon(_)
         | WrappedMessage::GfDousha(_)
         | WrappedMessage::GfRanDouSha(_)
-        | WrappedMessage::GfMult(_) => {}
+        | WrappedMessage::GfMult(_)
+        | WrappedMessage::DaBit(_) => {}
     }
 }
 
