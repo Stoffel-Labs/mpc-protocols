@@ -48,6 +48,7 @@
 //! The generation step itself no longer waits for anyone: PRSS is local, and the `Mod2` opening is
 //! degree-`t` robust, so it completes on `2t+1` honest shares with no timeout.
 
+pub mod edabit;
 pub mod prss_dabit;
 
 use ark_ff::PrimeField;
