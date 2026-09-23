@@ -1,4 +1,5 @@
 use crate::common::session_store::{Admission, SessionStore};
+use crate::common::ShamirShareWire;
 use crate::{
     common::{
         share::ShareError, utils::deser_bounded_vec, ProtocolSessionId, SecretSharingScheme,
@@ -378,8 +379,11 @@ impl<F: FftField> Multiply<F> {
         //    received ones, so this doesn't need RBC's reliable-broadcast agreement.
         if need_direct_open {
             // Reconstruct < t+1 values
+            // `self.id` and `self.t` are this node's own; `new` asserts every remainder share
+            // matches them and then drops both from the wire, so what goes out is bare field
+            // elements. The receiver re-derives the pair rather than reading it.
             let reconst_message =
-                ReconstructionMessage::new(remaining_a.to_vec(), remaining_b.to_vec());
+                ReconstructionMessage::new(remaining_a, remaining_b, self.id, self.t)?;
             let mut bytes_rec_message = Vec::new();
             reconst_message.serialize_compressed(&mut bytes_rec_message)?;
 
@@ -504,30 +508,21 @@ impl<F: FftField> Multiply<F> {
             }
 
             let mut r = payload.as_slice();
-            let a_sub_x = deser_bounded_vec::<RobustShare<F>>(&mut r, self.n)?;
-            let b_sub_y = deser_bounded_vec::<RobustShare<F>>(&mut r, self.n)?;
-            let open_message = ReconstructionMessage { a_sub_x, b_sub_y };
-            for share in open_message
-                .a_sub_x
-                .iter()
-                .chain(open_message.b_sub_y.iter())
-            {
-                if share.id != sender {
-                    return Err(MulError::InvalidInput(format!(
-                        "Invalid share id from sender {}",
-                        sender
-                    )));
-                }
-                if share.degree != self.t {
-                    return Err(MulError::InvalidInput(format!(
-                        "Invalid share degree from sender {}",
-                        sender
-                    )));
-                }
-            }
-            storage
-                .received_shares
-                .insert(sender, (open_message.a_sub_x, open_message.b_sub_y));
+            let open_message = ReconstructionMessage::<F> {
+                a_sub_x: ShamirShareWire::deserialize_bounded(&mut r, self.n)?,
+                b_sub_y: ShamirShareWire::deserialize_bounded(&mut r, self.n)?,
+            };
+            // Evaluation index and degree are DERIVED, not read: `sender` is the transport party
+            // id that `HoneyBadgerMPCNode::process_message` has already matched against the
+            // envelope's `sender` field, and `self.t` is this session's opening degree. Neither
+            // is on the wire, so neither can be claimed — this replaces the pair of
+            // `share.id != sender` / `share.degree != self.t` rejections the old encoding needed,
+            // and is strictly stronger: the inconsistency is now unrepresentable rather than
+            // caught. `into_shares` still rejects a body that is not a whole number of shares.
+            let (a_sub_x, b_sub_y) = open_message.into_shares(sender, self.t).map_err(|e| {
+                MulError::InvalidInput(format!("bad direct-open body from sender {sender}: {e}"))
+            })?;
+            storage.received_shares.insert(sender, (a_sub_x, b_sub_y));
         }
 
         // 3.
@@ -1108,8 +1103,13 @@ pub mod tests {
                 .expect("share subtraction failed");
 
             if shared_a_sub_x.len() > 0 && shared_b_sub_y.len() > 0 {
+                // `i`, not `mul_node.id`: this loop is simulating party `i` sending ITS
+                // remainder shares, and the message below is stamped `MultMessage::new(i, ..)`.
+                // The encoding's `(id, degree)` must be the sender's own, because that is what
+                // the receiver re-derives from the authenticated sender.
                 let rec_msg =
-                    ReconstructionMessage::new(shared_a_sub_x.to_vec(), shared_b_sub_y.to_vec());
+                    ReconstructionMessage::new(&shared_a_sub_x, &shared_b_sub_y, i, mul_node.t)
+                        .expect("party i's remainder shares are homogeneous at (i, t)");
                 let mut bytes_rec_msg = Vec::new();
                 rec_msg
                     .serialize_compressed(&mut bytes_rec_msg)

@@ -81,6 +81,104 @@ impl<K: BinaryField> GfShare<K> {
     }
 }
 
+/// The **wire** encoding of a run of [`GfShare<K>`] that all carry the same evaluation index and
+/// the same degree: the field elements, and nothing else.
+///
+/// # Why this type exists
+///
+/// `GfShare<K>` serialises under `bincode`'s fixint encoding to `1 + 8 + 8 = 17` bytes to carry
+/// **one** byte of secret. The 16 redundant bytes are:
+///
+/// - **`id`** — the sender's own evaluation index. It restates the authenticated transport
+///   sender, which every receiving handler already has and already checks the envelope's
+///   `sender` field against. A receiver must *reject* a mismatching `id` rather than believe it,
+///   so the field can never legitimately tell the receiver anything it did not already know.
+/// - **`degree`** — a session-wide constant fixed by the protocol (the node's own `threshold`,
+///   or `2 * threshold` for the degree-`2t` half of a double sharing). It cannot legitimately
+///   vary within a message, let alone within a session.
+///
+/// Both fields are attacker-controlled on the wire and neither is a proof of anything: a dealer
+/// writes them, nothing binds them to the share. Deleting them from the wire therefore removes
+/// two forgeable inputs as well as 16 bytes per share.
+///
+/// # Unrepresentable, not merely smaller
+///
+/// This struct has no `id` and no `degree` field, so a peer has no way to state either one.
+/// [`GfShareWire::encode`] refuses to build one from a batch that is not homogeneous at the
+/// *sender's own* `(id, degree)`, and [`GfShareWire::decode`] stamps the **receiver-derived**
+/// pair onto every element it returns. There is no code path by which a peer-supplied index or
+/// degree can reach a `GfShare`.
+///
+/// # Wire size
+///
+/// `8 + m` bytes for `m` shares under `bincode` fixint (`Vec`'s `u64` length prefix plus one
+/// `Gf256` byte each), against `8 + 17m` for a `Vec<GfShare<K>>`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(bound = "K: BinaryField", transparent)]
+pub struct GfShareWire<K: BinaryField> {
+    elements: Vec<K>,
+}
+
+impl<K: BinaryField> GfShareWire<K> {
+    /// Encodes `shares` for the wire, dropping `id`/`degree`.
+    ///
+    /// `id` and `degree` are the **sender's own**, passed explicitly rather than read off
+    /// `shares[0]`: the caller states what it believes it is sending and this rejects the batch
+    /// if the shares disagree, so a bug that mixes two dealers' or two degrees' shares into one
+    /// message fails here instead of being silently flattened onto the receiver's derivation.
+    ///
+    /// # Errors
+    /// - [`ShareError::IdMismatch`] if any share's `id` differs from `id`.
+    /// - [`ShareError::DegreeMismatch`] if any share's `degree` differs from `degree`.
+    pub fn encode(shares: &[GfShare<K>], id: usize, degree: usize) -> Result<Self, ShareError> {
+        for share in shares {
+            if share.id != id {
+                return Err(ShareError::IdMismatch);
+            }
+            if share.degree != degree {
+                return Err(ShareError::DegreeMismatch);
+            }
+        }
+        Ok(Self {
+            elements: shares.iter().map(|s| s.share).collect(),
+        })
+    }
+
+    /// Rebuilds `GfShare<K>`s from the wire, stamping the **receiver-derived** `id` and `degree`.
+    ///
+    /// `id` must be the authenticated transport sender's party id and `degree` the degree the
+    /// session fixes for this opening; neither may be taken from anything the peer sent. This is
+    /// infallible by construction — the values the old encoding could have disagreed with are no
+    /// longer on the wire to disagree.
+    pub fn decode(&self, id: usize, degree: usize) -> Vec<GfShare<K>> {
+        self.elements
+            .iter()
+            .map(|&share| GfShare::new(share, id, degree))
+            .collect()
+    }
+
+    /// Number of shares carried. Callers check this against a **locally derived** expectation.
+    pub fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+
+    /// The raw field elements, for callers that need no `GfShare` wrapper.
+    pub fn elements(&self) -> &[K] {
+        &self.elements
+    }
+
+    /// Builds a body straight from field elements, for callers that never held `GfShare`s.
+    ///
+    /// There is nothing to validate: elements are all this encoding carries.
+    pub fn from_elements(elements: Vec<K>) -> Self {
+        Self { elements }
+    }
+}
+
 impl<K: BinaryField> Add for GfShare<K> {
     type Output = Result<Self, ShareError>;
     fn add(self, other: Self) -> Self::Output {

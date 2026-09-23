@@ -1,5 +1,5 @@
 use crate::{
-    common::{rbc::RbcError, share::ShareError},
+    common::{rbc::RbcError, share::ShareError, ShamirShareWire},
     honeybadger::{
         batch_recon::BatchReconError,
         robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
@@ -132,19 +132,58 @@ impl MultMessage {
     }
 }
 
+/// Payload of a [`MultMessage`] carrying the remainder `(a-x)`/`(b-y)` shares directly.
+///
+/// The two runs ride as [`ShamirShareWire`]: bare field elements, with the sender's evaluation
+/// index and the opening degree **absent from the wire** rather than shipped and then checked.
+/// Both are re-derived by the receiver — the index from the authenticated envelope `sender` that
+/// `HoneyBadgerMPCNode` has already matched against the transport party id, the degree from the
+/// node's own `threshold`. See [`ShamirShareWire`] for why the dropped fields were never
+/// trustworthy; the `F` twin is [`GfMultReconstructionMessage`](crate::honeybadger::gf_mul::GfMultReconstructionMessage).
 #[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct ReconstructionMessage<F: FftField> {
-    pub a_sub_x: Vec<RobustShare<F>>,
-    pub b_sub_y: Vec<RobustShare<F>>,
+    pub a_sub_x: ShamirShareWire<F, 1>,
+    pub b_sub_y: ShamirShareWire<F, 1>,
 }
 
 impl<F> ReconstructionMessage<F>
 where
     F: FftField,
 {
-    /// Creates a message for the reconstruction phase.
-    pub fn new(a_sub_x: Vec<RobustShare<F>>, b_sub_y: Vec<RobustShare<F>>) -> Self {
-        Self { a_sub_x, b_sub_y }
+    /// Creates a message for the reconstruction phase from the sender's own remainder shares.
+    ///
+    /// `id` is the sender's party id and `degree` the opening degree (the node's `threshold`);
+    /// both are asserted against every share and then dropped.
+    ///
+    /// # Errors
+    /// [`ShareError`] if either run is not homogeneous at `(id, degree)`.
+    pub fn new(
+        a_sub_x: &[RobustShare<F>],
+        b_sub_y: &[RobustShare<F>],
+        id: usize,
+        degree: usize,
+    ) -> Result<Self, ShareError> {
+        Ok(Self {
+            a_sub_x: ShamirShareWire::encode(a_sub_x, id, degree)?,
+            b_sub_y: ShamirShareWire::encode(b_sub_y, id, degree)?,
+        })
+    }
+
+    /// Rebuilds the two runs of shares, stamping the **receiver-derived** `(id, degree)`.
+    ///
+    /// `id` must be the authenticated sender's party id, `degree` the receiver's own threshold.
+    ///
+    /// # Errors
+    /// [`ShareError::InvalidInput`] if either body is not a whole number of shares.
+    pub fn into_shares(
+        &self,
+        id: usize,
+        degree: usize,
+    ) -> Result<(Vec<RobustShare<F>>, Vec<RobustShare<F>>), ShareError> {
+        Ok((
+            self.a_sub_x.decode(id, degree)?,
+            self.b_sub_y.decode(id, degree)?,
+        ))
     }
 }
 

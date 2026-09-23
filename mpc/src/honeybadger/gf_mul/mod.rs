@@ -6,7 +6,12 @@ use thiserror::Error;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 use crate::{
-    common::{gf2k::field::BinaryField, gf2k::share::GfShare, gf2k::Gf2kError, share::ShareError},
+    common::{
+        gf2k::field::BinaryField,
+        gf2k::share::{GfShare, GfShareWire},
+        gf2k::Gf2kError,
+        share::ShareError,
+    },
     honeybadger::{gf_batch_recon::GfBatchReconError, mul::MultProtocolState, SessionId},
 };
 
@@ -105,15 +110,47 @@ impl GfMultMessage {
 }
 
 /// Payload of a [`GfMultMessage`] carrying the remainder `(a-x)`/`(b-y)` shares directly.
+///
+/// The two runs ride as [`GfShareWire`]: bare field elements, with the sender's evaluation index
+/// and the opening degree **absent from the wire** rather than shipped and then checked. Both are
+/// re-derived by the receiver — the index from the authenticated envelope `sender` that
+/// `HoneyBadgerMPCNode` has already matched against the transport party id, the degree from the
+/// node's own `threshold`. This is what makes the direct opening path cost `1` byte per share
+/// instead of `17`; see [`GfShareWire`] for why the dropped fields were never trustworthy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "K: BinaryField")]
 pub struct GfMultReconstructionMessage<K: BinaryField> {
-    pub a_sub_x: Vec<GfShare<K>>,
-    pub b_sub_y: Vec<GfShare<K>>,
+    pub a_sub_x: GfShareWire<K>,
+    pub b_sub_y: GfShareWire<K>,
 }
 
 impl<K: BinaryField> GfMultReconstructionMessage<K> {
-    pub fn new(a_sub_x: Vec<GfShare<K>>, b_sub_y: Vec<GfShare<K>>) -> Self {
-        Self { a_sub_x, b_sub_y }
+    /// Builds the message from the sender's own remainder shares.
+    ///
+    /// `id` is the sender's party id and `degree` the opening degree (the node's `threshold`);
+    /// both are asserted against every share and then dropped.
+    ///
+    /// # Errors
+    /// [`ShareError`] if either run is not homogeneous at `(id, degree)`.
+    pub fn new(
+        a_sub_x: &[GfShare<K>],
+        b_sub_y: &[GfShare<K>],
+        id: usize,
+        degree: usize,
+    ) -> Result<Self, ShareError> {
+        Ok(Self {
+            a_sub_x: GfShareWire::encode(a_sub_x, id, degree)?,
+            b_sub_y: GfShareWire::encode(b_sub_y, id, degree)?,
+        })
+    }
+
+    /// Rebuilds the two runs of shares, stamping the **receiver-derived** `(id, degree)`.
+    ///
+    /// `id` must be the authenticated sender's party id, `degree` the receiver's own threshold.
+    pub fn into_shares(&self, id: usize, degree: usize) -> (Vec<GfShare<K>>, Vec<GfShare<K>>) {
+        (
+            self.a_sub_x.decode(id, degree),
+            self.b_sub_y.decode(id, degree),
+        )
     }
 }

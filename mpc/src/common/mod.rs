@@ -105,6 +105,122 @@ pub struct ShamirShare<F: FftField, const N: usize, P> {
     pub _sharetype: PhantomData<fn() -> P>,
 }
 
+/// The **wire** encoding of a run of [`ShamirShare<F, N, P>`] that all carry the same evaluation
+/// index and the same degree: the field elements, and nothing else. The `F`-side twin of
+/// [`GfShareWire`](crate::common::gf2k::share::GfShareWire); see that type for the full
+/// rationale, which applies verbatim here.
+///
+/// `ShamirShare<F, 1, P>` serialises under `ark`'s `CanonicalSerialize` to `|F| + 8 + 8` bytes
+/// (24 for a 64-bit field) to carry `|F|` bytes of secret — `PhantomData` is free, `id` and
+/// `degree` are not. Both are derivable by the receiver (the authenticated transport sender, and
+/// a session-fixed constant) and both are dealer-written metadata that proves nothing, so both
+/// are absent from this type and cannot be stated by a peer.
+///
+/// Elements are stored flat, `N` per share, so the encoding is `8 + N * |F| * m` bytes for `m`
+/// shares: one `u64` count and the elements. [`ShamirShareWire::decode`] rejects a body whose
+/// element count is not a multiple of `N` — the only shape a peer can still get wrong.
+#[derive(Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ShamirShareWire<F: FftField, const N: usize> {
+    elements: Vec<F>,
+}
+
+impl<F: FftField, const N: usize> ShamirShareWire<F, N> {
+    /// Encodes `shares` for the wire, dropping `id`/`degree`.
+    ///
+    /// `id`/`degree` are the sender's own and are asserted against every share rather than read
+    /// off the first, so a batch that mixes dealers or degrees fails here instead of being
+    /// silently flattened onto the receiver's derivation.
+    ///
+    /// # Errors
+    /// - [`ShareError::IdMismatch`] if any share's `id` differs from `id`.
+    /// - [`ShareError::DegreeMismatch`] if any share's `degree` differs from `degree`.
+    pub fn encode<P>(
+        shares: &[ShamirShare<F, N, P>],
+        id: usize,
+        degree: usize,
+    ) -> Result<Self, ShareError> {
+        let mut elements = Vec::with_capacity(shares.len() * N);
+        for share in shares {
+            if share.id != id {
+                return Err(ShareError::IdMismatch);
+            }
+            if share.degree != degree {
+                return Err(ShareError::DegreeMismatch);
+            }
+            elements.extend_from_slice(&share.share);
+        }
+        Ok(Self { elements })
+    }
+
+    /// Rebuilds `ShamirShare`s from the wire, stamping the **receiver-derived** `id` and `degree`.
+    ///
+    /// `id` must be the authenticated transport sender's party id and `degree` the degree the
+    /// session fixes for this opening; neither may come from anything the peer sent.
+    ///
+    /// # Errors
+    /// - [`ShareError::InvalidInput`] if the body's element count is not a multiple of `N`.
+    pub fn decode<P>(
+        &self,
+        id: usize,
+        degree: usize,
+    ) -> Result<Vec<ShamirShare<F, N, P>>, ShareError> {
+        if N == 0 || self.elements.len() % N != 0 {
+            return Err(ShareError::InvalidInput);
+        }
+        Ok(self
+            .elements
+            .chunks_exact(N)
+            .map(|chunk| ShamirShare {
+                share: std::array::from_fn(|i| chunk[i]),
+                id,
+                degree,
+                _sharetype: PhantomData,
+            })
+            .collect())
+    }
+
+    /// Number of shares carried, or `None` if the body is not a whole number of shares. Callers
+    /// check this against a **locally derived** expectation.
+    ///
+    /// Not `len`: the element count and the share count differ by the factor `N`, and naming the
+    /// share count `len` would invite the wrong one to be compared against a bound. Use
+    /// `elements().len()` for the element count.
+    pub fn share_count(&self) -> Option<usize> {
+        if N == 0 || self.elements.len() % N != 0 {
+            None
+        } else {
+            Some(self.elements.len() / N)
+        }
+    }
+
+    /// The raw field elements, flat, `N` per share.
+    pub fn elements(&self) -> &[F] {
+        &self.elements
+    }
+
+    /// Builds a body straight from field elements, `N` per share, for callers that never held
+    /// `ShamirShare`s. The only shape invariant — a whole number of shares — is checked by
+    /// [`ShamirShareWire::len`] and [`ShamirShareWire::decode`], not here.
+    pub fn from_elements(elements: Vec<F>) -> Self {
+        Self { elements }
+    }
+
+    /// Reads one wire body from `r` under a **locally supplied** share-count bound, never the
+    /// peer's claimed length: at most `max_shares * N` elements are allocated.
+    ///
+    /// # Errors
+    /// `SerializationError::InvalidData` if the peer claims more than `max_shares` shares' worth
+    /// of elements, or the body is short or malformed.
+    pub fn deserialize_bounded(
+        r: &mut &[u8],
+        max_shares: usize,
+    ) -> Result<Self, ark_serialize::SerializationError> {
+        let elements =
+            crate::common::utils::deser_bounded_vec::<F>(r, max_shares.saturating_mul(N))?;
+        Ok(Self { elements })
+    }
+}
+
 pub trait SecretSharingScheme<F>:
     Sized
     + Add<Output = Result<Self, ShareError>>

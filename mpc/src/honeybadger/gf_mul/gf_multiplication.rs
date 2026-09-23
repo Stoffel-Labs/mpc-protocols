@@ -363,8 +363,11 @@ impl<K: BinaryField> GfMultiply<K> {
         // in `process` tolerates up to `t` bad shares among the received ones, so this doesn't
         // need RBC's reliable-broadcast agreement.
         if need_direct_open {
+            // `self.id` and `self.t` are this node's own; `new` asserts every remainder share
+            // matches them and then drops both from the wire, so what goes out is bare field
+            // elements. The receiver re-derives the pair rather than reading it.
             let reconst_message =
-                GfMultReconstructionMessage::new(remaining_a.to_vec(), remaining_b.to_vec());
+                GfMultReconstructionMessage::new(remaining_a, remaining_b, self.id, self.t)?;
             let bytes_rec_message = bincode::serialize(&reconst_message)?;
 
             let sessionid = SessionId::new(
@@ -470,25 +473,15 @@ impl<K: BinaryField> GfMultiply<K> {
             }
 
             let open_message: GfMultReconstructionMessage<K> = deser_bounded(&payload)?;
-            for share in open_message
-                .a_sub_x
-                .iter()
-                .chain(open_message.b_sub_y.iter())
-            {
-                if share.id != sender {
-                    return Err(GfMulError::InvalidInput(format!(
-                        "Invalid share id from sender {sender}"
-                    )));
-                }
-                if share.degree != self.t {
-                    return Err(GfMulError::InvalidInput(format!(
-                        "Invalid share degree from sender {sender}"
-                    )));
-                }
-            }
-            storage
-                .received_shares
-                .insert(sender, (open_message.a_sub_x, open_message.b_sub_y));
+            // Evaluation index and degree are DERIVED, not read: `sender` is the transport
+            // party id that `HoneyBadgerMPCNode::process_message` has already matched against
+            // the envelope's `sender` field, and `self.t` is this session's opening degree.
+            // Neither is on the wire, so neither can be claimed — this replaces the pair of
+            // `share.id != sender` / `share.degree != self.t` rejections that the old encoding
+            // needed, and is strictly stronger: the inconsistency is now unrepresentable rather
+            // than caught.
+            let (a_sub_x, b_sub_y) = open_message.into_shares(sender, self.t);
+            storage.received_shares.insert(sender, (a_sub_x, b_sub_y));
         }
 
         let Some(no_of_mul) = storage.no_of_mul else {
