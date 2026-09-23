@@ -90,8 +90,9 @@ mod tests {
         let cap = 2usize; // tiny on purpose, to reach "full" without needing thousands of sessions
 
         let (rbc_sender, mut rbc_receiver) = mpsc::channel(cap);
-        let bracha = Bracha::<SessionId>::new(0, n, t, k, rbc_sender, Arc::new(WrappedMessage::rbc_wrap))
-            .expect("failed to construct Bracha instance");
+        let bracha =
+            Bracha::<SessionId>::new(0, n, t, k, rbc_sender, Arc::new(WrappedMessage::rbc_wrap))
+                .expect("failed to construct Bracha instance");
 
         // A network is required for `process`'s broadcast side effects, but nothing needs
         // to drain it for this test — only `bracha`'s own completion channel matters here.
@@ -105,7 +106,8 @@ mod tests {
         // caller's job, not the RBC layer's — so this reaches the 2t+1=3 threshold without
         // any real INIT/ECHO round-trip or other live party instances.
         async fn complete_session(bracha: &Bracha<SessionId>, net: Arc<FakeNetwork>, exec: u64) {
-            let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(exec, 0, 0), 77);
+            let session_id =
+                SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(exec, 0, 0), 77);
             let payload = format!("payload-{exec}").into_bytes();
             for sender in 0..3 {
                 let msg = Msg::new(

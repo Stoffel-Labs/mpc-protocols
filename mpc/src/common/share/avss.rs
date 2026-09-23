@@ -1146,8 +1146,7 @@ where
         if row_valid {
             for (ct, commitments) in cts.iter().zip(all_commitments.iter()) {
                 let verified = decrypt(key, ct).ok().and_then(|pt| {
-                    let shamirshare =
-                        Shamirshare::<F>::deserialize_compressed(&pt[..]).ok()?;
+                    let shamirshare = Shamirshare::<F>::deserialize_compressed(&pt[..]).ok()?;
                     if shamirshare.id != self.ids[party_id] || shamirshare.degree != self.t {
                         return None;
                     }
@@ -1522,8 +1521,7 @@ mod reveal_tests {
         let secrets = vec![Fr::from(42)];
         let ids: Vec<usize> = (1..=n).collect();
         let shares: Vec<Vec<FeldmanShamirShare<Fr, G>>> =
-            FeldmanShamirShare::compute_shares_batch(&secrets, n, t, Some(&ids), &mut rng)
-                .unwrap();
+            FeldmanShamirShare::compute_shares_batch(&secrets, n, t, Some(&ids), &mut rng).unwrap();
 
         let sk_d = Fr::rand(&mut rng);
         let pk_d = G::generator() * sk_d;

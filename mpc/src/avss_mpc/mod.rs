@@ -99,6 +99,8 @@ pub enum AvssMPCError {
     InputError(#[from] AvssInputError),
     #[error("error in Output: {0:?}")]
     OutputError(#[from] AvssOutputError),
+    #[error("session id {0:?} uses reserved bits: not a canonically constructed session id")]
+    InvalidSessionId(AvssSessionId),
 }
 
 pub struct AvssMPCClient<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
@@ -472,6 +474,15 @@ where
 
         match wrapped {
             AvssWrappedMessage::Rbc(rbc_msg) => {
+                // Reject session ids with nonzero reserved bits before any routing or admission
+                // decision is made from them: left unchecked, such a value hashes and compares
+                // as a distinct session id from its canonical counterpart while every accessor
+                // reports the same protocol/round/sub/exec/instance fields, letting a single
+                // logical session be re-admitted many times against session-count caps (see
+                // `AvssSessionId::is_canonical`).
+                if !rbc_msg.session_id.is_canonical() {
+                    return Err(AvssMPCError::InvalidSessionId(rbc_msg.session_id));
+                }
                 if sender_id != rbc_msg.sender_id {
                     return Err(AvssMPCError::InvalidPartyId);
                 }
@@ -1023,6 +1034,49 @@ impl AvssSessionId {
     #[inline]
     pub fn pack_slot(exec_id: u64, sub_id: u8, round_id: u8) -> u128 {
         ((exec_id as u128) << 16) | ((sub_id as u128) << 8) | (round_id as u128)
+    }
+
+    /// Rejects aliases of an otherwise-identical session id that differ only in the reserved
+    /// bits (120..128). Those bits are never set by [`AvssSessionId::new`] and never read by any
+    /// accessor, but `AvssSessionId` derives `Eq`/`Hash`/`Serialize` over the raw `u128` — so an
+    /// attacker-supplied value with a nonzero reserved byte hashes and compares as a distinct
+    /// session id while presenting identical protocol/round/sub/exec/instance fields to every
+    /// check. Call this on every session id that arrives over the network, before it is used for
+    /// routing or admission.
+    pub fn is_canonical(self) -> bool {
+        (self.0 >> 120) == 0
+    }
+}
+
+#[cfg(test)]
+mod avss_session_id_tests {
+    use super::*;
+
+    #[test]
+    fn test_avss_session_id_canonicality() {
+        let session_id = AvssSessionId::new(
+            ProtocolType::Input,
+            AvssSessionId::pack_slot(0, 3, 0),
+            0xDEADBEEF,
+        );
+        assert!(session_id.is_canonical());
+
+        // Every one of the 256 reserved-byte values aliases the same protocol/round/sub/exec/
+        // instance fields as `session_id` while being a distinct `u128`, hash, and equality key.
+        // Only the all-zero reserved byte (already covered above) is canonical.
+        for reserved in 1..=u8::MAX {
+            let alias = unsafe {
+                AvssSessionId::from_u128(session_id.as_u128() | ((reserved as u128) << 120))
+            };
+            assert_ne!(alias.as_u128(), session_id.as_u128());
+            assert_ne!(alias, session_id);
+            assert_eq!(alias.calling_protocol(), session_id.calling_protocol());
+            assert_eq!(alias.exec_id(), session_id.exec_id());
+            assert_eq!(alias.sub_id(), session_id.sub_id());
+            assert_eq!(alias.round_id(), session_id.round_id());
+            assert_eq!(alias.instance_id(), session_id.instance_id());
+            assert!(!alias.is_canonical());
+        }
     }
 }
 

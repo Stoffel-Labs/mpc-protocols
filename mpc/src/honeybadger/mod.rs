@@ -194,6 +194,8 @@ pub enum HoneyBadgerError {
     UnauthorizedSender(PartyId, usize),
     #[error("the protocol cannot be executed any more")]
     LimitError,
+    #[error("session id {0:?} uses reserved bits: not a canonically constructed session id")]
+    InvalidSessionId(SessionId),
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -825,6 +827,12 @@ where
                 .bytes_received
                 .fetch_add(raw_msg.len() as u64, std::sync::atomic::Ordering::Relaxed);
             statistics::record_received(&wrapped, &self.statistics_counters.received);
+        }
+
+        if let WrappedMessage::Rbc(m) = &wrapped {
+            if !m.session_id.is_canonical() {
+                return Err(HoneyBadgerError::InvalidSessionId(m.session_id));
+            }
         }
 
         let is_client_input_broadcast = match &wrapped {
@@ -2233,6 +2241,18 @@ impl SessionId {
         ((self.0 >> 40) & 0xFF) as u8
     }
 
+    /// Rejects aliases of an otherwise-identical session id that differ only in the reserved
+    /// bits (120..128). Those bits are never set by [`SessionId::new`] and never read by any
+    /// accessor, but `SessionId` derives `Eq`/`Hash`/`Serialize` over the raw `u128` — so an
+    /// attacker-supplied value with a nonzero reserved byte hashes and compares as a distinct
+    /// session id while presenting identical protocol/round/sub/exec/instance fields to every
+    /// check. Left unchecked, this lets a single logical session be re-admitted up to 256 times,
+    /// each consuming a separate slot against session-count caps. Call this on every session id
+    /// that arrives over the network, before it is used for routing or admission.
+    pub fn is_canonical(self) -> bool {
+        (self.0 >> 120) == 0
+    }
+
     pub fn round_id(self) -> u8 {
         ((self.0 >> 32) & 0xFF) as u8
     }
@@ -2302,6 +2322,32 @@ mod tests {
         );
 
         assert_eq!(session_id, session_id2);
+    }
+
+    #[test]
+    fn test_session_id_canonicality() {
+        let session_id = SessionId::new(
+            ProtocolType::Input,
+            SessionId::pack_slot(0, 3, 0),
+            0xDEADBEEF,
+        );
+        assert!(session_id.is_canonical());
+
+        // Every one of the 256 reserved-byte values aliases the same protocol/round/sub/exec/
+        // instance fields as `session_id` while being a distinct `u128`, hash, and equality key.
+        // Only the all-zero reserved byte (already covered above) is canonical.
+        for reserved in 1..=u8::MAX {
+            let alias =
+                unsafe { SessionId::from_u128(session_id.as_u128() | ((reserved as u128) << 120)) };
+            assert_ne!(alias.as_u128(), session_id.as_u128());
+            assert_ne!(alias, session_id);
+            assert_eq!(alias.calling_protocol(), session_id.calling_protocol());
+            assert_eq!(alias.exec_id(), session_id.exec_id());
+            assert_eq!(alias.sub_id(), session_id.sub_id());
+            assert_eq!(alias.round_id(), session_id.round_id());
+            assert_eq!(alias.instance_id(), session_id.instance_id());
+            assert!(!alias.is_canonical());
+        }
     }
 
     #[tokio::test]

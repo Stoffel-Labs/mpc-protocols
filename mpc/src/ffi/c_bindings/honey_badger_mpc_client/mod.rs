@@ -54,6 +54,7 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerInstanceIdError,
     // Appended last to keep the existing discriminants ABI-stable for current SDK consumers.
     HoneyBadgerUnauthorizedSenderError,
+    HoneyBadgerInvalidSessionIdError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -93,6 +94,7 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::UnauthorizedSender(_, _) => Self::HoneyBadgerUnauthorizedSenderError,
             HoneyBadgerError::InvalidPartySize => Self::HoneyBadgerInvalidPartySizeError,
             HoneyBadgerError::InvalidPartyId => Self::HoneyBadgerInvalidPartyIdError,
+            HoneyBadgerError::InvalidSessionId(_) => Self::HoneyBadgerInvalidSessionIdError,
         }
     }
 }
