@@ -12,6 +12,10 @@ pub mod share;
 /// A GF(2^k) Shamir-sharing domain, parallel to the `F: FftField` domain above.
 pub mod gf2k;
 
+// Value-level helpers bridging the prime-field and GF(2^k) domains — the only place the two
+// domains touch, and they touch at the level of clear values, never shares. See the module header.
+pub mod convert;
+
 /// Implementation of the hbACSS protocol from https://eprint.iacr.org/2021/159.
 pub mod acss;
 
