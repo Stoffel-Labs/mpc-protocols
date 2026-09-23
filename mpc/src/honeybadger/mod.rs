@@ -25,6 +25,9 @@ pub mod binary_circuits;
 // Doubly-shared bits (daBits): the cross-domain primitive behind A2B and B2A.
 pub mod dabit;
 
+// daBit / edaBit pools, the conversion-side counterpart of `preprocessing` and `gf_preprocessing`.
+pub mod conv_preprocessing;
+
 /// Damgard-Nielsen degree-reduction multiplication and exact-zero check, over `F` and over
 /// GF(2^k). **Preprocessing-only**: it opens at degree `2t`, which needs `n >= 4t+1` to be
 /// reconstructible on the asynchronous robust online path and is therefore legal here only where
