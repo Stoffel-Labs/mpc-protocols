@@ -725,7 +725,7 @@ impl PrssExecSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const PSI_SUB_ID: u8 = 1;
+    use crate::honeybadger::dabit::prss_dabit::PSI_SUB_ID;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
     use std::collections::BTreeSet;

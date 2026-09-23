@@ -56,7 +56,11 @@ fn agreeing_width<F>(entries: &[(usize, Vec<F>)], threshold: usize) -> Option<us
     }
     None
 }
-const MAX_BATCH_RECON_SESSIONS: usize = 256;
+/// Concurrent batch-reconstruction sessions admitted node-wide. `pub` so that protocols driving
+/// many child openings can size their pipeline depth against the real quota
+/// (`MAX_BATCH_RECON_SESSIONS / n` per peer) instead of hard-coding a number that silently drifts
+/// out of step with it.
+pub const MAX_BATCH_RECON_SESSIONS: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct BatchReconNode<F: FftField> {

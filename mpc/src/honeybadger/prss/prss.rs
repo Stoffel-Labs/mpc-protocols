@@ -911,4 +911,19 @@ mod tests {
             Err(PrssError::KeyCountMismatch { .. })
         ));
     }
+
+    /// One number, four stores. Before this, three constructors capped `C(n, t)` and the `F`-side
+    /// PRSS store did not, so whether a mis-parameterised deployment got an error or an
+    /// out-of-memory abort depended on which field it instantiated first.
+    #[test]
+    fn every_store_over_this_key_family_shares_one_cap() {
+        assert_eq!(
+            crate::honeybadger::gf_prss::MAX_UNQUALIFIED_SETS,
+            MAX_UNQUALIFIED_SETS
+        );
+        assert_eq!(
+            crate::honeybadger::dabit::prss_dabit::MAX_UNQUALIFIED_SETS,
+            MAX_UNQUALIFIED_SETS as u128
+        );
+    }
 }
