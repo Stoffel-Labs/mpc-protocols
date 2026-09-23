@@ -499,12 +499,29 @@ impl<K: BinaryField> GfMultiply<K> {
         let share_len = no_of_mul % (self.t + 1);
 
         if storage.received_shares.len() >= 2 * self.t + 1 && storage.openings.is_none() {
-            // `share_len != 0`, since some honest nodes have sent us their shares
+            // `share_len != 0`, since some honest nodes have sent us their shares.
+            //
+            // **Re-attempt on every arrival, never abort.** This is the ONLINE path and it must
+            // stay robust: with `e` corrupt shares among the first `2t+1` received, OEC needs
+            // `m >= (t+1) + 2e` points and so fails outright for `e > t/2` — it only succeeds once
+            // the later honest shares land, at `m = 3t+1 = (t+1) + 2t`, which is exactly
+            // reachable. A failed partial decode is therefore the *expected* intermediate state
+            // under attack, not an error, so it is logged and retried on the next arrival rather
+            // than propagated. `init` has always done this; propagating here would have turned a
+            // recoverable wave into a surfaced protocol error, and does so far more often now
+            // that `OpeningPolicy::Direct` can route a whole wave through this path.
             info!("Received enough messages with shares to try reconstruction");
-            let openings = reconstruct_remainder(&storage.received_shares, share_len, self.n, self.t)?;
-
-            info!("Reconstruction succeeded");
-            storage.openings = Some(openings);
+            match reconstruct_remainder(&storage.received_shares, share_len, self.n, self.t) {
+                Ok(openings) => {
+                    info!("Reconstruction succeeded");
+                    storage.openings = Some(openings);
+                }
+                Err(e) => warn!(
+                    self_id = self.id,
+                    received = storage.received_shares.len(),
+                    "direct-open reconstruction not yet decodable, retrying on next arrival: {e}"
+                ),
+            }
         }
 
         // With batched batch-recon, completion needs the single a-x result (dealer 0) and the
