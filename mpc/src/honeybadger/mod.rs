@@ -51,6 +51,9 @@ pub mod mul_pub;
 pub mod output;
 pub mod preprocessing;
 pub mod prss;
+/// Pseudorandom zero sharing (CDI05 §4) at degree `2t`, over `F` and over GF(2^k).
+/// Preprocessing-only: a degree-`2t` sharing can only be spent by a degree-`2t` opening.
+pub mod przs;
 pub mod share_gen;
 #[cfg(feature = "statistics")]
 pub mod statistics;
