@@ -1798,6 +1798,227 @@ async fn fpdiv_const_rejects_undersized_prandint_mask() {
     );
 }
 
+/// `F` Beaver triples are made by **DN07 degree reduction over PRSS material**, not by
+/// `TripleGenNode` over dealt `RanSha` + `RanDouSha`.
+///
+/// The decisive assertion is `ran_dou_sha_counter`. Both paths produce identical triples — the
+/// algebra is the same, because `TripleGenNode::init` *is* DN07 written inline — so a test that
+/// only reconstructed `a * b == c` would pass either way and prove nothing about which ran. The
+/// dealt path calls `ensure_ran_dou_sha_pair`, which takes an exec id before it does anything
+/// else; the DN07 path never calls it. A counter still at zero after a run that produced triples
+/// is therefore proof that `RanDouSha` never went on the wire.
+///
+/// `n_random_shares` is zero as well, which makes the loose-pool figure `2 x per triple` and
+/// then subtracts it back out: on the dealt path this run deals six random shares to make three
+/// triples, on the DN07 path it deals none, and either way the pool ends empty.
+///
+/// The triples are checked to be *correct* triples, because "cheaper" is only interesting if
+/// `c = ab` still holds: a `[b]` drawn at the same PRSS position as `[a]` would give `c = a^2`,
+/// reconstruct perfectly, and be useless as a Beaver triple.
+#[tokio::test]
+async fn beaver_triples_come_from_dn07_over_prss_material() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+    let instance_id = 119;
+    // One group of `2t + 1`, which is the granularity both paths round to.
+    let n_triples = 3;
+
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        n_triples,
+        /*random shares*/ 0,
+        instance_id,
+        /*randbit*/ 0,
+        /*prandint*/ 0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    let mut handles = Vec::new();
+    for (pid, node) in nodes.iter().enumerate() {
+        let mut node = node.clone();
+        let net = network[pid].clone();
+        handles.push(tokio::spawn(async move {
+            let mut r = StdRng::from_rng(OsRng).unwrap();
+            node.run_preprocessing(net, &mut r)
+                .await
+                .expect("preprocessing on the DN07 triple path");
+            node
+        }));
+    }
+    for (pid, handle) in handles.into_iter().enumerate() {
+        nodes[pid] = handle.await.unwrap();
+    }
+
+    for (pid, node) in nodes.iter().enumerate() {
+        assert!(
+            node.prss_keys_installed(),
+            "node {pid} has no PRSS keys, so this test would be checking the dealt path"
+        );
+        assert!(
+            node.f_triples_use_dn07(),
+            "node {pid} has PRSS keys but no DN07 double-share source"
+        );
+        assert_eq!(
+            node.counters.ran_dou_sha_counter.peek().await,
+            Some(0),
+            "node {pid} ran RanDouSha: its triples came from the dealt path, not from DN07"
+        );
+        let len = node.preprocessing_material.lock().await.length();
+        assert!(
+            len.beaver_triples >= n_triples,
+            "node {pid} produced {} triples, wanted {n_triples}",
+            len.beaver_triples
+        );
+        assert_eq!(
+            len.random_shr, 0,
+            "node {pid} left dealt random shares behind"
+        );
+    }
+
+    // And they are real triples: `c = ab`, every share degree `t`.
+    let mut per_party = Vec::new();
+    for node in nodes.iter_mut() {
+        per_party.push(
+            node.preprocessing_material
+                .lock()
+                .await
+                .take_beaver_triples(n_triples)
+                .expect("triple pool"),
+        );
+    }
+    for i in 0..n_triples {
+        let a: Vec<RobustShare<Fr>> = (0..n_parties).map(|p| per_party[p][i].a.clone()).collect();
+        let b: Vec<RobustShare<Fr>> = (0..n_parties).map(|p| per_party[p][i].b.clone()).collect();
+        let c: Vec<RobustShare<Fr>> = (0..n_parties)
+            .map(|p| per_party[p][i].mult.clone())
+            .collect();
+        let (a_coeffs, a_val) = RobustShare::recover_secret(&a, n_parties, t).unwrap();
+        let (_, b_val) = RobustShare::recover_secret(&b, n_parties, t).unwrap();
+        let (c_coeffs, c_val) = RobustShare::recover_secret(&c, n_parties, t).unwrap();
+        assert!(a_coeffs.len() <= t + 1, "triple {i}: `a` is not degree t");
+        assert!(
+            c_coeffs.len() <= t + 1,
+            "triple {i}: `c` came back above degree t, so the degree reduction did not happen"
+        );
+        assert_eq!(c_val, a_val * b_val, "triple {i}: c != ab");
+        assert_ne!(
+            a_val, b_val,
+            "triple {i}: `a` and `b` share a PRSS position"
+        );
+    }
+}
+
+/// `generate_triples_via_dn07` retires every DN07 session it opens, and the batch-reconstruction
+/// child of each.
+///
+/// [`Dn07MulNode`] never retires a session on its own — not on success, not on timeout.
+/// `clear_store` is the **caller's** obligation, and since the previous phase this node has two
+/// callers that must honour it: `generate_triples_via_dn07` here, and `EdaBitFilterNode::mul_k`
+/// on the `Gf2k` side (covered by `edabit_filter_test`'s
+/// `every_session_is_retired_when_the_run_returns`).
+///
+/// The check is on the *store lengths* rather than on a failure, because a leak is silent at this
+/// scale: one preprocessing run that leaves its sessions resident still returns correct triples.
+/// It bites later, and elsewhere — `MAX_DN07_SESSIONS / n` sessions per initiator, after which a
+/// node refuses sessions it issued to itself and then blocks waiting for their results. The
+/// arithmetic of that is pinned by
+/// `dn07::tests::a_session_left_uncleared_costs_the_next_one_its_admission_slot`; what this test
+/// adds is that the production caller actually performs the call.
+///
+/// Both stores are asserted. `Dn07MulNode::clear_store` retires the session here *and* in
+/// `batch_recon`, and nothing else retires the child, so checking only the parent would pass a
+/// caller that reached into the store map itself.
+///
+/// The guard assertions matter as much as the store ones: a run that produced no triples, or one
+/// on a node without PRSS keys, would leave both stores empty for the wrong reason.
+#[tokio::test]
+async fn beaver_triples_leave_no_dn07_session_resident() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+    let instance_id = 121;
+    // Two groups of `2t + 1`, so the driver runs more than one opening and a leak has somewhere
+    // to accumulate.
+    let n_triples = 6;
+
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        n_triples,
+        /*random shares*/ 0,
+        instance_id,
+        /*randbit*/ 0,
+        /*prandint*/ 0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    let mut handles = Vec::new();
+    for (pid, node) in nodes.iter().enumerate() {
+        let mut node = node.clone();
+        let net = network[pid].clone();
+        handles.push(tokio::spawn(async move {
+            let mut r = StdRng::from_rng(OsRng).unwrap();
+            node.run_preprocessing(net, &mut r)
+                .await
+                .expect("preprocessing on the DN07 triple path");
+            node
+        }));
+    }
+    for (pid, handle) in handles.into_iter().enumerate() {
+        nodes[pid] = handle.await.unwrap();
+    }
+
+    for (pid, node) in nodes.iter().enumerate() {
+        assert!(
+            node.f_triples_use_dn07(),
+            "node {pid} did not take the DN07 path, so an empty store proves nothing"
+        );
+        assert!(
+            node.preprocessing_material
+                .lock()
+                .await
+                .length()
+                .beaver_triples
+                >= n_triples,
+            "node {pid} produced no triples, so an empty store proves nothing"
+        );
+        assert_eq!(
+            node.preprocess.dn07.store_len().await,
+            0,
+            "node {pid} left a DN07 session resident"
+        );
+        assert_eq!(
+            node.preprocess.dn07.batch_recon.store_len().await,
+            0,
+            "node {pid} left the DN07 batch-reconstruction child resident"
+        );
+    }
+}
+
 /// `RandBit` draws `[a]` from PRSS and its degree-`2t` re-randomiser from PRZS — **not** from the
 /// dealt `RanSha` / `ZeroSha` pools.
 ///

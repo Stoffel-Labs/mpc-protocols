@@ -76,7 +76,10 @@ use crate::{
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
-        dn07::{double_share::PrssDoubleShareSource, Dn07Error},
+        dn07::{
+            dn07::Dn07MulNode, double_share::PrssDoubleShareSource, gf_dn07::GfDn07MulNode,
+            Dn07Error, PreprocessingSessionId, MAX_DN07_SESSIONS,
+        },
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
@@ -109,7 +112,7 @@ use crate::{
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
-        triple_gen::TripleGenError,
+        triple_gen::{ShamirBeaverTriple, TripleGenError},
         zero_share::{zero_share::ZeroShaNode, ZeroShaError},
     },
 };
@@ -543,6 +546,15 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub rand_bit: RandBit<F>,
     /// Produces the degree-`2t` zero-sharings that re-randomise RandBit's MulPub opening.
     pub zero_sha: ZeroShaNode<F, R>,
+    /// DN07 degree-reduction multiplication and exact-zero check over `F`. Tag: `Dn07`.
+    ///
+    /// **PREPROCESSING ONLY.** It lives here, and not in [`Operation`], precisely because it
+    /// opens at degree `2t`: the online path must have no handle to it. See `honeybadger::dn07`.
+    ///
+    /// Its production caller is [`Self::generate_triples_via_dn07`], which makes every `F` Beaver
+    /// triple from PRSS material in one degree-`2t` opening. `init_zero_check` has no caller; see
+    /// the `dn07` module docs for why that is a deliberate state rather than dead code.
+    pub dn07: Dn07MulNode<F>,
     /// Non-interactive `([r]_t, [r]_2t)` source for [`PreprocessNodes::dn07`], installed by
     /// `setup_prss_keys` once the PRSS key family exists. `None` until then, and while it is
     /// `None` every DN07 consumer falls back to the dealt `RanDouSha` pool.
@@ -576,10 +588,33 @@ pub struct GfPreprocessNodes<R: RBC> {
     pub gf_dou_sha: GfDoubleShareNode<Gf256>,
     pub gf_ran_dou_sha: GfRanDouShaNode<Gf256, R>,
     pub gf_triple_gen: GfTripleGenNode<Gf256>,
+    /// DN07 degree-reduction multiplication and exact-zero check over `Gf256`. Tag: `GfDn07`.
+    /// **PREPROCESSING ONLY** — see [`PreprocessNodes::dn07`].
+    ///
+    /// This instance is reached only through the dispatcher's `GfDn07` arm. The edaBit filter's
+    /// AND layers run on a *second* `GfDn07MulNode`, owned by `conv.edabit` under the
+    /// `DaBitGfMul` tag: a `GfDn07MulNode` mints its batch-reconstruction child with the parent's
+    /// tag, and the dispatcher demuxes on that tag alone, so two nodes of this type must not
+    /// share one.
+    pub gf_dn07: GfDn07MulNode<Gf256>,
 }
 
 #[derive(Clone, Debug)]
 pub struct SubProtocolCounter(Arc<Mutex<Option<u64>>>);
+
+impl SubProtocolCounter {
+    /// The exec id `get_next` would hand out next, or `None` once the counter has saturated.
+    ///
+    /// Read-only, and read-only on purpose: there is no setter and there must not be one. Every
+    /// counter here addresses either a network session or — through
+    /// [`PrssAllocator`](prss::PrssAllocator) — a PRSS position, and rewinding one re-derives a
+    /// position that has already been spent. What this accessor is for is the opposite question:
+    /// "did that protocol run at all?", which is how a test tells a `TripleGenNode` batch apart
+    /// from a `Dn07MulNode` one when both produce identical triples.
+    pub async fn peek(&self) -> Option<u64> {
+        *self.0.lock().await
+    }
+}
 
 trait GetNext<T> {
     async fn get_next(&self) -> Result<T, HoneyBadgerError>;
@@ -820,6 +855,13 @@ where
         let gf_share_gen_node =
             GfRanShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
+        // DN07 preprocessing multiplication, `F` and `Gf256`. Both constructors hard-error for
+        // `t = 0` and for `n < 3t+1`, which `HoneyBadgerMPCNodeOpts::new`'s `t < (n+2)/3` already
+        // guarantees for `t >= 1`; the duplication is deliberate, since `Opts`' fields are public
+        // and a struct literal can bypass its constructor.
+        let dn07_node = Dn07MulNode::new(id, params.n_parties, params.threshold)?;
+        let gf_dn07_node = GfDn07MulNode::new(id, params.n_parties, params.threshold)?;
+
         Ok(Self {
             id,
             preprocessing_material: Arc::new(
@@ -835,6 +877,7 @@ where
                 prand_int: prand_int_node,
                 rand_bit: rand_bit_node,
                 zero_sha: zero_sha_node,
+                dn07: dn07_node,
                 // Installed by `setup_prss_keys`; until then DN07 consumers use the dealt pools.
                 dn07_doubles: None,
                 prss_alloc: None,
@@ -848,6 +891,7 @@ where
                 gf_dou_sha: gf_dou_sha_node,
                 gf_ran_dou_sha: gf_ran_dou_sha_node,
                 gf_triple_gen: gf_triple_gen_node,
+                gf_dn07: gf_dn07_node,
             },
             gf_operations: GfOperation { mul: gf_mul_node },
             type_ops: TypeOperations {
@@ -1178,6 +1222,17 @@ where
                             .drain_batch_recon_output()
                             .await?;
                     }
+                    // DN07 preprocessing multiplication / exact-zero check. Its child opens at
+                    // degree `2t`, which is legal here only because `Dn07` is a preprocessing tag
+                    // — `dn07::phase_of` is the exhaustive classification that says so.
+                    Some(ProtocolType::Dn07) => {
+                        self.preprocess
+                            .dn07
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.preprocess.dn07.drain_batch_recon_output().await?;
+                    }
                     Some(ProtocolType::FpMul) => {
                         self.type_ops
                             .fpmul
@@ -1346,6 +1401,17 @@ where
                             .gf_triple_gen
                             .drain_batch_recon_output()
                             .await?
+                    }
+                    Some(ProtocolType::GfDn07) => {
+                        self.gf_preprocess
+                            .gf_dn07
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.gf_preprocess
+                            .gf_dn07
+                            .drain_batch_recon_output()
+                            .await?;
                     }
                     _ => {
                         warn!(
@@ -1716,120 +1782,165 @@ where
             0
         };
 
+        // On the DN07 triple path a triple's `[a]` and `[b]` come from PRSS, so the
+        // `2 x per triple` term of the figure above buys nothing and is not dealt. The loose
+        // pool's *own* target is untouched, which is why the residual pool after preprocessing is
+        // the same size on both paths and the accounting assertions in the node tests do not move.
+        let random_shares_to_generate = if self.f_triples_use_dn07() {
+            total_random_shares_to_generate.saturating_sub(2 * total_triples_to_generate)
+        } else {
+            total_random_shares_to_generate
+        };
+
         if no_of_triples == 0 && no_of_random_shares == 0 {
             info!("There are enough Random shares and Beaver triples");
             // return Ok(());
         } else {
-            let mut triple_counter = self.counters.triple_counter.get_next().await?;
-
             // ------------------------
             // Step 1. Ensure random shares
             // ------------------------
             let phase_start = Instant::now();
-            self.ensure_random_shares(network.clone(), rng, total_random_shares_to_generate)
+            self.ensure_random_shares(network.clone(), rng, random_shares_to_generate)
                 .await?;
             trace_preprocessing_phase(
                 self.id,
                 "random_shares",
-                total_random_shares_to_generate,
+                random_shares_to_generate,
                 phase_start,
             );
             info!("Random share generation done");
 
             // ------------------------
-            // Step 2. Ensure RanDouSha pair
+            // Steps 2 and 3. Beaver triples
             // ------------------------
-            let phase_start = Instant::now();
-            let ran_dou_sha_pair = self
-                .ensure_ran_dou_sha_pair(network.clone(), rng, total_triples_to_generate)
-                .await?;
-            trace_preprocessing_phase(self.id, "randousha", total_triples_to_generate, phase_start);
-            info!("Randousha pair generation done");
-
-            // ------------------------
-            // Step 3. Generate triples
-            // ------------------------
-
-            // Take random shares for triples
-            let random_shares_a = self
-                .preprocessing_material
-                .lock()
-                .await
-                .take_random_shares(total_triples_to_generate)?;
-            let random_shares_b = self
-                .preprocessing_material
-                .lock()
-                .await
-                .take_random_shares(total_triples_to_generate)?;
-
-            let mut round_id = 0u8;
-            let mut group_index = 0;
-            let total_groups = total_triples_to_generate / group_size;
-            let phase_start = Instant::now();
-            let max_batch_groups = triple_batch_groups_limit();
-
-            // Build the full (session id, slice range) list up front. TripleGen sessions are
-            // independent — distinct session ids, disjoint input slices (taken once above), and
-            // disjoint Beaver randomness — so issuing every session's init before awaiting any result
-            // lets their 2-round reconstructions overlap instead of running strictly back-to-back.
-            // This mirrors the already-shipped mul pipelining (mod.rs `mul`) and is threat-model
-            // neutral: it is purely a scheduling change (when results are awaited). Per-session
-            // t-fault tolerance, the deterministic session-id sequence, and the protocol logic are
-            // all unchanged.
-            let mut sessions: Vec<(SessionId, usize, usize)> = Vec::new();
-            while group_index < total_groups {
-                let batch_groups = (total_groups - group_index).min(max_batch_groups);
-                let share_start = group_index * group_size;
-                let share_end = share_start + batch_groups * group_size;
-                let sessionid = SessionId::new(
-                    ProtocolType::Triple,
-                    SessionId::pack_slot(triple_counter, 0, round_id),
-                    self.params.instance_id,
-                );
-                sessions.push((sessionid, share_start, share_end));
-                if round_id == 255 {
-                    triple_counter = self.counters.triple_counter.get_next().await?;
-                    round_id = 0;
-                } else {
-                    round_id += 1;
-                }
-                group_index += batch_groups;
-            }
-
-            // Phase 1 — issue every session's init_batch (sequential awaits; every session's round-1
-            // messages are now in flight and processed concurrently by the other nodes).
-            for (sessionid, share_start, share_end) in &sessions {
-                self.preprocess
-                    .triple_gen
-                    .init_batch(
-                        random_shares_a[*share_start..*share_end].to_vec(),
-                        random_shares_b[*share_start..*share_end].to_vec(),
-                        ran_dou_sha_pair[*share_start..*share_end].to_vec(),
-                        *sessionid,
-                        network.clone(),
-                    )
+            //
+            // Two paths to the same object. `TripleGenNode` over dealt `RanSha` + `RanDouSha` is
+            // the original and is what a deployment that never establishes PRSS keys takes;
+            // `Dn07MulNode` over PRSS material is the same algebra — `TripleGenNode::init` already
+            // computes `[a][b] - [r]_2t`, opens it at degree `2t` and adds `[r]_t` — with `a`, `b`
+            // and `r` derived instead of dealt, which removes everything from a triple's bill
+            // except that one opening.
+            if self.f_triples_use_dn07() {
+                let phase_start = Instant::now();
+                self.generate_triples_via_dn07(total_triples_to_generate, network.clone())
                     .await?;
-            }
+                trace_preprocessing_phase(
+                    self.id,
+                    "triples_dn07",
+                    total_triples_to_generate,
+                    phase_start,
+                );
+                info!("Beaver triple generation done (DN07 degree reduction over PRSS material)");
+                Ok::<(), HoneyBadgerError>(())
+            } else {
+                let mut triple_counter = self.counters.triple_counter.get_next().await?;
 
-            // Phase 2 — collect each result as it completes (all sessions' rounds overlap here).
-            for (sessionid, _, _) in &sessions {
-                let result = self
-                    .preprocess
-                    .triple_gen
-                    .wait_for_result(*sessionid, self.params.timeout)
-                    .await;
-                if !self.preprocess.triple_gen.clear_store(*sessionid).await {
-                    warn!(
-                        sessionid = ?sessionid,
-                        "failed to clear triple generation protocol state"
-                    );
-                }
-                self.preprocessing_material
+                // ------------------------
+                // Step 2. Ensure RanDouSha pair
+                // ------------------------
+                let phase_start = Instant::now();
+                let ran_dou_sha_pair = self
+                    .ensure_ran_dou_sha_pair(network.clone(), rng, total_triples_to_generate)
+                    .await?;
+                trace_preprocessing_phase(
+                    self.id,
+                    "randousha",
+                    total_triples_to_generate,
+                    phase_start,
+                );
+                info!("Randousha pair generation done");
+
+                // ------------------------
+                // Step 3. Generate triples
+                // ------------------------
+
+                // Take random shares for triples
+                let random_shares_a = self
+                    .preprocessing_material
                     .lock()
                     .await
-                    .add(Some(result?), None, None, None);
-            }
-            trace_preprocessing_phase(self.id, "triples", total_triples_to_generate, phase_start);
+                    .take_random_shares(total_triples_to_generate)?;
+                let random_shares_b = self
+                    .preprocessing_material
+                    .lock()
+                    .await
+                    .take_random_shares(total_triples_to_generate)?;
+
+                let mut round_id = 0u8;
+                let mut group_index = 0;
+                let total_groups = total_triples_to_generate / group_size;
+                let phase_start = Instant::now();
+                let max_batch_groups = triple_batch_groups_limit();
+
+                // Build the full (session id, slice range) list up front. TripleGen sessions are
+                // independent — distinct session ids, disjoint input slices (taken once above), and
+                // disjoint Beaver randomness — so issuing every session's init before awaiting any result
+                // lets their 2-round reconstructions overlap instead of running strictly back-to-back.
+                // This mirrors the already-shipped mul pipelining (mod.rs `mul`) and is threat-model
+                // neutral: it is purely a scheduling change (when results are awaited). Per-session
+                // t-fault tolerance, the deterministic session-id sequence, and the protocol logic are
+                // all unchanged.
+                let mut sessions: Vec<(SessionId, usize, usize)> = Vec::new();
+                while group_index < total_groups {
+                    let batch_groups = (total_groups - group_index).min(max_batch_groups);
+                    let share_start = group_index * group_size;
+                    let share_end = share_start + batch_groups * group_size;
+                    let sessionid = SessionId::new(
+                        ProtocolType::Triple,
+                        SessionId::pack_slot(triple_counter, 0, round_id),
+                        self.params.instance_id,
+                    );
+                    sessions.push((sessionid, share_start, share_end));
+                    if round_id == 255 {
+                        triple_counter = self.counters.triple_counter.get_next().await?;
+                        round_id = 0;
+                    } else {
+                        round_id += 1;
+                    }
+                    group_index += batch_groups;
+                }
+
+                // Phase 1 — issue every session's init_batch (sequential awaits; every session's round-1
+                // messages are now in flight and processed concurrently by the other nodes).
+                for (sessionid, share_start, share_end) in &sessions {
+                    self.preprocess
+                        .triple_gen
+                        .init_batch(
+                            random_shares_a[*share_start..*share_end].to_vec(),
+                            random_shares_b[*share_start..*share_end].to_vec(),
+                            ran_dou_sha_pair[*share_start..*share_end].to_vec(),
+                            *sessionid,
+                            network.clone(),
+                        )
+                        .await?;
+                }
+
+                // Phase 2 — collect each result as it completes (all sessions' rounds overlap here).
+                for (sessionid, _, _) in &sessions {
+                    let result = self
+                        .preprocess
+                        .triple_gen
+                        .wait_for_result(*sessionid, self.params.timeout)
+                        .await;
+                    if !self.preprocess.triple_gen.clear_store(*sessionid).await {
+                        warn!(
+                            sessionid = ?sessionid,
+                            "failed to clear triple generation protocol state"
+                        );
+                    }
+                    self.preprocessing_material
+                        .lock()
+                        .await
+                        .add(Some(result?), None, None, None);
+                }
+                trace_preprocessing_phase(
+                    self.id,
+                    "triples",
+                    total_triples_to_generate,
+                    phase_start,
+                );
+                Ok::<(), HoneyBadgerError>(())
+            }?;
         }
         // ------------------------
         // Step 5. Generate zero shares (degree-2t zero-sharings)
@@ -2762,6 +2873,212 @@ where
             .lock()
             .await
             .add(Some(result?), None);
+        Ok(())
+    }
+}
+
+impl<F, R> HoneyBadgerMPCNode<F, R>
+where
+    F: PrimeField,
+    R: RBC<Id = SessionId>,
+{
+    /// `true` when `F` Beaver triples are made by **DN07 degree reduction over PRSS material**
+    /// rather than by `TripleGenNode` over dealt `RanSha` + `RanDouSha`.
+    ///
+    /// Both halves or neither, for the reason [`Self::randbit_uses_prss`] gives.
+    pub fn f_triples_use_dn07(&self) -> bool {
+        self.preprocess.dn07_doubles.is_some() && self.preprocess.prss_alloc.is_some()
+    }
+
+    /// `count` `F` Beaver triples, each one DN07 degree reduction and **nothing else**.
+    ///
+    /// ```text
+    ///   [a]_t, [b]_t, ([r]_t, [r]_2t)   PRSS + PRZS, zero rounds, zero bytes
+    ///   [d]_2t = [a][b] - [r]_2t        local
+    ///   d = Open_2t([d]_2t)             ONE batched degree-2t opening, 2t+1 secrets per group
+    ///   [ab]_t = [r]_t + d              local
+    /// ```
+    ///
+    /// Against the dealt path — `2 x RanSha` for `a` and `b`, one `RanDouSha` for the mask, and
+    /// the same degree-`2t` opening, which `TripleGenNode::init_batch` performs inline — this
+    /// removes everything except the opening. At `n = 10, t = 3` that is `O2 = 2.857` field
+    /// elements per triple against `2 x 4.000 + RanDouSha + 2.857`. Payload, and **marginal**:
+    /// the measured wire bill of a batch is `2n * 48 + O2 * triples`, the fixed term being the
+    /// per-message frame (`honeybadger::dn07`, units note).
+    ///
+    /// # What is *not* different
+    ///
+    /// The algebra. `TripleGenNode::init` already computes `[a][b] - [r]_2t`, opens it at degree
+    /// `2t` through a `BatchReconNode` pinned at `2t`, and adds `[r]_t`: it *is* DN07, written
+    /// inline. That is why this path is a re-sourcing rather than a new protocol, and why the two
+    /// produce interchangeable triples. What changes is where `a`, `b` and `r` come from — and
+    /// with them, whether a `Dn07MulNode` has a production caller at all.
+    ///
+    /// # Why PRSS-derived operands are safe here and dealt ones would not be
+    ///
+    /// [`Dn07MulNode::init_mul`] opens at degree `2t`, which imposes no codeword constraint on
+    /// the honest sub-word at `n = 3t+1`: a dealer who deals `a` at degree `t+1` makes the product
+    /// degree `2t+1`, the opening still succeeds, and the dealer recovers the honest `b` in the
+    /// clear. Every operand here is PRSS-derived — a deterministic function of keys held by
+    /// `n - t >= 2t+1` parties, with nothing dealt anywhere — so a corrupt party's only freedom is
+    /// to lie at the opening, which the `[3t+1, 2t+1]` code's distance `t+1` detects with
+    /// probability 1.
+    ///
+    /// # What this costs, and it is not nothing
+    ///
+    /// A Beaver triple made this way has **computationally** private `a` and `b`, under HMAC-
+    /// SHA256 as a PRF, where a dealt `RanSha` pair is perfectly private. Those masks are spent
+    /// by the *online* `mul`, so this is the first place a PRSS assumption reaches an online
+    /// operand rather than only preprocessing randomness. It is the same trade the `Gf2k` side
+    /// already makes — `gf_triple_gen` has taken its double sharings from
+    /// `GfPrssDoubleShareSource` since before this change, and those triples are spent online by
+    /// A2B — and the same assumption `PRandInt` has always carried. A deployment that wants
+    /// perfect privacy declines PRSS key setup and gets `TripleGenNode` unchanged; there is no
+    /// third option, and pretending otherwise is how a cost table becomes a security claim.
+    ///
+    /// # Phase
+    ///
+    /// PREPROCESSING, and the sessions are tagged [`ProtocolType::Dn07`] rather than
+    /// [`ProtocolType::Triple`]: the dispatcher demuxes `BatchRecon` on the calling protocol, and
+    /// `Triple` routes to `triple_gen`'s own reconstruction node. The tag is classified
+    /// `Preprocessing` by `dn07::phase_of`, and [`PreprocessingSessionId::new`] is what turns that
+    /// classification into a value `init_mul` will accept.
+    async fn generate_triples_via_dn07<N>(
+        &mut self,
+        count: usize,
+        network: Arc<N>,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
+        if count == 0 {
+            return Ok(());
+        }
+        let source = match self.preprocess.dn07_doubles.as_ref() {
+            Some(source) => source.clone(),
+            None => return Err(HoneyBadgerError::NotEnoughPreprocessing),
+        };
+        let alloc = match self.preprocess.prss_alloc.as_ref() {
+            Some(alloc) => alloc.clone(),
+            None => return Err(HoneyBadgerError::NotEnoughPreprocessing),
+        };
+
+        // Two ceilings on one session: PRZS spends `t` coefficients per double sharing and bounds
+        // the total per call, and DN07 bounds one session's opening at `MAX_DN07_GROUPS` groups of
+        // `2t+1`. Neither is binding at the thresholds this repo runs; taking the `min` means a
+        // change to either constant cannot silently produce a `BatchTooLarge` from in here.
+        let przs_cap = (MAX_PRZS_COEFFS_PER_CALL / self.params.threshold.max(1)).max(1);
+        let chunk = przs_cap.min(self.preprocess.dn07.max_batch_size()).max(1);
+        // And a third ceiling, on how many sessions are in flight at once: `Dn07MulNode` admits
+        // `MAX_DN07_SESSIONS / n` sessions per initiator, this node included. Issuing more than
+        // that before awaiting any would have the node reject its own sessions and then block
+        // forever waiting for their results. `n_triples` is a caller-supplied figure, so this is
+        // reachable rather than theoretical.
+        let in_flight = (MAX_DN07_SESSIONS / self.params.n_parties.max(1)).max(1);
+
+        let mut triples = Vec::with_capacity(count);
+        let mut produced = 0usize;
+
+        while produced < count {
+            // Phase 0 — claim and derive this wave's material. Each claim burns its own window,
+            // so a failure anywhere below leaves positions burned rather than rewound.
+            let mut pending = Vec::new();
+            let mut issued = produced;
+            while issued < count && pending.len() < in_flight {
+                let take = (count - issued).min(chunk);
+                let material = source.triple_material(&alloc, take).await?;
+                // The exec id here names a *network session*; the exec id inside the window above
+                // names a *PRF context*. Both live under `ProtocolType::Dn07` and neither can
+                // reach the other: nothing derives PRSS from a wire session id, and nothing routes
+                // a message by a window's.
+                let session_id = SessionId::new(
+                    ProtocolType::Dn07,
+                    SessionId::pack_slot(self.counters.triple_counter.get_next().await?, 0, 0),
+                    self.params.instance_id,
+                );
+                pending.push((session_id, material));
+                issued += take;
+            }
+
+            // Phase 1 — issue the wave's openings so their rounds overlap instead of running back
+            // to back. Same shape as the `TripleGenNode` pipelining this replaces.
+            let mut first_err: Option<HoneyBadgerError> = None;
+            let mut live = Vec::with_capacity(pending.len());
+            for (session_id, material) in &pending {
+                let outcome = match PreprocessingSessionId::new(*session_id) {
+                    Ok(pre_sid) => {
+                        self.preprocess
+                            .dn07
+                            .init_mul(
+                                pre_sid,
+                                material.a.clone(),
+                                material.b.clone(),
+                                material.doubles.clone(),
+                                network.clone(),
+                            )
+                            .await
+                    }
+                    Err(e) => Err(e),
+                };
+                match outcome {
+                    // Not `?`: sessions issued earlier in this wave are already live, and
+                    // returning here would leave them and their children resident.
+                    Ok(()) => live.push(*session_id),
+                    Err(e) if first_err.is_none() => first_err = Some(e.into()),
+                    Err(_) => {}
+                }
+            }
+
+            // Phase 2 — collect. `clear_store` on every exit path, including the failure one: an
+            // abandoned DN07 session holds an entry here and one in its batch-reconstruction
+            // child.
+            for (session_id, material) in &pending {
+                if live.contains(session_id) {
+                    match self
+                        .preprocess
+                        .dn07
+                        .wait_for_products(*session_id, self.params.timeout)
+                        .await
+                    {
+                        Ok(products) if products.len() == material.a.len() => {
+                            for ((a, b), mult) in material
+                                .a
+                                .iter()
+                                .zip(material.b.iter())
+                                .zip(products.into_iter())
+                            {
+                                triples.push(ShamirBeaverTriple::new(a.clone(), b.clone(), mult));
+                            }
+                        }
+                        Ok(products) => {
+                            if first_err.is_none() {
+                                first_err =
+                                    Some(HoneyBadgerError::Dn07Error(Dn07Error::LengthMismatch {
+                                        what: "DN07 triple products",
+                                        expected: material.a.len(),
+                                        got: products.len(),
+                                    }));
+                            }
+                        }
+                        Err(e) if first_err.is_none() => first_err = Some(e.into()),
+                        Err(_) => {}
+                    }
+                }
+                if !self.preprocess.dn07.clear_store(*session_id).await {
+                    warn!(?session_id, "failed to clear DN07 triple generation state");
+                }
+            }
+
+            if let Some(e) = first_err {
+                return Err(e);
+            }
+            produced = issued;
+        }
+
+        self.preprocessing_material
+            .lock()
+            .await
+            .add(Some(triples), None, None, None);
         Ok(())
     }
 }
