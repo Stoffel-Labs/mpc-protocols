@@ -1,9 +1,9 @@
 use crate::common::session_store::{Admission, SessionStore};
-use crate::common::ProtocolSessionId;
 use crate::{
     common::utils::deser_bounded_vec,
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
+        dn07::PreprocessingSessionId,
         mul_pub::{MulPubError, MulPubState, MulPubStore},
         robust_interpolate::robust_interpolate::RobustShare,
         SessionId,
@@ -22,6 +22,23 @@ const MAX_MUL_PUB_SESSIONS: usize = 256;
 /// payload of one session. Callers split larger requests via [`MulPubNode::max_batch_size`].
 const MAX_MUL_PUB_GROUPS: usize = 256;
 
+/// Opens `a * b` in the clear, in one batch-reconstruction round.
+///
+/// **PREPROCESSING.** The share it reconstructs is `a_j * b_j + [0]_{2t}`, a degree-`2t` sharing:
+/// its [`BatchReconNode`] is constructed with reconstruction degree `2 * threshold`, three lines
+/// below. A degree-`2t` opening needs `n >= 4t+1` to be robustly reconstructible, and this network
+/// is `n = 3t+1`, so on the asynchronous online path the `t` shares an adversary may simply never
+/// send are enough to stall it forever — and the `2t+1` honest shares that do arrive are not
+/// enough to error-correct. Preprocessing is synchronous and may abort, which is what makes the
+/// same opening legal there.
+///
+/// That is a statement about *which sessions may reach this node*, so [`MulPubNode::init`] takes a
+/// [`PreprocessingSessionId`] and not a bare [`SessionId`], exactly as
+/// [`Dn07MulNode::init_mul`](crate::honeybadger::dn07::dn07::Dn07MulNode::init_mul) does. The
+/// classification lives in one place — [`phase_of`](crate::honeybadger::dn07::phase_of)'s
+/// exhaustive match — so a new [`ProtocolType`](crate::honeybadger::ProtocolType) cannot be added
+/// without someone deciding its phase, and a future second MulPub caller cannot reach this opening
+/// from an online session without first failing to name it.
 #[derive(Clone, Debug)]
 pub struct MulPubNode<F: FftField> {
     pub id: usize,
@@ -85,14 +102,27 @@ impl<F: FftField> MulPubNode<F> {
         self.store.lock().await.retire(session_id)
     }
 
+    /// Opens `a_j * b_j` for every `j`, re-randomised by `zero_shares[j]`.
+    ///
+    /// # Phase
+    ///
+    /// `session_id` is a [`PreprocessingSessionId`], which is the containment: this opens at
+    /// degree `2t` (see the type docs on [`MulPubNode`]), and the only constructor of that type
+    /// classifies the session's calling protocol through
+    /// [`phase_of`](crate::honeybadger::dn07::phase_of) and refuses an online one with
+    /// [`Dn07Error::OnlinePhaseForbidden`](crate::honeybadger::dn07::Dn07Error::OnlinePhaseForbidden).
+    /// It also carries the root-session shape this call used to assert by hand — `sub_id` and
+    /// `round_id` both zero, leaving the child-minting space free for the batch reconstruction
+    /// below — so those checks are gone from this body rather than merely restated in it.
     pub async fn init<N: Network + Send + Sync + 'static>(
         &mut self,
-        session_id: SessionId,
+        session_id: PreprocessingSessionId,
         a: Vec<RobustShare<F>>,
         b: Vec<RobustShare<F>>,
         zero_shares: Vec<RobustShare<F>>,
         network: Arc<N>,
     ) -> Result<(), MulPubError> {
+        let session_id = session_id.get();
         if a.len() != b.len() {
             return Err(MulPubError::InvalidInput(
                 "a and b must have equal length".into(),
@@ -119,22 +149,6 @@ impl<F: FftField> MulPubNode<F> {
                 max: self.max_batch_size(),
             });
         }
-        if session_id.calling_protocol().is_none() {
-            return Err(MulPubError::InvalidInput(
-                "session_id must have a calling protocol".into(),
-            ));
-        }
-        if session_id.sub_id() != 0 {
-            return Err(MulPubError::InvalidInput(
-                "session_id sub_id must be 0".into(),
-            ));
-        }
-        if session_id.round_id() != 0 {
-            return Err(MulPubError::InvalidInput(
-                "session_id round_id must be 0".into(),
-            ));
-        }
-
         let storage_bind = match self.get_or_create_store(session_id, self.id, k).await {
             Some(s) => s,
             None => return Err(MulPubError::LimitError),
@@ -272,6 +286,7 @@ impl<F: FftField> MulPubNode<F> {
 mod tests {
     use super::*;
     use crate::common::ProtocolSessionId;
+    use crate::honeybadger::dn07::Dn07Error;
     use crate::honeybadger::ProtocolType;
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
@@ -280,7 +295,16 @@ mod tests {
     #[tokio::test]
     async fn buffers_batch_reconstruction_that_finishes_before_local_init() {
         let mut node = MulPubNode::<Fr>::new(0, 5, 1).unwrap();
-        let session_id = SessionId::new(ProtocolType::Mul, SessionId::pack_slot(7, 0, 0), 42);
+        // `RandBit`, not `Mul`. This test used to name `ProtocolType::Mul` — an *online* tag — on
+        // a node that opens at degree 2t, and nothing anywhere refused it. That it now cannot
+        // compile with an online tag is the point of `PreprocessingSessionId`.
+        let pre_sid = PreprocessingSessionId::new(SessionId::new(
+            ProtocolType::RandBit,
+            SessionId::pack_slot(7, 0, 0),
+            42,
+        ))
+        .unwrap();
+        let session_id = pre_sid.get();
 
         // k = 3, batch_size = 2t+1 = 3, so this is exactly one batch's worth of coefficients.
         let coeffs = vec![Fr::from(1_u64), Fr::from(2_u64), Fr::from(3_u64)];
@@ -319,7 +343,7 @@ mod tests {
         let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
 
         node.init(
-            session_id,
+            pre_sid,
             a,
             b,
             zero_shares,
@@ -337,5 +361,58 @@ mod tests {
         let store = storage_bind.lock().await;
         assert_eq!(store.state, MulPubState::Finished);
         assert!(store.pending_batch_recon_payload.is_none());
+    }
+
+    /// The barrier, mirroring `gf_dn07::tests::online_sessions_cannot_even_be_named`.
+    ///
+    /// `init` takes a `PreprocessingSessionId`, so an online session cannot be handed to MulPub at
+    /// all — the attempt has to be made here, at the constructor, and it fails before a single
+    /// share is touched. Every online tag is checked, not just one: a tag added to `ProtocolType`
+    /// and classified `Online` is covered by this test the moment `phase_of` is updated, which is
+    /// the only edit that can add one.
+    #[tokio::test]
+    async fn online_sessions_cannot_even_be_named() {
+        for tag in [
+            ProtocolType::Input,
+            ProtocolType::Mul,
+            ProtocolType::FpMul,
+            ProtocolType::Trunc,
+            ProtocolType::FpDivConst,
+            ProtocolType::GfMul,
+            ProtocolType::A2B,
+            ProtocolType::A2BGfMul,
+            ProtocolType::B2A,
+        ] {
+            let err =
+                PreprocessingSessionId::new(SessionId::new(tag, SessionId::pack_slot(7, 0, 0), 42))
+                    .unwrap_err();
+            assert!(
+                matches!(err, Dn07Error::OnlinePhaseForbidden { tag: t, .. } if t == tag as u8),
+                "MulPub opens at degree 2t; {tag:?} must not be able to name one of its sessions, \
+                 got {err:?}"
+            );
+            // And the refusal is reportable as a MulPub error, which is how `RandBit::init`
+            // surfaces it to its own caller.
+            let as_mul_pub: MulPubError =
+                PreprocessingSessionId::new(SessionId::new(tag, SessionId::pack_slot(7, 0, 0), 42))
+                    .unwrap_err()
+                    .into();
+            assert!(matches!(
+                as_mul_pub,
+                MulPubError::SessionPhase(Dn07Error::OnlinePhaseForbidden { .. })
+            ));
+        }
+    }
+
+    /// The preprocessing tags that actually reach MulPub are accepted, so the barrier above is
+    /// rejecting a phase rather than rejecting everything.
+    #[tokio::test]
+    async fn the_preprocessing_caller_is_still_admitted() {
+        assert!(PreprocessingSessionId::new(SessionId::new(
+            ProtocolType::RandBit,
+            SessionId::pack_slot(7, 0, 0),
+            42,
+        ))
+        .is_ok());
     }
 }

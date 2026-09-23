@@ -11,6 +11,8 @@ use tokio::time::{timeout, Duration};
 use tracing::info;
 
 use crate::common::utils::deser_bounded_vec;
+use crate::common::ProtocolSessionId;
+use crate::honeybadger::dn07::{phase_of, ProtocolPhase};
 use crate::honeybadger::triple_gen::{TripleGenError, TripleGenStorage};
 use crate::honeybadger::{
     double_share::DoubleShamirShare, triple_gen::ShamirBeaverTriple, SessionId,
@@ -19,6 +21,40 @@ use crate::honeybadger::{
 use crate::honeybadger::{
     batch_recon::batch_recon::BatchReconNode, robust_interpolate::robust_interpolate::RobustShare,
 };
+
+/// Refuses a session whose calling protocol runs in the online phase.
+///
+/// # Why this is a check and not a type
+///
+/// The repo's containment mechanism for degree-`2t` openings is
+/// [`PreprocessingSessionId`](crate::honeybadger::dn07::PreprocessingSessionId): `init_*` takes
+/// one, and its only constructor classifies the tag through
+/// [`phase_of`](crate::honeybadger::dn07::phase_of), which is what
+/// [`MulPubNode::init`](crate::honeybadger::mul_pub::mul_pub::MulPubNode::init) and the DN07 nodes
+/// use. [`TripleGenNode`] cannot take that type, because the constructor also demands a *root-shaped*
+/// session — `sub_id` and `round_id` both zero — while [`TripleGenNode::init_batch`] is called with
+/// `round_id` running `0..=255`: the node mints up to 256 concurrent sessions per counter value by
+/// varying exactly that byte. Wrapping the session id would reject every batch after the first.
+///
+/// So what generalises here is the phase half alone, applied against the same exhaustive
+/// `phase_of` match. The refusal is identical in force; it just lands at runtime instead of at
+/// compile time.
+fn require_preprocessing_phase(session_id: SessionId) -> Result<(), TripleGenError> {
+    let Some(tag) = session_id.calling_protocol() else {
+        // No calling protocol at all: malformed rather than mis-phased.
+        return Err(TripleGenError::SessionIdError(session_id));
+    };
+    match phase_of(tag) {
+        ProtocolPhase::Preprocessing => Ok(()),
+        ProtocolPhase::Online => Err(TripleGenError::OnlinePhaseForbidden {
+            session_id,
+            tag: tag as u8,
+        }),
+        // A transport tag (`Rbc`, `BatchRecon`, `GfBatchRecon`, `None`) never names a calling
+        // protocol, so a session carrying one is malformed here too.
+        ProtocolPhase::Transport => Err(TripleGenError::SessionIdError(session_id)),
+    }
+}
 
 /// Current state of the Shamir Beaver triple generation protocol.
 #[derive(Clone, PartialEq, Debug)]
@@ -286,6 +322,9 @@ where
             "Initializing TripleGen protocol"
         );
 
+        // The phase barrier: this opens the masked degree-`2t` product below, which only the
+        // synchronous preprocessing phase can carry. See `require_preprocessing_phase`.
+        require_preprocessing_phase(session_id)?;
         assert_eq!(session_id.sub_id(), 0);
 
         if randousha_pairs.len() != 2 * self.threshold + 1
@@ -363,6 +402,9 @@ where
             "Initializing batched TripleGen protocol"
         );
 
+        // The phase barrier: this opens the masked degree-`2t` product below, which only the
+        // synchronous preprocessing phase can carry. See `require_preprocessing_phase`.
+        require_preprocessing_phase(session_id)?;
         assert_eq!(session_id.sub_id(), 0);
 
         if randousha_pairs.is_empty()
@@ -442,6 +484,7 @@ mod tests {
     use super::*;
     use crate::common::share::shamir::NonRobustShare;
     use crate::common::ProtocolSessionId;
+    use crate::honeybadger::dn07::{Dn07Error, PreprocessingSessionId};
     use crate::honeybadger::ProtocolType;
     use ark_bls12_381::Fr;
     use ark_serialize::CanonicalSerialize;
@@ -511,5 +554,128 @@ mod tests {
         let storage = storage_bind.lock().await;
         assert_eq!(storage.protocol_state, ProtocolState::Finished);
         assert!(storage.pending_batch_recon_payload.is_none());
+    }
+
+    fn network() -> Arc<FakeNetwork> {
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        Arc::new(FakeNetwork::new(0, inner))
+    }
+
+    /// One group's worth of well-formed inputs at `t = 1`, so the refusals below are about the
+    /// session and not about the shares.
+    #[allow(clippy::type_complexity)]
+    fn inputs(
+        node: &TripleGenNode<Fr>,
+    ) -> (
+        Vec<RobustShare<Fr>>,
+        Vec<RobustShare<Fr>>,
+        Vec<DoubleShamirShare<Fr>>,
+    ) {
+        let values = [Fr::from(1_u64), Fr::from(2_u64), Fr::from(3_u64)];
+        (
+            values
+                .iter()
+                .map(|v| RobustShare::new(*v, node.id, 1))
+                .collect(),
+            values
+                .iter()
+                .map(|v| RobustShare::new(*v, node.id, 1))
+                .collect(),
+            values
+                .iter()
+                .map(|v| {
+                    DoubleShamirShare::new(
+                        NonRobustShare::new(*v, node.id, 1),
+                        NonRobustShare::new(*v, node.id, 2),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// The barrier, mirroring `gf_dn07::tests::online_sessions_cannot_even_be_named` and
+    /// `mul_pub::tests::online_sessions_cannot_even_be_named`.
+    ///
+    /// Before this change `init`/`init_batch` asserted only `sub_id == 0`, so any of these tags
+    /// would have been carried into a degree-`2t` batch reconstruction.
+    #[tokio::test]
+    async fn an_online_session_is_refused_by_both_entry_points() {
+        for tag in [
+            ProtocolType::Input,
+            ProtocolType::Mul,
+            ProtocolType::FpMul,
+            ProtocolType::Trunc,
+            ProtocolType::FpDivConst,
+            ProtocolType::GfMul,
+            ProtocolType::A2B,
+            ProtocolType::A2BGfMul,
+            ProtocolType::B2A,
+        ] {
+            let mut node = TripleGenNode::<Fr>::new(0, 5, 1).unwrap();
+            let session_id = SessionId::new(tag, SessionId::pack_slot(7, 0, 0), 42);
+            let (a, b, pairs) = inputs(&node);
+            let net = network();
+
+            let err = node
+                .init(a.clone(), b.clone(), pairs.clone(), session_id, net.clone())
+                .await
+                .expect_err("an online tag must not reach a degree-2t opening");
+            assert!(
+                matches!(err, TripleGenError::OnlinePhaseForbidden { tag: t, .. } if t == tag as u8),
+                "init accepted {tag:?}: got {err:?}"
+            );
+
+            let err = node
+                .init_batch(a, b, pairs, session_id, net)
+                .await
+                .expect_err("an online tag must not reach a degree-2t opening");
+            assert!(
+                matches!(err, TripleGenError::OnlinePhaseForbidden { tag: t, .. } if t == tag as u8),
+                "init_batch accepted {tag:?}: got {err:?}"
+            );
+
+            // Refused before any state was created, so no admission slot is burned.
+            assert_eq!(node.store_len().await, 0);
+        }
+    }
+
+    /// The negative control, and the evidence for the note on `require_preprocessing_phase`.
+    ///
+    /// The node's production caller mints sessions as `pack_slot(counter, 0, round_id)` with
+    /// `round_id` running `0..=255`, and `PreprocessingSessionId::new` rejects a non-zero
+    /// `round_id`. So taking that type in the signature — the containment `MulPubNode::init` uses
+    /// — would refuse a session this protocol legitimately produces. The phase half is what
+    /// generalises, and it accepts this session, as it must.
+    #[tokio::test]
+    async fn the_batch_path_uses_round_id_which_is_why_the_wrapper_type_does_not_fit() {
+        let sid = SessionId::new(ProtocolType::Triple, SessionId::pack_slot(7, 0, 3), 42);
+        assert!(
+            matches!(
+                PreprocessingSessionId::new(sid).unwrap_err(),
+                Dn07Error::MalformedSessionId(_)
+            ),
+            "if this ever starts succeeding, the wrapper type can be used here after all"
+        );
+        assert!(require_preprocessing_phase(sid).is_ok());
+        // And the root-shaped form the single-group path uses is fine either way.
+        let root = SessionId::new(ProtocolType::Triple, SessionId::pack_slot(7, 0, 0), 42);
+        assert!(PreprocessingSessionId::new(root).is_ok());
+        assert!(require_preprocessing_phase(root).is_ok());
+    }
+
+    /// A transport tag names no calling protocol, so it is malformed here rather than mis-phased.
+    #[tokio::test]
+    async fn a_transport_tag_is_rejected_as_malformed_not_as_online() {
+        for tag in [
+            ProtocolType::Rbc,
+            ProtocolType::BatchRecon,
+            ProtocolType::None,
+        ] {
+            let sid = SessionId::new(tag, SessionId::pack_slot(7, 0, 0), 42);
+            assert!(matches!(
+                require_preprocessing_phase(sid).unwrap_err(),
+                TripleGenError::SessionIdError(_)
+            ));
+        }
     }
 }

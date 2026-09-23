@@ -1,4 +1,4 @@
-use crate::honeybadger::{batch_recon::BatchReconError, SessionId};
+use crate::honeybadger::{batch_recon::BatchReconError, dn07::Dn07Error, SessionId};
 use ark_ff::FftField;
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
@@ -9,6 +9,19 @@ pub mod mul_pub;
 
 #[derive(Debug, Error)]
 pub enum MulPubError {
+    /// The session offered to [`MulPubNode::init`](mul_pub::MulPubNode::init) was not a
+    /// preprocessing session, or was not root-shaped.
+    ///
+    /// `init` takes a [`PreprocessingSessionId`](crate::honeybadger::dn07::PreprocessingSessionId)
+    /// rather than a bare [`SessionId`], so in practice this variant is how a *caller* reports the
+    /// refusal it got when it tried to name the session at all — see
+    /// [`RandBit::init`](crate::honeybadger::fpmul::rand_bit::RandBit::init), which is where the
+    /// conversion happens for the one production MulPub caller. The wrapped
+    /// [`Dn07Error::OnlinePhaseForbidden`] is the case that matters: MulPub opens
+    /// `a*b + [0]_{2t}` at degree `2t`, which the asynchronous robust path cannot reconstruct at
+    /// `n = 3t+1`.
+    #[error("MulPub session rejected: {0}")]
+    SessionPhase(#[from] Dn07Error),
     #[error("ark serialization: {0:?}")]
     ArkSerialization(#[from] SerializationError),
     #[error("bincode: {0:?}")]

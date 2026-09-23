@@ -20,6 +20,7 @@ use crate::common::gf2k::field::BinaryField;
 use crate::common::gf2k::share::GfShare;
 use crate::common::session_store::SessionStore;
 use crate::common::ProtocolSessionId;
+use crate::honeybadger::dn07::{phase_of, ProtocolPhase};
 use crate::honeybadger::gf_batch_recon::gf_batch_recon::GfBatchReconNode;
 use crate::honeybadger::gf_double_share::GfDoubleShamirShare;
 use crate::honeybadger::gf_triple_gen::{GfBeaverTriple, GfTripleGenError, GfTripleGenStorage};
@@ -34,6 +35,51 @@ fn deser_bounded<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, GfTripleGenErro
         .with_fixint_encoding()
         .with_limit(bytes.len() as u64)
         .deserialize(bytes)?)
+}
+
+/// Refuses a session whose calling protocol runs in the online phase.
+///
+/// # Why this is a check and not a type
+///
+/// The repo's containment mechanism for degree-`2t` openings is
+/// [`PreprocessingSessionId`](crate::honeybadger::dn07::PreprocessingSessionId): `init_*` takes
+/// one, and its only constructor classifies the tag through
+/// [`phase_of`](crate::honeybadger::dn07::phase_of), which is what
+/// [`MulPubNode::init`](crate::honeybadger::mul_pub::mul_pub::MulPubNode::init) and the DN07 nodes
+/// use. This node does not take that type, for two reasons, only the second of which is about
+/// GF(2^k).
+///
+/// First, the constructor also demands a *root-shaped* session — `sub_id` and `round_id` both zero
+/// — and this file is a structural port of
+/// [`TripleGenNode`](crate::honeybadger::triple_gen::triple_generation::TripleGenNode), whose
+/// `init_batch` is called with `round_id` running `0..=255`: that node mints up to 256 concurrent
+/// sessions per counter value by varying exactly that byte, and wrapping the session id would
+/// reject every batch after the first. `ensure_gf_triples` happens to mint root-shaped sessions
+/// today, so the wrapper type *would* fit this node as currently called — but the two `init_batch`
+/// bodies are the same algebra reached by the same caller shape, and splitting their contracts on
+/// an accident of the current GF counter would be a worse invariant than sharing one.
+///
+/// Second, the signature change would have to land at the call site in `honeybadger::mod.rs`,
+/// which is outside this change's blast radius.
+///
+/// So what generalises here is the phase half alone, applied against the same exhaustive
+/// `phase_of` match. The refusal is identical in force; it just lands at runtime instead of at
+/// compile time.
+fn require_preprocessing_phase(session_id: SessionId) -> Result<(), GfTripleGenError> {
+    let Some(tag) = session_id.calling_protocol() else {
+        // No calling protocol at all: malformed rather than mis-phased.
+        return Err(GfTripleGenError::SessionIdError(session_id));
+    };
+    match phase_of(tag) {
+        ProtocolPhase::Preprocessing => Ok(()),
+        ProtocolPhase::Online => Err(GfTripleGenError::OnlinePhaseForbidden {
+            session_id,
+            tag: tag as u8,
+        }),
+        // A transport tag (`Rbc`, `BatchRecon`, `GfBatchRecon`, `None`) never names a calling
+        // protocol, so a session carrying one is malformed here too.
+        ProtocolPhase::Transport => Err(GfTripleGenError::SessionIdError(session_id)),
+    }
 }
 
 /// Represents a node in the GF(2^k) triple generation protocol.
@@ -282,7 +328,10 @@ impl<K: BinaryField> GfTripleGenNode<K> {
             "Initializing GfTripleGen protocol"
         );
 
-        assert!(session_id.calling_protocol().is_some());
+        // The phase barrier: this opens the masked degree-`2t` product below, which only the
+        // synchronous preprocessing phase can carry. See `require_preprocessing_phase`.
+        require_preprocessing_phase(session_id)?;
+        // `calling_protocol().is_some()` is subsumed by the call above, which needs the tag.
         assert_eq!(session_id.sub_id(), 0);
         assert_eq!(session_id.round_id(), 0);
 
@@ -360,6 +409,9 @@ impl<K: BinaryField> GfTripleGenNode<K> {
             "Initializing batched GfTripleGen protocol"
         );
 
+        // The phase barrier: this opens the masked degree-`2t` product below, which only the
+        // synchronous preprocessing phase can carry. See `require_preprocessing_phase`.
+        require_preprocessing_phase(session_id)?;
         assert_eq!(session_id.sub_id(), 0);
 
         if randousha_pairs.is_empty()
@@ -438,6 +490,7 @@ mod tests {
     use super::*;
     use crate::common::gf2k::field::Gf256;
     use crate::common::ProtocolSessionId;
+    use crate::honeybadger::dn07::{Dn07Error, PreprocessingSessionId};
     use crate::honeybadger::ProtocolType;
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
 
@@ -504,5 +557,129 @@ mod tests {
         let storage = storage_bind.lock().await;
         assert_eq!(storage.protocol_state, ProtocolState::Finished);
         assert!(storage.pending_batch_recon_payload.is_none());
+    }
+
+    fn network() -> Arc<FakeNetwork> {
+        let (inner, _inboxes, _) = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10));
+        Arc::new(FakeNetwork::new(0, inner))
+    }
+
+    /// One group's worth of well-formed inputs at `t = 1`, so the refusals below are about the
+    /// session and not about the shares.
+    #[allow(clippy::type_complexity)]
+    fn inputs(
+        node: &GfTripleGenNode<Gf256>,
+    ) -> (
+        Vec<GfShare<Gf256>>,
+        Vec<GfShare<Gf256>>,
+        Vec<GfDoubleShamirShare<Gf256>>,
+    ) {
+        let values = [Gf256(1), Gf256(2), Gf256(3)];
+        (
+            values
+                .iter()
+                .map(|v| GfShare::new(*v, node.id, 1))
+                .collect(),
+            values
+                .iter()
+                .map(|v| GfShare::new(*v, node.id, 1))
+                .collect(),
+            values
+                .iter()
+                .map(|v| {
+                    GfDoubleShamirShare::new(
+                        GfShare::new(*v, node.id, 1),
+                        GfShare::new(*v, node.id, 2),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// The barrier, mirroring `gf_dn07::tests::online_sessions_cannot_even_be_named` and
+    /// `mul_pub::tests::online_sessions_cannot_even_be_named`.
+    ///
+    /// Before this change `init`/`init_batch` asserted only `sub_id == 0`, so any of these tags
+    /// would have been carried into a degree-`2t` batch reconstruction.
+    #[tokio::test]
+    async fn an_online_session_is_refused_by_both_entry_points() {
+        for tag in [
+            ProtocolType::Input,
+            ProtocolType::Mul,
+            ProtocolType::FpMul,
+            ProtocolType::Trunc,
+            ProtocolType::FpDivConst,
+            ProtocolType::GfMul,
+            ProtocolType::A2B,
+            ProtocolType::A2BGfMul,
+            ProtocolType::B2A,
+        ] {
+            let mut node = GfTripleGenNode::<Gf256>::new(0, 5, 1).unwrap();
+            let session_id = SessionId::new(tag, SessionId::pack_slot(7, 0, 0), 42);
+            let (a, b, pairs) = inputs(&node);
+            let net = network();
+
+            let err = node
+                .init(a.clone(), b.clone(), pairs.clone(), session_id, net.clone())
+                .await
+                .expect_err("an online tag must not reach a degree-2t opening");
+            assert!(
+                matches!(err, GfTripleGenError::OnlinePhaseForbidden { tag: t, .. } if t == tag as u8),
+                "init accepted {tag:?}: got {err:?}"
+            );
+
+            let err = node
+                .init_batch(a, b, pairs, session_id, net)
+                .await
+                .expect_err("an online tag must not reach a degree-2t opening");
+            assert!(
+                matches!(err, GfTripleGenError::OnlinePhaseForbidden { tag: t, .. } if t == tag as u8),
+                "init_batch accepted {tag:?}: got {err:?}"
+            );
+
+            // Refused before any state was created, so no admission slot is burned.
+            assert_eq!(node.store_len().await, 0);
+        }
+    }
+
+    /// The negative control, and the evidence for the note on `require_preprocessing_phase`.
+    ///
+    /// `ensure_gf_triples` mints root-shaped sessions today, so the root case below shows the
+    /// wrapper type would fit *this* node as currently called. The non-root case is the one the
+    /// shared `init_batch` contract has to keep admitting: the F-domain twin's caller varies
+    /// `round_id` across `0..=255`, `PreprocessingSessionId::new` rejects that, and these two
+    /// bodies are the same algebra. The phase half accepts both, which is the split the note
+    /// describes.
+    #[tokio::test]
+    async fn the_shared_batch_contract_admits_sessions_the_wrapper_type_would_not() {
+        let sid = SessionId::new(ProtocolType::GfTriple, SessionId::pack_slot(7, 0, 3), 42);
+        assert!(
+            matches!(
+                PreprocessingSessionId::new(sid).unwrap_err(),
+                Dn07Error::MalformedSessionId(_)
+            ),
+            "if this ever starts succeeding, the wrapper type can be used here after all"
+        );
+        assert!(require_preprocessing_phase(sid).is_ok());
+        // And the root-shaped form the single-group path uses is fine either way.
+        let root = SessionId::new(ProtocolType::GfTriple, SessionId::pack_slot(7, 0, 0), 42);
+        assert!(PreprocessingSessionId::new(root).is_ok());
+        assert!(require_preprocessing_phase(root).is_ok());
+    }
+
+    /// A transport tag names no calling protocol, so it is malformed here rather than mis-phased.
+    #[tokio::test]
+    async fn a_transport_tag_is_rejected_as_malformed_not_as_online() {
+        for tag in [
+            ProtocolType::Rbc,
+            ProtocolType::BatchRecon,
+            ProtocolType::None,
+        ] {
+            let sid = SessionId::new(tag, SessionId::pack_slot(7, 0, 0), 42);
+            assert!(matches!(
+                require_preprocessing_phase(sid).unwrap_err(),
+                GfTripleGenError::SessionIdError(_)
+            ));
+        }
     }
 }

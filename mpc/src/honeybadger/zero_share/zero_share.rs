@@ -18,6 +18,7 @@ use crate::{
         ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC,
     },
     honeybadger::{
+        dn07::{phase_of, ProtocolPhase},
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
         zero_share::{
             ZeroShaError, ZeroShaMessage, ZeroShaMessageType, ZeroShaPayload, ZeroShaState,
@@ -26,6 +27,38 @@ use crate::{
         SessionId, WrappedMessage,
     },
 };
+
+/// Refuses a session whose calling protocol runs in the online phase.
+///
+/// # Why this is a check and not a type
+///
+/// The repo's containment mechanism for degree-`2t` work is
+/// [`PreprocessingSessionId`](crate::honeybadger::dn07::PreprocessingSessionId), which
+/// [`MulPubNode::init`](crate::honeybadger::mul_pub::mul_pub::MulPubNode::init) and the DN07 nodes
+/// take in their signatures. [`ZeroShaNode::init_batch`] keeps a bare [`SessionId`] for the same
+/// reason [`TripleGenNode`](crate::honeybadger::triple_gen::triple_generation::TripleGenNode)
+/// does: the wrapper's constructor also asserts a root-shaped session, and ZeroSha's `round_id`
+/// is copied through into the per-verifier RBC child sessions minted in
+/// [`ZeroShaNode::reconstruction_handler`], so it is part of this protocol's own addressing
+/// rather than spare space. What generalises is the phase half, against the same exhaustive
+/// [`phase_of`](crate::honeybadger::dn07::phase_of) match.
+fn require_preprocessing_phase(session_id: SessionId) -> Result<(), ZeroShaError> {
+    let Some(tag) = session_id.calling_protocol() else {
+        // No calling protocol at all: malformed rather than mis-phased. `reconstruction_handler`
+        // needs the tag to route the OK-vote broadcast back to the right field's node, so a
+        // session without one could not complete anyway.
+        return Err(ZeroShaError::SessionIdError(session_id));
+    };
+    match phase_of(tag) {
+        ProtocolPhase::Preprocessing => Ok(()),
+        ProtocolPhase::Online => Err(ZeroShaError::OnlinePhaseForbidden {
+            session_id,
+            tag: tag as u8,
+        }),
+        // A transport tag never names a calling protocol.
+        ProtocolPhase::Transport => Err(ZeroShaError::SessionIdError(session_id)),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ZeroShaNode<F: FftField, R: RBC> {
@@ -227,6 +260,9 @@ where
         N: Network,
         G: Rng,
     {
+        // The phase barrier. See `require_preprocessing_phase`: this both produces degree-2t
+        // sharings and verifies them by reconstructing at degree 2t after hearing from all n.
+        require_preprocessing_phase(session_id)?;
         assert_eq!(session_id.sub_id(), 0);
         let batch_size = batch_size.max(1);
 
@@ -590,5 +626,128 @@ where
                 self.reconstruction_handler(msg, network).await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::rbc::rbc::Avid;
+    use crate::honeybadger::dn07::{Dn07Error, PreprocessingSessionId};
+    use crate::honeybadger::ProtocolType;
+    use ark_bls12_381::Fr;
+    use ark_std::rand::SeedableRng;
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+
+    type Node = ZeroShaNode<Fr, Avid<SessionId>>;
+
+    fn network() -> Arc<FakeNetwork> {
+        let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+        Arc::new(FakeNetwork::new(0, inner))
+    }
+
+    /// The barrier, mirroring `gf_dn07::tests::online_sessions_cannot_even_be_named`.
+    ///
+    /// Before this change `init_batch` asserted only `sub_id == 0`, so any of these tags would
+    /// have been carried into a protocol that deals degree-2t sharings, waits for all `n` parties
+    /// and reconstructs at degree 2t — none of which the asynchronous robust path can do.
+    #[tokio::test]
+    async fn an_online_session_is_refused_before_any_share_is_dealt() {
+        for tag in [
+            ProtocolType::Input,
+            ProtocolType::Mul,
+            ProtocolType::FpMul,
+            ProtocolType::Trunc,
+            ProtocolType::FpDivConst,
+            ProtocolType::GfMul,
+            ProtocolType::A2B,
+            ProtocolType::A2BGfMul,
+            ProtocolType::B2A,
+        ] {
+            let mut node = Node::new(0, 5, 1, 2).unwrap();
+            let session_id = SessionId::new(tag, SessionId::pack_slot(7, 0, 0), 42);
+            let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(7);
+
+            let err = node
+                .init_batch(session_id, 2, &mut rng, network())
+                .await
+                .expect_err("an online tag must not reach a degree-2t protocol");
+            assert!(
+                matches!(err, ZeroShaError::OnlinePhaseForbidden { tag: t, .. } if t == tag as u8),
+                "init_batch accepted {tag:?}: got {err:?}"
+            );
+
+            // Refused before any state was created, and before a single share left this node.
+            assert_eq!(node.store_len().await, 0);
+        }
+    }
+
+    /// The negative control: the tag the production caller actually passes is still admitted, so
+    /// the barrier rejects a phase rather than rejecting everything.
+    #[tokio::test]
+    async fn the_preprocessing_caller_is_still_admitted() {
+        let session_id = SessionId::new(ProtocolType::ZeroSha, SessionId::pack_slot(7, 0, 0), 42);
+        assert!(require_preprocessing_phase(session_id).is_ok());
+        // Every preprocessing tag, so a future caller retagging its ZeroSha sessions — the way
+        // `reconstruction_handler` already reads the tag back dynamically to route the OK vote —
+        // is not silently locked out.
+        for tag in [
+            ProtocolType::Randousha,
+            ProtocolType::Ransha,
+            ProtocolType::Triple,
+            ProtocolType::Dousha,
+            ProtocolType::PRandInt,
+            ProtocolType::GfRansha,
+            ProtocolType::RandBit,
+            ProtocolType::ZeroSha,
+            ProtocolType::GfDousha,
+            ProtocolType::GfRandousha,
+            ProtocolType::GfTriple,
+            ProtocolType::DaBit,
+            ProtocolType::DaBitMul,
+            ProtocolType::DaBitOpen,
+            ProtocolType::DaBitGfMul,
+            ProtocolType::DaBitGfOpen,
+            ProtocolType::Dn07,
+            ProtocolType::GfDn07,
+        ] {
+            assert!(
+                require_preprocessing_phase(SessionId::new(tag, SessionId::pack_slot(7, 0, 0), 42))
+                    .is_ok(),
+                "{tag:?} is preprocessing and must be admitted"
+            );
+        }
+    }
+
+    /// A transport tag names no calling protocol, so it is malformed here rather than mis-phased —
+    /// and `reconstruction_handler` would fail on it anyway when it reads the tag back to address
+    /// the OK-vote broadcast.
+    #[tokio::test]
+    async fn a_transport_tag_is_rejected_as_malformed_not_as_online() {
+        for tag in [
+            ProtocolType::Rbc,
+            ProtocolType::BatchRecon,
+            ProtocolType::GfBatchRecon,
+            ProtocolType::None,
+        ] {
+            let sid = SessionId::new(tag, SessionId::pack_slot(7, 0, 0), 42);
+            assert!(matches!(
+                require_preprocessing_phase(sid).unwrap_err(),
+                ZeroShaError::SessionIdError(_)
+            ));
+        }
+    }
+
+    /// Evidence for the note on `require_preprocessing_phase`: ZeroSha's `round_id` is copied into
+    /// the RBC child session `reconstruction_handler` mints, so it is this protocol's own
+    /// addressing space and not spare room the wrapper type could claim.
+    #[tokio::test]
+    async fn round_id_is_addressing_space_here_so_the_wrapper_type_does_not_fit() {
+        let sid = SessionId::new(ProtocolType::ZeroSha, SessionId::pack_slot(7, 0, 3), 42);
+        assert!(matches!(
+            PreprocessingSessionId::new(sid).unwrap_err(),
+            Dn07Error::MalformedSessionId(_)
+        ));
+        assert!(require_preprocessing_phase(sid).is_ok());
     }
 }

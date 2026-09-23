@@ -1,7 +1,8 @@
 use crate::common::session_store::SessionStore;
-use crate::common::ProtocolSessionId;
+use crate::honeybadger::dn07::PreprocessingSessionId;
 use crate::honeybadger::fpmul::{ProtocolState, RandBitError, RandBitStorage};
 use crate::honeybadger::mul_pub::mul_pub::MulPubNode;
+use crate::honeybadger::mul_pub::MulPubError;
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::SessionId;
 use ark_ff::FftField;
@@ -123,6 +124,25 @@ where
     /// `[d] = ([a]/sqrt(a^2) + 1) / 2`.
     ///
     /// `zero_shares`: one degree-`2t` sharing of zero per element of `a`.
+    ///
+    /// # Phase
+    ///
+    /// This is the conversion boundary for MulPub. `RandBit` is reached through the node's
+    /// preprocessing loop with a [`ProtocolType::RandBit`](crate::honeybadger::ProtocolType)
+    /// session, so `session_id` arrives as a bare [`SessionId`]; [`MulPubNode::init`] accepts only
+    /// a [`PreprocessingSessionId`], and this is where the one is turned into the other.
+    ///
+    /// The three `assert!`s this replaces (`calling_protocol().is_some()`, `sub_id == 0`,
+    /// `round_id == 0`) are all re-checked by [`PreprocessingSessionId::new`], which additionally
+    /// classifies the tag through [`phase_of`](crate::honeybadger::dn07::phase_of). So the
+    /// weaker checks are not merely relocated: the previous version would have accepted a
+    /// `ProtocolType::Mul` session and carried a degree-`2t` opening onto the asynchronous robust
+    /// path, and that is what now cannot happen. It is also an error rather than a panic, which
+    /// matters because this runs inside the node's message loop.
+    ///
+    /// # Errors
+    /// [`RandBitError::MulPubError`] wrapping
+    /// [`MulPubError::SessionPhase`] if `session_id` is not a root-shaped preprocessing session.
     pub async fn init<N>(
         &mut self,
         a: Vec<RobustShare<F>>,
@@ -141,9 +161,8 @@ where
         // enforces its own per-session batch ceiling, so the `2t+1` grouping stays its business.
         // Callers that may exceed it chunk against `mul_pub.max_batch_size()`.
 
-        assert!(session_id.calling_protocol().is_some());
-        assert_eq!(session_id.sub_id(), 0);
-        assert_eq!(session_id.round_id(), 0);
+        let pre_sid = PreprocessingSessionId::new(session_id)
+            .map_err(|e| RandBitError::MulPubError(MulPubError::SessionPhase(e)))?;
 
         // Mark the protocol as initialized.
         {
@@ -157,7 +176,7 @@ where
         }
 
         self.mul_pub
-            .init(session_id, a.clone(), a.clone(), zero_shares, network)
+            .init(pre_sid, a.clone(), a.clone(), zero_shares, network)
             .await
             .map_err(RandBitError::MulPubError)?;
 
@@ -212,6 +231,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::ProtocolSessionId;
     use ark_bls12_381::Fr;
 
     #[tokio::test]
@@ -241,5 +261,72 @@ mod tests {
             result.is_none(),
             "Should reject sessions past the per-peer limit"
         );
+    }
+
+    /// `RandBit` is the conversion boundary: it takes a bare `SessionId` from the node's
+    /// preprocessing loop and must turn it into a `PreprocessingSessionId` before MulPub will look
+    /// at it. An online tag has to be refused *here*, since past this point the type system does
+    /// it and the refusal is no longer expressible.
+    ///
+    /// Before this change the three `assert!`s at the top of `init` accepted every tag below, and
+    /// `MulPub` — which opens `a^2 + [0]_{2t}` at degree `2t` — would have run on the
+    /// asynchronous robust path where `n = 3t+1` makes that opening neither reconstructible nor
+    /// correctable.
+    #[tokio::test]
+    async fn an_online_session_is_refused_before_any_share_is_touched() {
+        use crate::honeybadger::dn07::Dn07Error;
+        use crate::honeybadger::ProtocolType;
+        use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+
+        for tag in [
+            ProtocolType::Mul,
+            ProtocolType::FpMul,
+            ProtocolType::A2B,
+            ProtocolType::B2A,
+        ] {
+            let mut node = RandBit::<Fr>::new(0, 5, 1).unwrap();
+            let session_id = SessionId::new(tag, SessionId::pack_slot(9, 0, 0), 111);
+            let a = vec![RobustShare::new(Fr::from(3_u64), 0, 1)];
+            let zero_shares = vec![RobustShare::new(Fr::from(0_u64), 0, 2)];
+            let inner = FakeInnerNetwork::new(5, None, FakeNetworkConfig::new(10)).0;
+
+            let err = node
+                .init(
+                    a,
+                    zero_shares,
+                    session_id,
+                    Duration::from_millis(50),
+                    Arc::new(FakeNetwork::new(0, inner)),
+                )
+                .await
+                .expect_err("an online tag must not reach a degree-2t opening");
+
+            assert!(
+                matches!(
+                    err,
+                    RandBitError::MulPubError(MulPubError::SessionPhase(
+                        Dn07Error::OnlinePhaseForbidden { tag: t, .. }
+                    )) if t == tag as u8
+                ),
+                "{tag:?} must be refused with OnlinePhaseForbidden, got {err:?}"
+            );
+
+            // Refused *before* any state was created: no session was admitted, so nothing needs
+            // retiring and no MulPub session exists to leak an admission slot.
+            assert_eq!(node.store_len().await, 0);
+            assert_eq!(node.mul_pub.store_len().await, 0);
+        }
+    }
+
+    /// The negative control for the test above: the tag the production caller actually passes is
+    /// still accepted, so the barrier rejects a phase rather than rejecting everything.
+    #[tokio::test]
+    async fn the_preprocessing_tag_still_gets_through() {
+        let session_id = SessionId::new(
+            crate::honeybadger::ProtocolType::RandBit,
+            SessionId::pack_slot(9, 0, 0),
+            111,
+        );
+        assert!(PreprocessingSessionId::new(session_id).is_ok());
     }
 }

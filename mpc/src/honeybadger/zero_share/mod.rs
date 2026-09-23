@@ -18,6 +18,25 @@ pub mod zero_share;
 
 #[derive(Debug, Error)]
 pub enum ZeroShaError {
+    /// The session offered to [`ZeroShaNode::init_batch`](zero_share::ZeroShaNode::init_batch)
+    /// names a protocol that [`phase_of`](crate::honeybadger::dn07::phase_of) classifies as
+    /// [`Online`](crate::honeybadger::dn07::ProtocolPhase::Online).
+    ///
+    /// ZeroSha is a degree-`2t` protocol twice over. Its *output* is degree-`2t` sharings of zero,
+    /// which exist only to re-randomise a degree-`2t` opening elsewhere; and its own verification
+    /// step reconstructs `2t` sacrificed Vandermonde combinations at degree `2t`, after waiting
+    /// for shares from all `n` parties and broadcasting an OK vote over RBC. Waiting for all `n`
+    /// and using RBC are both things the asynchronous robust path cannot do, so an online session
+    /// reaching here would not merely be insecure, it would not terminate.
+    ///
+    /// Same refusal, same exhaustive classification, as
+    /// [`Dn07Error::OnlinePhaseForbidden`](crate::honeybadger::dn07::Dn07Error::OnlinePhaseForbidden).
+    #[error(
+        "session {session_id:?} names online protocol tag {tag}: ZeroSha produces and verifies \
+         degree-2t sharings and waits for all n parties, neither of which the asynchronous \
+         robust path supports. Preprocessing sessions only."
+    )]
+    OnlinePhaseForbidden { session_id: SessionId, tag: u8 },
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
     #[error("error while serializing an arkworks object: {0:?}")]

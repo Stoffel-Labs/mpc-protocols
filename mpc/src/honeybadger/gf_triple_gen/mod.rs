@@ -17,6 +17,30 @@ pub mod gf_triple_generation;
 /// minus the ark_serialize-specific variant — this track uses `bincode`/`serde` throughout.
 #[derive(Debug, Error)]
 pub enum GfTripleGenError {
+    /// The session offered to `init` / `init_batch` names a protocol that
+    /// [`phase_of`](crate::honeybadger::dn07::phase_of) classifies as
+    /// [`Online`](crate::honeybadger::dn07::ProtocolPhase::Online).
+    ///
+    /// GF(2^k) triple generation opens a degree-`2t` sharing (`a*b - r_2t`), and a degree-`2t` opening needs
+    /// `n >= 4t+1` to be robustly reconstructible. This network is `n = 3t+1`, so on the
+    /// asynchronous online path the `t` shares an adversary may simply withhold are enough to
+    /// stall it forever, and the `2t+1` honest shares that do arrive are not enough to
+    /// error-correct. Preprocessing is synchronous and may abort, which is what makes the same
+    /// opening legal there.
+    ///
+    /// This is the same refusal
+    /// [`Dn07Error::OnlinePhaseForbidden`](crate::honeybadger::dn07::Dn07Error::OnlinePhaseForbidden)
+    /// carries, reached through the same exhaustive classification. It is a separate variant
+    /// rather than a [`PreprocessingSessionId`](crate::honeybadger::dn07::PreprocessingSessionId)
+    /// in the signature because that type additionally requires a root-shaped session
+    /// (`sub_id == round_id == 0`), and `init_batch`'s production caller mints up to 256 sessions
+    /// per counter value by varying `round_id`. See the note on `init_batch`.
+    #[error(
+        "session {session_id:?} names online protocol tag {tag}: GF(2^k) triple generation opens at degree 2t, \
+         which is unreconstructible on the asynchronous robust path at n = 3t+1 (it needs \
+         n >= 4t+1). Preprocessing sessions only."
+    )]
+    OnlinePhaseForbidden { session_id: SessionId, tag: u8 },
     #[error("network error: {0:?}")]
     NetworkError(#[from] NetworkError),
     #[error("share error: {0:?}")]
