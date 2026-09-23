@@ -119,6 +119,15 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::GfMulError(_) => Self::HoneyBadgerGfMulError,
             HoneyBadgerError::ShareError(_) => Self::HoneyBadgerShareError,
             HoneyBadgerError::GfPreprocessingError(_) => Self::HoneyBadgerGfPreprocessingError,
+            HoneyBadgerError::DaBitError(_) => Self::HoneyBadgerDaBitError,
+            HoneyBadgerError::A2BError(_) => Self::HoneyBadgerA2BError,
+            HoneyBadgerError::B2AError(_) => Self::HoneyBadgerB2AError,
+            HoneyBadgerError::CircuitError(_) => Self::HoneyBadgerCircuitError,
+            HoneyBadgerError::ConvPreprocessingError(_) => Self::HoneyBadgerConvPreprocessingError,
+            HoneyBadgerError::ConvertError(_) => Self::HoneyBadgerConvertError,
+            HoneyBadgerError::DaBitGenerationStalled { .. } => {
+                Self::HoneyBadgerDaBitGenerationStalled
+            }
             HoneyBadgerError::Dn07Error(_) => Self::HoneyBadgerDn07Error,
         }
     }

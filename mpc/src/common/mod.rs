@@ -28,7 +28,7 @@ use crate::common::{
     rbc::{rbc_store::Msg, RbcError},
     share::ShareError,
 };
-use ark_ff::{FftField, Zero};
+use ark_ff::{FftField, PrimeField, Zero};
 use ark_poly::{
     univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain,
 };
@@ -567,6 +567,65 @@ where
     N: Network,
 {
     async fn run_gf_preprocessing<R>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut R,
+    ) -> Result<(), Self::Error>
+    where
+        N: 'async_trait,
+        R: Rng + Send;
+}
+
+/// Cross-domain share conversion: `[x]_F <-> ([x_0]_K, .., [x_{l-1}]_K)`.
+///
+/// Both directions consume doubly-shared bits and nothing else on the cross-domain side, and
+/// **neither has a statistical parameter**: A2B opens `y = x - r mod p` with `r` uniform on
+/// `[0, p)`, which is *exactly* uniform on `Z_p`, and B2A opens `c_i = x_i XOR r_i` with `r_i` a
+/// uniform single-use daBit, which is *exactly* uniform on `{0,1}`. Privacy is perfect,
+/// information-theoretic, at zero statistical distance — there is no `kappa` to get wrong here.
+#[async_trait]
+pub trait ShareConversionProtocol<F, K, SA, SB, N>
+where
+    F: PrimeField,
+    K: BinaryField,
+    SA: SecretSharingScheme<F>,
+    SB: SecretSharingScheme<K>,
+    N: Network,
+{
+    type Error: std::fmt::Debug;
+
+    /// `[x]_F -> ([x_0]_K, .., [x_{w-1}]_K)`, LSB first, `w = ceil(log2 p)` (64 on Goldilocks).
+    ///
+    /// The bits are those of the **canonical representative of `x` in `[0, p)`**, not a
+    /// two's-complement encoding: `-1` comes back as `p - 1 = 0xFFFF_FFFF_0000_0000`, not as
+    /// `u64::MAX`. A caller wanting a sign bit shifts by `2^(k-1)` first, the same convention
+    /// `truncpr` already uses.
+    async fn a2b(&mut self, x: Vec<SA>, network: Arc<N>) -> Result<Vec<Vec<SB>>, Self::Error>
+    where
+        N: 'async_trait;
+
+    /// `([x_0]_K, .., [x_{l-1}]_K) -> [sum 2^i x_i]_F`, LSB first.
+    ///
+    /// `l <= ceil(log2 p) - 1` (63 on Goldilocks) is a hard bound, not a heuristic: at full width
+    /// the recomposition would silently return `x mod p` for the payloads in `[p, 2^w)`, and the
+    /// adversary picks the payload. Widths may differ between values; each is bounded on its own.
+    async fn b2a(&mut self, bits: Vec<Vec<SB>>, network: Arc<N>) -> Result<Vec<SA>, Self::Error>
+    where
+        N: 'async_trait;
+}
+
+/// Fills the daBit and edaBit pools the two conversions drain.
+#[async_trait]
+pub trait ConversionPreprocessingProtocol<F, K, SA, SB, N>:
+    ShareConversionProtocol<F, K, SA, SB, N>
+where
+    F: PrimeField,
+    K: BinaryField,
+    SA: SecretSharingScheme<F>,
+    SB: SecretSharingScheme<K>,
+    N: Network,
+{
+    async fn run_conversion_preprocessing<R>(
         &mut self,
         network: Arc<N>,
         rng: &mut R,

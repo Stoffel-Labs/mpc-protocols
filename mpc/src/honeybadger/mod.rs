@@ -79,6 +79,7 @@ pub mod zero_share;
 
 use crate::{
     common::{
+        convert::ConvertError,
         gf2k::{field::Gf256, share::GfShare},
         rbc::{rbc_store::Msg, RbcError},
         share::ShareError,
@@ -87,11 +88,24 @@ use crate::{
             integer::{ClearInt, SecretInt},
             TypeError,
         },
-        GfMPCProtocol, GfPreprocessingMPCProtocol, MPCProtocol, MPCTypeOps,
-        PreprocessingMPCProtocol, ProtocolSessionId, ProtocolTag, ShamirShare, RBC,
+        ConversionPreprocessingProtocol, GfMPCProtocol, GfPreprocessingMPCProtocol, MPCProtocol,
+        MPCTypeOps, PreprocessingMPCProtocol, ProtocolSessionId, ProtocolTag, ShamirShare,
+        ShareConversionProtocol, RBC,
     },
     honeybadger::{
+        a2b::{
+            a2b::{A2BNode, MAX_A2B_CONVERSIONS},
+            A2BError,
+        },
+        b2a::{b2a::B2ANode, B2AError},
         batch_recon::{BatchReconError, BatchReconMsg},
+        binary_circuits::CircuitError,
+        conv_preprocessing::{ConvPreprocMaterial, ConvPreprocessingError},
+        dabit::{
+            edabit::EdaBitFilterNode,
+            prss_dabit::{PrssDaBitKeys, PrssDaBitNode},
+            DaBit, DaBitError,
+        },
         dn07::{
             dn07::Dn07MulNode,
             double_share::{GfPrssDoubleShareSource, PrssDoubleShareSource},
@@ -126,7 +140,7 @@ use crate::{
         },
         preprocessing::HoneyBadgerMPCNodePreprocMaterial,
         prss::prss::{PrssKeys, PRSS_KEY_ENTROPY_BITS},
-        prss::PrssAllocator,
+        prss::{PrssAllocator, PrssStream},
         przs::{gf_przs::GfPrzsKeys, przs::PrzsKeys, MAX_PRZS_COEFFS_PER_CALL},
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
@@ -275,6 +289,24 @@ pub enum HoneyBadgerError {
     ShareError(#[from] ShareError),
     #[error("error in GF(2^k) preprocessing: {0:?}")]
     GfPreprocessingError(#[from] crate::honeybadger::gf_preprocessing::GfPreprocessingError),
+    #[error("error in daBit generation: {0:?}")]
+    DaBitError(#[from] DaBitError),
+    #[error("error in arithmetic-to-binary conversion: {0:?}")]
+    A2BError(#[from] A2BError),
+    #[error("error in binary-to-arithmetic conversion: {0:?}")]
+    B2AError(#[from] B2AError),
+    #[error("error in a binary circuit: {0:?}")]
+    CircuitError(#[from] CircuitError),
+    #[error("error in conversion preprocessing: {0:?}")]
+    ConvPreprocessingError(#[from] ConvPreprocessingError),
+    #[error("error converting between the arithmetic and binary domains: {0:?}")]
+    ConvertError(#[from] ConvertError),
+    /// daBit generation excluded so many dealers that a batch cannot be completed. Each
+    /// `DaBitOutcome::Partial` costs at least one dealer and at most `t` can ever be excluded, so
+    /// exceeding `t + 1` consecutive partial runs is impossible under the threat model — reaching
+    /// this means the exclusion logic has a bug, not that an adversary is winning.
+    #[error("daBit generation returned a partial batch {attempts} times in a row")]
+    DaBitGenerationStalled { attempts: usize },
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -361,6 +393,11 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     /// GF(2^k) sub-protocol nodes that feed `gf_preprocessing_material`.
     pub gf_preprocess: GfPreprocessNodes<R>,
     pub gf_operations: GfOperation,
+    /// daBit and edaBit pools consumed by the two conversions, parallel to the two pools above.
+    pub conv_preprocessing_material: Arc<Mutex<ConvPreprocMaterial<F, Gf256>>>,
+    /// Share-conversion nodes: the daBit generator that fills `conv_preprocessing_material`, and
+    /// the two conversions that drain it.
+    pub conv: ConvNodes<F>,
     /// Shared byte and message counters.  Updated by [`CountingNetwork`] (sends)
     /// and by [`process`] (receives).  Only present with the `statistics` feature.
     #[cfg(feature = "statistics")]
@@ -482,6 +519,21 @@ where
         self.gf_preprocess.gf_dn07_doubles =
             Some(GfPrssDoubleShareSource::new(gf_prss, gf_przs).map_err(to_err)?);
 
+        // The daBit generator reads the *same* key family from both sides: `beta_T` is one
+        // `derive_ints_at` call whose bytes the `F` conversion turns into the integer sum and the
+        // `K` conversion turns into the XOR. Two stores built over different keys would produce
+        // two unrelated bits and nothing could tell — which is why `PrssDaBitKeys::new`
+        // cross-checks them here rather than at first use.
+        let dabit_gf_prss = GfPrssKeys::<Gf256>::new(self.id, n, t, &keys)
+            .map_err(|e| Dn07Error::Prss(format!("{e:?}")))
+            .map_err(to_err)?;
+        self.conv.dabit_gen.install_keys(PrssDaBitKeys::new(
+            self.id,
+            t,
+            prss.clone(),
+            dabit_gf_prss,
+        )?);
+
         self.preprocess.prand_int.install_prss_keys(prss);
         info!("PRSS key setup complete");
         Ok(())
@@ -530,9 +582,12 @@ where
         let random_shares = len.random_shr;
         let randbit = len.randbit;
         let prandint = len.prandint;
+        let conv = self.conv_preprocessing_material.lock().await.length();
+        let dabits = conv.dabits;
+        let edabits = conv.edabits;
         format!(
-            "material=(triples:{triples},random:{random_shares},randbit:{randbit},prandint:{prandint}) \
-             stores=(share_gen:{},dou_sha:{},ran_dou_sha:{},triple:{},triple_batch_recon:{},mul:{},rand_bit:{},rand_bit_mul_pub:{},zero_sha:{},prand_int:{},fpmul_mul:{},fpmul_trunc:{})",
+            "material=(triples:{triples},random:{random_shares},randbit:{randbit},prandint:{prandint},dabits:{dabits},edabits:{edabits}) \
+             stores=(share_gen:{},dou_sha:{},ran_dou_sha:{},triple:{},triple_batch_recon:{},mul:{},rand_bit:{},rand_bit_mul_pub:{},zero_sha:{},prand_int:{},fpmul_mul:{},fpmul_trunc:{},dabit_mod2:{},edabit:{},edabit_gf_dn07:{},edabit_gf_open:{},a2b:{},a2b_open:{},a2b_gf_mul:{},b2a:{},b2a_gf_open:{},dn07:{},gf_dn07:{})",
             self.preprocess.share_gen.store_len().await,
             self.preprocess.dou_sha.store_len().await,
             self.preprocess.ran_dou_sha.store_len().await,
@@ -545,6 +600,17 @@ where
             self.preprocess.prand_int.store_len().await,
             self.type_ops.fpmul.mult_node.store_len().await,
             self.type_ops.fpmul.trunc_node.store_len().await,
+            self.conv.dabit_gen.store_len().await,
+            self.conv.edabit.store_len().await,
+            self.conv.edabit.gf_dn07.store_len().await,
+            self.conv.edabit.gf_open.store_len().await,
+            self.conv.a2b.store_len().await,
+            self.conv.a2b.open.store_len().await,
+            self.conv.a2b.gf_mul.store_len().await,
+            self.conv.b2a.store_len().await,
+            self.conv.b2a.gf_open.store_len().await,
+            self.preprocess.dn07.store_len().await,
+            self.gf_preprocess.gf_dn07.store_len().await,
         )
     }
 }
@@ -634,6 +700,46 @@ pub struct GfPreprocessNodes<R: RBC> {
     pub gf_dn07_doubles: Option<GfPrssDoubleShareSource<Gf256>>,
 }
 
+/// Share-conversion nodes.
+///
+/// Unlike [`GfPreprocessNodes`] this carries an `F` parameter: `GfPreprocessNodes` gets away
+/// without one only because it is `Gf256` on both sides, whereas every one of these nodes
+/// straddles the prime field and the binary field at once.
+///
+/// `Gf256` stays hard-wired on the `K` side, matching the precedent set by
+/// `gf_preprocessing_material` and `gf_operations`. Generalising the node over `K` is a separate
+/// breaking change and is not needed here: every verification opening in this stack is an
+/// *exact-zero* check rather than a random linear combination, so the eight-bit field carries no
+/// soundness penalty that a wider one would remove.
+///
+/// No `R: RBC` any more: the dealt daBit protocol reliably broadcast its dealers' `Deltas`, and
+/// PRSS daBits broadcast nothing at all.
+#[derive(Clone, Debug)]
+pub struct ConvNodes<F: PrimeField> {
+    /// Produces the doubly-shared bits both conversions consume. Tags: `DaBit` (the parent batch,
+    /// which carries no wire traffic) and `DaBitOpen` (the single Mod2 opening).
+    pub dabit_gen: PrssDaBitNode<F, Gf256>,
+    /// Composes full-range edaBits and filters the masks that wrap `p`. Tags: `DaBitGfMul` (the
+    /// filter's AND layers) and `DaBitGfOpen` (its degree-`t` verdict opening).
+    pub edabit: EdaBitFilterNode<F, Gf256>,
+    /// Arithmetic to binary. Tags: `A2B` (mask opening) and `A2BGfMul` (AND layers).
+    ///
+    /// Built on [`OpeningPolicy::Auto`](gf_mul::OpeningPolicy::Auto), which prices each AND
+    /// layer's two plans in measured bytes and takes the one-round direct path while it is no
+    /// dearer than the two-round batched one plus one round's allowance. For the layer widths a
+    /// 64-bit conversion actually issues that is the direct path at every `n` — 9 online rounds
+    /// rather than 16, and 9 not 8, since the mask opening this policy does not govern is a
+    /// two-round `BatchRecon` session — while the far wider layers of a large batch cross over
+    /// and batch, with the last group padded rather than opened directly. Both halves are
+    /// degree-`t` and robust; the node has no reason to differ per deployment, and a deployment
+    /// with its own bytes-for-rounds exchange rate can build the node through
+    /// [`A2BNode::new_with_opening_policy`](a2b::a2b::A2BNode::new_with_opening_policy) with
+    /// [`OpeningPolicy::Tuned`](gf_mul::OpeningPolicy::Tuned).
+    pub a2b: A2BNode<F, Gf256>,
+    /// Binary to arithmetic. Tag: `B2A` (the single `K`-side opening).
+    pub b2a: B2ANode<F, Gf256>,
+}
+
 #[derive(Clone, Debug)]
 pub struct SubProtocolCounter(Arc<Mutex<Option<u64>>>);
 
@@ -697,6 +803,17 @@ pub struct SubProtocolCounters {
     pub gf_ran_dou_sha_counter: SubProtocolCounter,
     pub gf_triple_counter: SubProtocolCounter,
     pub gf_mul_counter: SubProtocolCounter,
+    // There is deliberately **no `dabit_counter` here.** daBit-generation parent exec ids, and
+    // the edaBit modulus-overflow filter's, are minted by `PrssStream::DaBitSeed`'s cursor inside
+    // the node's single `PrssAllocator` — the same value addresses both a session-id block and a
+    // PRSS keystream, so it must have exactly one minter. A counter kept here as well would be a
+    // second one, and the two would issue the same exec the moment they disagreed. The
+    // disjoint-child-block argument that lived in this doc comment now lives on
+    // `PrssStream::DaBitSeed`.
+    /// Exec ids for A2B parent sessions. A2B derives its own children the same way.
+    pub a2b_counter: SubProtocolCounter,
+    /// Exec ids for B2A parent sessions.
+    pub b2a_counter: SubProtocolCounter,
 }
 
 impl SubProtocolCounters {
@@ -718,6 +835,8 @@ impl SubProtocolCounters {
             gf_ran_dou_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             gf_triple_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             gf_mul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            a2b_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            b2a_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -765,6 +884,26 @@ pub struct HoneyBadgerMPCNodeOpts {
     /// Number of GF(2^k) random shares needed. Same rule of thumb as `n_random_shares`: at least
     /// `2 * n_gf_triples` (the `a`/`b` inputs to every triple), plus any GF(2^k) inputs.
     pub n_gf_random_shares: usize,
+    /// Number of loose doubly-shared bits to keep in the conversion pool.
+    ///
+    /// One per input bit of every B2A call. edaBits are counted separately and are **not** drawn
+    /// from this figure — `ensure_edabits` generates its own daBits — so a node doing only A2B can
+    /// leave this at zero.
+    pub n_dabits: usize,
+    /// Number of full-range edaBits to keep in the conversion pool: one per A2B-converted value.
+    ///
+    /// Each costs `field_bit_width::<F>()` daBits plus one run of the modulus-overflow filter, so
+    /// the daBit-generation demand this implies is far larger than `n_dabits`.
+    pub n_edabits: usize,
+    /// `k`, the number of extra `RandBit`s folded into each daBit's Mod2 mask, or `None` for the
+    /// production default `ceil(log2 C(n,t)) - 3`.
+    ///
+    /// This is **not** a soundness parameter — PRSS daBits have soundness error 0. It trades
+    /// `RandBit`s for lifetime capacity: the per-daBit statistical leak is `2^-(lambda+k+1)`, so
+    /// a node may produce `Q = 2^(lambda+k+1-kappa)` daBits over its whole life before the union
+    /// bound reaches `kappa`. See
+    /// [`DaBitLeakBudget`](crate::honeybadger::dabit::prss_dabit::DaBitLeakBudget).
+    pub dabit_topup_bits: Option<usize>,
 }
 
 impl HoneyBadgerMPCNodeOpts {
@@ -813,6 +952,12 @@ impl HoneyBadgerMPCNodeOpts {
             timeout,
             n_gf_triples,
             n_gf_random_shares,
+            // Seeded here rather than taken positionally: `new` already takes twelve arguments,
+            // and the `n_gf_triples` addition churned every test, bench and FFI caller once
+            // already. Callers that want conversion preprocessing set it through the mutators.
+            n_dabits: 0,
+            n_edabits: 0,
+            dabit_topup_bits: None,
         })
     }
     pub fn set_timeout(&mut self, secs: u64) {
@@ -841,6 +986,31 @@ impl HoneyBadgerMPCNodeOpts {
     /// Override the zero-sharing pool size, which `new` seeds from `n_randbit`.
     pub fn set_n_zero_shares(&mut self, n_zero_shares: usize) {
         self.n_zero_shares = n_zero_shares
+    }
+
+    /// Set the loose-daBit pool size, which `new` seeds to zero.
+    pub fn set_n_dabits(&mut self, n_dabits: usize) {
+        self.n_dabits = n_dabits
+    }
+
+    /// Set the full-range edaBit pool size, which `new` seeds to zero.
+    pub fn set_n_edabits(&mut self, n_edabits: usize) {
+        self.n_edabits = n_edabits
+    }
+
+    /// Set the daBit `RandBit` top-up `k`, which `new` seeds to `None` (the production default
+    /// `ceil(log2 C(n,t)) - 3`).
+    ///
+    /// `Some(0)` is the minimum-cost setting: one `RandBit` per daBit, and the `Q` column of
+    /// [`DaBitLeakBudget`](crate::honeybadger::dabit::prss_dabit::DaBitLeakBudget) at `k = 0`.
+    /// It is correct at `n = 4` (where the default is 0 anyway) and for low-volume deployments.
+    ///
+    /// The value is validated when the node is built, not here: an out-of-range `k` is a
+    /// [`DaBitError::TopUpTooLarge`], never a `warn!` and never a clamp. `k` and `lambda` are one
+    /// budget, both consequences of the same no-wrap inequality, so silently adjusting either is
+    /// exactly the `l`/`kappa` misconfiguration class this repo has already shipped once.
+    pub fn set_dabit_topup_bits(&mut self, topup_bits: Option<usize>) {
+        self.dabit_topup_bits = topup_bits
     }
 }
 
@@ -890,6 +1060,28 @@ where
         let gf_share_gen_node =
             GfRanShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
+        // Share-conversion nodes. `Opts::new` already rejects `n_parties > 255`, which coincides
+        // with `Gf256::MAX_DOMAIN_SIZE` — the number of distinct evaluation points the binary
+        // domain has. Each constructor re-checks it against `K::MAX_DOMAIN_SIZE` so the coupling
+        // is explicit rather than a coincidence of two numbers that happen to agree today.
+        debug_assert!(
+            params.n_parties <= <Gf256 as crate::common::gf2k::field::BinaryField>::MAX_DOMAIN_SIZE
+        );
+        // The leak budget (`lambda`, `k`, `Q`) is derived and hard-checked here, at construction:
+        // an out-of-range `k`, a field too narrow for the mask, or a `(lambda, k)` pair that lets
+        // the Mod2 opening wrap `p` all fail once, loudly, rather than silently flipping bits or
+        // over-spending the statistical budget batch by batch.
+        let dabit_gen_node = PrssDaBitNode::new(
+            id,
+            params.n_parties,
+            params.threshold,
+            params.statistical_security,
+            params.dabit_topup_bits,
+        )?;
+        let edabit_node = EdaBitFilterNode::new(id, params.n_parties, params.threshold)?;
+        let a2b_node = A2BNode::new(id, params.n_parties, params.threshold)?;
+        let b2a_node = B2ANode::new(id, params.n_parties, params.threshold)?;
+
         // DN07 preprocessing multiplication, `F` and `Gf256`. Both constructors hard-error for
         // `t = 0` and for `n < 3t+1`, which `HoneyBadgerMPCNodeOpts::new`'s `t < (n+2)/3` already
         // guarantees for `t >= 1`; the duplication is deliberate, since `Opts`' fields are public
@@ -930,6 +1122,13 @@ where
                 gf_dn07_doubles: None,
             },
             gf_operations: GfOperation { mul: gf_mul_node },
+            conv_preprocessing_material: Arc::new(Mutex::new(ConvPreprocMaterial::empty())),
+            conv: ConvNodes {
+                dabit_gen: dabit_gen_node,
+                edabit: edabit_node,
+                a2b: a2b_node,
+                b2a: b2a_node,
+            },
             type_ops: TypeOperations {
                 fpmul: fpmul_node,
                 fpdiv_const: fpdiv_const_node,
@@ -1282,6 +1481,22 @@ where
                             .drain_batch_recon_output()
                             .await?;
                     }
+                    // The daBit's single Mod2 opening. Degree `t`, robust, no abort — see
+                    // `honeybadger::mod2`. `ProtocolType::DaBitMul` is retired with the dealt
+                    // daBit protocol and is deliberately not routed anywhere.
+                    Some(ProtocolType::DaBitOpen) => {
+                        self.conv
+                            .dabit_gen
+                            .mod2
+                            .open
+                            .process(batch_msg, net)
+                            .await?;
+                        self.conv.dabit_gen.drain_open_output().await?;
+                    }
+                    Some(ProtocolType::A2B) => {
+                        self.conv.a2b.open.process(batch_msg, net).await?;
+                        self.conv.a2b.drain_open_output().await?;
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} at Batch reconstruction",
@@ -1449,6 +1664,40 @@ where
                             .drain_batch_recon_output()
                             .await?;
                     }
+                    // The edaBit modulus-overflow filter's AND layers and its degree-`t` verdict
+                    // opening. Both tags kept their discriminants when the dealt daBit protocol
+                    // that first owned them was deleted.
+                    // The edaBit filter's AND layers, as DN07 degree reductions. This child
+                    // opens at degree `2t`, which is legal because `DaBitGfMul` is a
+                    // **preprocessing** tag — `dn07::phase_of` is the exhaustive classification
+                    // that says so, and `PreprocessingSessionId::new` is what enforces it at the
+                    // one place a session reaches `init_mul`.
+                    Some(ProtocolType::DaBitGfMul) => {
+                        self.conv
+                            .edabit
+                            .gf_dn07
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.conv.edabit.drain_gf_dn07_output().await?;
+                    }
+                    Some(ProtocolType::DaBitGfOpen) => {
+                        self.conv.edabit.gf_open.process(batch_msg, net).await?;
+                        self.conv.edabit.drain_gf_open_output().await?;
+                    }
+                    Some(ProtocolType::A2BGfMul) => {
+                        self.conv
+                            .a2b
+                            .gf_mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.conv.a2b.drain_gf_mul_output().await?;
+                    }
+                    Some(ProtocolType::B2A) => {
+                        self.conv.b2a.gf_open.process(batch_msg, net).await?;
+                        self.conv.b2a.drain_gf_open_output().await?;
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} at GF(2^k) Batch reconstruction",
@@ -1470,6 +1719,17 @@ where
                     Some(ProtocolType::GfMul) => {
                         self.gf_operations
                             .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    // No `DaBitGfMul` arm: the edaBit filter's AND layers are DN07 degree
+                    // reductions, which put nothing but a batch reconstruction on the wire. A
+                    // `GfMult` bearing that tag is a peer running the retired Beaver filter, and
+                    // falls through to the warning below rather than being routed anywhere.
+                    Some(ProtocolType::A2BGfMul) => {
+                        self.conv
+                            .a2b
+                            .gf_mul
                             .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
                             .await?;
                     }
@@ -2458,6 +2718,69 @@ where
         self.generate_randbits(total_to_generate, network).await
     }
 
+    /// Tops the RandBit pool up to at least `target`, generating the random shares and degree-`2t`
+    /// zero sharings the run needs rather than assuming them.
+    ///
+    /// The `ensure_randbit_shares` sizing discipline — "the configuration accounts for this
+    /// demand; an under-sized one surfaces as `NotEnoughPreprocessing`" — is deliberately *not*
+    /// what this does, for the same reason `ensure_edabits` tops up its own GF triples: a daBit
+    /// batch's RandBit demand is `outputs * (1 + k)`, a figure only the leak budget knows, so a
+    /// caller cannot have sized `n_randbit` for it.
+    async fn ensure_randbit_shares_at_least<N, G>(
+        &mut self,
+        target: usize,
+        network: Arc<N>,
+        rng: &mut G,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng + Send,
+    {
+        let have = {
+            let store = self.preprocessing_material.lock().await;
+            store.length().randbit
+        };
+        if have >= target {
+            return Ok(());
+        }
+        let missing = target - have;
+
+        // One random share (RandBit's `a` input) and one degree-`2t` zero sharing per output bit.
+        //
+        // Both come from PRSS + PRZS once `setup_prss_keys` has run, at zero rounds and zero
+        // bytes, so there is nothing to top up and the two interactive pools are not touched at
+        // all. That is the whole cost saving: a RandBit's bill drops to its one `MulPub`
+        // degree-`2t` opening (`O2`), which is what the plan's `19.286` F elem/daBit at
+        // `n = 10, k = 4` is priced on.
+        //
+        // `19.286` is **payload** — F elements in a message body, no framing. Measured end to
+        // end, the whole conversion-preprocessing `BatchRecon` phase for one 64-bit A2B is
+        // 4 224 / 8 176 / 11 664 / 16 904 B/party at `n = 4/7/10/13`
+        // (`conv_cost_measurement::measured_cost_n*`), of which 768 / 1 344 / 1 872 / 2 448 is the
+        // 48-byte envelope. Divided over 64 daBits that is 66 / 128 / 182 / 264 B/daBit on the
+        // wire against the payload model's 53 / 105 / 154 / 226. See `honeybadger::dn07` for the
+        // units rule: a payload figure is a marginal cost and needs its `2n * 48` beside it.
+        //
+        // When PRSS keys were never established the dealt `RanSha` + `ZeroSha` path runs exactly
+        // as before. The choice is all-or-nothing across parties because PRSS key setup is: RISS
+        // either completes for everyone or for no one — the same argument `ensure_gf_triples`
+        // relies on, and for the same reason it is safe to branch on a purely local flag here.
+        if !self.randbit_uses_prss() {
+            let have_random = {
+                let store = self.preprocessing_material.lock().await;
+                store.length().random_shr
+            };
+            if have_random < missing {
+                self.ensure_random_shares(network.clone(), rng, missing - have_random)
+                    .await?;
+            }
+            self.ensure_zero_shares(network.clone(), rng, missing)
+                .await?;
+        }
+
+        self.generate_randbits(missing, network).await
+    }
+
     /// Whether `RandBit` draws `[a]` and its re-randomiser from PRSS/PRZS rather than from the
     /// dealt `RanSha`/`ZeroSha` pools.
     ///
@@ -2990,6 +3313,15 @@ where
     }
 }
 
+/// edaBit candidates composed and filtered in one
+/// [`EdaBitFilterNode::compose_edabits`](dabit::edabit::EdaBitFilterNode::compose_edabits) call.
+///
+/// The filter's round count is already independent of the batch size — every candidate runs the
+/// same public netlist, so they share each AND layer's multiplication — so a larger batch buys
+/// only a little more amortisation of six rounds, while the resident wire arenas and the daBits
+/// the batch must be handed grow linearly.
+const MAX_EDABIT_COMPOSE_BATCH: usize = 256;
+
 impl<F, R> HoneyBadgerMPCNode<F, R>
 where
     F: PrimeField,
@@ -3204,6 +3536,44 @@ where
         self.gf_preprocess.gf_dn07_doubles.is_some() && self.preprocess.prss_alloc.is_some()
     }
 
+    /// `needed` `Gf2k` double sharings `([r]_t, [r]_2t)` from PRSS + PRZS — **zero rounds, zero
+    /// bytes** — with every position claimed from this node's one [`PrssAllocator`].
+    ///
+    /// # This is the only way to reach [`PrssStream::GfDn07Double`]
+    ///
+    /// That stream is shared by every `Gf2k` DN07 consumer: GF triple generation and the edaBit
+    /// modulus-overflow filter. Each of them running its own monotone counter would be
+    /// individually monotone and jointly colliding, and a collision re-derives an `[r]` that has
+    /// already masked a degree-`2t` opening — the total privacy break that no all-honest test can
+    /// see. Funnelling both through one allocator is what makes disjointness structural rather
+    /// than a convention two call sites have to keep agreeing on.
+    ///
+    /// Chunked against `MAX_PRZS_COEFFS_PER_CALL / t`, because PRZS spends `t` coefficients per
+    /// sharing and bounds the total per call. Each chunk burns its own exec id; positions are
+    /// never rewound, including when a later chunk fails.
+    async fn gf_prss_doubles(
+        &self,
+        needed: usize,
+    ) -> Result<
+        Vec<crate::honeybadger::gf_double_share::GfDoubleShamirShare<Gf256>>,
+        HoneyBadgerError,
+    > {
+        let (source, alloc) = match (
+            self.gf_preprocess.gf_dn07_doubles.as_ref(),
+            self.preprocess.prss_alloc.as_ref(),
+        ) {
+            (Some(source), Some(alloc)) => (source, alloc),
+            _ => return Err(HoneyBadgerError::NotEnoughPreprocessing),
+        };
+        let cap = (MAX_PRZS_COEFFS_PER_CALL / self.params.threshold.max(1)).max(1);
+        let mut out = Vec::with_capacity(needed);
+        while out.len() < needed {
+            let take = (needed - out.len()).min(cap);
+            out.extend(source.double_shares(alloc, take).await?);
+        }
+        Ok(out)
+    }
+
     /// A GF Beaver triple's **whole** input set for `needed` triples — `[a]_t`, `[b]_t` and one
     /// `([r]_t, [r]_2t)` each — from PRSS + PRZS, **zero rounds, zero bytes**, with every position
     /// claimed from this node's one [`PrssAllocator`].
@@ -3263,6 +3633,564 @@ where
             doubles.extend(chunk.doubles);
         }
         Ok(dn07::double_share::GfTripleMaterial { a, b, doubles })
+    }
+}
+
+impl<F, R> HoneyBadgerMPCNode<F, R>
+where
+    F: PrimeField,
+    R: RBC<Id = SessionId>,
+{
+    /// Bits per converted value: `ceil(log2 p)`, 64 on Goldilocks.
+    fn conv_bit_width() -> usize {
+        crate::common::convert::field_bit_width::<F>()
+    }
+
+    /// Runs exactly one PRSS daBit batch of `outputs` daBits.
+    ///
+    /// Material comes **explicitly** out of the shared `RandBit` pool, in pool order — the
+    /// `ensure_randbit_shares` discipline, and also what makes the material agree across parties,
+    /// since every party drains its own pool identically. This does not top that pool up itself,
+    /// so an undersized configuration surfaces as `NotEnoughPreprocessing` here rather than
+    /// silently generating more preprocessing underneath a caller who asked for a fixed amount;
+    /// [`Self::ensure_dabits_at_least`] is the layer that tops up.
+    ///
+    /// There is **no batch-size floor**. The dealt protocol had one, because its cross-domain
+    /// check was bucketed and `M^-(B-1)` only reaches `kappa` for large `M`. PRSS daBits have
+    /// soundness error 0 and no bucket, so a batch of one is exactly as sound as a batch of 2048.
+    /// What replaced the floor is a lifetime *ceiling*, enforced inside
+    /// [`PrssDaBitNode::generate`](dabit::prss_dabit::PrssDaBitNode::generate).
+    async fn run_dabit_batch<N>(
+        &mut self,
+        outputs: usize,
+        network: Arc<N>,
+    ) -> Result<Vec<DaBit<F, Gf256>>, HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
+        let per_dabit = self.conv.dabit_gen.rand_bits_per_dabit();
+        let needed = outputs
+            .checked_mul(per_dabit)
+            .ok_or(HoneyBadgerError::LimitError)?;
+        let rand_bits = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_randbit_shares(needed)?;
+
+        // One claim, one exec, both of the batch's keystreams: `beta` at width 1 and the Mod2
+        // mask `psi` at `lambda`, on the same `exec_id`, from the node's single `PrssAllocator`.
+        // The exec is the high half of every PRSS position this batch derives, so it must never be
+        // rewound — including after a failure. `claim_dabit_batch` advances the cursor under a
+        // lock before returning and there is no path that moves it back, which is what makes
+        // burn-never-rewind a property of the type rather than a discipline.
+        let alloc = self
+            .preprocess
+            .prss_alloc
+            .as_ref()
+            .ok_or(HoneyBadgerError::NotEnoughPreprocessing)?
+            .clone();
+        let windows = alloc
+            .claim_dabit_batch(outputs, self.conv.dabit_gen.mask_bits())
+            .await
+            .map_err(DaBitError::from)?;
+        // Captured before `generate` consumes the windows; it is the seed window's own session.
+        let session_id = windows.parent_session();
+
+        let dabits = self
+            .conv
+            .dabit_gen
+            .generate(windows, rand_bits, self.params.timeout, network)
+            .await;
+
+        // Cleared before the `?`, on every exit path: `generate` clears its own Mod2 session, but
+        // an error raised before it reached the opening leaves nothing to clear and this is
+        // cheap and idempotent.
+        self.conv.dabit_gen.clear_store(session_id).await;
+
+        Ok(dabits?)
+    }
+
+    /// Tops the loose daBit pool up to at least `target`.
+    ///
+    /// Unlike the dealt protocol this has no soundness floor to round up to, so it asks for
+    /// exactly what is missing (capped by one Mod2 session's ceiling) and loops.
+    async fn ensure_dabits_at_least<N, G>(
+        &mut self,
+        target: usize,
+        network: Arc<N>,
+        rng: &mut G,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng + Send,
+    {
+        let per_batch = self.conv.dabit_gen.max_batch_size();
+        let per_dabit = self.conv.dabit_gen.rand_bits_per_dabit();
+        loop {
+            let have = self
+                .conv_preprocessing_material
+                .lock()
+                .await
+                .length()
+                .dabits;
+            if have >= target {
+                return Ok(());
+            }
+            let outputs = (target - have).min(per_batch);
+
+            // Each daBit consumes `1 + k` RandBits. Topped up here rather than assumed, the same
+            // way `ensure_edabits` tops up the GF triples its filter needs — a daBit batch that
+            // failed for want of RandBits would burn its PRSS range for nothing.
+            //
+            // `+ n_randbit`: the fixed-point path's own reserve is in the same pool, and this
+            // batch drains it in pool order, so asking only for what this batch needs would let
+            // daBit generation quietly eat what `mul_fixed` was sized for.
+            let needed_bits = outputs
+                .checked_mul(per_dabit)
+                .and_then(|n| n.checked_add(self.params.n_randbit))
+                .ok_or(HoneyBadgerError::LimitError)?;
+            self.ensure_randbit_shares_at_least(needed_bits, network.clone(), rng)
+                .await?;
+
+            let dabits = self.run_dabit_batch(outputs, network.clone()).await?;
+            if dabits.is_empty() {
+                // `generate` returns exactly `outputs` daBits or an error, so an empty vector
+                // would mean the loop can never make progress.
+                return Err(HoneyBadgerError::NotEnoughPreprocessing);
+            }
+            self.conv_preprocessing_material
+                .lock()
+                .await
+                .add(Some(dabits), None);
+        }
+    }
+
+    /// Tops the full-range edaBit pool up to `params.n_edabits`.
+    ///
+    /// Each edaBit costs `ceil(log2 p)` daBits — generated here rather than taken from whatever
+    /// the loose pool happens to hold, so that topping up edaBits never quietly empties the pool
+    /// B2A draws from — plus one run of the modulus-overflow filter. A candidate whose composed
+    /// mask is not below `p` is dropped together with **all** of its daBits, at a rate of
+    /// `(2^32 - 1)/2^64 ≈ 2^-32`, so the loop simply runs again.
+    async fn ensure_edabits<N, G>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        G: Rng + Send,
+    {
+        let width = Self::conv_bit_width();
+        if width == 0 {
+            return Err(HoneyBadgerError::DaBitError(DaBitError::ZeroWidth));
+        }
+        let per_candidate = EdaBitFilterNode::<F, Gf256>::gf_doubles_per_edabit()?;
+
+        loop {
+            let have = self
+                .conv_preprocessing_material
+                .lock()
+                .await
+                .length()
+                .edabits;
+            if have >= self.params.n_edabits {
+                return Ok(());
+            }
+            let candidates = (self.params.n_edabits - have).min(MAX_EDABIT_COMPOSE_BATCH);
+
+            // The daBits this batch consumes are on top of whatever the loose pool already owes
+            // its own target, so ask for both at once and take only this batch's share.
+            let reserved = self.params.n_dabits;
+            let needed = candidates
+                .checked_mul(width)
+                .and_then(|n| n.checked_add(reserved))
+                .ok_or(HoneyBadgerError::LimitError)?;
+            self.ensure_dabits_at_least(needed, network.clone(), rng)
+                .await?;
+
+            let dabits = self
+                .conv_preprocessing_material
+                .lock()
+                .await
+                .take_dabits(candidates * width)?;
+
+            // One `([r]_t, [r]_2t)` per AND, where the filter used to spend one GF(2^k) Beaver
+            // triple per AND. Same count, two changes of kind:
+            //
+            // * making one costs **nothing** on the PRSS path, against a triple's `18.857` bytes
+            //   of payload from dealt `GfRanDouSha` or `2.857` from a PRSS-fed `gf_triple_gen`;
+            //   and
+            // * spending one costs the `O2 = 2.857`-byte degree-`2t` opening alone, against a
+            //   Beaver multiplication's `M1 = 4n/(t+1) = 10.0` bytes of degree-`t` openings.
+            //
+            // All four figures are payload. On the wire this filter's layers are narrow enough
+            // that framing is 93-97% of the phase, so the realised saving is the message count —
+            // `2n` per layer instead of `4n` plus a share of triple generation, about **2.1x**
+            // rather than 4.5x. `edabit.rs`'s module docs carry the measured breakdown.
+            //
+            // Net at `n = 10`: `12.857 -> 2.857` payload bytes per AND, **4.5x**, and the filter no longer
+            // draws on the GF triple pool at all — which is why `run_gf_preprocessing` is not
+            // called here any more. A2B still consumes GF triples online and still tops that pool
+            // up on its own path.
+            let doubles_needed = candidates
+                .checked_mul(per_candidate)
+                .ok_or(HoneyBadgerError::LimitError)?;
+            // Dealt `GfRanDouSha` is the fallback for a deployment that never establishes PRSS
+            // keys, exactly as it is for GF triple generation. DN07 does not care which source a
+            // double sharing came from — it needs a genuine `([r]_t, [r]_2t)` on one uniform `r`,
+            // and both produce that. What DN07 *does* care about is that its **operands** were
+            // never dealt, and those are daBit bits and earlier layers' outputs either way.
+            let doubles = if self.gf_dn07_uses_prss() {
+                self.gf_prss_doubles(doubles_needed).await?
+            } else {
+                let mut dealt = self
+                    .ensure_gf_ran_dou_sha_pair(network.clone(), rng, doubles_needed)
+                    .await?;
+                // `ensure_gf_ran_dou_sha_pair` ceil-rounds to a whole column; the filter's length
+                // check is exact.
+                if dealt.len() < doubles_needed {
+                    return Err(HoneyBadgerError::NotEnoughPreprocessing);
+                }
+                dealt.truncate(doubles_needed);
+                dealt
+            };
+
+            // Same monotone cursor as a daBit *parent* session, deliberately: both drivers mint
+            // their children as `parent_exec * 2^20 + wave`, so one cursor is what keeps their
+            // child blocks disjoint. A second minter would hand this filter an exec that a daBit
+            // batch already owns.
+            //
+            // `claim_exec`, not `claim_dabit_batch`: this filter spends the exec's child-id block
+            // and derives **no PRSS position**, so what it needs is a burned exec id carrying no
+            // right to name a byte. That is exactly what `PrssExecSlot` is.
+            let alloc = self
+                .preprocess
+                .prss_alloc
+                .as_ref()
+                .ok_or(HoneyBadgerError::NotEnoughPreprocessing)?
+                .clone();
+            let slot = alloc
+                .claim_exec(PrssStream::DaBitSeed)
+                .await
+                .map_err(DaBitError::from)?;
+
+            // `compose_edabits` clears its own session on every exit path.
+            let edabits = self
+                .conv
+                .edabit
+                .compose_edabits(slot, dabits, doubles, self.params.timeout, network.clone())
+                .await?;
+
+            if edabits.is_empty() {
+                // Only reachable if every candidate in the batch wrapped `p` — probability
+                // `2^-32` per candidate — or if `candidates` was zero, which the loop guard
+                // excludes. Erroring rather than looping keeps this from spinning.
+                return Err(HoneyBadgerError::NotEnoughPreprocessing);
+            }
+            self.conv_preprocessing_material
+                .lock()
+                .await
+                .add(None, Some(edabits));
+        }
+    }
+}
+
+#[async_trait]
+impl<F, R, N> ShareConversionProtocol<F, Gf256, RobustShare<F>, GfShare<Gf256>, N>
+    for HoneyBadgerMPCNode<F, R>
+where
+    N: Network + Send + Sync + 'static,
+    F: PrimeField,
+    R: RBC<Id = SessionId>,
+{
+    type Error = HoneyBadgerError;
+
+    /// Converts arithmetic sharings to the bit sharings of their canonical representatives.
+    ///
+    /// Consumes one full-range edaBit and `A2BNode::gf_triples_per_conversion()` GF(2^k) triples
+    /// per value, and **zero** `F` triples. Cost is one degree-`t` opening in `F` plus one
+    /// multiplication wave per AND layer of the circuit — on Goldilocks **9 message rounds**
+    /// (`2` for the mask opening's `BatchReconNode` round trip, then one round for each of the 7
+    /// AND layers, which `OpeningPolicy::Auto` opens directly at the widths a conversion issues),
+    /// rising to 16 if every layer batches. *Independent of the batch size*, because every value
+    /// in a batch shares each layer's wave. A previous version of this line said "14 sequential
+    /// openings", which conflated openings with rounds and dropped the mask opening besides; see
+    /// [`A2BNode::message_rounds`](a2b::a2b::A2BNode::message_rounds).
+    ///
+    /// Privacy is perfect: `y = x - r mod p` with `r` uniform on `[0, p)` and independent of `x`
+    /// is exactly uniform on `Z_p`. There is no statistical parameter on this path and no
+    /// `check_mask_security` call, which is why `max_masked_width` is deliberately not extended.
+    ///
+    /// The output bits are those of the representative in `[0, p)`, **not** two's complement:
+    /// `-1` comes back as `p - 1 = 0xFFFF_FFFF_0000_0000`.
+    async fn a2b(
+        &mut self,
+        x: Vec<RobustShare<F>>,
+        network: Arc<N>,
+    ) -> Result<Vec<Vec<GfShare<Gf256>>>, HoneyBadgerError>
+    where
+        N: 'async_trait,
+    {
+        if x.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let per_conversion = A2BNode::<F, Gf256>::gf_triples_per_conversion()?;
+
+        // Top the pools up only if short, the shape `mul` already uses. If they are still short
+        // afterwards the `take_*` calls below surface `NotEnoughPreprocessing` rather than
+        // silently converting fewer values.
+        let short_edabits = {
+            let store = self.conv_preprocessing_material.lock().await;
+            store.length().edabits < x.len()
+        };
+        if short_edabits {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_conversion_preprocessing(network.clone(), &mut rng)
+                .await?;
+        }
+        let needed_triples = per_conversion
+            .checked_mul(x.len())
+            .ok_or(HoneyBadgerError::LimitError)?;
+        let short_triples = {
+            let store = self.gf_preprocessing_material.lock().await;
+            store.length().beaver_triples < needed_triples
+        };
+        if short_triples {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_gf_preprocessing(network.clone(), &mut rng).await?;
+        }
+
+        let mut result: Vec<Vec<GfShare<Gf256>>> = Vec::with_capacity(x.len());
+        let mut sessions = Vec::new();
+        let mut first_err: Option<HoneyBadgerError> = None;
+
+        // Chunked at `MAX_A2B_CONVERSIONS`: each conversion carries its own netlist and wire
+        // arena, because the circuit plan depends on that conversion's own opened mask and so is
+        // shared with nothing. The round count does not improve past one chunk anyway.
+        for chunk in x.chunks(MAX_A2B_CONVERSIONS) {
+            // Not `?`: sessions issued for earlier chunks are already live, and returning here
+            // would leave them and their recorded children resident (C7).
+            let material = {
+                let edabits = self
+                    .conv_preprocessing_material
+                    .lock()
+                    .await
+                    .take_edabits(chunk.len());
+                let gf_triples = self
+                    .gf_preprocessing_material
+                    .lock()
+                    .await
+                    .take_beaver_triples(per_conversion * chunk.len());
+                match (edabits, gf_triples) {
+                    (Ok(edabits), Ok(gf_triples)) => Ok((edabits, gf_triples)),
+                    (Err(e), _) => Err(HoneyBadgerError::from(e)),
+                    (_, Err(e)) => Err(HoneyBadgerError::from(e)),
+                }
+            };
+            let (edabits, gf_triples) = match material {
+                Ok(material) => material,
+                Err(e) => {
+                    first_err = Some(e);
+                    break;
+                }
+            };
+
+            let session_id = SessionId::new(
+                ProtocolType::A2B,
+                SessionId::pack_slot(self.counters.a2b_counter.get_next().await?, 0, 0),
+                self.params.instance_id,
+            );
+            sessions.push(session_id);
+
+            match self
+                .conv
+                .a2b
+                .init(
+                    session_id,
+                    chunk.to_vec(),
+                    edabits,
+                    gf_triples,
+                    self.params.timeout,
+                    network.clone(),
+                )
+                .await
+            {
+                Ok(()) => match self
+                    .conv
+                    .a2b
+                    .wait_for_result(session_id, self.params.timeout)
+                    .await
+                {
+                    Ok(mut bits) => result.append(&mut bits),
+                    Err(e) => {
+                        first_err = Some(e.into());
+                        break;
+                    }
+                },
+                Err(e) => {
+                    first_err = Some(e.into());
+                    break;
+                }
+            }
+        }
+
+        // Every issued session is cleared regardless of outcome — a failed chunk must not leave
+        // its own session, or its recorded children, resident just because an earlier `?` would
+        // have skipped the cleanup (C7).
+        for session_id in &sessions {
+            if !self.conv.a2b.clear_store(*session_id).await {
+                warn!(?session_id, "failed to clear A2B protocol state");
+            }
+        }
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+        Ok(result)
+    }
+
+    /// Converts binary sharings back to arithmetic ones.
+    ///
+    /// One degree-`t` GF(2^k) opening, zero online multiplications, zero `F` communication, and
+    /// one daBit per input bit. Privacy is perfect: `c_i = x_i XOR r_i` with `r_i` a uniform,
+    /// single-use daBit is exactly uniform on `{0,1}`.
+    ///
+    /// Defaults to the unchecked variant, whose precondition is that each input share holds a bit.
+    /// That is structural when the bits came out of [`Self::a2b`], and violating it is *detected*
+    /// here in practice — the opened `c_i` then leaves `GF(2)` — though the detection leans on the
+    /// daBit's binary half being well formed rather than proving anything about the input.
+    /// `B2ANode::b2a_checked` proves it unconditionally for one extra AND layer.
+    async fn b2a(
+        &mut self,
+        bits: Vec<Vec<GfShare<Gf256>>>,
+        network: Arc<N>,
+    ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError>
+    where
+        N: 'async_trait,
+    {
+        if bits.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Widths are validated here, *before* any daBit leaves the pool: `B2ANode` would reject
+        // an over-wide value too, but only after this node had already drained the pads for it,
+        // and a drained daBit is gone (the pools are drain-only by design).
+        let width_bound = b2a::b2a::max_width::<F>();
+        let mut total = 0usize;
+        for (value, value_bits) in bits.iter().enumerate() {
+            let width = value_bits.len();
+            if width == 0 {
+                return Err(HoneyBadgerError::B2AError(B2AError::ZeroWidth { value }));
+            }
+            if width > width_bound {
+                return Err(HoneyBadgerError::B2AError(B2AError::WidthTooLarge {
+                    value,
+                    width,
+                    max: width_bound,
+                }));
+            }
+            total = total
+                .checked_add(width)
+                .ok_or(HoneyBadgerError::LimitError)?;
+        }
+
+        let short = {
+            let store = self.conv_preprocessing_material.lock().await;
+            store.length().dabits < total
+        };
+        if short {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_conversion_preprocessing(network.clone(), &mut rng)
+                .await?;
+        }
+        let dabits = self
+            .conv_preprocessing_material
+            .lock()
+            .await
+            .take_dabits(total)?;
+
+        let session_id = SessionId::new(
+            ProtocolType::B2A,
+            SessionId::pack_slot(self.counters.b2a_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        // One session for the whole batch: `B2ANode` chunks and depth-caps its own opening
+        // internally, and the conversion stays a single round for any batch up to
+        // `max_mul_pairs_per_session(t) * conv_pipeline_depth(n)` bits.
+        let started = self
+            .conv
+            .b2a
+            .b2a(
+                session_id,
+                bits,
+                dabits,
+                self.params.timeout,
+                network.clone(),
+            )
+            .await;
+        let result = match started {
+            Ok(()) => self
+                .conv
+                .b2a
+                .wait_for_result(session_id, self.params.timeout)
+                .await
+                .map_err(HoneyBadgerError::from),
+            Err(e) => Err(HoneyBadgerError::from(e)),
+        };
+        if !self.conv.b2a.clear_store(session_id).await {
+            warn!(?session_id, "failed to clear B2A protocol state");
+        }
+        result
+    }
+}
+
+#[async_trait]
+impl<F, R, N> ConversionPreprocessingProtocol<F, Gf256, RobustShare<F>, GfShare<Gf256>, N>
+    for HoneyBadgerMPCNode<F, R>
+where
+    N: Network + Send + Sync + 'static,
+    F: PrimeField,
+    R: RBC<Id = SessionId>,
+{
+    /// Fills the edaBit pool to `n_edabits` and the loose daBit pool to `n_dabits`.
+    ///
+    /// edaBits first: composing one consumes `ceil(log2 p)` daBits, so topping the loose pool up
+    /// beforehand would only see it drained again. Both phases draw their `F` and GF(2^k)
+    /// material from the ordinary preprocessing pools; neither tops *those* up beyond the GF
+    /// triples the filter needs, so an undersized `n_random_shares` / `n_triples` /
+    /// `n_gf_random_shares` surfaces as `NotEnoughPreprocessing` rather than as a silent extra
+    /// preprocessing run.
+    ///
+    /// # Liveness
+    ///
+    /// daBit generation waits for **all** `n` dealers' `Deltas`, so one crashed party stalls it —
+    /// exactly as `share_gen`, `gf_share_gen`, `zero_share` and `double_share_generation` already
+    /// do today. Closing that gap needs agreement on a core set of `>= 2t+1` contributors, which
+    /// exists nowhere in this repo; this work inherits the posture rather than worsening it. The
+    /// two *conversions* themselves are async-live and robust given well-formed preprocessing.
+    async fn run_conversion_preprocessing<G>(
+        &mut self,
+        network: Arc<N>,
+        rng: &mut G,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: 'async_trait,
+        G: Rng + Send,
+    {
+        let started = Instant::now();
+        self.ensure_edabits(network.clone(), rng).await?;
+        let produced = self.conv_preprocessing_material.lock().await.length();
+        trace_preprocessing_phase(self.id, "edabits", produced.edabits, started);
+
+        let started = Instant::now();
+        self.ensure_dabits_at_least(self.params.n_dabits, network, rng)
+            .await?;
+        let produced = self.conv_preprocessing_material.lock().await.length();
+        trace_preprocessing_phase(self.id, "dabits", produced.dabits, started);
+        Ok(())
     }
 }
 
@@ -3716,6 +4644,7 @@ impl SessionId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::honeybadger::dabit::prss_dabit::DaBitLeakBudget;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -3877,5 +4806,64 @@ mod tests {
         assert!(gf_mul_pipeline_depth(0) >= 1);
         assert!(gf_mul_pipeline_depth(usize::MAX) >= 1);
         assert_eq!(gf_mul_pipeline_depth(MAX_GF_BATCH_RECON_SESSIONS + 1), 1);
+    }
+
+    fn conv_opts(n: usize, t: usize, topup: Option<usize>) -> HoneyBadgerMPCNodeOpts {
+        let mut params = HoneyBadgerMPCNodeOpts::new(
+            n,
+            t,
+            1,
+            1,
+            0,
+            0,
+            0,
+            FixedPointPrecision::new(32, 16),
+            MIN_STATISTICAL_SECURITY,
+            Duration::from_secs(1),
+            0,
+            0,
+        )
+        .unwrap();
+        params.set_dabit_topup_bits(topup);
+        params
+    }
+
+    /// The daBit `RandBit` top-up defaults to "unset" and is validated when the node is built,
+    /// never clamped at the setter. `k` and `lambda` are one budget.
+    #[test]
+    fn the_dabit_topup_parameter_defaults_to_the_production_setting() {
+        let params = conv_opts(10, 3, None);
+        assert_eq!(params.dabit_topup_bits, None);
+        let budget = DaBitLeakBudget::new::<crate::common::math::goldilocks::GoldilocksField>(
+            10,
+            3,
+            params.statistical_security,
+            params.dabit_topup_bits,
+        )
+        .unwrap();
+        // C(10,3) = 120, ceil = 7, so the production default is k = 4 and lambda = 55.
+        assert_eq!(budget.topup_bits, 4);
+        assert_eq!(budget.mask_bits, 55);
+        assert!(budget.max_dabits >= 1 << 20);
+    }
+
+    /// An out-of-range top-up is a hard error at node construction, never a `warn!` and never a
+    /// clamp — the `l`/`kappa` misconfiguration class this repo has already shipped once.
+    #[test]
+    fn an_out_of_range_dabit_topup_is_refused_when_the_node_is_built() {
+        type F = crate::common::math::goldilocks::GoldilocksField;
+        // C(10,3) = 120, ceil = 7, so k <= 6.
+        assert!(DaBitLeakBudget::new::<F>(10, 3, MIN_STATISTICAL_SECURITY, Some(6)).is_ok());
+        let err = DaBitLeakBudget::new::<F>(10, 3, MIN_STATISTICAL_SECURITY, Some(7)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DaBitError::TopUpTooLarge {
+                    requested: 7,
+                    max: 6
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 }
