@@ -19,6 +19,9 @@ pub mod double_share;
 /// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
 pub mod triple_gen;
 
+// Layered Boolean netlists over `GfShare<K>` — the online circuit layer of A2B.
+pub mod binary_circuits;
+
 pub mod fpdiv;
 pub mod fpmul;
 
