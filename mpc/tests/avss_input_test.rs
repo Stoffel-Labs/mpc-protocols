@@ -84,14 +84,17 @@ async fn test_avss_input_e2e() {
 
     // Receive random shares at client and process them
     for _ in 0..(n - 1) {
-        let (_, raw) = client_recv.recv().await.unwrap();
+        let (sender, raw) = client_recv.recv().await.unwrap();
+        let SenderId::Node(sender) = sender else {
+            panic!("Unexpected sender kind");
+        };
         let wrapped: AvssWrappedMessage =
             bincode::deserialize(&raw).expect("deserialization error");
         match wrapped {
             AvssWrappedMessage::Input(msg) => {
                 assert!(client
                     .input
-                    .process(msg, client_network.clone())
+                    .process(sender, msg, client_network.clone())
                     .await
                     .is_ok());
             }

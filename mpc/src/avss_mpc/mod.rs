@@ -156,16 +156,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
 
         match wrapped {
             AvssWrappedMessage::Input(input_msg) => {
-                if sender_id != input_msg.sender_id {
-                    return Err(AvssMPCError::InvalidPartyId);
-                }
-                self.input.process(input_msg, net).await?;
+                self.input.process(sender_id, input_msg, net).await?;
             }
             AvssWrappedMessage::Output(output_msg) => {
-                if sender_id != output_msg.sender_id {
-                    return Err(AvssMPCError::InvalidPartyId);
-                }
-                self.output.process(output_msg).await?
+                self.output.process(sender_id, output_msg).await?
             }
             _ => warn!("Incorrect message type received at client"),
         }

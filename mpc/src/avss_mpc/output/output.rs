@@ -231,7 +231,16 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
     }
 
     /// Process any message (used for both client and server roles).
-    pub async fn process(&mut self, msg: AvssOutputMessage) -> Result<(), AvssOutputError> {
+    pub async fn process(
+        &mut self,
+        authenticated_sender_id: usize,
+        msg: AvssOutputMessage,
+    ) -> Result<(), AvssOutputError> {
+        if authenticated_sender_id != msg.sender_id {
+            return Err(AvssOutputError::InvalidInput(
+                "Output sender does not match authenticated peer".into(),
+            ));
+        }
         self.output_handler(msg).await?;
         Ok(())
     }

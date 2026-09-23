@@ -77,10 +77,13 @@ async fn test_multiple_clients_parallel_input() {
         let mut merged_rx = fan_in_inboxes(inbox);
         let net_clone = client_net.remove(&cid).unwrap();
         tokio::spawn(async move {
-            while let Some((_, raw)) = merged_rx.recv().await {
+            while let Some((sender, raw)) = merged_rx.recv().await {
+                let SenderId::Node(sender) = sender else {
+                    continue;
+                };
                 let wrapped: WrappedMessage = bincode::deserialize(&raw).ok().unwrap();
                 if let WrappedMessage::Input(msg) = wrapped {
-                    client.process(msg, net_clone.clone()).await.ok();
+                    client.process(sender, msg, net_clone.clone()).await.ok();
                 }
             }
         });
@@ -164,8 +167,11 @@ async fn test_input_recovery_with_missing_server() {
     let net_clone = client_net.remove(&clientid).unwrap();
     tokio::spawn(async move {
         while let Some(received) = merged_rx.recv().await {
+            let SenderId::Node(sender) = received.0 else {
+                continue;
+            };
             if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received.1) {
-                client.process(msg, net_clone.clone()).await.ok();
+                client.process(sender, msg, net_clone.clone()).await.ok();
             }
         }
     });
@@ -251,9 +257,12 @@ async fn test_input_with_too_many_faulty_shares() {
     let net_clone = client_net.remove(&client_id).unwrap();
     tokio::spawn(async move {
         while let Some(received) = merged_rx.recv().await {
+            let SenderId::Node(sender) = received.0 else {
+                continue;
+            };
             if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received.1) {
                 // Client will fail internally when trying to decode faulty shares
-                let _ = client.process(msg, net_clone.clone()).await;
+                let _ = client.process(sender, msg, net_clone.clone()).await;
             }
         }
     });

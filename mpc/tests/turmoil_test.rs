@@ -388,14 +388,17 @@ fn test_input_protocol_e2e_turmoil() {
             barrier.wait().await;
             loop {
                 match rx.recv().await {
-                    Some((_sender, msg)) => {
+                    Some((sender, msg)) => {
+                        let SenderId::Node(sender) = sender else {
+                            continue;
+                        };
                         let wrapped: WrappedMessage = match bincode::deserialize(&msg) {
                             Ok(w) => w,
                             Err(_) => continue,
                         };
                         match wrapped {
                             WrappedMessage::Input(msg) => {
-                                match client.process(msg, network_arc.clone()).await {
+                                match client.process(sender, msg, network_arc.clone()).await {
                                     Ok(_) => {}
                                     Err(e) => {
                                         let _ =

@@ -550,11 +550,20 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
     }
 
     /// Process any message (used for both client and server roles).
+    ///
+    /// `authenticated_sender_id` must come from the transport layer, not from the message
+    /// itself, since `InputMessage::sender_id` is self-reported and otherwise unverified.
     pub async fn process<N: Network + Send + Sync>(
         &mut self,
+        authenticated_sender_id: usize,
         msg: InputMessage,
         net: Arc<N>,
     ) -> Result<(), InputError> {
+        if authenticated_sender_id != msg.sender_id {
+            return Err(InputError::InvalidInput(
+                "Input sender does not match authenticated peer".into(),
+            ));
+        }
         self.init_handler(msg, net).await
     }
 }
@@ -658,12 +667,18 @@ pub mod tests {
 
         // receive random shares to send masked input
         for _ in 0..3 {
-            let (_, raw) = client_recv.recv().await.unwrap();
+            let (sender, raw) = client_recv.recv().await.unwrap();
+            let SenderId::Node(sender) = sender else {
+                panic!("Unexpected sender kind");
+            };
             let wrapped: WrappedMessage =
                 bincode::deserialize(&raw).expect("deserialization error");
             match wrapped {
                 WrappedMessage::Input(msg) => {
-                    assert!(client.process(msg, client_network.clone()).await.is_ok());
+                    assert!(client
+                        .process(sender, msg, client_network.clone())
+                        .await
+                        .is_ok());
                 }
                 _ => panic!("Unexpected message"),
             }

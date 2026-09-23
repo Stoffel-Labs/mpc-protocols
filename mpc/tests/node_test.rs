@@ -245,15 +245,20 @@ async fn test_input_protocol_e2e() {
     let mut merged_rx = fan_in_inboxes(inbox);
     tokio::spawn(async move {
         while let Some(received) = merged_rx.recv().await {
+            let SenderId::Node(sender) = received.0 else {
+                continue;
+            };
             let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
                 Ok(w) => w,
                 Err(_) => continue,
             };
             match wrapped {
-                WrappedMessage::Input(msg) => match client.process(msg, net_clone2.clone()).await {
-                    Ok(_) => {}
-                    Err(e) => eprintln!("Processing error : {}", e),
-                },
+                WrappedMessage::Input(msg) => {
+                    match client.process(sender, msg, net_clone2.clone()).await {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("Processing error : {}", e),
+                    }
+                }
                 _ => continue,
             }
         }
@@ -356,15 +361,20 @@ async fn gen_masks_for_input_e2e() {
     let mut merged_rx = fan_in_inboxes(inbox);
     tokio::spawn(async move {
         while let Some(received) = merged_rx.recv().await {
+            let SenderId::Node(sender) = received.0 else {
+                continue;
+            };
             let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
                 Ok(w) => w,
                 Err(_) => continue,
             };
             match wrapped {
-                WrappedMessage::Input(msg) => match client.process(msg, net_clone2.clone()).await {
-                    Ok(_) => {}
-                    Err(e) => eprintln!("Processing error : {}", e),
-                },
+                WrappedMessage::Input(msg) => {
+                    match client.process(sender, msg, net_clone2.clone()).await {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("Processing error : {}", e),
+                    }
+                }
                 _ => continue,
             }
         }

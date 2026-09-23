@@ -216,7 +216,16 @@ impl<F: FftField> OutputClient<F> {
     }
 
     /// Process any message (used for both client and server roles).
-    pub async fn process(&mut self, msg: OutputMessage) -> Result<(), OutputError> {
+    pub async fn process(
+        &mut self,
+        authenticated_sender_id: usize,
+        msg: OutputMessage,
+    ) -> Result<(), OutputError> {
+        if authenticated_sender_id != msg.sender_id {
+            return Err(OutputError::InvalidInput(
+                "Output sender does not match authenticated peer".into(),
+            ));
+        }
         self.output_handler(msg).await?;
         Ok(())
     }
