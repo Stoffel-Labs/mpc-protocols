@@ -484,14 +484,28 @@ where
                     && rbc_msg.session_id.calling_protocol() == Some(ProtocolType::Input)
                     && rbc_msg.session_id.exec_id() == 0
                     && rbc_msg.session_id.round_id() == 0;
-                if is_client_input_broadcast && sender_id < self.params.n_parties {
-                    warn!(
-                        "Rejecting client input broadcast: sender {} is a consensus node id, not a client id",
-                        sender_id
-                    );
-                    return Err(AvssMPCError::InvalidPartyId);
-                }
                 if rbc_msg.msg_type.is_dealer_message() {
+                    // Only the Input protocol accepts a client as dealer. Every other
+                    // dealer-message protocol (Avss/Triple/Mul/TripleCheck) is reserved for
+                    // consensus parties, so an id in the client range must be rejected here —
+                    // downstream layers (Avid's RBC, the AVSS agreement cache) trust this dealer
+                    // id without re-validating its range.
+                    if is_client_input_broadcast {
+                        if sender_id < self.params.n_parties {
+                            warn!(
+                                "Rejecting client input broadcast: sender {} is a consensus node id, not a client id",
+                                sender_id
+                            );
+                            return Err(AvssMPCError::InvalidPartyId);
+                        }
+                    } else if sender_id >= self.params.n_parties {
+                        warn!(
+                            "Rejecting dealer message: sender {} is not a consensus party id for protocol {:?}",
+                            sender_id,
+                            rbc_msg.session_id.calling_protocol()
+                        );
+                        return Err(AvssMPCError::InvalidPartyId);
+                    }
                     let expected_dealer = rbc_msg.session_id.sub_id() as usize;
                     if rbc_msg.sender_id != expected_dealer {
                         warn!(
