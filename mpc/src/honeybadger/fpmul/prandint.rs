@@ -11,7 +11,7 @@ use crate::{
         },
         prss::{
             prss::{all_tsets, derive_key_from_riss, PrssKeys},
-            PRSS_KEY_LEN,
+            PrssAllocator, PrssStream, PrssWindow, PRSS_KEY_LEN,
         },
         robust_interpolate::robust_interpolate::RobustShare,
         ProtocolType, SessionId, WrappedMessage, MAX_MESSAGE_SIZE,
@@ -117,19 +117,90 @@ where
         (G::MODULUS_BIT_SIZE as usize).saturating_sub(headroom)
     }
 
-    /// Derives the mask shares at absolute positions `start .. start + count`. No network, no
-    /// session state.
+    /// Claims `count` mask positions from `alloc` and derives them. No network, no session state.
+    ///
+    /// **The production entry point.** `start` is not a parameter and is not derivable from pool
+    /// depth: it comes from [`PrssStream::PRandIntMask`]'s monotone cursor inside the allocator,
+    /// which advances under a lock *before* this returns and is never rolled back. Deriving from
+    /// pool depth is the original bug this closes — depth shrinks as masks are consumed, so it
+    /// eventually rewinds onto a mask an already-completed `TruncPr` opened under, and two
+    /// `TruncPr` openings sharing an `r` give `(b+r) - (b'+r) = b - b'` in public.
+    ///
+    /// The claimed range is **burned on every exit path**, including the error paths below: the
+    /// cursor moved in `claim`, and a window dropped without being derived from takes its range to
+    /// the grave. That is correct, not a leak — re-deriving an already-opened position hands the
+    /// adversary the value in advance.
+    ///
+    /// Parties still have to agree on `bits` and on the order in which they claim; every honest
+    /// party runs the same top-up sequence, so their cursors agree without a round.
+    ///
+    /// # Errors
+    /// Whatever [`PrssAllocator::claim`] returns, plus the checks in [`Self::generate_prss_in`].
+    pub async fn generate_prss(
+        &self,
+        alloc: &PrssAllocator,
+        count: usize,
+        bits: usize,
+    ) -> Result<Vec<RobustShare<G>>, PRandIntError> {
+        let window = alloc
+            .claim(PrssStream::PRandIntMask, count, bits)
+            .await
+            .map_err(PRandIntError::PrssError)?;
+        self.generate_prss_in(&window)
+    }
+
+    /// Derives exactly the masks a claimed [`PrssWindow`] names.
+    ///
+    /// `start`, `count` and `bits` are taken **from the window**, never from a parameter — that is
+    /// what closes invariant P2 at this call site: a window cannot be re-addressed at a second
+    /// width, and a caller cannot derive more than it claimed.
+    ///
+    /// # Errors
+    /// - [`PRandIntError::WrongPrssStream`] if the window names another keystream.
+    /// - [`PRandIntError::KeyFamilyMismatch`] if it was claimed against other key material.
+    /// - [`PRandIntError::NoPrssKeys`], [`PRandIntError::SurpassedFieldCapacity`].
+    pub fn generate_prss_in(
+        &self,
+        window: &PrssWindow,
+    ) -> Result<Vec<RobustShare<G>>, PRandIntError> {
+        let keys = self.prss.as_ref().ok_or(PRandIntError::NoPrssKeys)?;
+        if window.stream() != PrssStream::PRandIntMask {
+            return Err(PRandIntError::WrongPrssStream {
+                expected: PrssStream::PRandIntMask.name(),
+                got: window.stream().name(),
+            });
+        }
+        if window.key_family_id() != keys.key_family_id() {
+            return Err(PRandIntError::KeyFamilyMismatch);
+        }
+        if window.bits() > self.max_mask_bits() {
+            return Err(PRandIntError::SurpassedFieldCapacity);
+        }
+        Ok(keys.shares_at_in(window)?)
+    }
+
+    /// Derives the mask shares at absolute positions `start .. start + count`, **without claiming
+    /// them**. No network, no session state.
+    ///
+    /// # This is not for production code
+    ///
+    /// It names a position directly, which is precisely what [`PrssWindow`] exists to make
+    /// impossible: nothing here records that the range was spent, so two calls at overlapping
+    /// `start`s silently re-derive one mask, and an all-honest test cannot see it. Production code
+    /// goes through [`Self::generate_prss`] or [`Self::generate_prss_in`]. This stays `pub` for
+    /// integration tests and audits that need to derive at a chosen position in order to *assert*
+    /// something about the addressing — the same role `double_shares_at` plays on the DN07 side —
+    /// and is named for what it does not do.
     ///
     /// `start` must be the total count of masks ever generated so far (a monotonic cursor), *not*
-    /// current pool depth — depth shrinks as masks are consumed, and deriving from it would
-    /// eventually rewind the PRF position and reissue a mask some earlier, already-opened
-    /// operation already used. Masks are addressed by position rather than by a per-invocation
-    /// counter precisely so that restarts and retries cannot silently repoint the derivation:
-    /// with a local counter in the PRF input, two parties out of step by one produce shares of
-    /// entirely different secrets and no message exchange remains to notice.
+    /// current pool depth. Masks are addressed by position rather than by a per-invocation counter
+    /// precisely so that restarts and retries cannot silently repoint the derivation: with a local
+    /// counter in the PRF input, two parties out of step by one produce shares of entirely
+    /// different secrets and no message exchange remains to notice.
     ///
     /// Parties must still agree on `bits` and on the cursor position they are filling.
-    pub fn generate_prss_at(
+    #[doc(hidden)]
+    pub fn generate_prss_at_unclaimed(
         &self,
         instance_id: u32,
         start: usize,

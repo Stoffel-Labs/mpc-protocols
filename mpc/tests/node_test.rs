@@ -1846,7 +1846,7 @@ async fn prss_setup_from_riss_then_local_masks() {
         .map(|node| {
             node.preprocess
                 .prand_int
-                .generate_prss_at(instance_id, 0, count, bits)
+                .generate_prss_at_unclaimed(instance_id, 0, count, bits)
                 .unwrap()
         })
         .collect();
@@ -1864,7 +1864,7 @@ async fn prss_setup_from_riss_then_local_masks() {
     let other = nodes[0]
         .preprocess
         .prand_int
-        .generate_prss_at(instance_id + 1, 0, count, bits)
+        .generate_prss_at_unclaimed(instance_id + 1, 0, count, bits)
         .unwrap();
     assert_ne!(other, per_party[0]);
 }

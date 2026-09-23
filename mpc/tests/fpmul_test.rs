@@ -384,7 +384,10 @@ async fn prandint_via_prss_needs_no_network() {
     // No network is constructed anywhere in this test -- that is the point.
     let per_party: Vec<Vec<RobustShare<G>>> = nodes
         .iter()
-        .map(|node| node.generate_prss_at(instance_id, 0, count, bits).unwrap())
+        .map(|node| {
+            node.generate_prss_at_unclaimed(instance_id, 0, count, bits)
+                .unwrap()
+        })
         .collect();
 
     let n_tsets = (0..n).combinations(t).count();
@@ -403,19 +406,19 @@ async fn prandint_via_prss_needs_no_network() {
 
     // Re-deriving the same range must be byte-identical; a different instance must differ.
     let again = nodes[0]
-        .generate_prss_at(instance_id, 0, count, bits)
+        .generate_prss_at_unclaimed(instance_id, 0, count, bits)
         .unwrap();
     assert_eq!(again, per_party[0]);
 
     let different = nodes[0]
-        .generate_prss_at(instance_id + 1, 0, count, bits)
+        .generate_prss_at_unclaimed(instance_id + 1, 0, count, bits)
         .unwrap();
     assert_ne!(different, per_party[0]);
 
     // Topping up from a pool depth must land on the same values as the one-shot derivation --
     // the property `ensure_prandint_shares` relies on when a node restarts mid-fill.
     let tail = nodes[0]
-        .generate_prss_at(instance_id, 2, count - 2, bits)
+        .generate_prss_at_unclaimed(instance_id, 2, count - 2, bits)
         .unwrap();
     assert_eq!(tail, per_party[0][2..]);
 }
@@ -433,9 +436,9 @@ async fn prandint_prss_rejects_an_oversized_mask() {
     );
 
     assert!(node
-        .generate_prss_at(222, 0, 1, node.max_mask_bits())
+        .generate_prss_at_unclaimed(222, 0, 1, node.max_mask_bits())
         .is_ok());
     assert!(node
-        .generate_prss_at(222, 0, 1, node.max_mask_bits() + 1)
+        .generate_prss_at_unclaimed(222, 0, 1, node.max_mask_bits() + 1)
         .is_err());
 }

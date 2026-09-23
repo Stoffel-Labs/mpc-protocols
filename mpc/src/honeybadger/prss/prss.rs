@@ -1,7 +1,7 @@
 use crate::common::ProtocolSessionId;
 use crate::honeybadger::{
     fpmul::build_all_f_polys,
-    prss::{PrssError, MAX_UNQUALIFIED_SETS, PRSS_KEY_LEN},
+    prss::{PrssError, PrssStream, PrssWindow, MAX_UNQUALIFIED_SETS, PRSS_KEY_LEN},
     robust_interpolate::robust_interpolate::RobustShare,
     SessionId,
 };
@@ -16,7 +16,30 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Fixed label for the KDF, per NIST SP 800-108. Bump the version suffix if the derivation
 /// changes in any way — every key's entire output stream depends on it.
-const KDF_LABEL: &[u8] = b"STOFFEL-PRSS-v1";
+///
+/// # The suffix is the key-family **epoch** marker
+///
+/// `v1 -> v2` was the [`PrssAllocator`](super::PrssAllocator) migration: before it,
+/// `PRandIntMask`, `DaBitSeed` and `DaBitPsi` had their positions minted by legacy counters
+/// (`prandint_cursor`, `dabit_counter`) rather than by the allocator, whose cursors for those
+/// three streams had never been advanced. Switching the call sites over without also moving the
+/// epoch would have re-issued `exec_id = 0` / `start = 0` against positions a legacy counter had
+/// already spent — one pseudorandom value masking two different openings, which no all-honest
+/// test can see.
+///
+/// Bumping all three labels together makes every pre-migration byte **unaddressable** rather than
+/// merely unlikely to be re-addressed: no value of any cursor, in any ordering, under any partial
+/// migration, names a byte that a `v1` derivation touched. Bump [`KDF_LABEL`],
+/// [`KDF_LABEL_UNIFORM`] and
+/// [`PRZS_KDF_LABEL`](crate::honeybadger::przs::PRZS_KDF_LABEL) **together** — leaving one behind
+/// makes the epoch partial, which is worse than not having one — and only in a change the whole
+/// committee restarts for. Nothing goes on the wire here, so a mixed-build committee derives
+/// different values and its openings fail loudly rather than silently.
+///
+/// Do **not** use `ctx[15]` as an epoch marker instead: that byte is per-*consumer* domain
+/// separation ([`PrssDomain`], [`PrzsDomain`](crate::honeybadger::przs::PrzsDomain)) and
+/// repurposing it would collide with the next consumer to appear.
+const KDF_LABEL: &[u8] = b"STOFFEL-PRSS-v2";
 
 /// `C(n, k)` by the exact sequential product, or `None` on overflow.
 ///
@@ -76,7 +99,7 @@ pub fn held_ranks(n: usize, t: usize, id: usize) -> Vec<usize> {
 /// Deliberately not `serde`/`bincode`: a serialization-format change would silently repoint every
 /// derivation, and there is no message exchange left to notice the divergence. Fixed-width
 /// big-endian only.
-fn context_bytes(session_id: SessionId) -> [u8; 16] {
+fn context_bytes(session_id: SessionId, domain: PrssDomain) -> [u8; 16] {
     let mut ctx = [0u8; 16];
     ctx[0] = session_id
         .calling_protocol()
@@ -86,10 +109,54 @@ fn context_bytes(session_id: SessionId) -> [u8; 16] {
     ctx[5..13].copy_from_slice(&session_id.exec_id().to_be_bytes());
     ctx[13] = session_id.sub_id();
     ctx[14] = session_id.round_id();
-    // Domain-separator slot, fixed while PRandInt masks are the only consumer. A second consumer
-    // takes a different value here; keeping 0x01 for masks leaves their keystream unchanged.
-    ctx[15] = 0x01;
+    // Domain-separator slot. `PrssDomain::Default` is `0x01`, which is what every consumer that
+    // predates the daBit psi split derives under, so their keystreams are unchanged by the
+    // introduction of the parameter. PRZS owns 0x02/0x03.
+    ctx[15] = domain.context_tag();
     ctx
+}
+
+/// Which consumer of the PRSS **mask** keystream a context belongs to — the `ctx[15]` byte.
+///
+/// The PRSS key family is read by more consumers than the label alone separates, and `ctx[15]` is
+/// the reserved slot for that separation.
+/// [`PrzsDomain`](crate::honeybadger::przs::PrzsDomain) already owns `0x02` (arithmetic) and
+/// `0x03` (binary); this enum names the values the PRSS side takes.
+///
+/// # Why the daBit Mod2 mask has its own value
+///
+/// `beta` (the daBit seed, width 1) and `psi` (the Mod2 mask, width `lambda`) are both drawn
+/// through [`PrssKeys::shares_at`] on the same keys under the same label. Before this they were
+/// separated by **one byte** — `ctx[13]`, `sub_id = 0` vs
+/// [`PSI_SUB_ID`](crate::honeybadger::dabit::prss_dabit::PSI_SUB_ID) — and because their widths
+/// differ, a merge would not be a clean overlap but a partial one: `beta_nu` would be the low bit
+/// of a byte inside `psi`'s own stream, which `prss_dabit`'s module docs quantify as revealing
+/// the bit with probability ~3/4 from `V mod 4`. `psi` therefore also takes its own `ctx[15]`,
+/// so the two are separated by **two independent bytes**, matching the standard
+/// `RandBitA`/`RandBitZero` already meet (label *and* domain).
+///
+/// A window carries its domain from [`PrssStream::domain`](super::PrssStream::domain), which is
+/// an exhaustive `match` with no wildcard arm, so a new stream's author has to choose.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
+pub enum PrssDomain {
+    /// Every PRSS mask consumer that predates the daBit `psi` split: `0x01`.
+    Default,
+    /// The daBit Mod2 mask `psi`: `0x04`.
+    DaBitPsi,
+}
+
+impl PrssDomain {
+    /// This domain's value for the context's domain-separator byte (`ctx[15]`).
+    ///
+    /// `0x01` is the PRSS default, `0x02`/`0x03` belong to
+    /// [`PrzsDomain`](crate::honeybadger::przs::PrzsDomain), `0x04` is the daBit Mod2 mask. Any
+    /// future consumer of this key family must take a value no other consumer uses.
+    pub const fn context_tag(self) -> u8 {
+        match self {
+            PrssDomain::Default => 0x01,
+            PrssDomain::DaBitPsi => 0x04,
+        }
+    }
 }
 
 /// Fixed output-length parameter for the KDF.
@@ -126,13 +193,55 @@ pub fn derive_ints_at(
     count: usize,
     bits: usize,
 ) -> Vec<BigUint> {
+    derive_ints_labelled(
+        KDF_LABEL,
+        key,
+        session_id,
+        PrssDomain::Default,
+        start,
+        count,
+        bits,
+    )
+}
+
+/// [`derive_ints_at`] under an explicit [`PrssDomain`], i.e. an explicit `ctx[15]`.
+///
+/// `derive_ints_at` is this at [`PrssDomain::Default`] and is therefore byte-for-byte unchanged.
+/// The parameter exists so that the daBit Mod2 mask can take a keystream separated from the daBit
+/// seed by two bytes rather than one — see [`PrssDomain`].
+pub fn derive_ints_at_domain(
+    key: &[u8; PRSS_KEY_LEN],
+    session_id: SessionId,
+    domain: PrssDomain,
+    start: usize,
+    count: usize,
+    bits: usize,
+) -> Vec<BigUint> {
+    derive_ints_labelled(KDF_LABEL, key, session_id, domain, start, count, bits)
+}
+
+/// The KDF body, with the SP 800-108 `Label` as a parameter.
+///
+/// Extracted verbatim from [`derive_ints_at`], which now passes [`KDF_LABEL`] and is therefore
+/// byte-for-byte unchanged. The parameter exists so that a second consumer of the *same* keys can
+/// take a **different keystream family** rather than a different position in the same one — see
+/// [`derive_uniform_ints_at`] for why the difference is load-bearing rather than tidy.
+fn derive_ints_labelled(
+    label: &[u8],
+    key: &[u8; PRSS_KEY_LEN],
+    session_id: SessionId,
+    domain: PrssDomain,
+    start: usize,
+    count: usize,
+    bits: usize,
+) -> Vec<BigUint> {
     if count == 0 || bits == 0 {
         return Vec::new();
     }
 
     const BLOCK: usize = 32;
     let width = bits.div_ceil(8);
-    let ctx = context_bytes(session_id);
+    let ctx = context_bytes(session_id, domain);
 
     // Seek to the first block covering byte `start * width`, then discard the partial prefix.
     let byte_offset = start * width;
@@ -146,7 +255,7 @@ pub fn derive_ints_at(
         // `new_from_slice` only fails on a bad key length, and PRSS keys are fixed-width.
         let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
         mac.update(&counter.to_be_bytes());
-        mac.update(KDF_LABEL);
+        mac.update(label);
         mac.update(&[0x00]);
         mac.update(&ctx);
         mac.update(&KDF_L_BITS.to_be_bytes());
@@ -174,9 +283,61 @@ pub fn derive_ints_at(
         .collect()
 }
 
+/// Fixed label for the **uniform-over-`F`** PRSS derivation.
+///
+/// Deliberately a distinct keystream family from [`KDF_LABEL`], not a distinct position inside it.
+/// [`derive_ints_at`] addresses a `(key, context)` stream by `start * ceil(bits/8)`, so two draws
+/// at the same `(key, session, start)` but different `bits` read **overlapping bytes**. A uniform
+/// draw is `MODULUS_BIT_SIZE + 128` bits wide where a mask draw is `mask_bits()` wide and a daBit
+/// seed is one bit wide, so sharing the label would make those three streams correlate at every
+/// position — the same hazard class as the daBit's `beta`/`psi` collision, which reveals the bit
+/// with probability ~3/4 from `V mod 4`. Separating at the label costs one constant and removes
+/// the discipline requirement entirely.
+///
+/// Bump the version suffix if the derivation changes in any way; every key's entire uniform output
+/// stream depends on it.
+const KDF_LABEL_UNIFORM: &[u8] = b"STOFFEL-PRSS-UNIFORM-v2";
+
+/// Extra PRF bits drawn beyond the modulus width before reducing mod `p`.
+///
+/// Reducing a uniform `MODULUS_BIT_SIZE`-bit integer mod `p` is *not* uniform on `F`; reducing a
+/// uniform `(MODULUS_BIT_SIZE + 128)`-bit one is within statistical distance `2^-128` of uniform,
+/// which is below every other term in any analysis this repo runs. Rejection sampling would be
+/// exactly uniform but is the one step where two implementations can consume different numbers of
+/// bytes and silently diverge, and PRSS has no message exchange left to catch that. Same value and
+/// same reasoning as `PRZS_REDUCTION_SLACK_BITS`.
+pub const PRSS_UNIFORM_SLACK_BITS: usize = 128;
+
+/// [`derive_ints_at`] over the uniform keystream family — see [`KDF_LABEL_UNIFORM`].
+///
+/// Same position addressing, same counter-mode KDF, same absence of rejection sampling. Only the
+/// SP 800-108 `Label` differs, which makes the output an independent stream rather than a
+/// differently-sliced view of the mask stream.
+pub fn derive_uniform_ints_at(
+    key: &[u8; PRSS_KEY_LEN],
+    session_id: SessionId,
+    start: usize,
+    count: usize,
+    bits: usize,
+) -> Vec<BigUint> {
+    derive_ints_labelled(
+        KDF_LABEL_UNIFORM,
+        key,
+        session_id,
+        PrssDomain::Default,
+        start,
+        count,
+        bits,
+    )
+}
+
 /// Domain separator for turning folded RISS values into a PRSS key. Distinct from `KDF_LABEL` so
 /// key derivation and keystream generation can never collide.
 const KEY_LABEL: &[u8] = b"STOFFEL-PRSS-KEY-v1";
+
+/// Domain separator for [`PrssKeys::key_family_id`]. Distinct from both [`KEY_LABEL`] and every
+/// KDF label, so a fingerprint is neither a key nor a keystream block for any input.
+pub(crate) const KEY_FAMILY_LABEL: &[u8] = b"STOFFEL-PRSS-KEYFAMILY-v1";
 
 /// Entropy target for a derived key, in bits. The setup sizes its RISS batch to reach this.
 pub const PRSS_KEY_ENTROPY_BITS: usize = 256;
@@ -236,7 +397,6 @@ impl<F: PrimeField> PrssKeys<F> {
         if id >= n {
             return Err(PrssError::PartyOutOfRange { id, n });
         }
-
         // Before `all_tsets`, which is the allocation this rejects. `GfPrssKeys::new` has always
         // done this; the arithmetic side used to be the one store over this key family that did
         // not, which made the bound a property of which field you happened to instantiate.
@@ -310,9 +470,142 @@ impl<F: PrimeField> PrssKeys<F> {
             return Err(PrssError::WidthExceedsField { bits });
         }
 
+        self.shares_at_domain(session_id, PrssDomain::Default, start, count, bits)
+    }
+
+    /// [`Self::shares_at`] under an explicit [`PrssDomain`]. See [`Self::shares_at_in`], which is
+    /// the only production entry point into it.
+    fn shares_at_domain(
+        &self,
+        session_id: SessionId,
+        domain: PrssDomain,
+        start: usize,
+        count: usize,
+        bits: usize,
+    ) -> Result<Vec<RobustShare<F>>, PrssError> {
+        if bits >= F::MODULUS_BIT_SIZE as usize {
+            return Err(PrssError::WidthExceedsField { bits });
+        }
+
         let mut shares = vec![RobustShare::new(F::zero(), self.id, self.t); count];
         for (_, key, coeff) in &self.entries {
-            let values = derive_ints_at(key, session_id, start, count, bits);
+            let values = derive_ints_at_domain(key, session_id, domain, start, count, bits);
+            for (share, value) in shares.iter_mut().zip(&values) {
+                share.share[0] += F::from(value.clone()) * coeff;
+            }
+        }
+        Ok(shares)
+    }
+
+    /// Derives exactly the positions a claimed [`PrssWindow`] names — **the production entry
+    /// point** into the mask keystream.
+    ///
+    /// `start`, `count`, `bits` and the `ctx16` (session *and* [`PrssDomain`]) all come from the
+    /// window and none of them from a caller. That is what closes invariants P1 and P2 here: a
+    /// consumer cannot derive at a position it did not claim, cannot derive more than it claimed,
+    /// and cannot re-address a claimed range at a second width.
+    ///
+    /// # Errors
+    /// - [`PrssError::WindowStreamMismatch`] if the window names a stream that is not drawn from
+    ///   this keystream family (only [`PrssStream::PRandIntMask`], [`PrssStream::DaBitSeed`] and
+    ///   [`PrssStream::DaBitPsi`] are — the rest ride the uniform or PRZS labels).
+    /// - [`PrssError::WindowKeyFamilyMismatch`] if the window was claimed by an allocator built
+    ///   over other key material. A position count is only meaningful against the keys it was
+    ///   counted for.
+    /// - [`PrssError::WidthExceedsField`].
+    pub fn shares_at_in(&self, window: &PrssWindow) -> Result<Vec<RobustShare<F>>, PrssError> {
+        match window.stream() {
+            PrssStream::PRandIntMask | PrssStream::DaBitSeed | PrssStream::DaBitPsi => {}
+            other => {
+                return Err(PrssError::WindowStreamMismatch { got: other.name() });
+            }
+        }
+        if window.key_family_id() != self.key_family_id() {
+            return Err(PrssError::WindowKeyFamilyMismatch);
+        }
+        self.shares_at_domain(
+            window.session_id(),
+            window.domain(),
+            window.start(),
+            window.len(),
+            window.bits(),
+        )
+    }
+
+    /// This party's index.
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    /// SHA-256 fingerprint of the `(rank, key)` list this store holds.
+    ///
+    /// Local and per-party by construction — each party holds a different `C(n-1, t)` subset — so
+    /// this is *not* a cross-party identifier and must never be compared between parties or put
+    /// on the wire. Its one job is to answer a local question: "is this
+    /// [`PrssWindow`](crate::honeybadger::prss::PrssWindow) counted against the keys I am about to
+    /// derive with?" A [`PrssAllocator`](crate::honeybadger::prss::PrssAllocator) is stamped with
+    /// this at construction, so a window from an allocator built over a *different* key family
+    /// cannot be spent here — which is what makes the "re-key on restart" argument in
+    /// [`window`](crate::honeybadger::prss::window) an enforced coupling rather than a comment.
+    ///
+    /// Domain-separated from [`derive_key_from_riss`] and from every KDF label, so a fingerprint
+    /// can never be mistaken for, or collide with, key material or a keystream block. The keys go
+    /// through a one-way hash and the digest is not secret, but it is also never logged: the
+    /// callers compare it and report a bare mismatch.
+    pub fn key_family_id(&self) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(KEY_FAMILY_LABEL);
+        h.update((self.id as u64).to_be_bytes());
+        h.update((self.t as u64).to_be_bytes());
+        h.update((self.entries.len() as u64).to_be_bytes());
+        for (rank, key, _) in &self.entries {
+            h.update((*rank as u64).to_be_bytes());
+            h.update(key);
+        }
+        h.finalize().into()
+    }
+
+    /// The threshold this store was built for, which is also the degree of every sharing
+    /// [`Self::shares_at`] and [`Self::uniform_shares_at`] produce.
+    pub fn threshold(&self) -> usize {
+        self.t
+    }
+
+    /// This party's degree-`t` shares of values **uniform over the whole of `F`**, at absolute
+    /// positions `start .. start + count`.
+    ///
+    /// Purely local, zero rounds, zero bytes: `s_j = sum_T beta_T(sid) * f_T(x_j)` with each
+    /// `beta_T` a `(MODULUS_BIT_SIZE + PRSS_UNIFORM_SLACK_BITS)`-bit draw reduced mod `p`.
+    ///
+    /// # Why this is not [`Self::shares_at`] with a large `bits`
+    ///
+    /// [`Self::shares_at`] draws each `beta_T` uniform on `[0, 2^bits)` with `bits <
+    /// MODULUS_BIT_SIZE`, so the reconstructed secret is `sum_T beta_T` over the **integers**,
+    /// living in `[0, C(n,t) * 2^bits)`. That is exactly right for a statistical mask — and for
+    /// the daBit, whose whole trick is that the integer sum's parity is the binary XOR — but it is
+    /// *not* uniform on `F`, and a DN07 mask that is not uniform on `F` leaks information about
+    /// the product it is supposed to hide. Here each `beta_T` is uniform on `Z_p` instead, so the
+    /// sum mod `p` is uniform on `Z_p` exactly, and stays uniform from the adversary's point of
+    /// view because it holds every key but its own set's (`|A| = |T| = t`, so `A` is contained in
+    /// `T` only when `T = A`).
+    ///
+    /// Every party must pass the identical `session_id`, `start` and `count`; the derivation is
+    /// deterministic and there is no message exchange left to catch a mismatch. A consumed range
+    /// must be **burned, never rewound**, on an abort or a retry — re-deriving an already-opened
+    /// position hands the adversary the value in advance (the VERIA-222 cursor-rewind class).
+    pub fn uniform_shares_at(
+        &self,
+        session_id: SessionId,
+        start: usize,
+        count: usize,
+    ) -> Result<Vec<RobustShare<F>>, PrssError> {
+        let bits = F::MODULUS_BIT_SIZE as usize + PRSS_UNIFORM_SLACK_BITS;
+        let mut shares = vec![RobustShare::new(F::zero(), self.id, self.t); count];
+        if count == 0 {
+            return Ok(shares);
+        }
+        for (_, key, coeff) in &self.entries {
+            let values = derive_uniform_ints_at(key, session_id, start, count, bits);
             for (share, value) in shares.iter_mut().zip(&values) {
                 share.share[0] += F::from(value.clone()) * coeff;
             }

@@ -98,6 +98,7 @@ use crate::{
         },
         preprocessing::HoneyBadgerMPCNodePreprocMaterial,
         prss::prss::{PrssKeys, PRSS_KEY_ENTROPY_BITS},
+        prss::PrssAllocator,
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
@@ -412,9 +413,24 @@ where
             warn!(?sessionid, "failed to clear PRSS setup session state");
         }
 
-        let keys = PrssKeys::<F>::new(self.id, self.params.n_parties, self.params.threshold, &keys)
-            .map_err(PRandIntError::from)?;
-        self.preprocess.prand_int.install_prss_keys(keys);
+        let n = self.params.n_parties;
+        let t = self.params.threshold;
+        let prss = PrssKeys::<F>::new(self.id, n, t, &keys).map_err(PRandIntError::from)?;
+
+        // The cursors that keep every PRSS/PRZS position on this key family monotone. Built here,
+        // once, with the family's fingerprint: the count of positions already issued is only
+        // meaningful against the keys it was counted for, and stamping it makes that coupling
+        // checkable rather than implied. It also pins the restart argument — keys are ephemeral
+        // (no store in this crate is `Serialize`, and the gate above is an in-memory flag), so a
+        // restarted node re-runs RISS, gets a *fresh* family, and a zeroed allocator is correct.
+        // Persisting keys without also persisting these cursors would re-derive every position
+        // this node has ever opened; see `prss::window`.
+        self.preprocess.prss_alloc = Some(PrssAllocator::new(
+            self.params.instance_id,
+            prss.key_family_id(),
+        ));
+
+        self.preprocess.prand_int.install_prss_keys(prss);
         info!("PRSS key setup complete");
         Ok(())
     }
@@ -506,6 +522,15 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub rand_bit: RandBit<F>,
     /// Produces the degree-`2t` zero-sharings that re-randomise RandBit's MulPub opening.
     pub zero_sha: ZeroShaNode<F, R>,
+    /// Monotone PRSS/PRZS position cursors for this node's key family, installed by
+    /// `setup_prss_keys` next to [`PreprocessNodes::dn07_doubles`] and `None` until then.
+    ///
+    /// Installed *alongside* the key stores and never rebuilt, because a second allocator over
+    /// one key family forks the cursors and re-issues every position. Held here rather than in a
+    /// global so that a cloned node shares it — the cursors live behind an `Arc`, so two clones
+    /// racing a claim serialise rather than both deriving the same range. See
+    /// [`prss::window`](crate::honeybadger::prss::window).
+    pub prss_alloc: Option<PrssAllocator>,
 }
 
 #[derive(Clone, Debug)]
@@ -781,6 +806,7 @@ where
                 prand_int: prand_int_node,
                 rand_bit: rand_bit_node,
                 zero_sha: zero_sha_node,
+                prss_alloc: None,
             },
             operations: Operation { mul: mul_node },
             gf_preprocessing_material: Arc::new(Mutex::new(
@@ -2285,14 +2311,18 @@ where
     /// Tops the PRandInt mask pool up to `n_prandint`, deriving locally from PRSS keys.
     ///
     /// No network: the keys were established once by [`Self::setup_prss_keys`], and every mask
-    /// after that is a local PRF evaluation. Masks are addressed by `prandint_cursor` — the total
-    /// number ever generated — rather than by current pool depth: depth shrinks as shares are
-    /// consumed, and deriving from it would eventually rewind the PRF position and hand out a
-    /// mask some earlier, already-opened operation already used. The cursor only advances, so a
-    /// position is never issued twice. Nor is it a per-invocation counter reset on retry — it is
-    /// driven purely by how much has been generated so far, which every honest party computes
-    /// identically; a counter that drifted between parties would silently yield shares of
-    /// different secrets, with no message exchange left to catch it.
+    /// after that is a local PRF evaluation. Positions come from
+    /// [`PrssStream::PRandIntMask`](prss::PrssStream::PRandIntMask)'s cursor inside the node's
+    /// single [`PrssAllocator`](prss::PrssAllocator) — never from pool depth, which shrinks as
+    /// shares are consumed and would eventually rewind the PRF onto a mask an already-completed
+    /// `TruncPr` opened under. The cursor advances under a lock inside the claim, before anything
+    /// is derived, and there is no path that moves it back; a batch that fails after claiming
+    /// burns its range, which is correct rather than a leak. See [`prss::window`].
+    ///
+    /// The claim order is what every honest party agrees on, not a number on the wire: each party
+    /// runs the same top-up sequence, so their cursors track each other. A cursor that drifted
+    /// between parties would silently yield shares of different secrets, with no message exchange
+    /// left to catch it.
     async fn ensure_prandint_shares(&mut self) -> Result<(), HoneyBadgerError> {
         let no_shares = {
             let store = self.preprocessing_material.lock().await;
@@ -2308,16 +2338,21 @@ where
         info!("PRandInt share generation");
 
         let bits = self.params.mask_bits();
-        let cursor = {
-            let store = self.preprocessing_material.lock().await;
-            store.prandint_cursor()
-        };
-        let output = self.preprocess.prand_int.generate_prss_at(
-            self.params.instance_id,
-            cursor,
-            missing,
-            bits,
-        )?;
+        // Cloned rather than borrowed: `generate_prss` is `&self` on the node's own sub-store, and
+        // holding a borrow of `self.preprocess` across it would conflict. The clone shares the
+        // cursors through an `Arc` — that is the whole point of `PrssAllocator: Clone` — so this
+        // is the same allocator, not a fork of it.
+        let alloc = self
+            .preprocess
+            .prss_alloc
+            .as_ref()
+            .ok_or(HoneyBadgerError::NotEnoughPreprocessing)?
+            .clone();
+        let output = self
+            .preprocess
+            .prand_int
+            .generate_prss(&alloc, missing, bits)
+            .await?;
         self.preprocessing_material
             .lock()
             .await

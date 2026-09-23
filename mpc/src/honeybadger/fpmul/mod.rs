@@ -163,6 +163,18 @@ pub enum PRandIntError {
     NoPrssKeys,
     #[error("PRSS error: {0:?}")]
     PrssError(#[from] crate::honeybadger::prss::PrssError),
+    /// A [`PrssWindow`](crate::honeybadger::prss::PrssWindow) naming a keystream other than
+    /// [`PrssStream::PRandIntMask`](crate::honeybadger::prss::PrssStream::PRandIntMask).
+    #[error("PRSS window names stream {got}, expected {expected}")]
+    WrongPrssStream {
+        expected: &'static str,
+        got: &'static str,
+    },
+    /// A [`PrssWindow`](crate::honeybadger::prss::PrssWindow) claimed by an allocator built over
+    /// other key material. A position count only means anything against the keys it was counted
+    /// for.
+    #[error("PRSS window was claimed against a different key family")]
+    KeyFamilyMismatch,
 }
 
 /// Length of the blinding nonce in a RISS commitment.
