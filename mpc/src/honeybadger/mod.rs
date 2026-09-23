@@ -39,6 +39,8 @@ pub mod gf_double_share;
 pub mod gf_mul;
 /// GF(2^k) equivalent of `preprocessing`
 pub mod gf_preprocessing;
+/// GF(2^k) equivalent of `prss` (CDI05 pseudorandom secret sharing; preprocessing-only, local)
+pub mod gf_prss;
 /// GF(2^k) equivalent of `ran_dou_sha` (hyperinvertible-matrix extraction + checksum)
 pub mod gf_ran_dou_sha;
 /// GF(2^k) equivalent of `share_gen` (RanSha)
