@@ -242,6 +242,10 @@ use crate::honeybadger::batch_recon::BatchReconError;
 use crate::honeybadger::gf_batch_recon::GfBatchReconError;
 use crate::honeybadger::{ProtocolType, SessionId};
 
+pub mod dn07;
+pub mod double_share;
+pub mod gf_dn07;
+
 /// Largest number of concurrent DN07 sessions one node admits, across all peers.
 pub const MAX_DN07_SESSIONS: usize = 256;
 
@@ -678,6 +682,3 @@ mod tests {
         assert!(store.pending_batch_recon_payload.is_none());
     }
 }
-
-pub mod dn07;
-pub mod gf_dn07;
