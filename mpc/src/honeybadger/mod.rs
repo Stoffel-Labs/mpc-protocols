@@ -25,6 +25,9 @@ pub mod binary_circuits;
 // Doubly-shared bits (daBits): the cross-domain primitive behind A2B and B2A.
 pub mod dabit;
 
+// Binary-to-arithmetic conversion: one GF(2^k) opening, no online multiplication.
+pub mod b2a;
+
 // daBit / edaBit pools, the conversion-side counterpart of `preprocessing` and `gf_preprocessing`.
 pub mod conv_preprocessing;
 
