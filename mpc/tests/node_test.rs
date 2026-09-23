@@ -2205,3 +2205,138 @@ async fn prss_setup_from_riss_then_local_masks() {
         .unwrap();
     assert_ne!(other, per_party[0]);
 }
+
+/// **The GF triple's last cost residual, closed, at the node.** `run_gf_preprocessing` took its
+/// double sharing from PRSS but still drew `[a]` and `[b]` from dealt `GfRanSha`, pricing a triple
+/// at `2 x R1 + O2` where the `F` side's `generate_triples_via_dn07` has always paid `O2` alone.
+///
+/// The assertion that distinguishes the two is not the triples — both paths produce correct ones —
+/// but `gf_ran_sha_counter`. It is exactly the question
+/// [`SubProtocolCounter::peek`](stoffelcrypto::honeybadger::SubProtocolCounter::peek) exists to
+/// answer: *did that protocol run at all?* With PRSS keys installed and no random-share request of
+/// the caller's own, a GF triple batch must now mint **no** `GfRansha` session and **no**
+/// `GfRandousha` session, and put nothing on the wire but the one degree-`2t` opening.
+#[tokio::test]
+async fn gf_triples_from_prss_deal_no_ransha_at_all() {
+    use stoffelcrypto::common::gf2k::field::{BinaryField, Gf256};
+    use stoffelcrypto::common::gf2k::share::GfShare;
+    use stoffelcrypto::common::GfPreprocessingMPCProtocol;
+
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+    let instance_id = 111;
+    // One whole degree-`2t` opening group, which is the granularity `GfTripleGenNode` works at.
+    let n_gf_triples = 2 * t + 1;
+
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        instance_id,
+        0,
+        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+    for node in &mut nodes {
+        node.params.n_gf_triples = n_gf_triples;
+        // Nothing of the caller's own: the only random shares the old path dealt here were the
+        // triples' `[a]` and `[b]`, so this isolates them.
+        node.params.n_gf_random_shares = 0;
+    }
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    // One RISS run installs the `F` and `K` PRSS/PRZS stores and the single allocator.
+    let mut handles = Vec::new();
+    for (pid, node) in nodes.iter().enumerate() {
+        let mut node = node.clone();
+        let net = network[pid].clone();
+        handles.push(tokio::spawn(async move {
+            node.setup_prss_keys(net).await.expect("prss setup");
+            node
+        }));
+    }
+    for (pid, handle) in handles.into_iter().enumerate() {
+        nodes[pid] = handle.await.unwrap();
+    }
+    for (pid, node) in nodes.iter().enumerate() {
+        assert!(
+            node.gf_dn07_uses_prss(),
+            "node {pid} has no GF PRSS double-share source, so this test would pass vacuously"
+        );
+    }
+
+    let mut handles = Vec::new();
+    for (pid, node) in nodes.iter().enumerate() {
+        let mut node = node.clone();
+        let net = network[pid].clone();
+        handles.push(tokio::spawn(async move {
+            let mut rng = StdRng::seed_from_u64(pid as u64);
+            node.run_gf_preprocessing(net, &mut rng)
+                .await
+                .expect("gf preprocessing");
+            node
+        }));
+    }
+    for (pid, handle) in handles.into_iter().enumerate() {
+        nodes[pid] = handle.await.unwrap();
+    }
+
+    // The cost claim, as a counter reading. Under the dealt path these would be `Some(1)`.
+    for (pid, node) in nodes.iter().enumerate() {
+        assert_eq!(
+            node.counters.gf_ran_sha_counter.peek().await,
+            Some(0),
+            "node {pid} dealt a GfRanSha batch for a PRSS triple's [a]/[b]"
+        );
+        assert_eq!(
+            node.counters.gf_ran_dou_sha_counter.peek().await,
+            Some(0),
+            "node {pid} dealt a GfRanDouSha batch for a PRSS triple's mask"
+        );
+    }
+
+    // And the triples are real ones.
+    let mut a_vals = Vec::new();
+    let mut per_party = Vec::with_capacity(n_parties);
+    for node in nodes.iter() {
+        let mut store = node.gf_preprocessing_material.lock().await;
+        assert!(store.length().beaver_triples >= n_gf_triples);
+        per_party.push(store.take_beaver_triples(n_gf_triples).unwrap());
+    }
+    for i in 0..n_gf_triples {
+        let a_col: Vec<GfShare<Gf256>> =
+            (0..n_parties).map(|p| per_party[p][i].a.clone()).collect();
+        let b_col: Vec<GfShare<Gf256>> =
+            (0..n_parties).map(|p| per_party[p][i].b.clone()).collect();
+        let c_col: Vec<GfShare<Gf256>> = (0..n_parties)
+            .map(|p| per_party[p][i].mult.clone())
+            .collect();
+        // `a` and `b` are PRSS-derived and unknown to this test in advance, so recovering them
+        // here is also the assertion that every party derived the same value at the same
+        // position: a fork would leave these on no common degree-`t` polynomial.
+        let (_, a) = GfShare::recover_secret(&a_col, n_parties, t).unwrap();
+        let (_, b) = GfShare::recover_secret(&b_col, n_parties, t).unwrap();
+        let (_, c) = GfShare::recover_secret(&c_col, n_parties, t).unwrap();
+        assert_eq!(c, a * b, "GF triple {i} from PRSS material is not a triple");
+        a_vals.push(a);
+    }
+    // `c == a * b` is satisfied by an all-zero batch, which is what a source that silently
+    // derived nothing would hand back. `a` is uniform over `K`, so a whole batch of zeros is
+    // `2^-24` here and a real failure everywhere else.
+    assert!(
+        a_vals.iter().any(|v| *v != Gf256::zero()),
+        "every PRSS-derived [a] in the batch reconstructed to zero"
+    );
+}

@@ -77,7 +77,9 @@ use crate::{
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
         dn07::{
-            dn07::Dn07MulNode, double_share::PrssDoubleShareSource, gf_dn07::GfDn07MulNode,
+            dn07::Dn07MulNode,
+            double_share::{GfPrssDoubleShareSource, PrssDoubleShareSource},
+            gf_dn07::GfDn07MulNode,
             Dn07Error, PreprocessingSessionId, MAX_DN07_SESSIONS,
         },
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
@@ -92,6 +94,7 @@ use crate::{
         gf_double_share::{gf_double_share_generation::GfDoubleShareNode, GfDouShaError},
         gf_mul::{gf_multiplication::GfMultiply, GfMulError},
         gf_preprocessing::GfHoneyBadgerMPCNodePreprocMaterial,
+        gf_prss::gf_prss::GfPrssKeys,
         gf_ran_dou_sha::{gf_ran_dou_sha::GfRanDouShaNode, GfRanDouShaError},
         gf_share_gen::{gf_share_gen::GfRanShaNode, GfRanShaError},
         gf_triple_gen::{gf_triple_generation::GfTripleGenNode, GfTripleGenError},
@@ -108,7 +111,7 @@ use crate::{
         preprocessing::HoneyBadgerMPCNodePreprocMaterial,
         prss::prss::{PrssKeys, PRSS_KEY_ENTROPY_BITS},
         prss::PrssAllocator,
-        przs::{przs::PrzsKeys, MAX_PRZS_COEFFS_PER_CALL},
+        przs::{gf_przs::GfPrzsKeys, przs::PrzsKeys, MAX_PRZS_COEFFS_PER_CALL},
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
@@ -454,6 +457,15 @@ where
             prss.key_family_id(),
         ));
 
+        let gf_prss = GfPrssKeys::<Gf256>::new(self.id, n, t, &keys)
+            .map_err(|e| Dn07Error::Prss(format!("{e:?}")))
+            .map_err(to_err)?;
+        let gf_przs = GfPrzsKeys::<Gf256>::new(self.id, n, t, &keys)
+            .map_err(|e| Dn07Error::Przs(format!("{e:?}")))
+            .map_err(to_err)?;
+        self.gf_preprocess.gf_dn07_doubles =
+            Some(GfPrssDoubleShareSource::new(gf_prss, gf_przs).map_err(to_err)?);
+
         self.preprocess.prand_int.install_prss_keys(prss);
         info!("PRSS key setup complete");
         Ok(())
@@ -597,6 +609,13 @@ pub struct GfPreprocessNodes<R: RBC> {
     /// tag, and the dispatcher demuxes on that tag alone, so two nodes of this type must not
     /// share one.
     pub gf_dn07: GfDn07MulNode<Gf256>,
+    /// Non-interactive `([r]_t, [r]_2t)` source for [`GfPreprocessNodes::gf_dn07`]. `None` until
+    /// `setup_prss_keys` runs; while it is `None`, GF triple generation and the edaBit filter
+    /// both use the dealt `GfRanDouSha` pool exactly as before.
+    ///
+    /// Both consumers claim their positions from [`PreprocessNodes::prss_alloc`], never from a
+    /// counter of their own — see `HoneyBadgerMPCNode::gf_prss_doubles`.
+    pub gf_dn07_doubles: Option<GfPrssDoubleShareSource<Gf256>>,
 }
 
 #[derive(Clone, Debug)]
@@ -892,6 +911,7 @@ where
                 gf_ran_dou_sha: gf_ran_dou_sha_node,
                 gf_triple_gen: gf_triple_gen_node,
                 gf_dn07: gf_dn07_node,
+                gf_dn07_doubles: None,
             },
             gf_operations: GfOperation { mul: gf_mul_node },
             type_ops: TypeOperations {
@@ -2793,6 +2813,11 @@ where
             (no_of_triples - no_of_triples_avail).div_ceil(group_size) * group_size
         };
 
+        // All three of a GF triple's inputs come from one source, not two. See the block comment
+        // below; the only thing this flag changes *here* is whether the triples' `[a]` and `[b]`
+        // have to be dealt as `GfRanSha`, which is the whole of the remaining cost gap.
+        let triples_from_prss = self.gf_dn07_uses_prss();
+
         let total_random_shares_to_generate = if total_triples_to_generate > 0 {
             let baseline = if no_of_random_shares_avail < no_of_random_shares {
                 no_of_random_shares - no_of_random_shares_avail
@@ -2800,7 +2825,14 @@ where
                 no_of_random_shares = 0;
                 0
             };
-            baseline + 2 * total_triples_to_generate
+            if triples_from_prss {
+                // `[a]` and `[b]` are derived, so the `2 x GfRanSha` per triple this used to add
+                // is not dealt at all. Only a caller's own `n_gf_random_shares` request remains —
+                // that pool is spent elsewhere and is not this path's to elide.
+                baseline
+            } else {
+                baseline + 2 * total_triples_to_generate
+            }
         } else if no_of_random_shares_avail < no_of_random_shares {
             no_of_random_shares - no_of_random_shares_avail
         } else {
@@ -2816,27 +2848,79 @@ where
         self.ensure_gf_random_shares(network.clone(), rng, total_random_shares_to_generate)
             .await?;
 
-        let mut ran_dou_sha_pair = self
-            .ensure_gf_ran_dou_sha_pair(network.clone(), rng, total_triples_to_generate)
-            .await?;
-        // `ensure_gf_ran_dou_sha_pair` may over-produce (ceil-rounded to a whole column) — only
-        // the exact multiple-of-`group_size` prefix `GfTripleGenNode::init_batch` requires.
-        ran_dou_sha_pair.truncate(total_triples_to_generate);
-
+        // A GF triple's **whole input set** — `[a]_t`, `[b]_t` and the `([r]_t, [r]_2t)` its
+        // degree reduction consumes. Two sources, same objects:
+        //
+        // * **PRSS + PRZS** once `setup_prss_keys` has run — `O2 = 2n/(2t+1)` bytes per triple,
+        //   the single degree-`2t` opening and nothing else, because none of the three inputs
+        //   goes on the wire at all. Costs computational rather than perfect privacy of
+        //   preprocessing randomness, under the same PRF assumption `PRandInt` already carries.
+        // * **`GfRanSha` x2 + `GfRanDouSha`** otherwise — dealt, interactive, perfect privacy.
+        //   This is the path a caller that runs `run_gf_preprocessing` without ever establishing
+        //   PRSS keys takes, and it is unchanged.
+        //
+        // The doubles alone came from PRSS before this change while `[a]` and `[b]` were still
+        // dealt, which left a GF triple costing `2 x R1 + O2` instead of `O2` — a 3.3-3.9x
+        // overcharge on every one of the ~695 triples an A2B spends. The `F` side never had it:
+        // `generate_triples_via_dn07` has always taken all three from
+        // `PrssDoubleShareSource::triple_material`. This is that asymmetry closed, against the
+        // same template.
+        //
+        // Why PRSS-derived operands are safe where dealt ones would not be: `gf_triple_gen`'s
+        // reduction opens `[a][b] - [r]_2t` at degree `2t`, which imposes no codeword constraint
+        // on the honest sub-word at `n = 3t+1`. A dealer who deals `a` at degree `t+1` makes the
+        // product degree `2t+1`, the opening still succeeds, and the dealer recovers the honest
+        // `b` in the clear. Every input here is a deterministic function of keys held by
+        // `n - t >= 2t+1` parties with nothing dealt anywhere, so a corrupt party's only freedom
+        // is to lie at the opening — which the `[3t+1, 2t+1]` code's distance `t+1` detects with
+        // probability 1. The dealt fallback keeps its own operands off a degree-`2t` opening's
+        // critical path the same way it always did: `GfRanSha` is verified at dealing.
+        //
+        // The choice is all-or-nothing across parties because PRSS key setup is: RISS either
+        // completes for everyone or for no one. Were it ever to split, the mismatch is *detected*
+        // rather than silent — parties deriving different `r` send shares that lie on no common
+        // degree-`2t` polynomial, and the `[3t+1, 2t+1]` code's distance `t+1` makes that a
+        // non-codeword, so `recover_secret` aborts.
+        //
+        // The PRSS positions come from the node's single [`PrssAllocator`], never from a counter
+        // of this call site's own. That is not a tidiness preference: `PrssStream::GfDn07Double`
+        // is one keystream shared with the edaBit modulus-overflow filter, and two independent
+        // monotone counters on one stream collide — re-deriving an `[r]` that has already masked a
+        // degree-`2t` opening, which is a total privacy break that no all-honest test detects.
+        // This call site used `gf_ran_dou_sha_counter` before the filter became a second consumer,
+        // which was monotone and sufficient while it was the *only* consumer; it is not any more.
+        // See [`Self::gf_prss_doubles`].
         if total_triples_to_generate == 0 {
             return Ok(());
         }
 
-        let random_shares_a = self
-            .gf_preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(total_triples_to_generate)?;
-        let random_shares_b = self
-            .gf_preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(total_triples_to_generate)?;
+        let (random_shares_a, random_shares_b, ran_dou_sha_pair) = if triples_from_prss {
+            // One claim per chunk on the node's single `PrssAllocator`, covering all three inputs
+            // — never a counter of this call site's own. See `Self::gf_prss_triple_material`.
+            let material = self
+                .gf_prss_triple_material(total_triples_to_generate)
+                .await?;
+            (material.a, material.b, material.doubles)
+        } else {
+            let mut pair = self
+                .ensure_gf_ran_dou_sha_pair(network.clone(), rng, total_triples_to_generate)
+                .await?;
+            // `ensure_gf_ran_dou_sha_pair` may over-produce (ceil-rounded to a whole column) —
+            // only the exact multiple-of-`group_size` prefix `GfTripleGenNode::init_batch`
+            // requires.
+            pair.truncate(total_triples_to_generate);
+            let a = self
+                .gf_preprocessing_material
+                .lock()
+                .await
+                .take_random_shares(total_triples_to_generate)?;
+            let b = self
+                .gf_preprocessing_material
+                .lock()
+                .await
+                .take_random_shares(total_triples_to_generate)?;
+            (a, b, pair)
+        };
 
         let session_id = SessionId::new(
             ProtocolType::GfTriple,
@@ -3080,6 +3164,76 @@ where
             .await
             .add(Some(triples), None, None, None);
         Ok(())
+    }
+
+    /// `true` when `Gf2k` DN07 double sharings come from PRSS + PRZS rather than from dealt
+    /// `GfRanDouSha`.
+    ///
+    /// Both halves or neither, for the reason [`Self::randbit_uses_prss`] gives: a source without
+    /// an allocator would derive at position zero every single time.
+    pub fn gf_dn07_uses_prss(&self) -> bool {
+        self.gf_preprocess.gf_dn07_doubles.is_some() && self.preprocess.prss_alloc.is_some()
+    }
+
+    /// A GF Beaver triple's **whole** input set for `needed` triples — `[a]_t`, `[b]_t` and one
+    /// `([r]_t, [r]_2t)` each — from PRSS + PRZS, **zero rounds, zero bytes**, with every position
+    /// claimed from this node's one [`PrssAllocator`].
+    ///
+    /// The `Gf2k` twin of what `generate_triples_via_dn07` gets from
+    /// [`PrssDoubleShareSource::triple_material`](dn07::double_share::PrssDoubleShareSource::triple_material),
+    /// and the thing that closes the GF triple's cost gap: `[a]` and `[b]` used to be dealt
+    /// `GfRanSha` while only the doubles were derived, which priced a triple at `2 x R1 + O2`
+    /// rather than `O2`.
+    ///
+    /// # It shares [`Self::gf_prss_doubles`]'s stream, and that is the point
+    ///
+    /// [`PrssStream::GfDn07Double`] is one keystream with three consumers now — GF triple `a`/`b`,
+    /// GF triple doubles, and the edaBit modulus-overflow filter's doubles. A claim here of
+    /// `3 * take` positions and a claim there of `take` come off the same monotone cursor, so they
+    /// cannot overlap. Introducing a counter of this call site's own would make two individually
+    /// monotone, jointly colliding sequences, and a collision re-derives an `[r]` that has already
+    /// masked a degree-`2t` opening — the total privacy break no all-honest test detects.
+    ///
+    /// # Chunking, and burned ranges
+    ///
+    /// Chunked against `MAX_PRZS_COEFFS_PER_CALL / t`, on the *triple* count rather than the
+    /// window width: PRZS spends `t` coefficients per double sharing and only the window's last
+    /// third derives any. Each chunk burns its own exec id, and a chunk that fails leaves its
+    /// range spent rather than rewinding onto it — including when an earlier chunk already
+    /// succeeded, whose positions stay burned too.
+    ///
+    /// # Phase
+    ///
+    /// PREPROCESSING, and structurally so: the window addresses `(GfDn07, 0, 0)` and
+    /// `triple_material_in` puts it through `PreprocessingSessionId::new`, which rejects an online
+    /// tag. Nothing this returns is reachable from A2B or B2A, which spend finished triples at
+    /// degree `t`.
+    async fn gf_prss_triple_material(
+        &self,
+        needed: usize,
+    ) -> Result<dn07::double_share::GfTripleMaterial<Gf256>, HoneyBadgerError> {
+        let (source, alloc) = match (
+            self.gf_preprocess.gf_dn07_doubles.as_ref(),
+            self.preprocess.prss_alloc.as_ref(),
+        ) {
+            (Some(source), Some(alloc)) => (source, alloc),
+            _ => return Err(HoneyBadgerError::NotEnoughPreprocessing),
+        };
+        let cap = (MAX_PRZS_COEFFS_PER_CALL / self.params.threshold.max(1)).max(1);
+        let mut a = Vec::with_capacity(needed);
+        let mut b = Vec::with_capacity(needed);
+        let mut doubles = Vec::with_capacity(needed);
+        while a.len() < needed {
+            let take = (needed - a.len()).min(cap);
+            let chunk = source.triple_material(alloc, take).await?;
+            if chunk.a.len() != take || chunk.b.len() != take || chunk.doubles.len() != take {
+                return Err(HoneyBadgerError::NotEnoughPreprocessing);
+            }
+            a.extend(chunk.a);
+            b.extend(chunk.b);
+            doubles.extend(chunk.doubles);
+        }
+        Ok(dn07::double_share::GfTripleMaterial { a, b, doubles })
     }
 }
 
