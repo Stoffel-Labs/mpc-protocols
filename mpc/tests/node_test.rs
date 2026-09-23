@@ -832,13 +832,22 @@ async fn preprocessing_e2e() {
         let n_shares = len.random_shr;
         let n_randbit = len.randbit;
         let n_prandint = len.prandint;
-        // no_of_triples=7 is rounded up to a multiple of group_size (2t+1=3) -> 9. RandBit now
+        // no_of_triples=7 is rounded up to a multiple of group_size (2t+1=3) -> 9. RandBit
         // squares via MulPub rather than a Beaver triple, so it consumes no triples at all --
-        // all 9 survive. It still draws one random share per output from the shared pool (no
-        // auto top-up), leaving 4-4=0 random shares behind. Its degree-2t zero-sharings are
-        // topped up by `ensure_zero_shares` and fully consumed, so that pool ends empty too.
+        // all 9 survive.
+        //
+        // Both of RandBit's own inputs now come from PRSS/PRZS instead of the dealt pools, so
+        // neither pool is touched by it:
+        //
+        // * `random_shr` ends at the full `no_of_randomshares = 4`. It used to end at 0, because
+        //   RandBit drew one dealt `RanSha` share per output bit. That share is now a local PRSS
+        //   derivation, so the four the caller asked for are still there afterwards.
+        // * `zero_shares` ends at 0 because `run_preprocessing` no longer *generates* any: with
+        //   RandBit re-randomising from PRZS, `generate_randbits`' dealt branch is the pool's
+        //   only consumer, so the whole `ZeroSha` run is skipped rather than run and discarded.
+        //   It used to end at 0 for the opposite reason -- generated, then fully consumed.
         assert_eq!(n_triples, 9);
-        assert_eq!(n_shares, 0);
+        assert_eq!(n_shares, no_of_randomshares);
         assert_eq!(len.zero_shares, 0);
         assert_eq!(n_randbit, 4);
         assert_eq!(n_prandint, 4);
@@ -1787,6 +1796,113 @@ async fn fpdiv_const_rejects_undersized_prandint_mask() {
         rendered.contains(&format!("value_bits: {value_bits}")),
         "error should report the value width {value_bits}, got {rendered}"
     );
+}
+
+/// `RandBit` draws `[a]` from PRSS and its degree-`2t` re-randomiser from PRZS — **not** from the
+/// dealt `RanSha` / `ZeroSha` pools.
+///
+/// The assertion that makes this a real test rather than a restatement: `n_random_shares` is
+/// **zero**. Before this wiring, `generate_randbits` called `take_random_shares` and this run
+/// failed with `NotEnoughPreprocessing`. It now succeeds with both interactive pools empty and
+/// stays empty afterwards, which is precisely the cost saving — `RanSha + ZeroSha` leave the
+/// RandBit bill, and with it the daBit bill, leaving one `MulPub` degree-`2t` opening per bit.
+///
+/// The bits themselves are checked to be bits, because "cheaper" is only interesting if the
+/// output is still correct: a PRSS `[a]` that was not uniform over `F` (the mask keystream rather
+/// than the uniform one, say) would still reconstruct to *something* and would still pass a
+/// degree check.
+#[tokio::test]
+async fn randbits_come_from_prss_and_przs_not_from_the_dealt_pools() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+    let instance_id = 117;
+    let n_randbit = 6;
+
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        /*triples*/ 0,
+        /*random shares*/ 0,
+        instance_id,
+        n_randbit,
+        /*prandint*/ 0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    let mut handles = Vec::new();
+    for (pid, node) in nodes.iter().enumerate() {
+        let mut node = node.clone();
+        let net = network[pid].clone();
+        handles.push(tokio::spawn(async move {
+            let mut r = StdRng::from_rng(OsRng).unwrap();
+            node.run_preprocessing(net, &mut r)
+                .await
+                .expect("preprocessing with an empty random-share pool");
+            node
+        }));
+    }
+    for (pid, handle) in handles.into_iter().enumerate() {
+        nodes[pid] = handle.await.unwrap();
+    }
+
+    for (pid, node) in nodes.iter().enumerate() {
+        assert!(
+            node.prss_keys_installed(),
+            "node {pid} has no PRSS keys, so this test would be checking the dealt path"
+        );
+        let len = node.preprocessing_material.lock().await.length();
+        assert!(
+            len.randbit >= n_randbit,
+            "node {pid} produced {} RandBits, wanted {n_randbit}",
+            len.randbit
+        );
+        assert_eq!(
+            len.random_shr, 0,
+            "node {pid} drew RandBit's `a` from the dealt RanSha pool"
+        );
+        assert_eq!(
+            len.zero_shares, 0,
+            "node {pid} drew RandBit's re-randomiser from the dealt ZeroSha pool"
+        );
+    }
+
+    // Every party's `i`-th bit must be a share of the same value, and that value must be 0 or 1.
+    let mut per_party = Vec::new();
+    for node in nodes.iter_mut() {
+        per_party.push(
+            node.preprocessing_material
+                .lock()
+                .await
+                .take_randbit_shares(n_randbit)
+                .expect("randbit pool"),
+        );
+    }
+    for i in 0..n_randbit {
+        let shares: Vec<RobustShare<Fr>> =
+            (0..n_parties).map(|p| per_party[p][i].clone()).collect();
+        let (coeffs, bit) = RobustShare::recover_secret(&shares, n_parties, t)
+            .unwrap_or_else(|e| panic!("RandBit {i} failed to reconstruct: {e:?}"));
+        assert!(
+            coeffs.len() <= t + 1,
+            "RandBit {i} is not a degree-t sharing"
+        );
+        assert!(
+            bit == Fr::from(0u64) || bit == Fr::from(1u64),
+            "RandBit {i} reconstructed to {bit}, which is not a bit"
+        );
+    }
 }
 
 /// PRSS key setup end to end: one RISS run establishes the keys, after which every party derives

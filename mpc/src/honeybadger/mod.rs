@@ -76,6 +76,7 @@ use crate::{
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
+        dn07::{double_share::PrssDoubleShareSource, Dn07Error},
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
@@ -104,6 +105,7 @@ use crate::{
         preprocessing::HoneyBadgerMPCNodePreprocMaterial,
         prss::prss::{PrssKeys, PRSS_KEY_ENTROPY_BITS},
         prss::PrssAllocator,
+        przs::{przs::PrzsKeys, MAX_PRZS_COEFFS_PER_CALL},
         ran_dou_sha::messages::RanDouShaMessage,
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
@@ -182,6 +184,8 @@ pub enum HoneyBadgerError {
     ZeroShaError(#[from] ZeroShaError),
     #[error("error in MulPub: {0:?}")]
     MulPubError(#[from] MulPubError),
+    #[error("error in DN07 preprocessing multiplication: {0:?}")]
+    Dn07Error(#[from] Dn07Error),
     #[error("error in Input share generation: {0:?}")]
     InputError(#[from] InputError),
     #[error("error in faulty double share generation: {0:?}")]
@@ -422,6 +426,18 @@ where
         let t = self.params.threshold;
         let prss = PrssKeys::<F>::new(self.id, n, t, &keys).map_err(PRandIntError::from)?;
 
+        // The same key family, read under four different KDF labels and context bytes, also gives
+        // DN07 its double sharings for free. Built here rather than lazily at first use so that a
+        // mis-parameterised store fails once, loudly, at setup — a PRZS store whose mask is not
+        // `t`-dimensional is a privacy break that no functional test can see, and
+        // `PrssDoubleShareSource::new` re-asserts that invariant.
+        let to_err = |e: Dn07Error| HoneyBadgerError::Dn07Error(e);
+        let przs = PrzsKeys::<F>::new(self.id, n, t, &keys)
+            .map_err(|e| Dn07Error::Przs(format!("{e:?}")))
+            .map_err(to_err)?;
+        self.preprocess.dn07_doubles =
+            Some(PrssDoubleShareSource::new(prss.clone(), przs).map_err(to_err)?);
+
         // The cursors that keep every PRSS/PRZS position on this key family monotone. Built here,
         // once, with the family's fingerprint: the count of positions already issued is only
         // meaningful against the keys it was counted for, and stamping it makes that coupling
@@ -527,6 +543,14 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub rand_bit: RandBit<F>,
     /// Produces the degree-`2t` zero-sharings that re-randomise RandBit's MulPub opening.
     pub zero_sha: ZeroShaNode<F, R>,
+    /// Non-interactive `([r]_t, [r]_2t)` source for [`PreprocessNodes::dn07`], installed by
+    /// `setup_prss_keys` once the PRSS key family exists. `None` until then, and while it is
+    /// `None` every DN07 consumer falls back to the dealt `RanDouSha` pool.
+    ///
+    /// Read by `RandBit` (through `randbit_material`, which takes the two halves *apart*) and by
+    /// triple generation (through `triple_material`, which takes `a`, `b` and the pair from three
+    /// disjoint position ranges of one window).
+    pub dn07_doubles: Option<PrssDoubleShareSource<F>>,
     /// Monotone PRSS/PRZS position cursors for this node's key family, installed by
     /// `setup_prss_keys` next to [`PreprocessNodes::dn07_doubles`] and `None` until then.
     ///
@@ -811,6 +835,8 @@ where
                 prand_int: prand_int_node,
                 rand_bit: rand_bit_node,
                 zero_sha: zero_sha_node,
+                // Installed by `setup_prss_keys`; until then DN07 consumers use the dealt pools.
+                dn07_doubles: None,
                 prss_alloc: None,
             },
             operations: Operation { mul: mul_node },
@@ -1808,16 +1834,32 @@ where
         // ------------------------
         // Step 5. Generate zero shares (degree-2t zero-sharings)
         // ------------------------
-        let phase_start = Instant::now();
-        self.ensure_zero_shares(network.clone(), rng, self.params.n_zero_shares)
-            .await?;
-        trace_preprocessing_phase(
-            self.id,
-            "zero_shares",
-            self.params.n_zero_shares,
-            phase_start,
-        );
-        info!("Zero share generation done");
+        //
+        // Skipped entirely once `RandBit` takes its re-randomiser from PRZS, because `RandBit`'s
+        // dealt path is the **only** consumer of this pool — `generate_randbits` holds the sole
+        // `take_zero_shares` call in the crate, and `n_zero_shares` defaults to `n_randbit` for
+        // exactly that reason. Running `ZeroSha` here anyway would put a full dealt protocol on
+        // the wire and then discard every share it produced, which is the difference between
+        // `RandBit` *being* priced at one degree-`2t` opening and merely being *able* to be.
+        //
+        // A deployment that declined PRSS keys reaches the `else` and is unchanged. If a second
+        // consumer of the zero-share pool is ever added, this gate must move to that consumer's
+        // demand rather than being deleted: the pool is still perfectly good, it just has nobody
+        // to serve here.
+        if self.randbit_uses_prss() {
+            info!("Zero share generation skipped: RandBit re-randomises from PRZS");
+        } else {
+            let phase_start = Instant::now();
+            self.ensure_zero_shares(network.clone(), rng, self.params.n_zero_shares)
+                .await?;
+            trace_preprocessing_phase(
+                self.id,
+                "zero_shares",
+                self.params.n_zero_shares,
+                phase_start,
+            );
+            info!("Zero share generation done");
+        }
 
         // ------------------------
         // Step 6. Generate Random bits
@@ -2253,29 +2295,103 @@ where
         // Computing the amount of needed shares. MulPub pads its last `2t+1`-wide group
         // internally, so the count no longer has to be a multiple of anything.
         let total_to_generate = self.params.n_randbit.saturating_sub(no_shares);
+        self.generate_randbits(total_to_generate, network).await
+    }
 
+    /// Whether `RandBit` draws `[a]` and its re-randomiser from PRSS/PRZS rather than from the
+    /// dealt `RanSha`/`ZeroSha` pools.
+    ///
+    /// Both halves are required: the source derives the shares, the allocator issues the
+    /// positions, and deriving without a monotone position is the failure this whole mechanism
+    /// exists to prevent. `setup_prss_keys` installs the two together, so a split is unreachable;
+    /// requiring both here means a future refactor that separates them falls back to the dealt
+    /// path instead of silently reusing position zero.
+    fn randbit_uses_prss(&self) -> bool {
+        self.preprocess.dn07_doubles.is_some() && self.preprocess.prss_alloc.is_some()
+    }
+
+    /// The generation loop shared by [`Self::ensure_randbit_shares`] and
+    /// [`Self::ensure_randbit_shares_at_least`].
+    ///
+    /// Two sources for the same two inputs, chosen by [`Self::randbit_uses_prss`]:
+    ///
+    /// * **PRSS + PRZS** once `setup_prss_keys` has run. `[a]` is a degree-`t` sharing of a value
+    ///   uniform over `F` from the PRSS *uniform* keystream, and the re-randomiser is an
+    ///   independent degree-`2t` sharing of zero from PRZS. Zero rounds, zero bytes, and neither
+    ///   interactive pool is touched. This is not
+    ///   [`PrssDoubleShareSource::double_shares_at`]: that returns one secret at two degrees,
+    ///   whereas RandBit needs the PRSS half and the PRZS half taken **apart** — see
+    ///   [`PrssDoubleShareSource::randbit_material`].
+    /// * **Dealt `RanSha` + `ZeroSha`** otherwise, drawn from the shared pools in pool order,
+    ///   unchanged. `ensure_randbit_shares_at_least` tops those pools up first; the
+    ///   `ensure_randbit_shares` entry point does not, so an under-sized `n_random_shares` /
+    ///   `n_zero_shares` still surfaces as `NotEnoughPreprocessing` here.
+    ///
+    /// The PRSS positions are issued by [`PrssAllocator::claim`], which advances a monotone
+    /// cursor under a lock *before* anything is derived. A chunk that then fails burns its range
+    /// rather than rewinding onto it, and there is no value of any type naming an already-issued
+    /// position — re-deriving one would hand the adversary the mask for an opening it has already
+    /// seen. Every honest party claims in the same order because every party runs this loop over
+    /// the same chunk sequence, exactly as they already agree on `rand_bit_counter`.
+    ///
+    /// Note that RandBit may return **fewer** outputs than inputs: it drops any input whose
+    /// square opens to zero, at probability `~1/|F|`. Those positions are burned by the attempt,
+    /// which is correct. The pool simply ends up one bit short and the next top-up refills it;
+    /// this is pre-existing behaviour and is not changed here.
+    async fn generate_randbits<N>(
+        &mut self,
+        total_to_generate: usize,
+        network: Arc<N>,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
         // MulPub sends a whole session's groups in one batch-reconstruction message per
         // recipient, so it caps how much a single `init` may open. Ask it rather than
         // recomputing the group arithmetic here.
-        let max_per_session = self.preprocess.rand_bit.mul_pub.max_batch_size();
+        let mut max_per_session = self.preprocess.rand_bit.mul_pub.max_batch_size();
+
+        // Cloned out of `self` so the per-chunk claim does not hold a borrow across the
+        // `&mut self` calls further down the loop body. Both are cheap handles: the allocator's
+        // cursors live behind an `Arc`, so the clone *shares* them rather than forking them,
+        // which is what keeps two concurrent clones of this node from claiming one range twice.
+        let prss_randbit = match (
+            self.preprocess.dn07_doubles.as_ref(),
+            self.preprocess.prss_alloc.as_ref(),
+        ) {
+            (Some(source), Some(alloc)) => Some((source.clone(), alloc.clone())),
+            // Matches `randbit_uses_prss`: both halves or neither. A source without an allocator
+            // could still derive, at position zero, every single time.
+            _ => None,
+        };
+
+        if prss_randbit.is_some() {
+            // PRZS lays a sharing's `t` coefficients out contiguously and refuses a call needing
+            // more than `MAX_PRZS_COEFFS_PER_CALL` of them. Not binding at small `t` — 21845 at
+            // `t = 3` against MulPub's 1792 — but at `t >= 37` it would be, and the symptom would
+            // be a spurious `BatchTooLarge` from a batch MulPub was perfectly happy with.
+            let przs_cap = MAX_PRZS_COEFFS_PER_CALL / self.params.threshold.max(1);
+            max_per_session = max_per_session.min(przs_cap).max(1);
+        }
 
         for chunk in chunk_sizes(total_to_generate, max_per_session) {
-            // One random share (RandBit's `a` input) and one degree-`2t` zero-sharing
-            // (re-randomising the MulPub opening) per output bit, both drawn from the shared
-            // pools. Sizing (`n_random_shares`/`n_zero_shares`) is expected to already account
-            // for this demand; this does not top either pool up itself, so an under-sized config
-            // surfaces as `NotEnoughPreprocessing` here instead of silently generating more.
-            let random_shares_a = self
-                .preprocessing_material
-                .lock()
-                .await
-                .take_random_shares(chunk)?;
+            let (random_shares_a, zero_shares) = match prss_randbit.as_ref() {
+                Some((source, alloc)) => source.randbit_material(alloc, chunk).await?,
+                None => {
+                    let random_shares_a = self
+                        .preprocessing_material
+                        .lock()
+                        .await
+                        .take_random_shares(chunk)?;
 
-            let zero_shares = self
-                .preprocessing_material
-                .lock()
-                .await
-                .take_zero_shares(chunk)?;
+                    let zero_shares = self
+                        .preprocessing_material
+                        .lock()
+                        .await
+                        .take_zero_shares(chunk)?;
+                    (random_shares_a, zero_shares)
+                }
+            };
 
             let session_id = SessionId::new(
                 ProtocolType::RandBit,

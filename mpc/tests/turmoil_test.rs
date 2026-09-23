@@ -746,10 +746,12 @@ fn preprocessing_e2e_turmoil(
             Err(e) => panic!("node failed: {}", e),
             Ok((n_triples, n_shares, n_rbit, n_pint)) => {
                 // no_of_triples=7 rounds up to group_size (2t+1=3) -> 9. RandBit squares via
-                // MulPub instead of consuming a Beaver triple, so all 9 survive. Likewise
-                // no_of_randomshares=4 are fully consumed by RandBit's own `a` input -> 0 remain.
+                // MulPub instead of consuming a Beaver triple, so all 9 survive. And RandBit's
+                // own `a` input is now a local PRSS derivation rather than a dealt `RanSha`
+                // share, so all 4 random shares survive too -- this used to assert 0. See
+                // `preprocessing_e2e` in `node_test.rs` for the same accounting written out.
                 assert_eq!(n_triples, 9);
-                assert_eq!(n_shares, 0);
+                assert_eq!(n_shares, 4);
                 assert_eq!(n_rbit, 4);
                 assert_eq!(n_pint, 4);
             }
