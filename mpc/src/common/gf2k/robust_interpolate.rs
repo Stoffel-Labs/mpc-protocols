@@ -268,7 +268,9 @@ pub fn batch_recover_secret<K: BinaryField>(
         )));
     }
     if evals_by_sender.is_empty() {
-        return Err(Gf2kError::InvalidInput("No evaluations provided".to_string()));
+        return Err(Gf2kError::InvalidInput(
+            "No evaluations provided".to_string(),
+        ));
     }
     let batch_len = evals_by_sender[0].1.len();
     if batch_len == 0 {
@@ -448,9 +450,9 @@ fn gao_rs_decode<K: BinaryField>(
     let s = s_set.len();
 
     // Erasure locator polynomial: s(x) = ∏ (x - a_i)
-    let s_poly = s_set
-        .iter()
-        .fold(Poly::one(), |acc, &i| &acc * &Poly::monomial(domain.element(i)));
+    let s_poly = s_set.iter().fold(Poly::one(), |acc, &i| {
+        &acc * &Poly::monomial(domain.element(i))
+    });
 
     // Step 1: Interpolate g1(x) directly from known (x, y) pairs using Lagrange
     let known_points: Vec<(K, K)> = (0..n)
@@ -655,7 +657,10 @@ mod tests {
         shares[5].share = shares[5].share + Gf256(99);
 
         let result = oec_decode(n, t, shares.clone());
-        assert!(result.is_ok(), "Decoding failed despite sufficient honest shares");
+        assert!(
+            result.is_ok(),
+            "Decoding failed despite sufficient honest shares"
+        );
 
         let (_, recovered) = result.unwrap();
         assert_eq!(recovered, secret);
@@ -676,7 +681,10 @@ mod tests {
         }
 
         let result = GfShare::recover_secret(&shares, n, t);
-        assert!(result.is_ok(), "robust_interpolate failed despite valid parameters");
+        assert!(
+            result.is_ok(),
+            "robust_interpolate failed despite valid parameters"
+        );
 
         let (_, val_at_zero) = result.unwrap();
         assert_eq!(val_at_zero, secret);
@@ -807,7 +815,10 @@ mod tests {
                 .collect();
             let (mut per_chunk, _) = GfShare::recover_secret(&shares, n, t).unwrap();
             per_chunk.resize(degree + 1, Gf256::zero());
-            assert_eq!(batched[c], per_chunk, "chunk {c} differs from recover_secret");
+            assert_eq!(
+                batched[c], per_chunk,
+                "chunk {c} differs from recover_secret"
+            );
             assert_eq!(
                 batched[c][0], polys[c].coeffs[0],
                 "chunk {c} secret mismatch"

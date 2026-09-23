@@ -5,18 +5,27 @@ mod tests {
     use itertools::izip;
     use std::{sync::Arc, time::Duration};
     use stoffelcrypto::{
-        common::{gf2k::field::BinaryField, gf2k::field::Gf256, gf2k::share::GfShare, ProtocolSessionId},
+        common::{
+            gf2k::field::BinaryField, gf2k::field::Gf256, gf2k::share::GfShare, ProtocolSessionId,
+        },
         honeybadger::{
-            gf_double_share::GfDoubleShamirShare, gf_triple_gen::gf_triple_generation::GfTripleGenNode,
+            gf_double_share::GfDoubleShamirShare,
+            gf_triple_gen::gf_triple_generation::GfTripleGenNode,
             triple_gen::triple_generation::ProtocolState, ProtocolType, SessionId, WrappedMessage,
         },
     };
-    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig, SenderId};
+    use stoffelmpc_network::fake_network::{
+        FakeInnerNetwork, FakeNetwork, FakeNetworkConfig, SenderId,
+    };
     use tokio::sync::{mpsc::Receiver, Mutex};
 
     fn create_nodes(n_parties: usize, threshold: usize) -> Vec<Arc<Mutex<GfTripleGenNode<Gf256>>>> {
         (0..n_parties)
-            .map(|id| Arc::new(Mutex::new(GfTripleGenNode::new(id, n_parties, threshold).unwrap())))
+            .map(|id| {
+                Arc::new(Mutex::new(
+                    GfTripleGenNode::new(id, n_parties, threshold).unwrap(),
+                ))
+            })
             .collect()
     }
 
@@ -129,7 +138,8 @@ mod tests {
         let n_parties = 13;
         let threshold = 2;
         let n_shares = 2 * threshold + 1;
-        let session_id = SessionId::new(ProtocolType::GfTriple, SessionId::pack_slot(123, 0, 0), 111);
+        let session_id =
+            SessionId::new(ProtocolType::GfTriple, SessionId::pack_slot(123, 0, 0), 111);
         let (random_shares_a, random_shares_b, randousha_pairs, a_values, b_values, _) =
             get_triple_init_test_shares(n_shares, n_parties, threshold);
 
@@ -164,7 +174,10 @@ mod tests {
             let storage = node.storage.lock().await;
             let (_, _, triple_store) = storage.get(&session_id).unwrap();
             let triple_data = triple_store.lock().await;
-            assert!(matches!(triple_data.protocol_state, ProtocolState::Finished));
+            assert!(matches!(
+                triple_data.protocol_state,
+                ProtocolState::Finished
+            ));
 
             for (i, triples) in triple_data.protocol_output.iter().enumerate() {
                 a_shares[i][p] = triples.a.clone();
@@ -202,11 +215,15 @@ mod tests {
                 randousha_pairs_2t_i.push(randousha_pairs[p][i].degree_2t.clone());
             }
             assert_eq!(
-                GfShare::recover_secret(&a_i, n_parties, threshold).unwrap().1,
+                GfShare::recover_secret(&a_i, n_parties, threshold)
+                    .unwrap()
+                    .1,
                 a_values[i]
             );
             assert_eq!(
-                GfShare::recover_secret(&b_i, n_parties, threshold).unwrap().1,
+                GfShare::recover_secret(&b_i, n_parties, threshold)
+                    .unwrap()
+                    .1,
                 b_values[i]
             );
             assert_eq!(

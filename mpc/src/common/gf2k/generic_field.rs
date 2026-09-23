@@ -266,8 +266,16 @@ mod tests {
                 let (ga, gb) = (Gf256(a), Gf256(b));
                 let (pa, pb) = (Gf2p8::new(a as u128), Gf2p8::new(b as u128));
 
-                assert_eq!((ga + gb).0 as u128, (pa + pb).0, "add mismatch at ({a},{b})");
-                assert_eq!((ga * gb).0 as u128, (pa * pb).0, "mul mismatch at ({a},{b})");
+                assert_eq!(
+                    (ga + gb).0 as u128,
+                    (pa + pb).0,
+                    "add mismatch at ({a},{b})"
+                );
+                assert_eq!(
+                    (ga * gb).0 as u128,
+                    (pa * pb).0,
+                    "mul mismatch at ({a},{b})"
+                );
             }
         }
     }
@@ -305,7 +313,10 @@ mod tests {
             if x.is_zero() || x == Gf2p16::one() {
                 continue;
             }
-            assert!(!x.is_bit(), "non-{{0,1}} element {x:?} should not satisfy x^2=x");
+            assert!(
+                !x.is_bit(),
+                "non-{{0,1}} element {x:?} should not satisfy x^2=x"
+            );
             nontrivial_checked += 1;
         }
     }

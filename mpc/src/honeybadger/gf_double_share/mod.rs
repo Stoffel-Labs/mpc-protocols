@@ -5,7 +5,9 @@ use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
 
-use crate::common::{gf2k::field::BinaryField, gf2k::share::GfShare, gf2k::Gf2kError, share::ShareError};
+use crate::common::{
+    gf2k::field::BinaryField, gf2k::share::GfShare, gf2k::Gf2kError, share::ShareError,
+};
 use crate::honeybadger::{double_share::double_share_generation::ProtocolState, SessionId};
 
 pub mod gf_double_share_generation;
@@ -14,7 +16,9 @@ pub mod gf_double_share_generation;
 /// ark_serialize-specific variants — this track uses `bincode`/`serde` throughout.
 #[derive(Debug, Error)]
 pub enum GfDouShaError {
-    #[error("sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}")]
+    #[error(
+        "sender mismatch: expected sender: {expected_sender:?}, actual_sender: {actual_sender:?}"
+    )]
     SenderMismatch {
         expected_sender: PartyId,
         actual_sender: PartyId,

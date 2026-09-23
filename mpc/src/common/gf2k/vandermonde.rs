@@ -98,9 +98,8 @@ mod tests {
         let domain = Gf2kDomain::<Gf256>::new(n).unwrap();
         for j in 0..n {
             let alpha_j = domain.element(j);
-            let expected = shares[0].share
-                + shares[1].share * alpha_j
-                + shares[2].share * (alpha_j * alpha_j);
+            let expected =
+                shares[0].share + shares[1].share * alpha_j + shares[2].share * (alpha_j * alpha_j);
             assert_eq!(y_values[j].share, expected, "mismatch at index {j}");
         }
     }

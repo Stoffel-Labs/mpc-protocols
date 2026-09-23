@@ -368,9 +368,15 @@ async fn preprocessing_e2e() {
         triples_per_node.push(triples);
     }
     for i in 0..no_of_triples {
-        let a_shares: Vec<_> = (0..=t).map(|pid| triples_per_node[pid][i].a.clone()).collect();
-        let b_shares: Vec<_> = (0..=t).map(|pid| triples_per_node[pid][i].b.clone()).collect();
-        let c_shares: Vec<_> = (0..=t).map(|pid| triples_per_node[pid][i].c.clone()).collect();
+        let a_shares: Vec<_> = (0..=t)
+            .map(|pid| triples_per_node[pid][i].a.clone())
+            .collect();
+        let b_shares: Vec<_> = (0..=t)
+            .map(|pid| triples_per_node[pid][i].b.clone())
+            .collect();
+        let c_shares: Vec<_> = (0..=t)
+            .map(|pid| triples_per_node[pid][i].c.clone())
+            .collect();
         let (_, a_rec) = FeldmanShamirShare::recover_secret(&a_shares, n_parties, t).unwrap();
         let (_, b_rec) = FeldmanShamirShare::recover_secret(&b_shares, n_parties, t).unwrap();
         let (_, c_rec) = FeldmanShamirShare::recover_secret(&c_shares, n_parties, t).unwrap();

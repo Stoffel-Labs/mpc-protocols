@@ -26,7 +26,11 @@ fn construct_e2e_input(
     n: usize,
     degree_t: usize,
     rng: &mut impl ark_std::rand::Rng,
-) -> (Vec<Gf256>, Vec<Vec<GfShare<Gf256>>>, Vec<Vec<GfShare<Gf256>>>) {
+) -> (
+    Vec<Gf256>,
+    Vec<Vec<GfShare<Gf256>>>,
+    Vec<Vec<GfShare<Gf256>>>,
+) {
     let mut n_shares_t = vec![vec![]; n];
     let mut n_shares_2t = vec![vec![]; n];
     let mut secrets = Vec::new();
@@ -75,7 +79,8 @@ async fn test_gf_output_handler() {
     let node_store = node.get_or_create_store(session_id, node.id).await.unwrap();
 
     for i in (threshold + 1)..(n_parties - 1) {
-        let output_message = GfRanDouShaMessage::new(i, session_id, GfRanDouShaPayload::Output(true));
+        let output_message =
+            GfRanDouShaMessage::new(i, session_id, GfRanDouShaPayload::Output(true));
         let _ = node.output_handler(output_message).await;
     }
     assert_eq!(

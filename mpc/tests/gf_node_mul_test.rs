@@ -6,7 +6,9 @@
 //! and the batch-recon multiplexing added for `GfMul`/`GfTriple`).
 pub mod utils;
 
-use crate::utils::test_utils::{create_global_nodes, receive, setup_tracing, test_setup, unused_precision};
+use crate::utils::test_utils::{
+    create_global_nodes, receive, setup_tracing, test_setup, unused_precision,
+};
 use ark_bls12_381::Fr;
 use std::time::Duration;
 use stoffelcrypto::{
@@ -16,7 +18,9 @@ use stoffelcrypto::{
         rbc::rbc::Avid,
         GfMPCProtocol,
     },
-    honeybadger::{robust_interpolate::robust_interpolate::RobustShare, SessionId, MIN_STATISTICAL_SECURITY},
+    honeybadger::{
+        robust_interpolate::robust_interpolate::RobustShare, SessionId, MIN_STATISTICAL_SECURITY,
+    },
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
 

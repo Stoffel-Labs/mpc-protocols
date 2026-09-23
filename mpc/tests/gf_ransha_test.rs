@@ -22,7 +22,9 @@ use stoffelcrypto::{
         ProtocolType, SessionId, WrappedMessage,
     },
 };
-use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig, SenderId};
+use stoffelmpc_network::fake_network::{
+    FakeInnerNetwork, FakeNetwork, FakeNetworkConfig, SenderId,
+};
 use tokio::{sync::mpsc::Receiver, task::JoinSet, time::timeout};
 use tracing::warn;
 
@@ -40,7 +42,8 @@ async fn test_gf_reconstruct_handler_incorrect_share() {
     let t = 3;
     let session_id = SessionId::new(ProtocolType::GfRansha, SessionId::pack_slot(123, 0, 0), 111);
 
-    let (inner, receivers, _client_recv) = FakeInnerNetwork::new(n_parties, None, FakeNetworkConfig::new(500));
+    let (inner, receivers, _client_recv) =
+        FakeInnerNetwork::new(n_parties, None, FakeNetworkConfig::new(500));
     let network: Vec<Arc<FakeNetwork>> = (0..n_parties)
         .map(|id| Arc::new(FakeNetwork::new(id, inner.clone())))
         .collect();
@@ -152,7 +155,8 @@ async fn test_gf_output_handler() {
     let session_id = SessionId::new(ProtocolType::GfRansha, SessionId::pack_slot(123, 0, 0), 111);
     let degree_t = 3;
 
-    let (inner, _receivers, _client_recv) = FakeInnerNetwork::new(n_parties, None, FakeNetworkConfig::new(500));
+    let (inner, _receivers, _client_recv) =
+        FakeInnerNetwork::new(n_parties, None, FakeNetworkConfig::new(500));
     let network: Vec<Arc<FakeNetwork>> = (0..n_parties)
         .map(|id| Arc::new(FakeNetwork::new(id, inner.clone())))
         .collect();
@@ -190,7 +194,10 @@ async fn test_gf_output_handler() {
         );
         let _ = node.output_handler(output_message).await;
     }
-    assert_eq!(node_store.lock().await.received_ok_msg.len(), 2 * threshold - 1);
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        2 * threshold - 1
+    );
 
     // Duplicate sender must not double-count.
     let output_message = GfRanShaMessage::new(
@@ -200,7 +207,10 @@ async fn test_gf_output_handler() {
         GfRanShaPayload::Output(true),
     );
     let _ = node.output_handler(output_message).await;
-    assert_eq!(node_store.lock().await.received_ok_msg.len(), 2 * threshold - 1);
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        2 * threshold - 1
+    );
 
     // Output(false) must abort without polluting received_ok_msg.
     let output_message = GfRanShaMessage::new(
@@ -214,7 +224,10 @@ async fn test_gf_output_handler() {
         .await
         .expect_err("should return abort");
     assert_eq!(e.to_string(), GfRanShaError::Abort.to_string());
-    assert_eq!(node_store.lock().await.received_ok_msg.len(), 2 * threshold - 1);
+    assert_eq!(
+        node_store.lock().await.received_ok_msg.len(),
+        2 * threshold - 1
+    );
 
     // The 2t-th distinct OK message finalizes.
     let output_message = GfRanShaMessage::new(

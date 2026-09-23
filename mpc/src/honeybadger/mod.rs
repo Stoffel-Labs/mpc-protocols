@@ -315,9 +315,9 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     pub output: OutputServer,
     pub counters: SubProtocolCounters,
     /// GF(2^k) preprocessing material, parallel to `preprocessing_material` above — fixed to
-    /// `Gf256` for now 
+    /// `Gf256` for now
     pub gf_preprocessing_material: Arc<Mutex<GfHoneyBadgerMPCNodePreprocMaterial<Gf256>>>,
-    /// GF(2^k) sub-protocol nodes that feed `gf_preprocessing_material`. 
+    /// GF(2^k) sub-protocol nodes that feed `gf_preprocessing_material`.
     pub gf_preprocess: GfPreprocessNodes<R>,
     pub gf_operations: GfOperation,
     /// Shared byte and message counters.  Updated by [`CountingNetwork`] (sends)
@@ -506,7 +506,7 @@ pub struct GfOperation {
 
 /// GF(2^k) sub-protocol nodes needed to keep `gf_preprocessing_material` topped up:
 /// random-share generation for the triple's `a`/`b`, double-share dealing + RanDouSha for the
-/// mask, and triple generation itself. 
+/// mask, and triple generation itself.
 #[derive(Clone, Debug)]
 pub struct GfPreprocessNodes<R: RBC> {
     pub gf_share_gen: GfRanShaNode<Gf256, R>,
@@ -2080,7 +2080,10 @@ where
             .wait_for_result(sessionid, self.params.timeout)
             .await;
         if !self.gf_preprocess.gf_share_gen.clear_store(sessionid).await {
-            warn!(?sessionid, "failed to clear GF(2^k) share generation protocol state");
+            warn!(
+                ?sessionid,
+                "failed to clear GF(2^k) share generation protocol state"
+            );
         }
         self.gf_preprocessing_material
             .lock()
@@ -2091,13 +2094,16 @@ where
 
     /// GF(2^k) analogue of `ensure_ran_dou_sha_pair`. Same simplification as
     /// `ensure_gf_random_shares` — one DoubleShare session and one RanDouSha session, not a
-    /// pipelined run. 
+    /// pipelined run.
     async fn ensure_gf_ran_dou_sha_pair<G, N>(
         &mut self,
         network: Arc<N>,
         rng: &mut G,
         needed: usize,
-    ) -> Result<Vec<crate::honeybadger::gf_double_share::GfDoubleShamirShare<Gf256>>, HoneyBadgerError>
+    ) -> Result<
+        Vec<crate::honeybadger::gf_double_share::GfDoubleShamirShare<Gf256>>,
+        HoneyBadgerError,
+    >
     where
         N: Network + Send + Sync + 'static,
         G: Rng + Send,
@@ -2122,8 +2128,16 @@ where
             .gf_dou_sha
             .wait_for_result(dou_sha_session, self.params.timeout)
             .await;
-        if !self.gf_preprocess.gf_dou_sha.clear_store(dou_sha_session).await {
-            warn!(?dou_sha_session, "failed to clear GF(2^k) double share protocol state");
+        if !self
+            .gf_preprocess
+            .gf_dou_sha
+            .clear_store(dou_sha_session)
+            .await
+        {
+            warn!(
+                ?dou_sha_session,
+                "failed to clear GF(2^k) double share protocol state"
+            );
         }
         let double_shares = double_shares?;
 
@@ -2158,8 +2172,16 @@ where
             .gf_ran_dou_sha
             .wait_for_result(rds_session, self.params.timeout)
             .await;
-        if !self.gf_preprocess.gf_ran_dou_sha.clear_store(rds_session).await {
-            warn!(?rds_session, "failed to clear GF(2^k) RanDouSha protocol state");
+        if !self
+            .gf_preprocess
+            .gf_ran_dou_sha
+            .clear_store(rds_session)
+            .await
+        {
+            warn!(
+                ?rds_session,
+                "failed to clear GF(2^k) RanDouSha protocol state"
+            );
         }
         Ok(result?)
     }
@@ -2560,8 +2582,16 @@ where
             .gf_triple_gen
             .wait_for_result(session_id, self.params.timeout)
             .await;
-        if !self.gf_preprocess.gf_triple_gen.clear_store(session_id).await {
-            warn!(?session_id, "failed to clear GF(2^k) triple generation protocol state");
+        if !self
+            .gf_preprocess
+            .gf_triple_gen
+            .clear_store(session_id)
+            .await
+        {
+            warn!(
+                ?session_id,
+                "failed to clear GF(2^k) triple generation protocol state"
+            );
         }
         self.gf_preprocessing_material
             .lock()

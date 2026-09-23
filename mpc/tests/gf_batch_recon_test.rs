@@ -151,16 +151,24 @@ mod tests {
         // Byzantine sender 3 wins the race, arriving first with a bogus width (1 value instead
         // of the real 2).
         let poison_payload = bincode::serialize(&vec![Gf256(99)]).unwrap();
-        let poison_msg =
-            GfBatchReconMsg::new(3, session_id, GfBatchReconMsgType::EvalBatch, poison_payload);
+        let poison_msg = GfBatchReconMsg::new(
+            3,
+            session_id,
+            GfBatchReconMsgType::EvalBatch,
+            poison_payload,
+        );
         victim
             .process(poison_msg, net.clone())
             .await
             .expect("a well-formed (if bogus-width) EvalBatch must not itself error");
 
         let honest_payload = bincode::serialize(&vec![Gf256(1), Gf256(2)]).unwrap();
-        let honest_msg =
-            GfBatchReconMsg::new(0, session_id, GfBatchReconMsgType::EvalBatch, honest_payload);
+        let honest_msg = GfBatchReconMsg::new(
+            0,
+            session_id,
+            GfBatchReconMsgType::EvalBatch,
+            honest_payload,
+        );
         victim
             .process(honest_msg, net.clone())
             .await

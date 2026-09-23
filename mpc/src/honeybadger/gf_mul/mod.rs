@@ -7,9 +7,7 @@ use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 use crate::{
     common::{gf2k::field::BinaryField, gf2k::share::GfShare, gf2k::Gf2kError, share::ShareError},
-    honeybadger::{
-        gf_batch_recon::GfBatchReconError, mul::MultProtocolState, SessionId,
-    },
+    honeybadger::{gf_batch_recon::GfBatchReconError, mul::MultProtocolState, SessionId},
 };
 
 pub mod gf_multiplication;

@@ -43,10 +43,7 @@ async fn test_gf_double_share_e2e() {
         let sender = final_result_sender.clone();
 
         tokio::spawn(async move {
-            let node_store = node
-                .get_or_create_store(session_id, node.id)
-                .await
-                .unwrap();
+            let node_store = node.get_or_create_store(session_id, node.id).await.unwrap();
             loop {
                 {
                     let store = node_store.lock().await;
@@ -111,6 +108,10 @@ async fn test_gf_double_share_e2e() {
         let secret_t = GfShare::recover_secret_naive(&shares_t, n_parties, threshold);
         let secret_2t = GfShare::recover_secret_naive(&shares_2t, n_parties, threshold);
 
-        assert_eq!(secret_t.unwrap().1, secret_2t.unwrap().1, "Mismatch for secret {i}");
+        assert_eq!(
+            secret_t.unwrap().1,
+            secret_2t.unwrap().1,
+            "Mismatch for secret {i}"
+        );
     }
 }

@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use stoffelnet::network_utils::{NetworkError, PartyId};
 use thiserror::Error;
 
-use crate::common::{gf2k::field::BinaryField, gf2k::share::GfShare, gf2k::Gf2kError, rbc::RbcError, share::ShareError};
+use crate::common::{
+    gf2k::field::BinaryField, gf2k::share::GfShare, gf2k::Gf2kError, rbc::RbcError,
+    share::ShareError,
+};
 use crate::honeybadger::SessionId;
 
 pub mod gf_ran_dou_sha;

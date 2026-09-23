@@ -752,12 +752,19 @@ mod tests {
         let (_, a1_val) = FeldmanShamirShare::recover_secret(&a1_shares, n, t).unwrap();
         let (_, a2_val) = FeldmanShamirShare::recover_secret(&a2_shares, n, t).unwrap();
 
-        let reconstruct_rho = |candidates: &[BeaverTriple<Fr, G>], sacrifices: &[BeaverTriple<Fr, G>]| -> Fr {
-            let rho_shares: Vec<_> = (0..=t)
-                .map(|p| Node::compute_rho_sigma(&candidates[p], &sacrifices[p], t_pub).unwrap().0)
-                .collect();
-            FeldmanShamirShare::recover_secret(&rho_shares, n, t).unwrap().1
-        };
+        let reconstruct_rho =
+            |candidates: &[BeaverTriple<Fr, G>], sacrifices: &[BeaverTriple<Fr, G>]| -> Fr {
+                let rho_shares: Vec<_> = (0..=t)
+                    .map(|p| {
+                        Node::compute_rho_sigma(&candidates[p], &sacrifices[p], t_pub)
+                            .unwrap()
+                            .0
+                    })
+                    .collect();
+                FeldmanShamirShare::recover_secret(&rho_shares, n, t)
+                    .unwrap()
+                    .1
+            };
 
         let rho_1 = reconstruct_rho(&candidates_1, &sacrifices_1);
         // The bug: candidate 2 checked against candidate 1's sacrifice instead of its own.

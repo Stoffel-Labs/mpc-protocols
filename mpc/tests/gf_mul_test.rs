@@ -4,7 +4,9 @@ mod tests {
     use crate::utils::test_utils::{fan_in_inboxes, setup_tracing};
     use std::{collections::HashMap, sync::Arc, time::Duration};
     use stoffelcrypto::{
-        common::{gf2k::field::BinaryField, gf2k::field::Gf256, gf2k::share::GfShare, ProtocolSessionId},
+        common::{
+            gf2k::field::BinaryField, gf2k::field::Gf256, gf2k::share::GfShare, ProtocolSessionId,
+        },
         honeybadger::{
             gf_mul::gf_multiplication::GfMultiply, gf_triple_gen::GfBeaverTriple, ProtocolType,
             SessionId, WrappedMessage,
@@ -186,8 +188,8 @@ mod tests {
 
         for i in 0..no_of_mul {
             let shares_for_i = per_multiplication_shares[i][0..=(2 * t)].to_vec();
-            let (_, z_rec) = GfShare::recover_secret(&shares_for_i, n_parties, t)
-                .expect("interpolate failed");
+            let (_, z_rec) =
+                GfShare::recover_secret(&shares_for_i, n_parties, t).expect("interpolate failed");
             let expected = x_values[i] * y_values[i];
 
             assert_eq!(z_rec, expected, "multiplication mismatch at index {i}");

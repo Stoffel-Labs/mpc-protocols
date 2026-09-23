@@ -15,11 +15,13 @@ use tracing::{info, warn};
 
 use crate::common::session_store::{Admission, SessionStore};
 use crate::{
-    common::{gf2k::field::BinaryField, gf2k::share::GfShare, share::ShareError, ProtocolSessionId},
+    common::{
+        gf2k::field::BinaryField, gf2k::share::GfShare, share::ShareError, ProtocolSessionId,
+    },
     honeybadger::{
         double_share::double_share_generation::ProtocolState,
-        gf_double_share::{GfDouShaError, GfDouShaMessage, GfDouShaPayload, GfDouShaStorage},
         gf_double_share::GfDoubleShamirShare,
+        gf_double_share::{GfDouShaError, GfDouShaMessage, GfDouShaPayload, GfDouShaStorage},
         SessionId, WrappedMessage,
     },
 };
@@ -149,7 +151,8 @@ impl<K: BinaryField> GfDoubleShareNode<K> {
         for _ in 0..batch_size {
             let secret = K::random(rng);
 
-            let shares_deg_t = GfShare::compute_shares(secret, self.n_parties, self.threshold, rng)?;
+            let shares_deg_t =
+                GfShare::compute_shares(secret, self.n_parties, self.threshold, rng)?;
             let shares_deg_2t =
                 GfShare::compute_shares(secret, self.n_parties, 2 * self.threshold, rng)?;
 

@@ -235,7 +235,11 @@ mod tests {
         for a in 0u8..=255 {
             let a = Gf256(a);
             assert_eq!(a + Gf256::zero(), a, "additive identity failed for {a:?}");
-            assert_eq!(a * Gf256::one(), a, "multiplicative identity failed for {a:?}");
+            assert_eq!(
+                a * Gf256::one(),
+                a,
+                "multiplicative identity failed for {a:?}"
+            );
             assert_eq!(a - a, Gf256::zero(), "self-subtraction failed for {a:?}");
 
             if a.is_zero() {

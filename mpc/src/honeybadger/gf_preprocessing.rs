@@ -111,7 +111,10 @@ mod test {
         );
         let share = GfShare::new(Gf256(0), 1, 1);
 
-        cache.add(Some(vec![triple.clone(), triple.clone()]), Some(vec![share.clone()]));
+        cache.add(
+            Some(vec![triple.clone(), triple.clone()]),
+            Some(vec![share.clone()]),
+        );
 
         assert_eq!(
             cache.length(),

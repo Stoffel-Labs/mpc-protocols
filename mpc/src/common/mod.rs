@@ -428,12 +428,17 @@ where
     fn gf_sub(&self, x: Vec<S>, y: Vec<S>) -> Result<Vec<S>, Self::Error>;
 
     /// Secure GF(2^k) Beaver multiplication.
-    async fn gf_mul(&mut self, x: Vec<S>, y: Vec<S>, network: Arc<N>) -> Result<Vec<S>, Self::Error>
+    async fn gf_mul(
+        &mut self,
+        x: Vec<S>,
+        y: Vec<S>,
+        network: Arc<N>,
+    ) -> Result<Vec<S>, Self::Error>
     where
         N: 'async_trait;
 }
 
-/// GF(2^k) analogue of `PreprocessingMPCProtocol` 
+/// GF(2^k) analogue of `PreprocessingMPCProtocol`
 #[async_trait]
 pub trait GfPreprocessingMPCProtocol<K, S, N>: GfMPCProtocol<K, S, N>
 where

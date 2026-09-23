@@ -1,5 +1,5 @@
 //! GF(2^k) equivalent of `BatchReconNode` (`honeybadger::batch_recon`), a direct structural
-//! port 
+//! port
 
 use bincode::Options;
 use serde::{de::DeserializeOwned, Serialize};
@@ -19,7 +19,9 @@ use crate::{
         vandermonde::{apply_vandermonde, make_vandermonde},
     },
     honeybadger::{
-        gf_batch_recon::{GfBatchReconError, GfBatchReconMsg, GfBatchReconMsgType, GfBatchReconStore},
+        gf_batch_recon::{
+            GfBatchReconError, GfBatchReconMsg, GfBatchReconMsgType, GfBatchReconStore,
+        },
         SessionId, WrappedMessage,
     },
 };
@@ -62,9 +64,8 @@ pub struct GfBatchReconNode<K: BinaryField> {
     pub n: usize,
     pub t: usize,
     pub degree: usize,
-    pub store: Arc<
-        Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<GfBatchReconStore<K>>>)>>,
-    >,
+    pub store:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<GfBatchReconStore<K>>>)>>>,
     pub output_sender: Sender<SessionId>,
 }
 
@@ -183,12 +184,8 @@ impl<K: BinaryField> GfBatchReconNode<K> {
 
         for (j, values) in y_shares_by_recipient.into_iter().enumerate() {
             let payload = ser(&values)?;
-            let msg = GfBatchReconMsg::new(
-                self.id,
-                session_id,
-                GfBatchReconMsgType::EvalBatch,
-                payload,
-            );
+            let msg =
+                GfBatchReconMsg::new(self.id, session_id, GfBatchReconMsgType::EvalBatch, payload);
             let wrapped = WrappedMessage::GfBatchRecon(msg);
             let encoded_msg = bincode::serialize(&wrapped)?;
             let _ = net.send(j, &encoded_msg).await?;
@@ -210,7 +207,11 @@ impl<K: BinaryField> GfBatchReconNode<K> {
 
         match msg.msg_type {
             GfBatchReconMsgType::Eval => {
-                debug!(self_id = self.id, from = msg.sender_id, "Received Eval message");
+                debug!(
+                    self_id = self.id,
+                    from = msg.sender_id,
+                    "Received Eval message"
+                );
                 let sender_id = msg.sender_id;
                 let val: K = deser_bounded(&msg.payload)?;
 
@@ -226,7 +227,10 @@ impl<K: BinaryField> GfBatchReconNode<K> {
                         .push(GfShare::new(val, sender_id, self.degree));
                 }
                 if store.evals_received.len() >= self.degree + self.t + 1 && store.y_j.is_none() {
-                    info!(self_id = self.id, "Enough Evals collected, interpolating y_j");
+                    info!(
+                        self_id = self.id,
+                        "Enough Evals collected, interpolating y_j"
+                    );
 
                     match GfShare::recover_secret(&store.evals_received, self.n, self.t) {
                         Ok((_, value)) => {
@@ -254,7 +258,11 @@ impl<K: BinaryField> GfBatchReconNode<K> {
                 Ok(())
             }
             GfBatchReconMsgType::Reveal => {
-                debug!(self_id = self.id, from = msg.sender_id, "Received Reveal message");
+                debug!(
+                    self_id = self.id,
+                    from = msg.sender_id,
+                    "Received Reveal message"
+                );
                 let sender_id = msg.sender_id;
                 let y_j: K = deser_bounded(&msg.payload)?;
 
@@ -269,9 +277,13 @@ impl<K: BinaryField> GfBatchReconNode<K> {
                         .reveals_received
                         .push(GfShare::new(y_j, sender_id, self.degree));
                 }
-                if store.reveals_received.len() >= self.degree + self.t + 1 && store.secrets.is_none()
+                if store.reveals_received.len() >= self.degree + self.t + 1
+                    && store.secrets.is_none()
                 {
-                    info!(self_id = self.id, "Enough Reveals collected, interpolating secrets");
+                    info!(
+                        self_id = self.id,
+                        "Enough Reveals collected, interpolating secrets"
+                    );
                     match GfShare::recover_secret(&store.reveals_received, self.n, self.t) {
                         Ok((mut result, _)) => {
                             result.resize(self.degree + 1, K::zero());
@@ -295,7 +307,11 @@ impl<K: BinaryField> GfBatchReconNode<K> {
                 Ok(())
             }
             GfBatchReconMsgType::EvalBatch => {
-                debug!(self_id = self.id, from = msg.sender_id, "Received EvalBatch message");
+                debug!(
+                    self_id = self.id,
+                    from = msg.sender_id,
+                    "Received EvalBatch message"
+                );
                 let sender_id = msg.sender_id;
                 let values: Vec<K> = deser_bounded(&msg.payload)?;
 
@@ -352,7 +368,11 @@ impl<K: BinaryField> GfBatchReconNode<K> {
                 Ok(())
             }
             GfBatchReconMsgType::RevealBatch => {
-                debug!(self_id = self.id, from = msg.sender_id, "Received RevealBatch message");
+                debug!(
+                    self_id = self.id,
+                    from = msg.sender_id,
+                    "Received RevealBatch message"
+                );
                 let sender_id = msg.sender_id;
                 let values: Vec<K> = deser_bounded(&msg.payload)?;
 
