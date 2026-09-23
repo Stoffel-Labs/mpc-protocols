@@ -4,14 +4,15 @@
 
 use ark_std::rand::Rng;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::common::share::ShareError;
 use crate::common::SecretSharingScheme;
 
-use super::field::{BinaryField, Gf2kDomain};
+use super::field::BinaryField;
 use super::poly::{lagrange_interpolate, Poly};
 use super::share::GfShare;
-use super::Gf2kError;
+use super::{get_cached_gf2k_g0, get_or_create_gf2k_domain, store_gf2k_g0, Gf2kError};
 
 impl<K: BinaryField> GfShare<K> {
     /// Full robust interpolation combining optimistic decoding and error correction.
@@ -149,7 +150,7 @@ impl<K: BinaryField> GfShare<K> {
             )));
         }
 
-        let domain = Gf2kDomain::<K>::new(n)?;
+        let domain = get_or_create_gf2k_domain::<K>(n)?;
         let (x_vals, y_vals): (Vec<K>, Vec<K>) = shares
             .iter()
             .map(|s| {
@@ -184,7 +185,7 @@ fn robust_interpolate_fnt<K: BinaryField>(
     shares: &[GfShare<K>],
 ) -> Result<Poly<K>, Gf2kError> {
     let degree = shares[0].degree;
-    let domain = Gf2kDomain::<K>::new(n)?;
+    let domain = get_or_create_gf2k_domain::<K>(n)?;
     let subset = &shares[..=degree];
     let xs: Vec<K> = subset.iter().map(|s| domain.element(s.id)).collect();
     let ys: Vec<K> = subset.iter().map(|s| s.share).collect();
@@ -303,7 +304,7 @@ pub fn batch_recover_secret<K: BinaryField>(
         )));
     }
 
-    let domain = Gf2kDomain::<K>::new(n)?;
+    let domain = get_or_create_gf2k_domain::<K>(n)?;
 
     // The lowest (degree + 1) senders define the optimistic interpolation subset — matches
     // `robust_interpolate_fnt`, which interpolates from `shares[..=degree]` on the id-sorted
@@ -400,15 +401,31 @@ pub fn batch_recover_secret<K: BinaryField>(
 
 /// `g0(x) = ∏_{i<n} (x - domain.element(i))`.
 ///
-/// Unlike the `F`-domain equivalent (`honeybadger::robust_interpolate::compute_g0_from_domain`),
-/// this is not memoized — that cache was a measured perf optimization on the hot preprocessing
-/// path, not a correctness requirement.
+/// Memoized under `(K, n)`, exactly as the `F`-domain equivalent
+/// (`honeybadger::robust_interpolate::compute_g0_from_domain`) is: `g0` is a pure deterministic
+/// function of `(K, n)`, so the cache is observationally equivalent to recomputing and is
+/// therefore correctness- and security-neutral. Without it every Gao/OEC call rebuilds an
+/// `O(n^2)`-multiplication product, and that is the *corruption* path — the one an adversary can
+/// force by sending a wrong share.
+///
+/// Prefer [`get_or_create_gf2k_g0`] on hot paths; this wrapper clones the cached polynomial only
+/// to keep the `F`-side signature.
 pub fn compute_g0_from_domain<K: BinaryField>(n: usize) -> Result<Poly<K>, Gf2kError> {
-    let domain = Gf2kDomain::<K>::new(n)?;
+    Ok((*get_or_create_gf2k_g0::<K>(n)?).clone())
+}
+
+/// Shared-ownership form of [`compute_g0_from_domain`], avoiding a clone of the cached polynomial.
+pub fn get_or_create_gf2k_g0<K: BinaryField>(n: usize) -> Result<Arc<Poly<K>>, Gf2kError> {
+    if let Some(cached) = get_cached_gf2k_g0::<K>(n) {
+        return Ok(cached);
+    }
+    let domain = get_or_create_gf2k_domain::<K>(n)?;
     let mut g0 = Poly::one();
     for i in 0..n {
         g0 = &g0 * &Poly::monomial(domain.element(i));
     }
+    let g0 = Arc::new(g0);
+    store_gf2k_g0(n, Arc::clone(&g0));
     Ok(g0)
 }
 
@@ -425,7 +442,7 @@ fn gao_rs_decode<K: BinaryField>(
             "k ({k}) must be less than or equal to n ({n})"
         )));
     }
-    let domain = Gf2kDomain::<K>::new(n)?;
+    let domain = get_or_create_gf2k_domain::<K>(n)?;
 
     let s_set: HashSet<usize> = erasure_positions.iter().copied().collect();
     let s = s_set.len();
@@ -444,7 +461,7 @@ fn gao_rs_decode<K: BinaryField>(
     let g1 = lagrange_interpolate(&x_vals, &y_vals)?;
 
     // Step 2: Define g0(x) = ∏ (x - a_i), then divide out the erasure locator.
-    let x_a_prod = compute_g0_from_domain::<K>(n)?;
+    let x_a_prod = get_or_create_gf2k_g0::<K>(n)?;
     let (g0, rem) = x_a_prod.div_with_remainder(&s_poly)?;
     if !rem.is_zero() {
         return Err(Gf2kError::PolynomialOperationError(
@@ -495,7 +512,7 @@ fn oec_decode<K: BinaryField>(
     t: usize,
     shares: Vec<GfShare<K>>,
 ) -> Result<(Poly<K>, K), Gf2kError> {
-    let domain = Gf2kDomain::<K>::new(n)?;
+    let domain = get_or_create_gf2k_domain::<K>(n)?;
     let degree = shares[0].degree;
 
     for r in 1..=t {
@@ -537,7 +554,7 @@ fn oec_decode<K: BinaryField>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::field::Gf256;
+    use super::super::field::{Gf256, Gf2kDomain};
     use super::*;
     use ark_std::test_rng;
     use itertools::Itertools;

@@ -1,15 +1,17 @@
 //! Hyperinvertible-matrix helpers for GF(2^k), mirroring `common/share/mod.rs`'s
-//! `make_vandermonde`/`apply_vandermonde` (`F: FftField`-bound) with `Gf2kDomain<K>` in place of
-//! `get_or_create_evaluation_domain::<F>` and `GfShare<K>` in place of `ShamirShare<F, 1, P>`.
+//! `make_vandermonde`/`apply_vandermonde` (`F: FftField`-bound) with
+//! `get_or_create_gf2k_domain::<K>` in place of `get_or_create_evaluation_domain::<F>` and
+//! `GfShare<K>` in place of `ShamirShare<F, 1, P>`.
 
-use super::field::{BinaryField, Gf2kDomain};
+use super::field::BinaryField;
+use super::get_or_create_gf2k_domain;
 use super::share::GfShare;
 use super::Gf2kError;
 
 /// Creates a Vandermonde matrix `V` of size `n x (t+1)`. Each row `j` contains powers of
 /// `domain.element(j)`: `[1, alpha_j, alpha_j^2, ..., alpha_j^t]`.
 pub fn make_vandermonde<K: BinaryField>(n: usize, t: usize) -> Result<Vec<Vec<K>>, Gf2kError> {
-    let domain = Gf2kDomain::<K>::new(n)?;
+    let domain = get_or_create_gf2k_domain::<K>(n)?;
     let mut matrix = vec![vec![K::zero(); t + 1]; n];
     for j in 0..n {
         let alpha_j = domain.element(j);
@@ -51,7 +53,7 @@ pub fn apply_vandermonde<K: BinaryField>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::field::Gf256;
+    use super::super::field::{Gf256, Gf2kDomain};
     use super::*;
 
     #[test]

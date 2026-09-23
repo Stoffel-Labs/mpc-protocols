@@ -4,7 +4,8 @@ use std::ops::{Add, Mul, Sub};
 
 use crate::common::share::ShareError;
 
-use super::field::{BinaryField, Gf2kDomain};
+use super::field::BinaryField;
+use super::get_or_create_gf2k_domain;
 use super::poly::Poly;
 use super::Gf2kError;
 
@@ -44,7 +45,8 @@ impl<K: BinaryField> GfShare<K> {
     }
 
     /// Generates `n` secret shares of `secret` using a random degree-`degree` polynomial with
-    /// `f(0) = secret`, evaluated at the first `n` points of the canonical [`Gf2kDomain`].
+    /// `f(0) = secret`, evaluated at the first `n` points of the canonical
+    /// [`Gf2kDomain`](super::field::Gf2kDomain).
     ///
     /// Evaluated via direct Horner evaluation at each point : `BinaryField` is
     /// deliberately not bound by `FftField`, and at `n <= K::MAX_DOMAIN_SIZE` (255 for GF(2^8))
@@ -64,7 +66,7 @@ impl<K: BinaryField> GfShare<K> {
                 "Number of shares ({n}) must be greater than threshold ({degree})"
             )));
         }
-        let domain = Gf2kDomain::<K>::new(n)?;
+        let domain = get_or_create_gf2k_domain::<K>(n)?;
 
         let mut coeffs = vec![K::zero(); degree + 1];
         coeffs[0] = secret;
