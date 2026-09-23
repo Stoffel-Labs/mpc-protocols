@@ -1,7 +1,7 @@
 use crate::common::ProtocolSessionId;
 use crate::honeybadger::{
     fpmul::build_all_f_polys,
-    prss::{PrssError, PRSS_KEY_LEN},
+    prss::{PrssError, MAX_UNQUALIFIED_SETS, PRSS_KEY_LEN},
     robust_interpolate::robust_interpolate::RobustShare,
     SessionId,
 };
@@ -17,6 +17,41 @@ type HmacSha256 = Hmac<Sha256>;
 /// Fixed label for the KDF, per NIST SP 800-108. Bump the version suffix if the derivation
 /// changes in any way — every key's entire output stream depends on it.
 const KDF_LABEL: &[u8] = b"STOFFEL-PRSS-v1";
+
+/// `C(n, k)` by the exact sequential product, or `None` on overflow.
+///
+/// `acc * (n - i) / (i + 1)` is exact at every step: after `i + 1` factors the accumulator is a
+/// product of `i + 1` consecutive integers, which is always divisible by `(i + 1)!`.
+///
+/// The single copy. `gf_prss` and `dabit::prss_dabit` each carried a byte-identical private one;
+/// they now import this, so the count and the cap check are one implementation rather than three
+/// that happen to agree today.
+pub fn binomial(n: usize, k: usize) -> Option<u128> {
+    if k > n {
+        return Some(0);
+    }
+    let k = k.min(n - k);
+    let mut acc: u128 = 1;
+    for i in 0..k {
+        acc = acc.checked_mul((n - i) as u128)?;
+        acc /= (i + 1) as u128;
+    }
+    Some(acc)
+}
+
+/// `C(n, t)` when it is within [`MAX_UNQUALIFIED_SETS`], `None` when it overflows or exceeds it.
+///
+/// The shared admissibility test behind all four key-store constructors. It deliberately returns
+/// the count rather than a `Result`: each constructor has its own error enum, and the one thing
+/// they must share is the *number*, not the type. `C(n, t) = 0` (i.e. `t > n`) is passed through
+/// as `Some(0)` — that is a different misconfiguration, and the constructors that care about it
+/// reject it in their own words.
+///
+/// Must be called **before** [`all_tsets`], never after: the allocation is the thing being
+/// prevented, so a check that runs once the `Vec` exists has already lost.
+pub fn bounded_set_count(n: usize, t: usize) -> Option<u128> {
+    binomial(n, t).filter(|count| *count <= MAX_UNQUALIFIED_SETS as u128)
+}
 
 /// All maximal unqualified sets, in the canonical order every party must agree on.
 ///
@@ -186,6 +221,12 @@ impl<F: PrimeField> PrssKeys<F> {
     ///
     /// Requires a key for every set the party is outside of — a partial store would silently
     /// produce shares of the wrong secret, since the missing terms just drop out of the sum.
+    ///
+    /// # Errors
+    /// - [`PrssError::PartyOutOfRange`] for `id >= n`.
+    /// - [`PrssError::TooManyUnqualifiedSets`] when `C(n, t)` is above
+    ///   [`MAX_UNQUALIFIED_SETS`] or overflows — raised before the enumeration allocates.
+    /// - [`PrssError::KeyCountMismatch`], [`PrssError::MissingKey`].
     pub fn new(
         id: usize,
         n: usize,
@@ -194,6 +235,17 @@ impl<F: PrimeField> PrssKeys<F> {
     ) -> Result<Self, PrssError> {
         if id >= n {
             return Err(PrssError::PartyOutOfRange { id, n });
+        }
+
+        // Before `all_tsets`, which is the allocation this rejects. `GfPrssKeys::new` has always
+        // done this; the arithmetic side used to be the one store over this key family that did
+        // not, which made the bound a property of which field you happened to instantiate.
+        if bounded_set_count(n, t).is_none() {
+            return Err(PrssError::TooManyUnqualifiedSets {
+                n,
+                t,
+                max: MAX_UNQUALIFIED_SETS,
+            });
         }
 
         let tsets = all_tsets(n, t);
@@ -507,6 +559,63 @@ mod tests {
         assert!(matches!(
             keys[0].shares_at(sid(1), 0, 1, Fr::MODULUS_BIT_SIZE as usize),
             Err(PrssError::WidthExceedsField { .. })
+        ));
+    }
+
+    /// The exact sequential product, against values computed by hand, including the two edges
+    /// that decide the cap: `C(n, t) = 0` for `t > n`, and `None` rather than a wrapped value
+    /// once the product leaves `u128`.
+    #[test]
+    fn binomial_is_exact_and_saturates_to_none() {
+        assert_eq!(binomial(10, 3), Some(120));
+        assert_eq!(binomial(16, 5), Some(4368));
+        assert_eq!(binomial(19, 6), Some(27_132));
+        assert_eq!(binomial(20, 7), Some(77_520));
+        assert_eq!(binomial(5, 0), Some(1));
+        assert_eq!(binomial(3, 5), Some(0));
+        // C(1000, 500) is a 996-bit number. A `u64` accumulator would have wrapped to a small
+        // number here and silently *passed* the cap check.
+        assert_eq!(binomial(1000, 500), None);
+    }
+
+    /// The admissibility test every key store now shares, at the boundary.
+    ///
+    /// `MAX_UNQUALIFIED_SETS` is not itself a binomial value, so the boundary is between two
+    /// neighbouring `(n, t)`: `C(19,6) = 27 132` is in, `C(20,7) = 77 520` is out.
+    #[test]
+    fn bounded_set_count_admits_the_practical_range_and_rejects_the_rest() {
+        assert_eq!(MAX_UNQUALIFIED_SETS, 65_536);
+        assert_eq!(bounded_set_count(19, 6), Some(27_132));
+        assert_eq!(bounded_set_count(16, 5), Some(4368));
+        assert_eq!(bounded_set_count(20, 7), None);
+        assert_eq!(bounded_set_count(64, 32), None);
+        assert_eq!(bounded_set_count(1000, 500), None);
+        // Passed through rather than rejected: `t > n` is a different misconfiguration, and the
+        // constructors that care about it say so in their own words.
+        assert_eq!(bounded_set_count(3, 5), Some(0));
+    }
+
+    /// The cap fires *before* the enumeration, which is the only place it is any use.
+    ///
+    /// `C(64, 32)` is about `1.8e18`; `all_tsets` would try to allocate that many `Vec<usize>`.
+    /// If this test ever hangs or is OOM-killed rather than failing, the check has been moved
+    /// below `all_tsets` — which is exactly the failure it exists to prevent, so the symptom is
+    /// the diagnosis.
+    #[test]
+    fn new_rejects_a_party_count_whose_enumeration_would_be_unbounded() {
+        assert!(matches!(
+            PrssKeys::<Fr>::new(0, 64, 32, &[]),
+            Err(PrssError::TooManyUnqualifiedSets {
+                n: 64,
+                t: 32,
+                max: MAX_UNQUALIFIED_SETS
+            })
+        ));
+        // And it is the *set count* that binds, not `n`: `C(64, 1) = 64` is admitted straight
+        // past the cap and fails later, on the key store, as it always did.
+        assert!(matches!(
+            PrssKeys::<Fr>::new(0, 64, 1, &[]),
+            Err(PrssError::KeyCountMismatch { .. })
         ));
     }
 }
