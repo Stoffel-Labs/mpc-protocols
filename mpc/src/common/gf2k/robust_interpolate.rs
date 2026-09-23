@@ -384,7 +384,13 @@ pub fn batch_recover_secret<K: BinaryField>(
                 .iter()
                 .map(|(id, vals)| GfShare::new(vals[c], *id, degree))
                 .collect();
-            let (coeffs, _) = GfShare::recover_secret(&shares, n, t)?;
+            let (mut coeffs, _) = GfShare::recover_secret(&shares, n, t)?;
+            // See the `F`-domain twin in `honeybadger::robust_interpolate`: `recover_secret`
+            // hands back the polynomial's normalized coefficients, so a chunk whose top secrets
+            // are zero is shorter than `degree + 1`, while the `ok` branch above is always
+            // exactly `degree + 1`. `GfBatchReconNode`'s `RevealBatch` arm flattens at a fixed
+            // stride and its `EvalBatch` arm indexes `coeffs[0]`, so the padding belongs here.
+            coeffs.resize(degree + 1, K::zero());
             results.push(coeffs);
         }
     }

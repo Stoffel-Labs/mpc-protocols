@@ -434,7 +434,14 @@ pub fn batch_recover_secret<F: FftField>(
                 .iter()
                 .map(|(id, vals)| RobustShare::new(vals[c], *id, degree))
                 .collect();
-            let (coeffs, _) = RobustShare::recover_secret(&shares, n, t)?;
+            let (mut coeffs, _) = RobustShare::recover_secret(&shares, n, t)?;
+            // `recover_secret` returns the interpolated polynomial's own coefficient vector,
+            // which `Poly` normalizes: a chunk whose top secrets are zero comes back SHORTER
+            // than `degree + 1`. The `ok` branch above always returns exactly `degree + 1`, and
+            // both `BatchReconNode` arms flatten these chunks at a fixed stride of `degree + 1`
+            // — so an unpadded fallback chunk silently truncates and misaligns every later value
+            // in the batch. Restore the invariant here, where it is produced.
+            coeffs.resize(degree + 1, F::zero());
             results.push(coeffs);
         }
     }
