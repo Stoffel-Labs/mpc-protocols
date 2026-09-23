@@ -48,6 +48,10 @@ pub mod gf_share_gen;
 /// GF(2^k) equivalent of `triple_gen` (Beaver triple generation)
 pub mod gf_triple_gen;
 pub mod input;
+/// Catrina-Saxena `Mod2m` at `m = 1`: parity extraction by one degree-`t` opening and zero
+/// multiplications. Degree-`t` throughout, so unlike `dn07` it carries no phase restriction of
+/// its own; its consumer (PRSS daBit generation) is preprocessing.
+pub mod mod2;
 pub mod mul;
 pub mod mul_pub;
 pub mod output;
