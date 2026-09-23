@@ -53,7 +53,8 @@ fn agreeing_width<K>(entries: &[(usize, Vec<K>)], threshold: usize) -> Option<us
     None
 }
 
-const MAX_GF_BATCH_RECON_SESSIONS: usize = 256;
+/// GF(2^k) counterpart of `MAX_BATCH_RECON_SESSIONS`, and `pub` for the same reason.
+pub const MAX_GF_BATCH_RECON_SESSIONS: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct GfBatchReconNode<K: BinaryField> {

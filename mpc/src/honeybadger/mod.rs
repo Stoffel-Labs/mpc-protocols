@@ -70,7 +70,7 @@ use crate::{
             rand_bit::RandBit,
             PRandIntError, PRandIntMessage, RandBitError, TruncPrError, TruncPrMessage,
         },
-        gf_batch_recon::GfBatchReconError,
+        gf_batch_recon::{gf_batch_recon::MAX_GF_BATCH_RECON_SESSIONS, GfBatchReconError},
         gf_double_share::{gf_double_share_generation::GfDoubleShareNode, GfDouShaError},
         gf_mul::{gf_multiplication::GfMultiply, GfMulError},
         gf_preprocessing::GfHoneyBadgerMPCNodePreprocMaterial,
@@ -2330,10 +2330,20 @@ where
     }
 
     /// GF(2^k) analogue of `mul` — Beaver multiplication over `Gf256`, drawing triples from
-    /// `gf_preprocessing_material` (topping it up via `run_gf_preprocessing` if short) and
-    /// running one `GfMultiply` session. Simplified relative to `mul`: a single session (no
-    /// chunking across `max_mul_pairs_per_session`, no multi-session pipelining) — the GF track
-    /// doesn't need that scale yet.
+    /// `gf_preprocessing_material` (topping it up via `run_gf_preprocessing` if short).
+    ///
+    /// Chunked against `max_gf_mul_pairs_per_session` and pipelined at `gf_mul_pipeline_depth`,
+    /// the same shape `mul` uses, with one addition: the depth cap.
+    /// `mul` issues every chunk at once, which is safe at the batch sizes it sees; A2B drives this
+    /// entry point with AND layers of thousands of gates, and past `MAX_GF_BATCH_RECON_SESSIONS /
+    /// n` concurrent openings a peer's `Eval` messages start being rejected by its own per-peer
+    /// quota and the openings silently never complete. Each wave is awaited **and cleared** before
+    /// the next is issued, which is also what keeps the 200-slot channel inside `GfMultiply` from
+    /// filling — a channel this node cannot resize, since `GfMultiply::new` builds it internally.
+    ///
+    /// This was previously a single un-chunked session. A2B cannot ship on that: one AND layer
+    /// over a batch of `m` values is up to `64 * m` gates, which overruns both the per-session
+    /// figure and, eventually, `MAX_MESSAGE_SIZE`.
     async fn gf_mul(
         &mut self,
         x: Vec<GfShare<Gf256>>,
@@ -2357,32 +2367,98 @@ where
             self.run_gf_preprocessing(network.clone(), &mut rng).await?;
         }
 
-        let beaver_triples = self
-            .gf_preprocessing_material
-            .lock()
-            .await
-            .take_beaver_triples(x.len())?;
+        let per_session = max_gf_mul_pairs_per_session(self.params.threshold);
+        let depth = gf_mul_pipeline_depth(self.params.n_parties);
+        let mut result = Vec::with_capacity(x.len());
+        let mut offset = 0usize;
 
-        let session_id = SessionId::new(
-            ProtocolType::GfMul,
-            SessionId::pack_slot(self.counters.gf_mul_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
+        while offset < x.len() {
+            let wave_end = offset
+                .saturating_add(per_session.saturating_mul(depth))
+                .min(x.len());
+            let mut first_err: Option<HoneyBadgerError> = None;
+            let mut issued = Vec::new();
 
-        self.gf_operations
-            .mul
-            .init(session_id, x, y, beaver_triples, network)
-            .await?;
+            // Issue this wave's sessions. They are independent — distinct session ids, distinct
+            // triples, distinct storage entries — so their network rounds overlap during the
+            // awaits below instead of running strictly back to back.
+            let mut cursor = offset;
+            while cursor < wave_end {
+                let end = (cursor + per_session).min(wave_end);
+                // Not `?`: sessions issued earlier in this wave are already live, and returning
+                // here would leave them resident. Record the failure and fall through to the
+                // await-and-clear below (C7).
+                let beaver_triples = match self
+                    .gf_preprocessing_material
+                    .lock()
+                    .await
+                    .take_beaver_triples(end - cursor)
+                {
+                    Ok(triples) => triples,
+                    Err(e) => {
+                        if first_err.is_none() {
+                            first_err = Some(e.into());
+                        }
+                        break;
+                    }
+                };
 
-        let result = self
-            .gf_operations
-            .mul
-            .wait_for_result(session_id, self.params.timeout)
-            .await;
-        if !self.gf_operations.mul.clear_store(session_id).await {
-            warn!(?session_id, "failed to clear GF(2^k) multiplication protocol state");
+                let session_id = SessionId::new(
+                    ProtocolType::GfMul,
+                    SessionId::pack_slot(self.counters.gf_mul_counter.get_next().await?, 0, 0),
+                    self.params.instance_id,
+                );
+
+                match self
+                    .gf_operations
+                    .mul
+                    .init(
+                        session_id,
+                        x[cursor..end].to_vec(),
+                        y[cursor..end].to_vec(),
+                        beaver_triples,
+                        network.clone(),
+                    )
+                    .await
+                {
+                    Ok(()) => issued.push(session_id),
+                    Err(e) if first_err.is_none() => first_err = Some(e.into()),
+                    Err(_) => {}
+                }
+                cursor = end;
+            }
+
+            // Results are collected in session order, so the output ordering matches the input.
+            // Every session is cleared regardless of outcome — a timed-out session must not be
+            // left dangling in the store just because an earlier `?` would have skipped over it.
+            for session_id in &issued {
+                match self
+                    .gf_operations
+                    .mul
+                    .wait_for_result(*session_id, self.params.timeout)
+                    .await
+                {
+                    Ok(mut chunk) => result.append(&mut chunk),
+                    Err(e) if first_err.is_none() => first_err = Some(e.into()),
+                    Err(_) => {}
+                }
+            }
+            for session_id in &issued {
+                if !self.gf_operations.mul.clear_store(*session_id).await {
+                    warn!(
+                        ?session_id,
+                        "failed to clear GF(2^k) multiplication protocol state"
+                    );
+                }
+            }
+
+            if let Some(e) = first_err {
+                return Err(e);
+            }
+            offset = wave_end;
         }
-        Ok(result?)
+
+        Ok(result)
     }
 }
 
@@ -2506,6 +2582,32 @@ pub(crate) fn max_mul_pairs_per_session(threshold: usize) -> usize {
     // Mul child sessions encode batch-reconstruction children in sub_id.
     // Each batch-reconstruction chunk uses two child ids: one for a - x and one for b - y.
     128 * threshold.saturating_add(1)
+}
+
+/// GF(2^k) counterpart of [`max_mul_pairs_per_session`].
+///
+/// The same figure, and for the same reason: `GfMultiply` has the identical child-session shape
+/// (one batch-reconstruction session for all `a - x`, one for all `b - y`, encoded in `sub_id`)
+/// and emits one field element per slot in a single eval/reveal message pair. A `Gf256` element is
+/// one byte against a Goldilocks element's eight, so this is if anything conservative — it is kept
+/// equal so the two tracks cannot drift apart silently.
+pub(crate) fn max_gf_mul_pairs_per_session(threshold: usize) -> usize {
+    max_mul_pairs_per_session(threshold)
+}
+
+/// Concurrent `GfMultiply` sessions the node-level `gf_mul` will have in flight at once.
+///
+/// `GfBatchReconNode::get_or_create_store` admits with `initiator_id = msg.sender_id` under a
+/// `MAX_GF_BATCH_RECON_SESSIONS / n` **per-peer** quota, and each `GfMultiply` session opens two
+/// batch-reconstruction children — hence the halving. Past this depth a given peer's `Eval`
+/// messages start being rejected and those openings silently never complete.
+///
+/// Capping the depth is deliberately the lever here rather than raising the quota: the quota is a
+/// DoS bound, and it also happens to bound the 200-slot `mpsc` backlog inside `GfMultiply`, whose
+/// `send().await` runs inline on the single message-handling path, so a full channel stalls the
+/// whole node.
+pub(crate) fn gf_mul_pipeline_depth(n_parties: usize) -> usize {
+    (MAX_GF_BATCH_RECON_SESSIONS / n_parties.max(1) / 2).max(1)
 }
 
 ///Used for routing messages to respective sub-protocols
@@ -2875,5 +2977,28 @@ mod tests {
         assert_eq!(max_mul_pairs_per_session(1), 256);
         assert_eq!(max_mul_pairs_per_session(2), 384);
         assert_eq!(max_mul_pairs_per_session(3), 512);
+    }
+
+    /// The GF(2^k) multiplication track's chunking figures.
+    ///
+    /// `max_gf_mul_pairs_per_session` tracks its `F`-domain counterpart exactly — `GfMultiply` has
+    /// the identical child-session shape — and the pipeline depth halves the per-peer
+    /// batch-reconstruction quota because each multiplication session opens two children.
+    #[test]
+    fn gf_mul_chunking_figures_track_the_existing_quotas() {
+        for threshold in 0..8 {
+            assert_eq!(
+                max_gf_mul_pairs_per_session(threshold),
+                max_mul_pairs_per_session(threshold)
+            );
+        }
+        assert_eq!(
+            gf_mul_pipeline_depth(10),
+            MAX_GF_BATCH_RECON_SESSIONS / 10 / 2
+        );
+        // Never zero, at any party count, including the degenerate ones.
+        assert!(gf_mul_pipeline_depth(0) >= 1);
+        assert!(gf_mul_pipeline_depth(usize::MAX) >= 1);
+        assert_eq!(gf_mul_pipeline_depth(MAX_GF_BATCH_RECON_SESSIONS + 1), 1);
     }
 }
