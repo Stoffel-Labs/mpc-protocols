@@ -25,6 +25,9 @@ pub mod binary_circuits;
 // Doubly-shared bits (daBits): the cross-domain primitive behind A2B and B2A.
 pub mod dabit;
 
+// Arithmetic-to-binary conversion: `[x]_F` to the bit shares of its canonical representative.
+pub mod a2b;
+
 // Binary-to-arithmetic conversion: one GF(2^k) opening, no online multiplication.
 pub mod b2a;
 
