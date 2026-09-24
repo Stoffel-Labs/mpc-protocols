@@ -76,8 +76,7 @@ pub fn create_nodes(
         MIN_STATISTICAL_SECURITY,
         timeout,
         // These benches don't exercise GF(2^k) operations.
-        0,
-        0,
+        None,
     )
     .unwrap();
 

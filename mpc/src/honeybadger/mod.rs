@@ -49,7 +49,7 @@ pub mod zero_share;
 
 use crate::{
     common::{
-        gf2k::{field::Gf256, share::GfShare},
+        gf2k::{field::BinaryField, field::Gf256, share::GfShare},
         rbc::{rbc_store::Msg, RbcError},
         share::ShareError,
         types::{
@@ -234,6 +234,10 @@ pub enum HoneyBadgerError {
     ShareError(#[from] ShareError),
     #[error("error in GF(2^k) preprocessing: {0:?}")]
     GfPreprocessingError(#[from] crate::honeybadger::gf_preprocessing::GfPreprocessingError),
+    #[error(
+        "this node was not configured with a binary field (HoneyBadgerMPCNodeOpts::gf was None)"
+    )]
+    GfNotConfigured,
 }
 
 pub struct HoneyBadgerMPCClient<F: FftField, R: RBC> {
@@ -301,8 +305,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
     }
 }
 /// Information pertaining a HoneyBadgerMPCNode protocol participant.
+///
+/// `K` defaults to `Gf256` and is only ever named by callers that want a different binary
+/// field — every existing `HoneyBadgerMPCNode<F, R>` call site keeps compiling unchanged.
 #[derive(Clone, Debug)]
-pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
+pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC, K: BinaryField = Gf256> {
     /// ID of the current execution node.
     pub id: PartyId,
     /// Preprocessing material used in the protocol execution.
@@ -314,22 +321,21 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     pub type_ops: TypeOperations<F>,
     pub output: OutputServer,
     pub counters: SubProtocolCounters,
-    /// GF(2^k) preprocessing material, parallel to `preprocessing_material` above — fixed to
-    /// `Gf256` for now 
-    pub gf_preprocessing_material: Arc<Mutex<GfHoneyBadgerMPCNodePreprocMaterial<Gf256>>>,
-    /// GF(2^k) sub-protocol nodes that feed `gf_preprocessing_material`. 
-    pub gf_preprocess: GfPreprocessNodes<R>,
-    pub gf_operations: GfOperation,
+    /// GF(2^k) state — `None` when this node's setup doesn't use a binary field at all: no
+    /// session stores, no RBC channels, no preprocessing pool ever get built for it. Only built
+    /// (`Some`) when `HoneyBadgerMPCNodeOpts::gf` was supplied at construction.
+    pub gf: Option<GfNodeState<K, R>>,
     /// Shared byte and message counters.  Updated by [`CountingNetwork`] (sends)
     /// and by [`process`] (receives).  Only present with the `statistics` feature.
     #[cfg(feature = "statistics")]
     pub statistics_counters: std::sync::Arc<statistics::NodeStatisticsCounters>,
 }
 
-impl<F, R> HoneyBadgerMPCNode<F, R>
+impl<F, R, K> HoneyBadgerMPCNode<F, R, K>
 where
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    K: BinaryField,
 {
     /// Wraps `inner` in a [`CountingNetwork`] that shares this node's statistics
     /// counters.  Pass the resulting wrapper (or an `Arc` of it) wherever the
@@ -500,19 +506,30 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
 }
 
 #[derive(Clone, Debug)]
-pub struct GfOperation {
-    pub mul: GfMultiply<Gf256>,
+pub struct GfOperation<K: BinaryField> {
+    pub mul: GfMultiply<K>,
 }
 
-/// GF(2^k) sub-protocol nodes needed to keep `gf_preprocessing_material` topped up:
+/// GF(2^k) sub-protocol nodes needed to keep `preprocessing_material` topped up:
 /// random-share generation for the triple's `a`/`b`, double-share dealing + RanDouSha for the
-/// mask, and triple generation itself. 
+/// mask, and triple generation itself.
 #[derive(Clone, Debug)]
-pub struct GfPreprocessNodes<R: RBC> {
-    pub gf_share_gen: GfRanShaNode<Gf256, R>,
-    pub gf_dou_sha: GfDoubleShareNode<Gf256>,
-    pub gf_ran_dou_sha: GfRanDouShaNode<Gf256, R>,
-    pub gf_triple_gen: GfTripleGenNode<Gf256>,
+pub struct GfPreprocessNodes<K: BinaryField, R: RBC> {
+    pub gf_share_gen: GfRanShaNode<K, R>,
+    pub gf_dou_sha: GfDoubleShareNode<K>,
+    pub gf_ran_dou_sha: GfRanDouShaNode<K, R>,
+    pub gf_triple_gen: GfTripleGenNode<K>,
+}
+
+/// Everything a `HoneyBadgerMPCNode` needs to also operate over a binary field `K` — bundled so
+/// the node's own `gf` field can be a single `Option`, built only when actually configured.
+#[derive(Clone, Debug)]
+pub struct GfNodeState<K: BinaryField, R: RBC> {
+    /// Preprocessing material, parallel to `HoneyBadgerMPCNode::preprocessing_material` but for
+    /// GF(2^k) triples/random shares.
+    pub preprocessing_material: Arc<Mutex<GfHoneyBadgerMPCNodePreprocMaterial<K>>>,
+    pub preprocess: GfPreprocessNodes<K, R>,
+    pub operations: GfOperation<K>,
 }
 
 #[derive(Clone, Debug)]
@@ -627,6 +644,17 @@ pub struct HoneyBadgerMPCNodeOpts {
     /// value is what silently decouples the configured κ from the delivered one.
     pub statistical_security: usize,
     pub timeout: Duration,
+    /// GF(2^k) preprocessing sizing — `None` means this node's setup doesn't use a binary field
+    /// at all, and `HoneyBadgerMPCNode::gf` will be built as `None` too (no session stores, no
+    /// RBC channels, no preprocessing pool).
+    pub gf: Option<GfPreprocessingOpts>,
+}
+
+/// GF(2^k) preprocessing sizing, mirroring `n_triples`/`n_random_shares` above but for the
+/// binary-field side. A separate struct (rather than two more fields directly on
+/// `HoneyBadgerMPCNodeOpts`) so it can be wrapped in a single `Option`.
+#[derive(Clone, Copy, Debug)]
+pub struct GfPreprocessingOpts {
     /// Number of GF(2^k) Beaver triples that need to be generated.
     pub n_gf_triples: usize,
     /// Number of GF(2^k) random shares needed. Same rule of thumb as `n_random_shares`: at least
@@ -647,8 +675,7 @@ impl HoneyBadgerMPCNodeOpts {
         precision: FixedPointPrecision,
         statistical_security: usize,
         timeout: Duration,
-        n_gf_triples: usize,
-        n_gf_random_shares: usize,
+        gf: Option<GfPreprocessingOpts>,
     ) -> Result<Self, HoneyBadgerError> {
         //No of parties should not exceed 255
         if n_parties > 255 {
@@ -678,8 +705,7 @@ impl HoneyBadgerMPCNodeOpts {
             precision,
             statistical_security,
             timeout,
-            n_gf_triples,
-            n_gf_random_shares,
+            gf,
         })
     }
     pub fn set_timeout(&mut self, secs: u64) {
@@ -712,11 +738,12 @@ impl HoneyBadgerMPCNodeOpts {
 }
 
 #[async_trait]
-impl<F, R, N> MPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
+impl<F, R, K, N> MPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R, K>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    K: BinaryField,
 {
     type MPCOpts = HoneyBadgerMPCNodeOpts;
     type Error = HoneyBadgerError;
@@ -748,14 +775,45 @@ where
         let zero_sha_node =
             ZeroShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
 
-        // GF(2^k) nodes, parallel to the F-domain ones above.
-        let gf_dou_sha_node = GfDoubleShareNode::new(id, params.n_parties, params.threshold);
-        let gf_ran_dou_sha_node =
-            GfRanDouShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
-        let gf_triple_gen_node = GfTripleGenNode::new(id, params.n_parties, params.threshold)?;
-        let gf_mul_node = GfMultiply::new(id, params.n_parties, params.threshold)?;
-        let gf_share_gen_node =
-            GfRanShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
+        // GF(2^k) nodes, parallel to the F-domain ones above — only built when this node's
+        // setup actually asked for a binary field (`params.gf.is_some()`). No config means no
+        // session stores, no RBC channels, no preprocessing pool ever get constructed.
+        let gf = params
+            .gf
+            .is_some()
+            .then(|| -> Result<GfNodeState<K, R>, HoneyBadgerError> {
+                let gf_dou_sha_node =
+                    GfDoubleShareNode::new(id, params.n_parties, params.threshold);
+                let gf_ran_dou_sha_node = GfRanDouShaNode::new(
+                    id,
+                    params.n_parties,
+                    params.threshold,
+                    params.threshold + 1,
+                )?;
+                let gf_triple_gen_node =
+                    GfTripleGenNode::new(id, params.n_parties, params.threshold)?;
+                let gf_mul_node = GfMultiply::new(id, params.n_parties, params.threshold)?;
+                let gf_share_gen_node = GfRanShaNode::new(
+                    id,
+                    params.n_parties,
+                    params.threshold,
+                    params.threshold + 1,
+                )?;
+
+                Ok(GfNodeState {
+                    preprocessing_material: Arc::new(Mutex::new(
+                        GfHoneyBadgerMPCNodePreprocMaterial::empty(),
+                    )),
+                    preprocess: GfPreprocessNodes {
+                        gf_share_gen: gf_share_gen_node,
+                        gf_dou_sha: gf_dou_sha_node,
+                        gf_ran_dou_sha: gf_ran_dou_sha_node,
+                        gf_triple_gen: gf_triple_gen_node,
+                    },
+                    operations: GfOperation { mul: gf_mul_node },
+                })
+            })
+            .transpose()?;
 
         Ok(Self {
             id,
@@ -774,16 +832,7 @@ where
                 zero_sha: zero_sha_node,
             },
             operations: Operation { mul: mul_node },
-            gf_preprocessing_material: Arc::new(Mutex::new(
-                GfHoneyBadgerMPCNodePreprocMaterial::empty(),
-            )),
-            gf_preprocess: GfPreprocessNodes {
-                gf_share_gen: gf_share_gen_node,
-                gf_dou_sha: gf_dou_sha_node,
-                gf_ran_dou_sha: gf_ran_dou_sha_node,
-                gf_triple_gen: gf_triple_gen_node,
-            },
-            gf_operations: GfOperation { mul: gf_mul_node },
+            gf,
             type_ops: TypeOperations {
                 fpmul: fpmul_node,
                 fpdiv_const: fpdiv_const_node,
@@ -1013,20 +1062,24 @@ where
                         self.preprocess.prand_int.drain_rbc_output(net).await?;
                     }
                     Some(ProtocolType::GfRansha) => {
-                        self.gf_preprocess
-                            .gf_share_gen
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.gf_preprocess.gf_share_gen.drain_rbc_output().await?;
+                        if let Some(gf) = self.gf.as_mut() {
+                            gf.preprocess.gf_share_gen.rbc.process(rbc_msg, net).await?;
+                            gf.preprocess.gf_share_gen.drain_rbc_output().await?;
+                        } else {
+                            warn!("GfRansha RBC message received, but this node has no binary field configured");
+                        }
                     }
                     Some(ProtocolType::GfRandousha) => {
-                        self.gf_preprocess
-                            .gf_ran_dou_sha
-                            .rbc
-                            .process(rbc_msg, net)
-                            .await?;
-                        self.gf_preprocess.gf_ran_dou_sha.drain_rbc_output().await?;
+                        if let Some(gf) = self.gf.as_mut() {
+                            gf.preprocess
+                                .gf_ran_dou_sha
+                                .rbc
+                                .process(rbc_msg, net)
+                                .await?;
+                            gf.preprocess.gf_ran_dou_sha.drain_rbc_output().await?;
+                        } else {
+                            warn!("GfRandousha RBC message received, but this node has no binary field configured");
+                        }
                     }
                     _ => {
                         warn!(
@@ -1225,7 +1278,13 @@ where
                         rs_msg.session_id.instance_id(),
                     ));
                 }
-                self.gf_preprocess.gf_share_gen.process(rs_msg, net).await?;
+                if let Some(gf) = self.gf.as_mut() {
+                    gf.preprocess.gf_share_gen.process(rs_msg, net).await?;
+                } else {
+                    warn!(
+                        "GfRansha message received, but this node has no binary field configured"
+                    );
+                }
             }
             WrappedMessage::GfDousha(ds_msg) => {
                 if sender_id != ds_msg.sender_id {
@@ -1236,7 +1295,13 @@ where
                         ds_msg.session_id.instance_id(),
                     ));
                 }
-                self.gf_preprocess.gf_dou_sha.process(ds_msg).await?;
+                if let Some(gf) = self.gf.as_mut() {
+                    gf.preprocess.gf_dou_sha.process(ds_msg).await?;
+                } else {
+                    warn!(
+                        "GfDousha message received, but this node has no binary field configured"
+                    );
+                }
             }
             WrappedMessage::GfRanDouSha(rds_msg) => {
                 if sender_id != rds_msg.sender_id {
@@ -1247,10 +1312,11 @@ where
                         rds_msg.session_id.instance_id(),
                     ));
                 }
-                self.gf_preprocess
-                    .gf_ran_dou_sha
-                    .process(rds_msg, net)
-                    .await?;
+                if let Some(gf) = self.gf.as_mut() {
+                    gf.preprocess.gf_ran_dou_sha.process(rds_msg, net).await?;
+                } else {
+                    warn!("GfRanDouSha message received, but this node has no binary field configured");
+                }
             }
             WrappedMessage::GfBatchRecon(batch_msg) => {
                 if sender_id != batch_msg.sender_id {
@@ -1261,22 +1327,26 @@ where
                         batch_msg.session_id.instance_id(),
                     ));
                 }
+                let Some(gf) = self.gf.as_mut() else {
+                    warn!("GfBatchRecon message received, but this node has no binary field configured");
+                    return Ok(());
+                };
                 match batch_msg.session_id.calling_protocol() {
                     Some(ProtocolType::GfMul) => {
-                        self.gf_operations
+                        gf.operations
                             .mul
                             .batch_recon
                             .process(batch_msg, net)
                             .await?;
-                        self.gf_operations.mul.drain_batch_recon_output().await?
+                        gf.operations.mul.drain_batch_recon_output().await?
                     }
                     Some(ProtocolType::GfTriple) => {
-                        self.gf_preprocess
+                        gf.preprocess
                             .gf_triple_gen
                             .batch_recon_node
                             .process(batch_msg, net)
                             .await?;
-                        self.gf_preprocess
+                        gf.preprocess
                             .gf_triple_gen
                             .drain_batch_recon_output()
                             .await?
@@ -1298,9 +1368,13 @@ where
                         mult_msg.session_id.instance_id(),
                     ));
                 }
+                let Some(gf) = self.gf.as_mut() else {
+                    warn!("GfMult message received, but this node has no binary field configured");
+                    return Ok(());
+                };
                 match mult_msg.session_id.calling_protocol() {
                     Some(ProtocolType::GfMul) => {
-                        self.gf_operations
+                        gf.operations
                             .mul
                             .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
                             .await?;
@@ -1320,11 +1394,12 @@ where
 }
 
 #[async_trait]
-impl<F, N, R> MPCTypeOps<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
+impl<F, N, R, K> MPCTypeOps<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R, K>
 where
     F: PrimeField,
     N: Network + Send + Sync + 'static,
     R: RBC<Id = SessionId>,
+    K: BinaryField,
 {
     type Error = HoneyBadgerError;
     type Sfix = SecretFixedPoint<F, RobustShare<F>>;
@@ -1578,11 +1653,12 @@ where
 }
 
 #[async_trait]
-impl<F, R, N> PreprocessingMPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R>
+impl<F, R, K, N> PreprocessingMPCProtocol<F, RobustShare<F>, N> for HoneyBadgerMPCNode<F, R, K>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    K: BinaryField,
 {
     /// Runs preprocessing to produce Random shares and Beaver triples.
     /// Steps:
@@ -1798,10 +1874,11 @@ where
         Ok(())
     }
 }
-impl<F, R> HoneyBadgerMPCNode<F, R>
+impl<F, R, K> HoneyBadgerMPCNode<F, R, K>
 where
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    K: BinaryField,
 {
     /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
     async fn ensure_random_shares<G, N>(
@@ -2051,7 +2128,10 @@ where
 
     /// GF(2^k) analogue of `ensure_random_shares`. Simplified to a single session — no multi-run
     /// pipelining across a `max_columns_per_run` cap, since the GF track doesn't need that scale
-    /// yet;
+    /// yet.
+    ///
+    /// # Errors
+    /// - `HoneyBadgerError::GfNotConfigured` if this node's setup didn't include a binary field.
     async fn ensure_gf_random_shares<G, N>(
         &mut self,
         network: Arc<N>,
@@ -2070,19 +2150,23 @@ where
             SessionId::pack_slot(self.counters.gf_ran_sha_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
-        self.gf_preprocess
+        let gf = self.gf.as_mut().ok_or(HoneyBadgerError::GfNotConfigured)?;
+        gf.preprocess
             .gf_share_gen
             .init_batch(sessionid, needed, rng, network)
             .await?;
-        let result = self
-            .gf_preprocess
+        let result = gf
+            .preprocess
             .gf_share_gen
             .wait_for_result(sessionid, self.params.timeout)
             .await;
-        if !self.gf_preprocess.gf_share_gen.clear_store(sessionid).await {
-            warn!(?sessionid, "failed to clear GF(2^k) share generation protocol state");
+        if !gf.preprocess.gf_share_gen.clear_store(sessionid).await {
+            warn!(
+                ?sessionid,
+                "failed to clear GF(2^k) share generation protocol state"
+            );
         }
-        self.gf_preprocessing_material
+        gf.preprocessing_material
             .lock()
             .await
             .add(None, Some(result?));
@@ -2091,13 +2175,16 @@ where
 
     /// GF(2^k) analogue of `ensure_ran_dou_sha_pair`. Same simplification as
     /// `ensure_gf_random_shares` — one DoubleShare session and one RanDouSha session, not a
-    /// pipelined run. 
+    /// pipelined run.
+    ///
+    /// # Errors
+    /// - `HoneyBadgerError::GfNotConfigured` if this node's setup didn't include a binary field.
     async fn ensure_gf_ran_dou_sha_pair<G, N>(
         &mut self,
         network: Arc<N>,
         rng: &mut G,
         needed: usize,
-    ) -> Result<Vec<crate::honeybadger::gf_double_share::GfDoubleShamirShare<Gf256>>, HoneyBadgerError>
+    ) -> Result<Vec<crate::honeybadger::gf_double_share::GfDoubleShamirShare<K>>, HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
         G: Rng + Send,
@@ -2113,17 +2200,28 @@ where
             SessionId::pack_slot(self.counters.gf_dou_sha_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
-        self.gf_preprocess
-            .gf_dou_sha
-            .init_batch(dou_sha_session, columns_needed, rng, network.clone())
-            .await?;
-        let double_shares = self
-            .gf_preprocess
-            .gf_dou_sha
-            .wait_for_result(dou_sha_session, self.params.timeout)
-            .await;
-        if !self.gf_preprocess.gf_dou_sha.clear_store(dou_sha_session).await {
-            warn!(?dou_sha_session, "failed to clear GF(2^k) double share protocol state");
+        {
+            let gf = self.gf.as_mut().ok_or(HoneyBadgerError::GfNotConfigured)?;
+            gf.preprocess
+                .gf_dou_sha
+                .init_batch(dou_sha_session, columns_needed, rng, network.clone())
+                .await?;
+        }
+        let double_shares = {
+            let gf = self.gf.as_mut().ok_or(HoneyBadgerError::GfNotConfigured)?;
+            gf.preprocess
+                .gf_dou_sha
+                .wait_for_result(dou_sha_session, self.params.timeout)
+                .await
+        };
+        {
+            let gf = self.gf.as_mut().ok_or(HoneyBadgerError::GfNotConfigured)?;
+            if !gf.preprocess.gf_dou_sha.clear_store(dou_sha_session).await {
+                warn!(
+                    ?dou_sha_session,
+                    "failed to clear GF(2^k) double share protocol state"
+                );
+            }
         }
         let double_shares = double_shares?;
 
@@ -2144,22 +2242,33 @@ where
             SessionId::pack_slot(self.counters.gf_ran_dou_sha_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
-        self.gf_preprocess
-            .gf_ran_dou_sha
-            .init_batch(
-                shares_deg_t_by_batch,
-                shares_deg_2t_by_batch,
-                rds_session,
-                network,
-            )
-            .await?;
-        let result = self
-            .gf_preprocess
-            .gf_ran_dou_sha
-            .wait_for_result(rds_session, self.params.timeout)
-            .await;
-        if !self.gf_preprocess.gf_ran_dou_sha.clear_store(rds_session).await {
-            warn!(?rds_session, "failed to clear GF(2^k) RanDouSha protocol state");
+        {
+            let gf = self.gf.as_mut().ok_or(HoneyBadgerError::GfNotConfigured)?;
+            gf.preprocess
+                .gf_ran_dou_sha
+                .init_batch(
+                    shares_deg_t_by_batch,
+                    shares_deg_2t_by_batch,
+                    rds_session,
+                    network,
+                )
+                .await?;
+        }
+        let result = {
+            let gf = self.gf.as_mut().ok_or(HoneyBadgerError::GfNotConfigured)?;
+            gf.preprocess
+                .gf_ran_dou_sha
+                .wait_for_result(rds_session, self.params.timeout)
+                .await
+        };
+        {
+            let gf = self.gf.as_mut().ok_or(HoneyBadgerError::GfNotConfigured)?;
+            if !gf.preprocess.gf_ran_dou_sha.clear_store(rds_session).await {
+                warn!(
+                    ?rds_session,
+                    "failed to clear GF(2^k) RanDouSha protocol state"
+                );
+            }
         }
         Ok(result?)
     }
@@ -2296,20 +2405,28 @@ where
 }
 
 #[async_trait]
-impl<F, R, N> GfMPCProtocol<Gf256, GfShare<Gf256>, N> for HoneyBadgerMPCNode<F, R>
+impl<F, R, K, N> GfMPCProtocol<K, GfShare<K>, N> for HoneyBadgerMPCNode<F, R, K>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    K: BinaryField,
 {
     type Error = HoneyBadgerError;
 
     /// Local GF(2^k) addition — no network round, mirroring how `+` on `GfShare` itself is free.
+    ///
+    /// # Errors
+    /// - `HoneyBadgerError::GfNotConfigured` if this node's setup didn't include a binary field
+    ///   (`HoneyBadgerMPCNodeOpts::gf` was `None`).
     fn gf_add(
         &self,
-        x: Vec<GfShare<Gf256>>,
-        y: Vec<GfShare<Gf256>>,
-    ) -> Result<Vec<GfShare<Gf256>>, HoneyBadgerError> {
+        x: Vec<GfShare<K>>,
+        y: Vec<GfShare<K>>,
+    ) -> Result<Vec<GfShare<K>>, HoneyBadgerError> {
+        if self.gf.is_none() {
+            return Err(HoneyBadgerError::GfNotConfigured);
+        }
         x.into_iter()
             .zip(y)
             .map(|(a, b)| (a + b).map_err(HoneyBadgerError::from))
@@ -2318,28 +2435,37 @@ where
 
     /// Local GF(2^k) subtraction — no network round, mirroring how `-` on `GfShare` itself is
     /// free.
+    ///
+    /// # Errors
+    /// - `HoneyBadgerError::GfNotConfigured` if this node's setup didn't include a binary field.
     fn gf_sub(
         &self,
-        x: Vec<GfShare<Gf256>>,
-        y: Vec<GfShare<Gf256>>,
-    ) -> Result<Vec<GfShare<Gf256>>, HoneyBadgerError> {
+        x: Vec<GfShare<K>>,
+        y: Vec<GfShare<K>>,
+    ) -> Result<Vec<GfShare<K>>, HoneyBadgerError> {
+        if self.gf.is_none() {
+            return Err(HoneyBadgerError::GfNotConfigured);
+        }
         x.into_iter()
             .zip(y)
             .map(|(a, b)| (a - b).map_err(HoneyBadgerError::from))
             .collect()
     }
 
-    /// GF(2^k) analogue of `mul` — Beaver multiplication over `Gf256`, drawing triples from
-    /// `gf_preprocessing_material` (topping it up via `run_gf_preprocessing` if short) and
+    /// GF(2^k) analogue of `mul` — Beaver multiplication over `K`, drawing triples from this
+    /// node's GF preprocessing pool (topping it up via `run_gf_preprocessing` if short) and
     /// running one `GfMultiply` session. Simplified relative to `mul`: a single session (no
     /// chunking across `max_mul_pairs_per_session`, no multi-session pipelining) — the GF track
     /// doesn't need that scale yet.
+    ///
+    /// # Errors
+    /// - `HoneyBadgerError::GfNotConfigured` if this node's setup didn't include a binary field.
     async fn gf_mul(
         &mut self,
-        x: Vec<GfShare<Gf256>>,
-        y: Vec<GfShare<Gf256>>,
+        x: Vec<GfShare<K>>,
+        y: Vec<GfShare<K>>,
         network: Arc<N>,
-    ) -> Result<Vec<GfShare<Gf256>>, HoneyBadgerError>
+    ) -> Result<Vec<GfShare<K>>, HoneyBadgerError>
     where
         N: 'async_trait,
     {
@@ -2347,9 +2473,13 @@ where
         if x.is_empty() {
             return Ok(Vec::new());
         }
+        if self.gf.is_none() {
+            return Err(HoneyBadgerError::GfNotConfigured);
+        }
 
         let no_triples = {
-            let store = self.gf_preprocessing_material.lock().await;
+            let gf = self.gf.as_ref().unwrap();
+            let store = gf.preprocessing_material.lock().await;
             store.length().beaver_triples
         };
         if no_triples < x.len() {
@@ -2357,11 +2487,13 @@ where
             self.run_gf_preprocessing(network.clone(), &mut rng).await?;
         }
 
-        let beaver_triples = self
-            .gf_preprocessing_material
-            .lock()
-            .await
-            .take_beaver_triples(x.len())?;
+        let beaver_triples = {
+            let gf = self.gf.as_ref().unwrap();
+            gf.preprocessing_material
+                .lock()
+                .await
+                .take_beaver_triples(x.len())?
+        };
 
         let session_id = SessionId::new(
             ProtocolType::GfMul,
@@ -2369,31 +2501,39 @@ where
             self.params.instance_id,
         );
 
-        self.gf_operations
+        let gf = self.gf.as_mut().unwrap();
+        gf.operations
             .mul
             .init(session_id, x, y, beaver_triples, network)
             .await?;
 
-        let result = self
-            .gf_operations
+        let result = gf
+            .operations
             .mul
             .wait_for_result(session_id, self.params.timeout)
             .await;
-        if !self.gf_operations.mul.clear_store(session_id).await {
-            warn!(?session_id, "failed to clear GF(2^k) multiplication protocol state");
+        if !gf.operations.mul.clear_store(session_id).await {
+            warn!(
+                ?session_id,
+                "failed to clear GF(2^k) multiplication protocol state"
+            );
         }
         Ok(result?)
     }
 }
 
 #[async_trait]
-impl<F, R, N> GfPreprocessingMPCProtocol<Gf256, GfShare<Gf256>, N> for HoneyBadgerMPCNode<F, R>
+impl<F, R, K, N> GfPreprocessingMPCProtocol<K, GfShare<K>, N> for HoneyBadgerMPCNode<F, R, K>
 where
     N: Network + Send + Sync + 'static,
     F: PrimeField,
     R: RBC<Id = SessionId>,
+    K: BinaryField,
 {
-    /// GF(2^k) analogue of `run_preprocessing`, producing random shares and Beaver triples only
+    /// GF(2^k) analogue of `run_preprocessing`, producing random shares and Beaver triples only.
+    ///
+    /// # Errors
+    /// - `HoneyBadgerError::GfNotConfigured` if this node's setup didn't include a binary field.
     async fn run_gf_preprocessing<G>(
         &mut self,
         network: Arc<N>,
@@ -2403,14 +2543,16 @@ where
         N: 'async_trait,
         G: Rng + Send,
     {
+        let gf_opts = self.params.gf.ok_or(HoneyBadgerError::GfNotConfigured)?;
         let (no_of_triples_avail, no_of_random_shares_avail) = {
-            let store = self.gf_preprocessing_material.lock().await;
+            let gf = self.gf.as_ref().ok_or(HoneyBadgerError::GfNotConfigured)?;
+            let store = gf.preprocessing_material.lock().await;
             let len = store.length();
             (len.beaver_triples, len.random_shr)
         };
 
-        let mut no_of_triples = self.params.n_gf_triples;
-        let mut no_of_random_shares = self.params.n_gf_random_shares;
+        let mut no_of_triples = gf_opts.n_gf_triples;
+        let mut no_of_random_shares = gf_opts.n_gf_random_shares;
         let group_size = 2 * self.params.threshold + 1;
         let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
             no_of_triples = 0;
@@ -2453,41 +2595,50 @@ where
             return Ok(());
         }
 
-        let random_shares_a = self
-            .gf_preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(total_triples_to_generate)?;
-        let random_shares_b = self
-            .gf_preprocessing_material
-            .lock()
-            .await
-            .take_random_shares(total_triples_to_generate)?;
+        let (random_shares_a, random_shares_b) = {
+            let gf = self.gf.as_ref().ok_or(HoneyBadgerError::GfNotConfigured)?;
+            let mut store = gf.preprocessing_material.lock().await;
+            let a = store.take_random_shares(total_triples_to_generate)?;
+            let b = store.take_random_shares(total_triples_to_generate)?;
+            (a, b)
+        };
 
         let session_id = SessionId::new(
             ProtocolType::GfTriple,
             SessionId::pack_slot(self.counters.gf_triple_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
-        self.gf_preprocess
-            .gf_triple_gen
-            .init_batch(
-                random_shares_a,
-                random_shares_b,
-                ran_dou_sha_pair,
-                session_id,
-                network,
-            )
-            .await?;
-        let result = self
-            .gf_preprocess
-            .gf_triple_gen
-            .wait_for_result(session_id, self.params.timeout)
-            .await;
-        if !self.gf_preprocess.gf_triple_gen.clear_store(session_id).await {
-            warn!(?session_id, "failed to clear GF(2^k) triple generation protocol state");
+        {
+            let gf = self.gf.as_mut().ok_or(HoneyBadgerError::GfNotConfigured)?;
+            gf.preprocess
+                .gf_triple_gen
+                .init_batch(
+                    random_shares_a,
+                    random_shares_b,
+                    ran_dou_sha_pair,
+                    session_id,
+                    network,
+                )
+                .await?;
         }
-        self.gf_preprocessing_material
+        let result = {
+            let gf = self.gf.as_mut().ok_or(HoneyBadgerError::GfNotConfigured)?;
+            gf.preprocess
+                .gf_triple_gen
+                .wait_for_result(session_id, self.params.timeout)
+                .await
+        };
+        {
+            let gf = self.gf.as_mut().ok_or(HoneyBadgerError::GfNotConfigured)?;
+            if !gf.preprocess.gf_triple_gen.clear_store(session_id).await {
+                warn!(
+                    ?session_id,
+                    "failed to clear GF(2^k) triple generation protocol state"
+                );
+            }
+        }
+        let gf = self.gf.as_ref().ok_or(HoneyBadgerError::GfNotConfigured)?;
+        gf.preprocessing_material
             .lock()
             .await
             .add(Some(result?), None);

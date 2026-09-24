@@ -62,6 +62,7 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerGfMulError,
     HoneyBadgerShareError,
     HoneyBadgerGfPreprocessingError,
+    HoneyBadgerGfNotConfigured,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -109,6 +110,7 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::GfMulError(_) => Self::HoneyBadgerGfMulError,
             HoneyBadgerError::ShareError(_) => Self::HoneyBadgerShareError,
             HoneyBadgerError::GfPreprocessingError(_) => Self::HoneyBadgerGfPreprocessingError,
+            HoneyBadgerError::GfNotConfigured => Self::HoneyBadgerGfNotConfigured,
         }
     }
 }
