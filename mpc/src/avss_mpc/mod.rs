@@ -15,7 +15,7 @@ use crate::{
     common::{
         rbc::{rbc_store::Msg, RbcError},
         share::{
-            avss::{AvssError, AvssMessage},
+            avss::{AvssAgreementMessage, AvssError, AvssMessage},
             feldman::FeldmanShamirShare,
             shamir::Shamirshare,
         },
@@ -99,6 +99,8 @@ pub enum AvssMPCError {
     InputError(#[from] AvssInputError),
     #[error("error in Output: {0:?}")]
     OutputError(#[from] AvssOutputError),
+    #[error("session id {0:?} uses reserved bits: not a canonically constructed session id")]
+    InvalidSessionId(AvssSessionId),
 }
 
 pub struct AvssMPCClient<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> {
@@ -134,8 +136,11 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         inputs: Vec<F>,
         input_len: usize,
     ) -> Result<Self, AvssMPCError> {
+        if id < n || id > u8::MAX as usize {
+            return Err(AvssInputError::InvalidClientId(id, n).into());
+        }
         let input = AvssInputClient::new(id, n, t, instance_id, inputs)?;
-        let output = AvssOutputClient::new(id, n, t, input_len)?;
+        let output = AvssOutputClient::new(id, n, t, instance_id, input_len)?;
         Ok(Self { id, input, output })
     }
 
@@ -153,16 +158,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
 
         match wrapped {
             AvssWrappedMessage::Input(input_msg) => {
-                if sender_id != input_msg.sender_id {
-                    return Err(AvssMPCError::InvalidPartyId);
-                }
-                self.input.process(input_msg, net).await?;
+                self.input.process(sender_id, input_msg, net).await?;
             }
             AvssWrappedMessage::Output(output_msg) => {
-                if sender_id != output_msg.sender_id {
-                    return Err(AvssMPCError::InvalidPartyId);
-                }
-                self.output.process(output_msg).await?
+                self.output.process(sender_id, output_msg).await?
             }
             _ => warn!("Incorrect message type received at client"),
         }
@@ -435,8 +434,14 @@ where
             params.pk_map.clone(),
         )?;
         let mul_node = Multiply::new(id, params.n_parties, params.threshold)?;
-        let input_server = AvssInputServer::new(id, params.n_parties, params.threshold, input_ids)?;
-        let output_server = AvssOutputServer::new(id, params.n_parties)?;
+        let input_server = AvssInputServer::new(
+            id,
+            params.n_parties,
+            params.threshold,
+            params.instance_id,
+            input_ids,
+        )?;
+        let output_server = AvssOutputServer::new(id, params.n_parties, params.instance_id)?;
         Ok(Self {
             id,
             preprocessing_material: Arc::new(Mutex::new(AvssMPCNodePreprocMaterial::empty())),
@@ -475,6 +480,15 @@ where
 
         match wrapped {
             AvssWrappedMessage::Rbc(rbc_msg) => {
+                // Reject session ids with nonzero reserved bits before any routing or admission
+                // decision is made from them: left unchecked, such a value hashes and compares
+                // as a distinct session id from its canonical counterpart while every accessor
+                // reports the same protocol/round/sub/exec/instance fields, letting a single
+                // logical session be re-admitted many times against session-count caps (see
+                // `AvssSessionId::is_canonical`).
+                if !rbc_msg.session_id.is_canonical() {
+                    return Err(AvssMPCError::InvalidSessionId(rbc_msg.session_id));
+                }
                 if sender_id != rbc_msg.sender_id {
                     return Err(AvssMPCError::InvalidPartyId);
                 }
@@ -483,7 +497,32 @@ where
                         rbc_msg.session_id.instance_id(),
                     ));
                 }
+                let is_client_input_broadcast = rbc_msg.msg_type.is_dealer_message()
+                    && rbc_msg.session_id.calling_protocol() == Some(ProtocolType::Input)
+                    && rbc_msg.session_id.exec_id() == 0
+                    && rbc_msg.session_id.round_id() == 0;
                 if rbc_msg.msg_type.is_dealer_message() {
+                    // Only the Input protocol accepts a client as dealer. Every other
+                    // dealer-message protocol (Avss/Triple/Mul/TripleCheck) is reserved for
+                    // consensus parties, so an id in the client range must be rejected here —
+                    // downstream layers (Avid's RBC, the AVSS agreement cache) trust this dealer
+                    // id without re-validating its range.
+                    if is_client_input_broadcast {
+                        if sender_id < self.params.n_parties {
+                            warn!(
+                                "Rejecting client input broadcast: sender {} is a consensus node id, not a client id",
+                                sender_id
+                            );
+                            return Err(AvssMPCError::InvalidPartyId);
+                        }
+                    } else if sender_id >= self.params.n_parties {
+                        warn!(
+                            "Rejecting dealer message: sender {} is not a consensus party id for protocol {:?}",
+                            sender_id,
+                            rbc_msg.session_id.calling_protocol()
+                        );
+                        return Err(AvssMPCError::InvalidPartyId);
+                    }
                     let expected_dealer = rbc_msg.session_id.sub_id() as usize;
                     if rbc_msg.sender_id != expected_dealer {
                         warn!(
@@ -497,12 +536,23 @@ where
 
                 match rbc_msg.session_id.calling_protocol() {
                     Some(ProtocolType::Avss) => {
-                        self.share_gen_avss.avss.rbc.process(rbc_msg, net).await?;
-                        self.share_gen_avss.avss.drain_rbc_output().await?;
+                        self.share_gen_avss
+                            .avss
+                            .rbc
+                            .process(rbc_msg, net.clone())
+                            .await?;
+                        self.share_gen_avss.avss.drain_rbc_output(net).await?;
                     }
                     Some(ProtocolType::Triple) => {
-                        self.triple_gen.avss.rbc.process(rbc_msg, net).await?;
-                        self.triple_gen.avss.drain_rbc_output().await?;
+                        self.triple_gen
+                            .avss
+                            .rbc
+                            .process(rbc_msg, net.clone())
+                            .await?;
+                        self.triple_gen.avss.drain_rbc_output(net).await?;
+                    }
+                    Some(ProtocolType::TripleCheck) => {
+                        self.triple_gen.rbc.process(rbc_msg, net).await?;
                     }
                     Some(ProtocolType::Mul) => {
                         self.mul_node.rbc.process(rbc_msg, net).await?;
@@ -531,6 +581,35 @@ where
             }
             AvssWrappedMessage::Output(_) => {
                 warn!("Incorrect message received at process function (Output)");
+            }
+            AvssWrappedMessage::Agreement(agreement_msg) => {
+                if sender_id != agreement_msg.claimed_sender() {
+                    return Err(AvssMPCError::InvalidPartyId);
+                }
+                let session_id = agreement_msg.session_id();
+                if session_id.instance_id() != self.params.instance_id {
+                    return Err(AvssMPCError::InstanceIdError(session_id.instance_id()));
+                }
+                match session_id.calling_protocol() {
+                    Some(ProtocolType::Avss) => {
+                        self.share_gen_avss
+                            .avss
+                            .process_agreement(agreement_msg, net)
+                            .await?;
+                    }
+                    Some(ProtocolType::Triple) => {
+                        self.triple_gen
+                            .avss
+                            .process_agreement(agreement_msg, net)
+                            .await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in Agreement",
+                            session_id
+                        );
+                    }
+                }
             }
         }
 
@@ -658,6 +737,11 @@ where
         // Generate the exact pool shortfall. Triple generation itself is
         // vectorized and does not require a multiple of the party count.
         let total_triples_to_generate = self.params.n_triples.saturating_sub(no_of_triples_avail);
+        // Every real triple needs its own dedicated, single-use sacrifice triple for the
+        // post-generation correctness check (gen_triple's Step 4) — a sacrifice shared
+        // across multiple candidates would let their `a`/`b` values be correlated via the
+        // shared mask, so this cannot be amortized below 1-to-1. That doubles the (a,b)
+        // random-share requirement.
         let random_pool_shortfall = self
             .params
             .n_v_random_shares
@@ -666,6 +750,7 @@ where
             .checked_add(
                 total_triples_to_generate
                     .checked_mul(2)
+                    .and_then(|v| v.checked_mul(2))
                     .ok_or(AvssMPCError::LimitError)?,
             )
             .ok_or(AvssMPCError::LimitError)?;
@@ -696,20 +781,42 @@ where
                 .lock()
                 .await
                 .take_v_random_shares(total_triples_to_generate)?;
+            // One dedicated, single-use sacrifice (a,b) pair per real triple (see
+            // `TripleGenNode::gen_triple`'s sacrifice check — this cannot be amortized
+            // to fewer than 1-to-1 without correlating candidates' masks).
+            let sacrifice_shares_a = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_v_random_shares(total_triples_to_generate)?;
+            let sacrifice_shares_b = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_v_random_shares(total_triples_to_generate)?;
 
             let a_chunks = random_shares_a.chunks(MAX_AVSS_BATCH_SIZE);
             let b_chunks = random_shares_b.chunks(MAX_AVSS_BATCH_SIZE);
+            let sacrifice_a_chunks = sacrifice_shares_a.chunks(MAX_AVSS_BATCH_SIZE);
+            let sacrifice_b_chunks = sacrifice_shares_b.chunks(MAX_AVSS_BATCH_SIZE);
 
-            for (a, b) in a_chunks.zip(b_chunks) {
+            for (a, b, sacrifice_a, sacrifice_b) in
+                itertools::izip!(a_chunks, b_chunks, sacrifice_a_chunks, sacrifice_b_chunks)
+            {
                 let triple_counter = self.counters.triple_counter.get_next().await?;
                 let sessionid = AvssSessionId::new(
                     ProtocolType::Triple,
                     AvssSessionId::pack_slot(triple_counter, 0, 0),
                     self.params.instance_id,
                 );
+                let mut a_batch = a.to_vec();
+                a_batch.extend_from_slice(sacrifice_a);
+                let mut b_batch = b.to_vec();
+                b_batch.extend_from_slice(sacrifice_b);
+
                 let result = self
                     .triple_gen
-                    .gen_triple(sessionid, a.to_vec(), b.to_vec(), rng, network.clone())
+                    .gen_triple(sessionid, a_batch, b_batch, rng, network.clone())
                     .await;
 
                 if !self.triple_gen.clear_store(sessionid).await {
@@ -801,6 +908,7 @@ pub enum AvssWrappedMessage {
     Mul(MultMessage),
     Input(AvssInputMessage),
     Output(AvssOutputMessage),
+    Agreement(AvssAgreementMessage<AvssSessionId>),
 }
 
 impl AvssWrappedMessage {
@@ -815,6 +923,12 @@ impl AvssWrappedMessage {
         let wrapped = AvssWrappedMessage::Avss(msg);
         Ok(bincode::serialize(&wrapped)?)
     }
+
+    /// Wraps an AVSS OK/READY/Reveal agreement message.
+    pub fn agreement_wrap(msg: AvssAgreementMessage<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
+        let wrapped = AvssWrappedMessage::Agreement(msg);
+        Ok(bincode::serialize(&wrapped)?)
+    }
 }
 
 #[repr(u8)]
@@ -827,6 +941,7 @@ pub enum ProtocolType {
     Mul = 4,
     Input = 5,
     Output = 6,
+    TripleCheck = 7,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -845,6 +960,7 @@ impl ProtocolTag for ProtocolType {
             4 => Some(Self::Mul),
             5 => Some(Self::Input),
             6 => Some(Self::Output),
+            7 => Some(Self::TripleCheck),
 
             _ => None,
         }
@@ -924,6 +1040,49 @@ impl AvssSessionId {
     #[inline]
     pub fn pack_slot(exec_id: u64, sub_id: u8, round_id: u8) -> u128 {
         ((exec_id as u128) << 16) | ((sub_id as u128) << 8) | (round_id as u128)
+    }
+
+    /// Rejects aliases of an otherwise-identical session id that differ only in the reserved
+    /// bits (120..128). Those bits are never set by [`AvssSessionId::new`] and never read by any
+    /// accessor, but `AvssSessionId` derives `Eq`/`Hash`/`Serialize` over the raw `u128` — so an
+    /// attacker-supplied value with a nonzero reserved byte hashes and compares as a distinct
+    /// session id while presenting identical protocol/round/sub/exec/instance fields to every
+    /// check. Call this on every session id that arrives over the network, before it is used for
+    /// routing or admission.
+    pub fn is_canonical(self) -> bool {
+        (self.0 >> 120) == 0
+    }
+}
+
+#[cfg(test)]
+mod avss_session_id_tests {
+    use super::*;
+
+    #[test]
+    fn test_avss_session_id_canonicality() {
+        let session_id = AvssSessionId::new(
+            ProtocolType::Input,
+            AvssSessionId::pack_slot(0, 3, 0),
+            0xDEADBEEF,
+        );
+        assert!(session_id.is_canonical());
+
+        // Every one of the 256 reserved-byte values aliases the same protocol/round/sub/exec/
+        // instance fields as `session_id` while being a distinct `u128`, hash, and equality key.
+        // Only the all-zero reserved byte (already covered above) is canonical.
+        for reserved in 1..=u8::MAX {
+            let alias = unsafe {
+                AvssSessionId::from_u128(session_id.as_u128() | ((reserved as u128) << 120))
+            };
+            assert_ne!(alias.as_u128(), session_id.as_u128());
+            assert_ne!(alias, session_id);
+            assert_eq!(alias.calling_protocol(), session_id.calling_protocol());
+            assert_eq!(alias.exec_id(), session_id.exec_id());
+            assert_eq!(alias.sub_id(), session_id.sub_id());
+            assert_eq!(alias.round_id(), session_id.round_id());
+            assert_eq!(alias.instance_id(), session_id.instance_id());
+            assert!(!alias.is_canonical());
+        }
     }
 }
 

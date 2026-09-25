@@ -3,7 +3,7 @@ use crate::common::types::TypeError;
 use crate::honeybadger::fpdiv::fixed_point_reciprocal_scaled;
 use crate::honeybadger::{fpmul::TruncPrError, SessionId};
 use crate::{
-    common::{types::fixed::SecretFixedPoint, RBC},
+    common::types::fixed::SecretFixedPoint,
     honeybadger::{
         fpmul::truncpr::TruncPrNode, robust_interpolate::robust_interpolate::RobustShare,
     },
@@ -34,21 +34,19 @@ pub enum FPDivConstError {
 }
 
 #[derive(Clone, Debug)]
-pub struct FPDivConstNode<F, R>
+pub struct FPDivConstNode<F>
 where
     F: PrimeField,
-    R: RBC,
 {
     pub id: usize,
     pub n_parties: usize,
     pub threshold: usize,
-    pub trunc_node: TruncPrNode<F, R>,
+    pub trunc_node: TruncPrNode<F>,
 }
 
-impl<F, R> FPDivConstNode<F, R>
+impl<F> FPDivConstNode<F>
 where
     F: PrimeField,
-    R: RBC<Id = SessionId>,
 {
     pub fn new(id: usize, n_parties: usize, threshold: usize) -> Result<Self, FPDivConstError> {
         Ok(Self {

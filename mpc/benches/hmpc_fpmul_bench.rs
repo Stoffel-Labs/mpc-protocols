@@ -32,14 +32,14 @@ async fn setup_fpmul(
 ) {
     // Compute preprocessing requirements
     let batch = t + 1;
-    let n_prandbit = n_muls * m;
-    let total_randbit = (n_prandbit + batch - 1) / batch * batch;
-    let n_triples = n_muls + total_randbit; // fpmul triples + prandbit's consumption
+    let n_randbit = n_muls * m;
+    let total_randbit = (n_randbit + batch - 1) / batch * batch;
+    let n_triples = n_muls + total_randbit; // fpmul triples + randbit's consumption
     let n_shares = total_randbit;
     let n_prandint = n_muls;
 
     let (network, receivers) = test_setup(n_parties);
-    let nodes = create_nodes(n_parties, t, n_triples, n_shares, n_prandbit, n_prandint, 1);
+    let nodes = create_nodes(n_parties, t, n_triples, n_shares, n_randbit, n_prandint, 1);
     spawn_receivers(receivers, nodes.clone(), network.clone());
 
     // Run preprocessing — generates all required materials

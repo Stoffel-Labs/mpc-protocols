@@ -14,8 +14,8 @@ mod tests {
         },
         honeybadger::{ProtocolType, SessionId, WrappedMessage},
     };
-    use stoffelmpc_network::fake_network::FakeNetwork;
-    use tokio::sync::Mutex;
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+    use tokio::sync::{mpsc, Mutex};
     use tokio::time::timeout;
     use tracing::warn;
 
@@ -66,6 +66,103 @@ mod tests {
                 bracha.id
             );
         }
+    }
+
+    /// Regression test for the dispatcher-freeze DoS this module's `try_send` fix closes:
+    /// `ready_handler` used to hand off a completed session via a blocking
+    /// `output_sender.send(...).await`. Since `AvssMPCNode::process` takes `&mut self` and
+    /// processes one inbound message at a time, a single node's completion channel filling
+    /// up (e.g. from an authenticated-but-unsolicited flood of unrelated sessions nobody is
+    /// consuming) would block that one blocking send forever, wedging *every* subsequent
+    /// inbound message on that node shut — not just the session that filled the queue.
+    ///
+    /// This drives more Bracha sessions to completion than the output channel has capacity
+    /// for, with the receiving end deliberately never drained (mirroring "nobody is
+    /// consuming completions right now"), and checks that processing still returns
+    /// promptly instead of hanging.
+    #[tokio::test]
+    async fn test_full_output_channel_does_not_block_bracha_dispatch() {
+        setup_tracing();
+
+        let n = 4;
+        let t = 1;
+        let k = t + 1;
+        let cap = 2usize; // tiny on purpose, to reach "full" without needing thousands of sessions
+
+        let (rbc_sender, mut rbc_receiver) = mpsc::channel(cap);
+        let bracha =
+            Bracha::<SessionId>::new(0, n, t, k, rbc_sender, Arc::new(WrappedMessage::rbc_wrap))
+                .expect("failed to construct Bracha instance");
+
+        // A network is required for `process`'s broadcast side effects, but nothing needs
+        // to drain it for this test — only `bracha`'s own completion channel matters here.
+        let config = FakeNetworkConfig::new(500);
+        let (inner, _receivers, _) = FakeInnerNetwork::new(n, None, config);
+        let net = Arc::new(FakeNetwork::new(0, inner));
+
+        // Drives one session to completion via synthetic READY votes from three distinct
+        // senders. Bracha's own completion logic only counts votes by `sender_id` and
+        // admits sessions lazily — per the `Msg` doc comment, sender authentication is the
+        // caller's job, not the RBC layer's — so this reaches the 2t+1=3 threshold without
+        // any real INIT/ECHO round-trip or other live party instances.
+        async fn complete_session(bracha: &Bracha<SessionId>, net: Arc<FakeNetwork>, exec: u64) {
+            let session_id =
+                SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(exec, 0, 0), 77);
+            let payload = format!("payload-{exec}").into_bytes();
+            for sender in 0..3 {
+                let msg = Msg::new(
+                    sender,
+                    session_id,
+                    0,
+                    payload.clone(),
+                    vec![],
+                    GenericMsgType::Bracha(MsgType::Ready),
+                );
+                bracha.process(msg, net.clone()).await.unwrap();
+            }
+        }
+
+        // Fill the completion channel to capacity with unsolicited sessions nobody drains.
+        for exec in 0..cap as u64 {
+            complete_session(&bracha, net.clone(), exec).await;
+        }
+
+        // The next completion pushes past capacity. Before the fix, the blocking
+        // `output_sender.send().await` inside `ready_handler` would hang here forever;
+        // `try_send` must let this return promptly instead, dropping the notification.
+        let result = timeout(
+            Duration::from_secs(3),
+            complete_session(&bracha, net.clone(), cap as u64),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "processing a completion past a full output channel must not block — this is \
+             exactly the node-wide dispatcher freeze the try_send fix closes"
+        );
+
+        // A completely unrelated, later session must still get processed normally — proving
+        // the dispatcher isn't left wedged after the channel filled.
+        let followup = timeout(
+            Duration::from_secs(3),
+            complete_session(&bracha, net.clone(), (cap + 1) as u64),
+        )
+        .await;
+        assert!(
+            followup.is_ok(),
+            "a later, unrelated session must still be processed after the channel filled"
+        );
+
+        // The channel isn't wedged shut either: the first `cap` completions that fit are
+        // still there to be drained.
+        let mut drained = 0;
+        while rbc_receiver.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(
+            drained, cap,
+            "expected exactly the first {cap} completions to have been queued"
+        );
     }
 
     #[tokio::test]

@@ -24,6 +24,9 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerSuccess,
     HoneyBadgerNetworkError,
     HoneyBadgerRanShaError,
+    HoneyBadgerZeroShaError,
+    HoneyBadgerInsufficientStatisticalSecurity,
+    HoneyBadgerMulPubError,
     HoneyBadgerInputError,
     HoneyBadgerDouShaError,
     HoneyBadgerRanDouShaError,
@@ -38,7 +41,7 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerChannelClosed,
     HoneyBadgerOutputNotReady,
     HoneyBadgerRandBitError,
-    HoneyBadgerPRandError,
+    HoneyBadgerPRandIntError,
     HoneyBadgerFPMulError,
     HoneyBadgerTruncPrError,
     HoneyBadgerFPDivConstError,
@@ -51,6 +54,7 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerInstanceIdError,
     // Appended last to keep the existing discriminants ABI-stable for current SDK consumers.
     HoneyBadgerUnauthorizedSenderError,
+    HoneyBadgerInvalidSessionIdError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -58,6 +62,11 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
         match value {
             HoneyBadgerError::NetworkError(_) => Self::HoneyBadgerNetworkError,
             HoneyBadgerError::RanShaError(_) => Self::HoneyBadgerRanShaError,
+            HoneyBadgerError::ZeroShaError(_) => Self::HoneyBadgerZeroShaError,
+            HoneyBadgerError::InsufficientStatisticalSecurity { .. } => {
+                Self::HoneyBadgerInsufficientStatisticalSecurity
+            }
+            HoneyBadgerError::MulPubError(_) => Self::HoneyBadgerMulPubError,
             HoneyBadgerError::InputError(_) => Self::HoneyBadgerInputError,
             HoneyBadgerError::DouShaError(_) => Self::HoneyBadgerDouShaError,
             HoneyBadgerError::RanDouShaError(_) => Self::HoneyBadgerRanDouShaError,
@@ -73,7 +82,7 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::JoinError => Self::HoneyBadgerJoinError,
             HoneyBadgerError::ChannelClosed => Self::HoneyBadgerChannelClosed,
             HoneyBadgerError::RandBitError(_) => Self::HoneyBadgerRandBitError,
-            HoneyBadgerError::PRandError(_) => Self::HoneyBadgerPRandError,
+            HoneyBadgerError::PRandIntError(_) => Self::HoneyBadgerPRandIntError,
             HoneyBadgerError::FPError(_) => Self::HoneyBadgerFPMulError,
             HoneyBadgerError::TruncPrError(_) => Self::HoneyBadgerTruncPrError,
             HoneyBadgerError::FPDivConstError(_) => Self::HoneyBadgerFPDivConstError,
@@ -85,6 +94,7 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::UnauthorizedSender(_, _) => Self::HoneyBadgerUnauthorizedSenderError,
             HoneyBadgerError::InvalidPartySize => Self::HoneyBadgerInvalidPartySizeError,
             HoneyBadgerError::InvalidPartyId => Self::HoneyBadgerInvalidPartyIdError,
+            HoneyBadgerError::InvalidSessionId(_) => Self::HoneyBadgerInvalidSessionIdError,
         }
     }
 }

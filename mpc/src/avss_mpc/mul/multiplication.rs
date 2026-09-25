@@ -387,7 +387,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
     }
 }
 
-fn verify_share_against_commitments<F: FftField, G: CurveGroup<ScalarField = F>>(
+pub(crate) fn verify_share_against_commitments<F: FftField, G: CurveGroup<ScalarField = F>>(
     share: &FeldmanShamirShare<F, G>,
     expected_commitments: &[G],
     expected_id: usize,

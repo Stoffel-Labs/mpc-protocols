@@ -29,7 +29,7 @@ The core engine is built around the `HoneyBadgerMPCNode`, which orchestrates all
 | Preprocessing | Shamir Random Share (RanSha) | ✔ Implemented |
 | Preprocessing | Double Sharing / Random Double Sharing (DouSha / RanDouSha) | ✔ Implemented |
 | Preprocessing | Beaver Triple Generation | ✔ Implemented |
-| Preprocessing | Random Bit / PRandBit / PRandInt | ✔ Implemented |
+| Preprocessing | Random Bit (RandBit) / PRandInt | ✔ Implemented |
 | Arithmetic | Secure Beaver Multiplication | ✔ Implemented |
 | Arithmetic | Fixed-Point Mul / DivWithConst / Trunc | ✔ Implemented |
 | I/O | Distributed Input / Output (via RBC) | ✔ Implemented |
@@ -61,7 +61,7 @@ All modules plug into:
 
 #### `HoneyBadgerMPCNode<F, R>`
 A node capable of:
-- Running preprocessing (random shares, doubles, triples, PRandBit, PRandInt)
+- Running preprocessing (random shares, doubles, triples, RandBit, PRandInt)
 - Performing secure arithmetic operations
 - Handling RBC-based input and output
 - Routing messages using compact `SessionId` fields
@@ -240,7 +240,7 @@ This generates:
 - Double shares  
 - Random double shares  
 - Beaver triples  
-- PRandBit outputs  
+- RandBit outputs  
 - PRandInt outputs  
 
 ---

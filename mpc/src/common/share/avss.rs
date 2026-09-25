@@ -1,13 +1,18 @@
 use crate::common::{
+    lagrange_interpolate,
     rbc::RbcError,
     session_store::{session_ttl, RetiredSet, DEFAULT_RETIRED_CAP},
     share::{feldman::FeldmanShamirShare, shamir::Shamirshare},
     ProtocolSessionId, RbcWrapFn, RBC,
 };
 use ark_ec::CurveGroup;
-use ark_ff::FftField;
+use ark_ff::{FftField, PrimeField};
+use ark_poly::Polynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::rand::Rng;
+use ark_std::rand::{
+    rngs::{OsRng, StdRng},
+    Rng, SeedableRng,
+};
 use bincode::{ErrorKind, Options};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -15,7 +20,11 @@ use chacha20poly1305::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Instant,
+};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
     mpsc::{self, Receiver, Sender},
@@ -42,6 +51,12 @@ pub const MAX_PENDING_SESSIONS: usize = 512;
 /// relationship is enforced by a static assertion at the consumer, so the two cannot drift
 /// apart into silently-rejected honest dealings.
 pub const MAX_DEAL_BATCH: usize = 128;
+
+/// Upper bound on the serialized size of a single group element or scalar carried in a
+/// `Reveal` message (`k_id`, and each of `DleqProof`'s `a1`/`a2`/`z`). Generous headroom
+/// over any real curve's compressed point/scalar size (e.g. 48 bytes for BLS12-381 G1) —
+/// this only exists to reject obviously-malformed/padded input before it's buffered.
+const MAX_DLEQ_FIELD_SIZE: usize = 128;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AvssError {
@@ -121,6 +136,88 @@ pub fn verify_feldman<F: FftField, G: CurveGroup<ScalarField = F>>(
 
     G::generator().mul(share.feldmanshare.share[0]) == rhs
 }
+
+/// Non-interactive Chaum-Pedersen proof of equality of discrete logarithms:
+/// `NIZK{(alpha) : x = g0^alpha ∧ y = g1^alpha}`. Used to reveal a session-scoped
+/// ECDH secret (`Ki_d = pk_d^sk_i`) as proof of a dealer's misbehavior, without
+/// revealing the long-term `sk_i` itself — the prover convinces everyone the
+/// revealed value was genuinely derived from the secret key matching their own
+/// already-known public key, and nothing more.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DleqProof {
+    a1: Vec<u8>,
+    a2: Vec<u8>,
+    z: Vec<u8>,
+}
+
+fn dleq_challenge<F, G>(g0: &G, x: &G, g1: &G, y: &G, a1: &G, a2: &G) -> Result<F, AvssError>
+where
+    F: PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    let mut buf = Vec::new();
+    g0.serialize_compressed(&mut buf)?;
+    x.serialize_compressed(&mut buf)?;
+    g1.serialize_compressed(&mut buf)?;
+    y.serialize_compressed(&mut buf)?;
+    a1.serialize_compressed(&mut buf)?;
+    a2.serialize_compressed(&mut buf)?;
+    Ok(F::from_le_bytes_mod_order(&Sha256::digest(&buf)))
+}
+
+/// Proves `x = g0^alpha ∧ y = g1^alpha` for a known witness `alpha`, without
+/// revealing it.
+fn dleq_prove<F, G>(
+    alpha: F,
+    g0: G,
+    x: G,
+    g1: G,
+    y: G,
+    rng: &mut impl Rng,
+) -> Result<DleqProof, AvssError>
+where
+    F: PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    let beta = F::rand(rng);
+    let a1 = g0.mul(beta);
+    let a2 = g1.mul(beta);
+    let e: F = dleq_challenge(&g0, &x, &g1, &y, &a1, &a2)?;
+    let z = beta - alpha * e;
+
+    let mut a1_bytes = Vec::new();
+    a1.serialize_compressed(&mut a1_bytes)?;
+    let mut a2_bytes = Vec::new();
+    a2.serialize_compressed(&mut a2_bytes)?;
+    let mut z_bytes = Vec::new();
+    z.serialize_compressed(&mut z_bytes)?;
+
+    Ok(DleqProof {
+        a1: a1_bytes,
+        a2: a2_bytes,
+        z: z_bytes,
+    })
+}
+
+/// Verifies a `DleqProof` for the statement `x = g0^alpha ∧ y = g1^alpha`.
+fn dleq_verify<F, G>(proof: &DleqProof, g0: G, x: G, g1: G, y: G) -> bool
+where
+    F: PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    let (Ok(a1), Ok(a2), Ok(z)) = (
+        G::deserialize_compressed(&proof.a1[..]),
+        G::deserialize_compressed(&proof.a2[..]),
+        F::deserialize_compressed(&proof.z[..]),
+    ) else {
+        return false;
+    };
+    let Ok(e) = dleq_challenge::<F, G>(&g0, &x, &g1, &y, &a1, &a2) else {
+        return false;
+    };
+    a1 == g0.mul(z) + x.mul(e) && a2 == g1.mul(z) + y.mul(e)
+}
+
 fn kdf_from_point<G: CanonicalSerialize>(p: &G) -> [u8; 32] {
     let mut buf = Vec::new();
     p.serialize_compressed(&mut buf).unwrap();
@@ -165,6 +262,134 @@ fn decrypt(key32: [u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>, AvssError> {
 pub type AvssWrapFn<Id> =
     Arc<dyn Fn(AvssMessage<Id>) -> Result<Vec<u8>, RbcError> + Send + Sync + 'static>;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AvssAgreementMessage<Id: ProtocolSessionId> {
+    Ok {
+        session_id: Id,
+        voter: PartyId,
+    },
+    Ready {
+        session_id: Id,
+        voter: PartyId,
+    },
+    Reveal {
+        session_id: Id,
+        party_id: PartyId,
+        k_id: Vec<u8>,
+        proof: DleqProof,
+    },
+}
+
+impl<Id: ProtocolSessionId> AvssAgreementMessage<Id> {
+    pub fn session_id(&self) -> Id {
+        match self {
+            Self::Ok { session_id, .. } => *session_id,
+            Self::Ready { session_id, .. } => *session_id,
+            Self::Reveal { session_id, .. } => *session_id,
+        }
+    }
+
+    /// The party this message is attributed to — used by callers to authenticate that the
+    /// transport-level sender matches the party the message claims to speak for.
+    pub fn claimed_sender(&self) -> PartyId {
+        match self {
+            Self::Ok { voter, .. } => *voter,
+            Self::Ready { voter, .. } => *voter,
+            Self::Reveal { party_id, .. } => *party_id,
+        }
+    }
+}
+
+pub type AvssAgreementWrapFn<Id> =
+    Arc<dyn Fn(AvssAgreementMessage<Id>) -> Result<Vec<u8>, RbcError> + Send + Sync + 'static>;
+
+/// The parts of a dealing an `AgreementState` needs once this node has locally processed it:
+/// enough to redo any peer's decryption+Feldman-check during recovery, plus this node's own
+/// verdict.
+struct DealingInfo<F, G>
+where
+    F: FftField,
+    G: CurveGroup<ScalarField = F>,
+{
+    pk_d: G,
+    all_commitments: Vec<Vec<G>>,
+    encrypted_shares: Vec<Vec<Vec<u8>>>,
+    own_valid: bool,
+    own_shares: Option<Vec<FeldmanShamirShare<F, G>>>,
+}
+
+struct AgreementState<F, G>
+where
+    F: FftField,
+    G: CurveGroup<ScalarField = F>,
+{
+    created_at: Instant,
+    /// Who this entry's admission slot is billed to. Set once at creation — `process()`
+    /// charges the RBC-authenticated dealer (`session_id.dealer_id()`, trustworthy because
+    /// the RBC layer already checked the sender against it upstream); a vote-triggered lazy
+    /// creation charges the authenticated voter instead, since `session_id` itself carries no
+    /// authenticated dealer identity in that case. See `admit`.
+    charged_to: u8,
+    dealing: Option<DealingInfo<F, G>>,
+    ok_votes: BTreeSet<PartyId>,
+    ready_votes: BTreeSet<PartyId>,
+    sent_ready: bool,
+    /// Feldman-verified rows recovered from other parties' `Reveal`s, keyed by the party
+    /// they belong to. Once `t + 1` accumulate, Feldman's binding property guarantees they
+    /// lie on the unique degree-`t` polynomial the (RBC-agreed) commitments commit to,
+    /// regardless of OK/READY timing — recovery does not need to wait on Bracha quorum.
+    recovered: BTreeMap<PartyId, Vec<FeldmanShamirShare<F, G>>>,
+    sent_reveal: bool,
+    /// Reveals buffered before `dealing` was known, keyed by `party_id` — a party can only
+    /// ever speak for itself (`claimed_sender() == party_id`), so this naturally caps at
+    /// `n_parties` entries and a repeat send from the same party overwrites rather than
+    /// accumulates.
+    pending_reveals: BTreeMap<PartyId, (Vec<u8>, DleqProof)>,
+    finished: bool,
+}
+
+impl<F, G> AgreementState<F, G>
+where
+    F: FftField,
+    G: CurveGroup<ScalarField = F>,
+{
+    fn pending(charged_to: u8) -> Self {
+        Self {
+            created_at: Instant::now(),
+            charged_to,
+            dealing: None,
+            ok_votes: BTreeSet::new(),
+            ready_votes: BTreeSet::new(),
+            sent_ready: false,
+            recovered: BTreeMap::new(),
+            sent_reveal: false,
+            pending_reveals: BTreeMap::new(),
+            finished: false,
+        }
+    }
+
+    /// `true` once enough votes are in that this node should have echoed READY, whether or
+    /// not it already has (used both when a new vote arrives and, symmetrically, when the
+    /// local dealing finally arrives after votes that were already sufficient).
+    fn should_amplify_ready(&self, t: usize) -> bool {
+        !self.sent_ready && (self.ok_votes.len() >= 2 * t + 1 || self.ready_votes.len() >= t + 1)
+    }
+
+    /// Own share to finalize-and-output via the direct (non-recovery) path, if the READY
+    /// quorum has been met and this node's own row verified.
+    fn direct_finalize_shares(&self, t: usize) -> Option<Vec<FeldmanShamirShare<F, G>>> {
+        if self.finished {
+            return None;
+        }
+        let dealing = self.dealing.as_ref()?;
+        if dealing.own_valid && self.ready_votes.len() >= 2 * t + 1 {
+            dealing.own_shares.clone()
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AvssNode<F, R, G, Id>
 where
@@ -180,14 +405,16 @@ where
     pub sk_i: F,
     pub pk_map: Arc<Vec<G>>,
     pub shares: Arc<Mutex<BTreeMap<Id, (Instant, Option<Vec<FeldmanShamirShare<F, G>>>)>>>,
-    /// Tombstones for `shares` entries already consumed (or otherwise cleared),
-    /// so a late/duplicate dealer message can't silently resurrect a session
-    /// nobody is waiting on anymore.
+    /// Tombstones for `shares`/`agreement` entries already consumed (or otherwise cleared),
+    /// so a late/duplicate message can't silently resurrect a session nobody is waiting on
+    /// anymore.
     retired: Arc<Mutex<RetiredSet<Id>>>,
+    agreement: Arc<Mutex<BTreeMap<Id, AgreementState<F, G>>>>,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<Receiver<Id>>>,
     pub output_sender: Sender<Id>,
     pub wrapper: AvssWrapFn<Id>,
+    pub agreement_wrapper: AvssAgreementWrapFn<Id>,
 }
 impl<F, R, G, Id> std::fmt::Debug for AvssNode<F, R, G, Id>
 where
@@ -202,6 +429,7 @@ where
             .field("n_parties", &self.n_parties)
             .field("t", &self.t)
             .field("shares", &self.shares)
+            .field("agreement", &"<agreement state>")
             .field("rbc", &self.rbc)
             .field("wrapper", &"<fn>") // 👈 intentionally opaque
             .finish()
@@ -225,6 +453,7 @@ where
         output_sender: Sender<Id>,
         rbc_wrapper: RbcWrapFn<Id>,
         avss_wrapper: AvssWrapFn<Id>,
+        agreement_wrapper: AvssAgreementWrapFn<Id>,
     ) -> Result<Self, AvssError> {
         if ids.len() != n_parties {
             return Err(AvssError::InvalidInput(
@@ -249,19 +478,25 @@ where
             pk_map,
             shares: Arc::new(Mutex::new(BTreeMap::new())),
             retired: Arc::new(Mutex::new(RetiredSet::new(DEFAULT_RETIRED_CAP))),
+            agreement: Arc::new(Mutex::new(BTreeMap::new())),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             output_sender,
             wrapper: avss_wrapper,
+            agreement_wrapper,
         })
     }
 
-    /// Clears the dealer share mailbox entry and the underlying RBC broadcast
-    /// session for a single AVSS instance. Callers that derive one `Id` per
-    /// dealer must call this once per dealer to fully release a round.
+    /// Clears the dealer share mailbox entry, the agreement state, and the underlying RBC
+    /// broadcast session for a single AVSS instance. Callers that derive one `Id` per dealer
+    /// must call this once per dealer to fully release a round.
     pub async fn clear_session(&self, id: Id) {
         self.rbc.clear_session(id).await;
-        self.shares.lock().await.remove(&id);
+        self.agreement.lock().await.remove(&id);
+        // `shares` and `retired` are held together (shares first) so this can't interleave
+        // with `finalize`'s own check-then-act on the same two locks — see `finalize`.
+        let mut map = self.shares.lock().await;
+        map.remove(&id);
         self.retired.lock().await.record(id);
     }
 
@@ -269,52 +504,62 @@ where
     /// duplicate of the same dealer message can't resurrect it after the
     /// consumer has already moved on.
     pub async fn take_share(&self, id: Id) -> Option<Option<Vec<FeldmanShamirShare<F, G>>>> {
-        let value = self.shares.lock().await.remove(&id).map(|(_, v)| v);
+        self.agreement.lock().await.remove(&id);
+        // See `clear_session`'s comment on lock ordering: `shares` held across the
+        // `retired` mark so this can't interleave with `finalize`.
+        let mut map = self.shares.lock().await;
+        let value = map.remove(&id).map(|(_, v)| v);
         self.retired.lock().await.record(id);
         value
     }
 
     /// Returns `true` if `map` has room for one more entry. Entries only leave this map via
     /// `take_share`/`clear_session`, both driven by the consuming protocol's success path — a
-    /// dealer message for a session no local caller ever finishes waiting on (timed out, or
-    /// never legitimately started) would otherwise squat here forever. If `map` is full, evicts
-    /// anything idle past the global session TTL first to reclaim room from exactly that kind
-    /// of entry before giving up.
-    async fn admit(
-        &self,
-        map: &mut BTreeMap<Id, (Instant, Option<Vec<FeldmanShamirShare<F, G>>>)>,
-        session_id: Id,
-    ) -> bool {
-        let over_capacity = |map: &BTreeMap<
-            Id,
-            (Instant, Option<Vec<FeldmanShamirShare<F, G>>>),
-        >| { map.len() >= MAX_PENDING_SESSIONS };
+    /// session no local caller ever finishes waiting on (timed out, or never legitimately
+    /// started) would otherwise squat here forever. If `map` is full, evicts anything idle
+    /// past the global session TTL first to reclaim room from exactly that kind of entry
+    /// before giving up.
+    async fn admit(&self, map: &mut BTreeMap<Id, AgreementState<F, G>>, charged_to: u8) -> bool {
+        let over_capacity =
+            |map: &BTreeMap<Id, AgreementState<F, G>>| map.len() >= MAX_PENDING_SESSIONS;
         // Per-peer quota, mirroring `SessionStore::get_or_admit`. Without it the global cap is
-        // first-come-first-served, so a single dealer can occupy all `MAX_PENDING_SESSIONS`
+        // first-come-first-served, so a single party can occupy all `MAX_PENDING_SESSIONS`
         // slots and starve every honest dealer.
         //
-        // Attribution follows the same convention as the RBC layer : charge the
-        // dealer named by `session_id`, not whichever peer happened to deliver the message.
-        // Relayed messages for an honest dealer's broadcast would otherwise be billed to the
-        // relay. `drain_rbc_output` has already rejected any message whose inner `session_id`
-        // disagrees with the RBC session it arrived on, and `verify_feldman` above has rejected
-        // malformed dealings, so a slot is only ever consumed by a well-formed dealing.
-        let dealer = session_id.dealer_id();
+        // Attribution is by `charged_to`, an authenticated identity the *caller* picks — not
+        // by reading `session_id.dealer_id()` here, which would be unauthenticated for a
+        // vote-triggered admission (an `Ok`/`Ready`/`Reveal` carries its `session_id` as plain
+        // data, so its embedded dealer bits could name anyone). `process()` passes the
+        // RBC-authenticated dealer for a real dealing; `get_or_admit_agreement` passes the
+        // authenticated voter for a lazily-created, vote-triggered entry. Each entry's charge
+        // is fixed at creation (`AgreementState::pending`) and never re-attributed.
         let per_peer_cap = (MAX_PENDING_SESSIONS / self.n_parties).max(1);
-        let peer_count = |map: &BTreeMap<Id, (Instant, Option<Vec<FeldmanShamirShare<F, G>>>)>| {
-            map.keys().filter(|id| id.dealer_id() == dealer).count()
+        let peer_count = |map: &BTreeMap<Id, AgreementState<F, G>>| {
+            map.values()
+                .filter(|state| state.charged_to == charged_to)
+                .count()
         };
 
         if over_capacity(map) || peer_count(map) >= per_peer_cap {
             let stale: Vec<Id> = map
                 .iter()
-                .filter(|(_, (inserted_at, _))| inserted_at.elapsed() >= session_ttl())
+                .filter(|(_, state)| state.created_at.elapsed() >= session_ttl())
                 .map(|(id, _)| *id)
                 .collect();
             if !stale.is_empty() {
+                // A stale entry may have already finalized into `shares` without ever being
+                // drained by `take_share` (e.g. the output notification was dropped under a
+                // full channel) — clear that too, or it would outlive its own agreement entry
+                // and leak indefinitely. `shares` locked before `retired` (never the reverse)
+                // to match `finalize`/`clear_session`/`take_share`'s ordering — this runs
+                // while the caller already holds `agreement`, so the global order stays
+                // `agreement` -> `shares` -> `retired` everywhere and can't deadlock against
+                // them.
+                let mut shares = self.shares.lock().await;
                 let mut retired = self.retired.lock().await;
                 for id in stale {
                     map.remove(&id);
+                    shares.remove(&id);
                     retired.record(id);
                 }
             }
@@ -322,7 +567,13 @@ where
         !over_capacity(map) && peer_count(map) < per_peer_cap
     }
 
-    pub async fn drain_rbc_output(&mut self) -> Result<(), AvssError> {
+    pub async fn drain_rbc_output<N: Network + Send + Sync>(
+        &mut self,
+        net: Arc<N>,
+    ) -> Result<(), AvssError>
+    where
+        F: PrimeField,
+    {
         loop {
             let id = {
                 let mut rx = self.rbc_output.lock().await;
@@ -347,7 +598,7 @@ where
                 continue;
             }
 
-            match self.process(msg).await {
+            match self.process(msg, net.clone()).await {
                 Ok(()) => {}
                 Err(e) => {
                     return Err(e);
@@ -439,49 +690,14 @@ where
         Ok(())
     }
 
-    pub async fn process(&mut self, msg: AvssMessage<Id>) -> Result<(), AvssError> {
-        info!(
-            party_id = ?self.id,
-            session_id = msg.session_id.as_u128(),
-            "Processing AVSS share"
-        );
-        match msg.session_id.calling_protocol() {
-            Some(proto) => proto,
-            None => {
-                return Err(AvssError::InvalidInput(format!(
-                    "Unknown calling protocol in session ID {:?}",
-                    msg.session_id
-                )));
-            }
-        };
-        {
-            let mut map = self.shares.lock().await;
-            if map.contains_key(&msg.session_id) {
-                return Ok(()); // ignore duplicates
-            }
-            // Reject an over-quota dealer here, before the decryption and curve arithmetic
-            // below. Everything from `dealer_pk` onwards costs real work — `t + 1` point
-            // decompressions per commitment plus a Feldman verification per share — and
-            // without this the quota only limited what an attacker could *cache*, not what
-            // it could make us *compute*.
-            //
-            // `admit` does not insert, so this is purely an early-out; the authoritative
-            // check still runs after verification, because the lock is released in between
-            // and another task may take the last slot meanwhile.
-            if !self.admit(&mut map, msg.session_id).await {
-                warn!(
-                    session_id = msg.session_id.as_u128(),
-                    "AVSS share cache full or dealer {} over its per-peer quota; rejecting before verification",
-                    msg.session_id.dealer_id()
-                );
-                self.rbc.clear_session(msg.session_id).await;
-                return Err(AvssError::LimitExceeded);
-            }
-        };
-        if self.retired.lock().await.contains(&msg.session_id) {
-            return Ok(()); // already consumed — drop the straggler instead of resurrecting it
-        }
-
+    /// Validates the shape of a dealing — deserializable `dealer_pk`, consistent lengths,
+    /// well-formed commitment points — everything that must hold before this node's own row
+    /// can even be decrypted. Kept separate from `process` so a failure here has a single,
+    /// centralized cleanup site instead of repeating it at each of the checks below.
+    fn validate_dealing(
+        &self,
+        msg: &AvssMessage<Id>,
+    ) -> Result<(G, Vec<Vec<G>>, [u8; 32], Vec<Vec<u8>>), AvssError> {
         let pk_d: G = CanonicalDeserialize::deserialize_compressed(&msg.dealer_pk[..])?;
         if pk_d.is_zero() {
             return Err(AvssError::InvalidShare);
@@ -496,10 +712,11 @@ where
         {
             return Err(AvssError::InvalidShareLength);
         }
-        let cts: &Vec<Vec<u8>> = msg
+        let cts: Vec<Vec<u8>> = msg
             .encrypted_shares
             .get(self.id)
-            .ok_or(AvssError::InvalidShare)?;
+            .ok_or(AvssError::InvalidShare)?
+            .clone();
 
         let ss = pk_d.mul(self.sk_i);
         let key = kdf_from_point(&ss);
@@ -534,72 +751,912 @@ where
             return Err(AvssError::InvalidShareLength);
         }
 
-        let mut shares = Vec::with_capacity(cts.len());
-        for (ct, commitments) in cts.iter().zip(all_commitments.iter()) {
-            let pt = decrypt(key.clone(), ct)?;
-            let shamirshare: Shamirshare<F> =
-                CanonicalDeserialize::deserialize_compressed(&pt[..])?;
-            if shamirshare.id != self.ids[self.id] {
-                return Err(AvssError::InvalidShare);
-            }
-            if shamirshare.degree != self.t {
-                return Err(AvssError::InvalidShare);
-            }
+        Ok((pk_d, all_commitments, key, cts))
+    }
 
-            let share = FeldmanShamirShare {
-                feldmanshare: shamirshare,
-                commitments: commitments.clone(),
-            };
-
-            if !verify_feldman(share.clone(), self.ids[self.id]) {
-                return Err(AvssError::InvalidShare);
+    pub async fn process<N: Network + Send + Sync>(
+        &mut self,
+        msg: AvssMessage<Id>,
+        net: Arc<N>,
+    ) -> Result<(), AvssError>
+    where
+        F: PrimeField,
+    {
+        info!(
+            party_id = ?self.id,
+            session_id = msg.session_id.as_u128(),
+            "Processing AVSS share"
+        );
+        match msg.session_id.calling_protocol() {
+            Some(proto) => proto,
+            None => {
+                return Err(AvssError::InvalidInput(format!(
+                    "Unknown calling protocol in session ID {:?}",
+                    msg.session_id
+                )));
             }
-
-            shares.push(share);
+        };
+        let already_dealt = {
+            let mut map = self.agreement.lock().await;
+            if self.retired.lock().await.contains(&msg.session_id) {
+                return Ok(()); // already consumed — drop the straggler instead of resurrecting it
+            }
+            if !map.contains_key(&msg.session_id) {
+                // Reject an over-quota dealer here, before the decryption and curve
+                // arithmetic below. Everything from `dealer_pk` onwards costs real work —
+                // `t + 1` point decompressions per commitment plus a Feldman verification
+                // per share — and without this the quota only limited what an attacker
+                // could *cache*, not what it could make us *compute*.
+                //
+                // `admit` does not insert, so this is purely an early-out; the authoritative
+                // check still runs after verification, because the lock is released in between
+                // and another task may take the last slot meanwhile.
+                // `session_id.dealer_id()` is trustworthy here: `avss_mpc`'s dispatch already
+                // checked the RBC sender against it before this dealing was accepted.
+                let dealer = msg.session_id.dealer_id();
+                if !self.admit(&mut map, dealer).await {
+                    warn!(
+                        session_id = msg.session_id.as_u128(),
+                        "AVSS agreement cache full or dealer {} over its per-peer quota; rejecting before verification",
+                        dealer
+                    );
+                    self.rbc.clear_session(msg.session_id).await;
+                    return Err(AvssError::LimitExceeded);
+                }
+                map.insert(msg.session_id, AgreementState::pending(dealer));
+            }
+            map.get(&msg.session_id)
+                .is_some_and(|state| state.dealing.is_some())
+        };
+        if already_dealt {
+            return Ok(()); // duplicate dealing delivery — RBC should not redeliver, but guard anyway
         }
 
-        {
-            let mut map = self.shares.lock().await;
-            if !self.admit(&mut map, msg.session_id).await {
-                warn!(
-                    "AVSS share cache full or dealer {} over its per-peer quota; dropping session {:?}",
-                    msg.session_id.dealer_id(),
-                    msg.session_id
-                );
-                // The RBC layer already completed and is holding the raw payload for
-                // this session in its own store. Since this layer is rejecting it,
-                // nobody will ever call `take_share`/`clear_session` to release that
-                // memory, so drop it here instead of leaving it for RBC's own (much
-                // larger) cap/TTL to eventually reclaim.
+        let (pk_d, all_commitments, key, cts) = match self.validate_dealing(&msg) {
+            Ok(v) => v,
+            Err(e) => {
+                // The dealing itself is malformed — RBC will never redeliver a corrected
+                // payload for this session_id, so any agreement state accumulated for it is
+                // dead regardless. Clean up rather than leaving the slot (and the RBC-layer
+                // payload) to squat until TTL, mirroring the admission-rejection branch above.
+                self.agreement.lock().await.remove(&msg.session_id);
+                self.retired.lock().await.record(msg.session_id);
                 self.rbc.clear_session(msg.session_id).await;
-                return Err(AvssError::LimitExceeded);
+                return Err(e);
             }
-            map.insert(msg.session_id, (Instant::now(), Some(shares)));
         };
 
+        // Unlike plain AVSS's all-or-nothing early return, a bad row is now a local verdict
+        // (`own_valid = false`) rather than a hard error — the whole point of the agreement
+        // layer below is to let this node recover via its peers instead of being stuck.
+        let mut own_shares = Vec::with_capacity(cts.len());
+        let mut own_valid = true;
+        for (ct, commitments) in cts.iter().zip(all_commitments.iter()) {
+            let row = decrypt(key.clone(), ct).ok().and_then(|pt| {
+                let shamirshare: Shamirshare<F> =
+                    CanonicalDeserialize::deserialize_compressed(&pt[..]).ok()?;
+                if shamirshare.id != self.ids[self.id] || shamirshare.degree != self.t {
+                    return None;
+                }
+                let share = FeldmanShamirShare {
+                    feldmanshare: shamirshare,
+                    commitments: commitments.clone(),
+                };
+                verify_feldman(share.clone(), self.ids[self.id]).then_some(share)
+            });
+            match row {
+                Some(share) => own_shares.push(share),
+                None => {
+                    own_valid = false;
+                    break;
+                }
+            }
+        }
+        let own_shares = own_valid.then_some(own_shares);
+
+        {
+            let mut agreement = self.agreement.lock().await;
+            let Some(state) = agreement.get_mut(&msg.session_id) else {
+                return Ok(()); // evicted between admission and now
+            };
+            state.dealing = Some(DealingInfo {
+                pk_d,
+                all_commitments,
+                encrypted_shares: msg.encrypted_shares.clone(),
+                own_valid,
+                own_shares,
+            });
+        }
+
+        // Replay any `Reveal` this node saw before it could verify it — verification needs
+        // `pk_d`, just learned above.
+        let pending_reveals = {
+            let mut agreement = self.agreement.lock().await;
+            match agreement.get_mut(&msg.session_id) {
+                Some(state) => std::mem::take(&mut state.pending_reveals),
+                None => BTreeMap::new(),
+            }
+        };
+        for (party_id, (k_id, proof)) in pending_reveals {
+            self.apply_reveal(msg.session_id, party_id, k_id, proof, net.clone())
+                .await?;
+        }
+
+        let (should_amplify, direct_finalize) = {
+            let mut agreement = self.agreement.lock().await;
+            let Some(state) = agreement.get_mut(&msg.session_id) else {
+                return Ok(());
+            };
+            let should_amplify = state.should_amplify_ready(self.t);
+            if should_amplify {
+                state.sent_ready = true;
+            }
+            let direct_finalize = state.direct_finalize_shares(self.t);
+            if direct_finalize.is_some() {
+                state.finished = true;
+            }
+            (should_amplify, direct_finalize)
+        };
+
+        if should_amplify {
+            self.broadcast_ready(msg.session_id, net.clone()).await?;
+        }
+        if let Some(shares) = direct_finalize {
+            self.finalize(msg.session_id, shares).await;
+        }
+
+        if own_valid {
+            self.broadcast_ok(msg.session_id, net).await?;
+        } else {
+            self.broadcast_reveal(msg.session_id, net).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Dispatches an incoming OK/READY/Reveal vote.
+    pub async fn process_agreement<N: Network + Send + Sync>(
+        &mut self,
+        msg: AvssAgreementMessage<Id>,
+        net: Arc<N>,
+    ) -> Result<(), AvssError>
+    where
+        F: PrimeField,
+    {
+        match msg {
+            AvssAgreementMessage::Ok { session_id, voter } => {
+                self.handle_ok(session_id, voter, net).await
+            }
+            AvssAgreementMessage::Ready { session_id, voter } => {
+                self.handle_ready(session_id, voter, net).await
+            }
+            AvssAgreementMessage::Reveal {
+                session_id,
+                party_id,
+                k_id,
+                proof,
+            } => {
+                self.handle_reveal(session_id, party_id, k_id, proof, net)
+                    .await
+            }
+        }
+    }
+
+    /// Gets (lazily admitting/creating if needed) the agreement entry for `session_id`,
+    /// returning `None` if the session is retired or the cache is full. Mirrors
+    /// `get_or_create_store`-style lazy admission elsewhere in the codebase: votes and the
+    /// local dealing race over independent channels, so whichever arrives first creates the
+    /// entry.
+    ///
+    /// `charged_to` must be an *authenticated* identity (the caller's already-verified
+    /// voter/party_id) — never derived from `session_id` itself, since a vote's `session_id`
+    /// is unauthenticated plain data and could name any dealer.
+    async fn get_or_admit_agreement(&self, session_id: Id, charged_to: u8) -> bool {
+        let mut agreement = self.agreement.lock().await;
+        if agreement.contains_key(&session_id) {
+            return true;
+        }
+        if self.retired.lock().await.contains(&session_id) {
+            return false;
+        }
+        if !self.admit(&mut agreement, charged_to).await {
+            return false;
+        }
+        agreement.insert(session_id, AgreementState::pending(charged_to));
+        true
+    }
+
+    async fn handle_ok<N: Network + Send + Sync>(
+        &mut self,
+        session_id: Id,
+        voter: PartyId,
+        net: Arc<N>,
+    ) -> Result<(), AvssError> {
+        if voter >= self.n_parties || !self.get_or_admit_agreement(session_id, voter as u8).await {
+            return Ok(());
+        }
+        let should_amplify = {
+            let mut agreement = self.agreement.lock().await;
+            let Some(state) = agreement.get_mut(&session_id) else {
+                return Ok(());
+            };
+            if state.finished {
+                return Ok(());
+            }
+            state.ok_votes.insert(voter);
+            let amplify = state.should_amplify_ready(self.t);
+            if amplify {
+                state.sent_ready = true;
+            }
+            amplify
+        };
+        if should_amplify {
+            self.broadcast_ready(session_id, net).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_ready<N: Network + Send + Sync>(
+        &mut self,
+        session_id: Id,
+        voter: PartyId,
+        net: Arc<N>,
+    ) -> Result<(), AvssError> {
+        if voter >= self.n_parties || !self.get_or_admit_agreement(session_id, voter as u8).await {
+            return Ok(());
+        }
+        let (should_amplify, direct_finalize) = {
+            let mut agreement = self.agreement.lock().await;
+            let Some(state) = agreement.get_mut(&session_id) else {
+                return Ok(());
+            };
+            if state.finished {
+                return Ok(());
+            }
+            state.ready_votes.insert(voter);
+            let amplify = state.should_amplify_ready(self.t);
+            if amplify {
+                state.sent_ready = true;
+            }
+            let direct_finalize = state.direct_finalize_shares(self.t);
+            if direct_finalize.is_some() {
+                state.finished = true;
+            }
+            (amplify, direct_finalize)
+        };
+        if should_amplify {
+            self.broadcast_ready(session_id, net.clone()).await?;
+        }
+        if let Some(shares) = direct_finalize {
+            self.finalize(session_id, shares).await;
+        }
+        Ok(())
+    }
+
+    async fn handle_reveal<N: Network + Send + Sync>(
+        &mut self,
+        session_id: Id,
+        party_id: PartyId,
+        k_id: Vec<u8>,
+        proof: DleqProof,
+        net: Arc<N>,
+    ) -> Result<(), AvssError>
+    where
+        F: PrimeField,
+    {
+        if party_id >= self.n_parties {
+            return Ok(());
+        }
+        // Cheap size guard before admission or any buffering: a genuine k_id/proof field is
+        // one compressed group element or scalar (tens of bytes). Without this, a session
+        // whose dealing hasn't arrived yet would let a single sender pad each of its (at most
+        // one, per `pending_reveals` being keyed by `party_id`) buffered fields out toward
+        // the wrapper's own message-size cap.
+        if k_id.len() > MAX_DLEQ_FIELD_SIZE
+            || proof.a1.len() > MAX_DLEQ_FIELD_SIZE
+            || proof.a2.len() > MAX_DLEQ_FIELD_SIZE
+            || proof.z.len() > MAX_DLEQ_FIELD_SIZE
+        {
+            return Ok(());
+        }
+        if !self
+            .get_or_admit_agreement(session_id, party_id as u8)
+            .await
+        {
+            return Ok(());
+        }
+        {
+            let mut agreement = self.agreement.lock().await;
+            let Some(state) = agreement.get_mut(&session_id) else {
+                return Ok(());
+            };
+            if state.finished {
+                return Ok(());
+            }
+            if state.dealing.is_none() {
+                // Can't verify the NIZK yet — needs `pk_d` from the local dealing, which
+                // hasn't arrived. Buffer for replay from `process` once it does. Keyed by
+                // `party_id` (not appended), so a repeat send from the same party overwrites
+                // rather than growing this entry without bound.
+                state.pending_reveals.insert(party_id, (k_id, proof));
+                return Ok(());
+            }
+        }
+        self.apply_reveal(session_id, party_id, k_id, proof, net)
+            .await
+    }
+
+    /// Verifies and applies one `Reveal`, assuming this node's own copy of the dealing is
+    /// already known (checked by both callers: `handle_reveal` buffers otherwise, and
+    /// `process`'s replay only runs after setting `dealing`).
+    async fn apply_reveal<N: Network + Send + Sync>(
+        &mut self,
+        session_id: Id,
+        party_id: PartyId,
+        k_id_bytes: Vec<u8>,
+        proof: DleqProof,
+        net: Arc<N>,
+    ) -> Result<(), AvssError>
+    where
+        F: PrimeField,
+    {
+        let Ok(k_id) = G::deserialize_compressed(&k_id_bytes[..]) else {
+            return Ok(());
+        };
+        let (pk_d, all_commitments, encrypted_shares, own_valid, sent_reveal) = {
+            let agreement = self.agreement.lock().await;
+            let Some(state) = agreement.get(&session_id) else {
+                return Ok(());
+            };
+            if state.finished {
+                return Ok(());
+            }
+            let Some(dealing) = &state.dealing else {
+                return Ok(());
+            };
+            (
+                dealing.pk_d.clone(),
+                dealing.all_commitments.clone(),
+                dealing.encrypted_shares.clone(),
+                dealing.own_valid,
+                state.sent_reveal,
+            )
+        };
+
+        let pk_party = self.pk_map[party_id].clone();
+        if !dleq_verify(&proof, G::generator(), pk_party, pk_d.clone(), k_id.clone()) {
+            return Ok(()); // fabricated or inconsistent — ignore
+        }
+        if party_id >= encrypted_shares.len() {
+            return Ok(());
+        }
+
+        // Independently re-derive `party_id`'s row using the now-proven-genuine key, rather
+        // than trusting the Reveal's mere existence. The DLEQ proof above only shows the
+        // request genuinely comes from `party_id` — it says nothing about whether their row
+        // is actually broken, and any registered party can produce a valid Reveal about its
+        // own perfectly fine row at will. Feldman's binding property makes this check safe to
+        // trust regardless of *why* `party_id` revealed: the outcome is fixed by the dealer's
+        // original (RBC-agreed) ciphertext for `party_id`, not by anything the revealer
+        // controls.
+        let key = kdf_from_point(&k_id);
+        let cts = &encrypted_shares[party_id];
+        let mut row_valid = !cts.is_empty() && cts.len() == all_commitments.len();
+        let mut shares = Vec::with_capacity(cts.len());
+        if row_valid {
+            for (ct, commitments) in cts.iter().zip(all_commitments.iter()) {
+                let verified = decrypt(key, ct).ok().and_then(|pt| {
+                    let shamirshare = Shamirshare::<F>::deserialize_compressed(&pt[..]).ok()?;
+                    if shamirshare.id != self.ids[party_id] || shamirshare.degree != self.t {
+                        return None;
+                    }
+                    let share = FeldmanShamirShare {
+                        feldmanshare: shamirshare,
+                        commitments: commitments.clone(),
+                    };
+                    verify_feldman(share.clone(), self.ids[party_id]).then_some(share)
+                });
+                match verified {
+                    Some(share) => shares.push(share),
+                    None => {
+                        row_valid = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Only a confirmed-invalid row justifies disclosing our own key: a genuine Reveal
+        // alone doesn't prove `party_id` actually needs help, since the DLEQ proof above is
+        // satisfiable by any registered party for its own row at any time, valid or not.
+        // Gating on the row actually being broken (not merely on the Reveal being genuine)
+        // closes that — a party can no longer harvest every honest key by falsely crying
+        // recovery over a row that's perfectly fine. Also gated on having actually observed an
+        // invalid reveal (rather than doing it unconditionally) — cheap, since it only exposes
+        // our ECDH secret for *this one dealing*: the whole point of deriving it from a
+        // per-dealing ephemeral key rather than our long-term key (hbACSS §V-C) is to make
+        // that safe — so a dealing that behaves for everyone never has anyone reveal anything.
+        if own_valid && !row_valid && !sent_reveal {
+            let already_sending = {
+                let mut agreement = self.agreement.lock().await;
+                match agreement.get_mut(&session_id) {
+                    Some(state) if !state.sent_reveal && !state.finished => {
+                        state.sent_reveal = true;
+                        false
+                    }
+                    _ => true,
+                }
+            };
+            if !already_sending {
+                self.broadcast_reveal(session_id, net.clone()).await?;
+            }
+        }
+
+        if own_valid || !row_valid {
+            // Either we already have our own valid share, or `party_id`'s row turned out to
+            // be fine too — nothing left to disclose or track either way.
+            return Ok(());
+        }
+
+        let finalize_input = {
+            let mut agreement = self.agreement.lock().await;
+            let Some(state) = agreement.get_mut(&session_id) else {
+                return Ok(());
+            };
+            if state.finished {
+                return Ok(());
+            }
+            state.recovered.insert(party_id, shares);
+            if state.recovered.len() >= self.t + 1 {
+                state.finished = true;
+                let recovered = std::mem::take(&mut state.recovered);
+                let commitments = state
+                    .dealing
+                    .as_ref()
+                    .map(|d| d.all_commitments.clone())
+                    .unwrap_or_default();
+                Some((recovered, commitments))
+            } else {
+                None
+            }
+        };
+        if let Some((recovered, commitments)) = finalize_input {
+            let my_shares = self.interpolate_own_share(&recovered, &commitments)?;
+            self.finalize(session_id, my_shares).await;
+        }
+        Ok(())
+    }
+
+    /// Interpolates this node's own share at each batch position from `t + 1` (or more)
+    /// Feldman-verified peer rows recovered via `Reveal`.
+    fn interpolate_own_share(
+        &self,
+        recovered: &BTreeMap<PartyId, Vec<FeldmanShamirShare<F, G>>>,
+        all_commitments: &[Vec<G>],
+    ) -> Result<Vec<FeldmanShamirShare<F, G>>, AvssError> {
+        let my_x = F::from(self.ids[self.id] as u64);
+        let mut out = Vec::with_capacity(all_commitments.len());
+        for (batch_index, commitments) in all_commitments.iter().enumerate() {
+            let mut x_vals = Vec::with_capacity(recovered.len());
+            let mut y_vals = Vec::with_capacity(recovered.len());
+            for (&party, shares) in recovered.iter() {
+                let share = shares
+                    .get(batch_index)
+                    .ok_or(AvssError::InvalidShareLength)?;
+                x_vals.push(F::from(self.ids[party] as u64));
+                y_vals.push(share.feldmanshare.share[0]);
+            }
+            let poly = lagrange_interpolate(&x_vals, &y_vals)?;
+            let y = poly.evaluate(&my_x);
+            out.push(FeldmanShamirShare {
+                feldmanshare: Shamirshare::new(y, self.ids[self.id], self.t),
+                commitments: commitments.clone(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Writes a finalized result (direct or recovered) to the output cache and notifies the
+    /// consumer, unless the session was cleared/consumed in the meantime.
+    async fn finalize(&self, session_id: Id, shares: Vec<FeldmanShamirShare<F, G>>) {
+        {
+            // `shares` held across the `retired` check so this can't interleave with
+            // `clear_session`/`take_share`'s own remove-then-retire: whichever of the two
+            // gets `shares`'s lock first completes its whole check-then-act atomically,
+            // instead of a retire landing in the gap between this check and the insert below
+            // and orphaning an entry `admit`'s TTL sweep (which only scans `agreement`) can
+            // never reach again.
+            let mut map = self.shares.lock().await;
+            if self.retired.lock().await.contains(&session_id) {
+                return; // cleared/consumed already — drop the belated result
+            }
+            map.insert(session_id, (Instant::now(), Some(shares)));
+        }
+
         // A blocking `.send().await` here would stall this node's entire message-processing
-        // loop (not just AVSS) whenever the output channel fills up — e.g. an attacker sending
-        // sessions the consumer isn't currently draining (it's only active during specific
-        // protocol phases). `try_send` never blocks: on a full channel we drop the
+        // loop (not just AVSS) whenever the output channel fills up — e.g. an attacker
+        // sending sessions the consumer isn't currently draining (it's only active during
+        // specific protocol phases). `try_send` never blocks: on a full channel we drop the
         // notification and log it. The verified share is already cached above regardless, so
-        // this only risks that one session's notification going unseen (bounded by the channel
-        // capacity, which callers size to `MAX_PENDING_SESSIONS`) rather than an unbounded
-        // node-wide hang.
-        match self.output_sender.try_send(msg.session_id) {
+        // this only risks that one session's notification going unseen (bounded by the
+        // channel capacity, which callers size to `MAX_PENDING_SESSIONS`) rather than an
+        // unbounded node-wide hang.
+        match self.output_sender.try_send(session_id) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
                 warn!(
-                    session_id = msg.session_id.as_u128(),
+                    session_id = session_id.as_u128(),
                     "AVSS output channel full; dropping notification for cached session"
                 );
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 warn!(
-                    session_id = msg.session_id.as_u128(),
+                    session_id = session_id.as_u128(),
                     "AVSS output receiver dropped; discarding notification"
                 );
             }
         }
+    }
+
+    async fn broadcast_ok<N: Network + Send + Sync>(
+        &self,
+        session_id: Id,
+        net: Arc<N>,
+    ) -> Result<(), AvssError> {
+        let msg = AvssAgreementMessage::Ok {
+            session_id,
+            voter: self.id,
+        };
+        let bytes = (self.agreement_wrapper)(msg)?;
+        net.broadcast(&bytes).await?;
         Ok(())
+    }
+
+    async fn broadcast_ready<N: Network + Send + Sync>(
+        &self,
+        session_id: Id,
+        net: Arc<N>,
+    ) -> Result<(), AvssError> {
+        let msg = AvssAgreementMessage::Ready {
+            session_id,
+            voter: self.id,
+        };
+        let bytes = (self.agreement_wrapper)(msg)?;
+        net.broadcast(&bytes).await?;
+        Ok(())
+    }
+
+    async fn broadcast_reveal<N: Network + Send + Sync>(
+        &self,
+        session_id: Id,
+        net: Arc<N>,
+    ) -> Result<(), AvssError>
+    where
+        F: PrimeField,
+    {
+        let pk_d = {
+            let agreement = self.agreement.lock().await;
+            let Some(state) = agreement.get(&session_id) else {
+                return Ok(());
+            };
+            let Some(dealing) = &state.dealing else {
+                return Ok(());
+            };
+            dealing.pk_d.clone()
+        };
+        let k_id = pk_d.clone().mul(self.sk_i);
+        let mut k_id_bytes = Vec::new();
+        k_id.serialize_compressed(&mut k_id_bytes)?;
+
+        let mut rng =
+            StdRng::from_rng(OsRng).map_err(|e| AvssError::InvalidInput(e.to_string()))?;
+        let proof = dleq_prove(
+            self.sk_i,
+            G::generator(),
+            self.pk_map[self.id].clone(),
+            pk_d,
+            k_id,
+            &mut rng,
+        )?;
+
+        let msg = AvssAgreementMessage::Reveal {
+            session_id,
+            party_id: self.id,
+            k_id: k_id_bytes,
+            proof,
+        };
+        let bytes = (self.agreement_wrapper)(msg)?;
+        net.broadcast(&bytes).await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod dleq_tests {
+    use super::*;
+    use ark_bls12_381::{Fr, G1Projective as G};
+    use ark_ec::PrimeGroup;
+    use ark_std::test_rng;
+    use ark_std::UniformRand;
+
+    /// Completeness: a proof generated with the real witness verifies against the
+    /// real statement.
+    #[test]
+    fn valid_proof_verifies() {
+        let mut rng = test_rng();
+        let alpha = Fr::rand(&mut rng);
+        let g0 = G::generator();
+        let g1 = G::generator() * Fr::rand(&mut rng);
+        let x = g0 * alpha;
+        let y = g1 * alpha;
+
+        let proof = dleq_prove(alpha, g0, x, g1, y, &mut rng).unwrap();
+        assert!(dleq_verify(&proof, g0, x, g1, y));
+    }
+
+    /// Soundness sanity check: a proof for one statement must not verify against
+    /// a different `y` (i.e., a different claimed Ki_d) — this is exactly the
+    /// griefing case: someone claiming a fabricated shared secret.
+    #[test]
+    fn proof_rejects_mismatched_y() {
+        let mut rng = test_rng();
+        let alpha = Fr::rand(&mut rng);
+        let g0 = G::generator();
+        let g1 = G::generator() * Fr::rand(&mut rng);
+        let x = g0 * alpha;
+        let y = g1 * alpha;
+        let wrong_y = g1 * Fr::rand(&mut rng);
+
+        let proof = dleq_prove(alpha, g0, x, g1, y, &mut rng).unwrap();
+        assert!(!dleq_verify(&proof, g0, x, g1, wrong_y));
+    }
+
+    /// Soundness sanity check: a proof must not verify against a different `x`
+    /// (i.e., claiming the reveal came from a different party's public key).
+    #[test]
+    fn proof_rejects_mismatched_x() {
+        let mut rng = test_rng();
+        let alpha = Fr::rand(&mut rng);
+        let g0 = G::generator();
+        let g1 = G::generator() * Fr::rand(&mut rng);
+        let x = g0 * alpha;
+        let y = g1 * alpha;
+        let wrong_x = g0 * Fr::rand(&mut rng);
+
+        let proof = dleq_prove(alpha, g0, x, g1, y, &mut rng).unwrap();
+        assert!(!dleq_verify(&proof, g0, wrong_x, g1, y));
+    }
+
+    /// A prover who doesn't actually know a consistent witness (x and y derived
+    /// from *different* exponents) cannot produce a proof that verifies — this is
+    /// the actual griefing attempt: fabricating a `(Ki_d, proof)` pair without ever
+    /// having a real ECDH witness tying them together.
+    #[test]
+    fn cannot_fake_proof_without_consistent_witness() {
+        let mut rng = test_rng();
+        let g0 = G::generator();
+        let g1 = G::generator() * Fr::rand(&mut rng);
+        let x = g0 * Fr::rand(&mut rng);
+        let y = g1 * Fr::rand(&mut rng); // unrelated exponent — no real alpha exists
+
+        // The forger's best move is to run the honest prover with *some* alpha it
+        // knows (say, the one behind x) and hope it slips through for y anyway.
+        let fake_alpha = Fr::rand(&mut rng);
+        let proof = dleq_prove(fake_alpha, g0, x, g1, y, &mut rng).unwrap();
+        assert!(!dleq_verify(&proof, g0, x, g1, y));
+    }
+}
+
+#[cfg(test)]
+mod reveal_tests {
+    use super::*;
+    use crate::avss_mpc::{AvssSessionId, AvssWrappedMessage, ProtocolType};
+    use crate::common::rbc::rbc::Avid;
+    use ark_bls12_381::{Fr, G1Projective as G};
+    use ark_ec::PrimeGroup;
+    use ark_std::{test_rng, UniformRand};
+    use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
+    use tokio::sync::mpsc;
+
+    type TestNode = AvssNode<Fr, Avid<AvssSessionId>, G, AvssSessionId>;
+
+    /// Regression test for the row-key disclosure bug `apply_reveal` used to have: a
+    /// genuine `Reveal` (a correct DLEQ proof) is not by itself evidence that the
+    /// revealing party's row is broken — any registered party can produce one for its
+    /// own, perfectly valid row at will. Before the fix, every honest node with a valid
+    /// row treated *any* genuine `Reveal` as a real recovery request and responded by
+    /// broadcasting its own per-dealing key, letting a single dishonest-but-registered
+    /// party harvest every honest party's share on demand.
+    ///
+    /// This checks both directions with one dealing: party `victim`'s row is genuinely
+    /// corrupted by the dealer, everyone else's is genuinely fine. A gratuitous
+    /// self-Reveal from `attacker` (whose row is fine) must trigger no response, while
+    /// the following genuine Reveal for `victim`'s actually-broken row must still get
+    /// the legitimate recovery help.
+    #[tokio::test]
+    async fn self_reveal_over_a_valid_row_triggers_no_disclosure() {
+        let n = 4;
+        let t = 1;
+        let attacker = 3usize; // its own row will be perfectly valid
+        let victim = 2usize; // its own row will be genuinely corrupted
+        let mut rng = test_rng();
+
+        let mut sks = Vec::new();
+        let mut pks = Vec::new();
+        for _ in 0..n {
+            let sk = Fr::rand(&mut rng);
+            pks.push(G::generator() * sk);
+            sks.push(sk);
+        }
+        let pk_map = Arc::new(pks);
+
+        let config = FakeNetworkConfig::new(128);
+        let (inner, _receivers, _) = FakeInnerNetwork::new(n, None, config);
+        let net: Vec<_> = (0..n)
+            .map(|id| Arc::new(FakeNetwork::new(id, inner.clone())))
+            .collect();
+
+        let mut nodes: Vec<TestNode> = (0..n)
+            .map(|i| {
+                let (sender, _) = mpsc::channel(128);
+                AvssNode::new(
+                    i,
+                    n,
+                    (1..=n).collect(),
+                    t,
+                    sks[i],
+                    pk_map.clone(),
+                    sender,
+                    Arc::new(AvssWrappedMessage::rbc_wrap),
+                    Arc::new(AvssWrappedMessage::avss_wrap),
+                    Arc::new(AvssWrappedMessage::agreement_wrap),
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // Hand-craft a dealing exactly like an honest `AvssNode::init` would, except the
+        // victim's row is encrypted under an unrelated key — indistinguishable, from the
+        // victim's side, from a dealer that simply sent it garbage.
+        let secrets = vec![Fr::from(42)];
+        let ids: Vec<usize> = (1..=n).collect();
+        let shares: Vec<Vec<FeldmanShamirShare<Fr, G>>> =
+            FeldmanShamirShare::compute_shares_batch(&secrets, n, t, Some(&ids), &mut rng).unwrap();
+
+        let sk_d = Fr::rand(&mut rng);
+        let pk_d = G::generator() * sk_d;
+        let mut pk_d_bytes = Vec::new();
+        pk_d.serialize_compressed(&mut pk_d_bytes).unwrap();
+
+        let mut public_commitments = Vec::with_capacity(shares.len());
+        let mut encrypted_shares: Vec<Vec<Vec<u8>>> = vec![Vec::with_capacity(shares.len()); n];
+        for per_secret in &shares {
+            let commitment_bytes = per_secret[0]
+                .commitments
+                .iter()
+                .map(|c| {
+                    let mut b = Vec::new();
+                    c.serialize_compressed(&mut b).unwrap();
+                    b
+                })
+                .collect::<Vec<_>>();
+            public_commitments.push(commitment_bytes);
+
+            for (party_idx, share) in per_secret.iter().enumerate() {
+                let key = if party_idx == victim {
+                    kdf_from_point(&(pk_d * Fr::rand(&mut rng))) // wrong key
+                } else {
+                    kdf_from_point(&(pk_map[party_idx] * sk_d))
+                };
+                let mut pt = Vec::new();
+                share.feldmanshare.serialize_compressed(&mut pt).unwrap();
+                encrypted_shares[party_idx].push(encrypt(key, &pt, &mut rng).unwrap());
+            }
+        }
+
+        let session_id =
+            AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot(0, 0, 0), 999);
+        let msg = AvssMessage {
+            session_id,
+            dealer_pk: pk_d_bytes,
+            public_commitments,
+            encrypted_shares,
+        };
+
+        // Deliver the identical dealing directly to every node — `process` doesn't touch
+        // RBC on the success path, so this is equivalent to RBC having delivered it.
+        for i in 0..n {
+            nodes[i].process(msg.clone(), net[i].clone()).await.unwrap();
+        }
+
+        // --- Attack: a genuine self-Reveal over a row that is actually fine. ---
+        let attacker_k_id = pk_d * sks[attacker];
+        let mut attacker_k_id_bytes = Vec::new();
+        attacker_k_id
+            .serialize_compressed(&mut attacker_k_id_bytes)
+            .unwrap();
+        let attacker_proof = dleq_prove(
+            sks[attacker],
+            G::generator(),
+            pk_map[attacker],
+            pk_d,
+            attacker_k_id,
+            &mut rng,
+        )
+        .unwrap();
+        let fake_reveal = AvssAgreementMessage::Reveal {
+            session_id,
+            party_id: attacker,
+            k_id: attacker_k_id_bytes,
+            proof: attacker_proof,
+        };
+
+        for i in 0..n {
+            if i == attacker {
+                continue;
+            }
+            nodes[i]
+                .process_agreement(fake_reveal.clone(), net[i].clone())
+                .await
+                .unwrap();
+        }
+
+        for i in 0..n {
+            if i == attacker || i == victim {
+                continue; // victim's own row is genuinely bad; it has its own reasons to reveal
+            }
+            let agreement = nodes[i].agreement.lock().await;
+            let state = agreement.get(&session_id).unwrap();
+            assert!(
+                !state.sent_reveal,
+                "node {i} disclosed its own key in response to a gratuitous self-Reveal \
+                 from party {attacker}, whose row was actually fine"
+            );
+        }
+
+        // --- Sanity check: a Reveal over a genuinely broken row still gets legitimate
+        // help, so the fix above is a precise gate and not an overcorrection. ---
+        let victim_k_id = pk_d * sks[victim];
+        let mut victim_k_id_bytes = Vec::new();
+        victim_k_id
+            .serialize_compressed(&mut victim_k_id_bytes)
+            .unwrap();
+        let victim_proof = dleq_prove(
+            sks[victim],
+            G::generator(),
+            pk_map[victim],
+            pk_d,
+            victim_k_id,
+            &mut rng,
+        )
+        .unwrap();
+        let genuine_reveal = AvssAgreementMessage::Reveal {
+            session_id,
+            party_id: victim,
+            k_id: victim_k_id_bytes,
+            proof: victim_proof,
+        };
+
+        for i in 0..n {
+            if i == victim {
+                continue;
+            }
+            nodes[i]
+                .process_agreement(genuine_reveal.clone(), net[i].clone())
+                .await
+                .unwrap();
+        }
+
+        for i in 0..n {
+            if i == victim {
+                continue;
+            }
+            let agreement = nodes[i].agreement.lock().await;
+            let state = agreement.get(&session_id).unwrap();
+            assert!(
+                state.sent_reveal,
+                "node {i} did not help recover party {victim}'s genuinely broken row"
+            );
+        }
     }
 }

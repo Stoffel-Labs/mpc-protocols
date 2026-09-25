@@ -76,6 +76,7 @@ pub enum InputType {
 pub struct InputServer<F: FftField, R: RBC> {
     pub id: usize,
     pub n: usize,
+    pub instance_id: u32,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
     status_sender: Sender<HashMap<ClientId, (InputType, Vec<RobustShare<F>>)>>,
@@ -105,8 +106,15 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         id: usize,
         n: usize,
         t: usize,
+        instance_id: u32,
         input_ids: Vec<ClientId>,
     ) -> Result<Self, InputError> {
+        if let Some(&overlapping) = input_ids
+            .iter()
+            .find(|&&cid| cid < n || cid > u8::MAX as usize)
+        {
+            return Err(InputError::InvalidClientId(overlapping, n));
+        }
         let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
         let rbc = R::new(
             id,
@@ -126,6 +134,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         Ok(Self {
             id,
             n,
+            instance_id,
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             status_sender,
@@ -146,26 +155,37 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
                 }
             };
 
-            let output = self.rbc.get_store(id).await?;
-            let msg: InputMessage = bincode::DefaultOptions::new()
+            let output = match self.rbc.get_store(id).await {
+                Ok(output) => output,
+                Err(e) => {
+                    self.rbc.clear_session(id).await;
+                    return Err(e.into());
+                }
+            };
+            let msg: InputMessage = match bincode::DefaultOptions::new()
                 .with_fixint_encoding()
                 .allow_trailing_bytes()
                 .with_limit(MAX_MESSAGE_SIZE)
-                .deserialize(&output)?;
+                .deserialize(&output)
+            {
+                Ok(msg) => msg,
+                Err(e) => {
+                    self.rbc.clear_session(id).await;
+                    return Err(e.into());
+                }
+            };
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(
                     "Dropping RBC output: inner sender_id {} does not match session sub_id {}",
                     msg.sender_id, authenticated_sender
                 );
+                self.rbc.clear_session(id).await;
                 continue;
             }
-            match self.input_handler(authenticated_sender, msg.payload).await {
-                Ok(()) => {}
-                Err(e) => {
-                    return Err(e);
-                }
-            }
+            let handler_result = self.input_handler(authenticated_sender, msg.payload).await;
+            self.rbc.clear_session(id).await;
+            handler_result?;
         }
         Ok(())
     }
@@ -240,7 +260,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         if send_over_network {
             let mut payload = Vec::new();
             shares.serialize_compressed(&mut payload)?;
-            let msg = InputMessage::new(self.id, payload);
+            let msg = InputMessage::new(self.id, self.instance_id, payload);
             let wrapped = WrappedMessage::Input(msg);
             let bytes = bincode::serialize(&wrapped)?;
             net.send_to_client(client_id, &bytes).await?;
@@ -507,7 +527,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
 
             let mut payload = Vec::new();
             output.serialize_compressed(&mut payload)?;
-            let msg = InputMessage::new(self.client_id, payload);
+            let msg = InputMessage::new(self.client_id, self.instance_id, payload);
             let bytes = bincode::serialize(&msg)?;
 
             //Broadcast to servers
@@ -533,11 +553,30 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
     }
 
     /// Process any message (used for both client and server roles).
+    ///
+    /// `authenticated_sender_id` must come from the transport layer, not from the message
+    /// itself, since `InputMessage::sender_id` is self-reported and otherwise unverified.
     pub async fn process<N: Network + Send + Sync>(
         &mut self,
+        authenticated_sender_id: usize,
         msg: InputMessage,
         net: Arc<N>,
     ) -> Result<(), InputError> {
+        if msg.instance_id != self.instance_id {
+            return Err(InputError::InvalidInput(
+                "Input message belongs to a different execution".into(),
+            ));
+        }
+        if authenticated_sender_id != msg.sender_id {
+            return Err(InputError::InvalidInput(
+                "Input sender does not match authenticated peer".into(),
+            ));
+        }
+        if authenticated_sender_id >= self.n {
+            return Err(InputError::InvalidInput(
+                "Authenticated sender is not an MPC committee member".into(),
+            ));
+        }
         self.init_handler(msg, net).await
     }
 }
@@ -611,7 +650,7 @@ pub mod tests {
             InputClient::<Fr, Avid<SessionId>>::new(clientid, n, t, 111, vec![input].clone())
                 .unwrap();
         let mut nodes: Vec<_> = (0..n)
-            .map(|i| InputServer::<Fr, Avid<SessionId>>::new(i, n, t, vec![clientid]).unwrap())
+            .map(|i| InputServer::<Fr, Avid<SessionId>>::new(i, n, t, 111, vec![clientid]).unwrap())
             .collect();
 
         // all but one node call init
@@ -641,12 +680,18 @@ pub mod tests {
 
         // receive random shares to send masked input
         for _ in 0..3 {
-            let (_, raw) = client_recv.recv().await.unwrap();
+            let (sender, raw) = client_recv.recv().await.unwrap();
+            let SenderId::Node(sender) = sender else {
+                panic!("Unexpected sender kind");
+            };
             let wrapped: WrappedMessage =
                 bincode::deserialize(&raw).expect("deserialization error");
             match wrapped {
                 WrappedMessage::Input(msg) => {
-                    assert!(client.process(msg, client_network.clone()).await.is_ok());
+                    assert!(client
+                        .process(sender, msg, client_network.clone())
+                        .await
+                        .is_ok());
                 }
                 _ => panic!("Unexpected message"),
             }

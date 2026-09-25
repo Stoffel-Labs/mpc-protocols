@@ -70,6 +70,7 @@ where
             avss_sender,
             Arc::new(AvssWrappedMessage::rbc_wrap),
             Arc::new(AvssWrappedMessage::avss_wrap),
+            Arc::new(AvssWrappedMessage::agreement_wrap),
         )?;
         Ok(Self {
             id,
@@ -196,16 +197,29 @@ where
                 && id.round_id() == session_id.round_id()
                 && id.instance_id() == session_id.instance_id()
             {
-                let avss_share = self.avss.take_share(id).await.unwrap().unwrap();
+                let sender_id = id.sub_id();
+                if usize::from(sender_id) >= self.n_parties {
+                    self.avss.take_share(id).await;
+                    warn!(
+                        ?id,
+                        sender_id, "Discarding unsolicited AVSS dealer outside consensus range"
+                    );
+                    continue;
+                }
+                // The entry can be evicted by `admit`'s idle-session sweep between the
+                // notification being queued and this loop draining it (this node fell
+                // behind, or another dealer's flood forced capacity pressure). Skip this
+                // dealer's contribution rather than panicking the node — the loop is still
+                // waiting on the rest.
+                let Some(avss_share) = self.avss.take_share(id).await.flatten() else {
+                    warn!(?id, "AVSS share evicted before consumption; skipping");
+                    continue;
+                };
                 let binding = match self.get_or_create_store(session_id, self.id).await {
                     Some(s) => s,
                     None => return Ok(()),
                 };
                 let mut ransha_storage = binding.lock().await;
-                let sender_id = id.sub_id();
-                if usize::from(sender_id) >= self.n_parties {
-                    return Err(RanShaAvssError::InvalidPartyId);
-                }
                 if avss_share.len() != batch_size {
                     return Err(RanShaAvssError::InvalidBatchSize);
                 }

@@ -5,7 +5,6 @@ use crate::utils::truncpr_utils::{
 };
 use ark_bls12_381::Fr;
 use ark_ff::{One, Zero};
-use stoffelcrypto::common::rbc::rbc::Avid;
 use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelcrypto::honeybadger::fpmul::mod_pow_2_from_field;
 use stoffelcrypto::honeybadger::fpmul::truncpr::TruncPrNode;
@@ -37,7 +36,7 @@ async fn truncpr_e2e() {
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);
 
     // Create the nodes. We don't need to use Arc<Mutex<_>> as the internal storage has an mutex.
-    let nodes: Vec<TruncPrNode<Fr, Avid<SessionId>>> = (0..num_parties)
+    let nodes: Vec<TruncPrNode<Fr>> = (0..num_parties)
         .map(|id| TruncPrNode::new(id, num_parties, threshold).unwrap())
         .collect();
 
