@@ -572,6 +572,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
                 "Input sender does not match authenticated peer".into(),
             ));
         }
+        if authenticated_sender_id >= self.n {
+            return Err(InputError::InvalidInput(
+                "Authenticated sender is not an MPC committee member".into(),
+            ));
+        }
         self.init_handler(msg, net).await
     }
 }

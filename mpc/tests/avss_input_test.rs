@@ -212,3 +212,42 @@ async fn test_avss_input_rejects_stale_instance() {
         "expected a mask share from a different instance to be rejected"
     );
 }
+
+/// Regression test for missing committee-membership validation: a sender id outside
+/// `0..n` must be rejected by `process` before the payload is even parsed, since it
+/// can never be a legitimate committee member regardless of what it claims to carry.
+#[tokio::test]
+async fn test_avss_input_rejects_non_committee_sender() {
+    setup_tracing();
+
+    let n = 4;
+    let t = 1;
+    let clientid = 100;
+    let instance_id = 111;
+    let input = Fr::from(42u64);
+
+    let (_network, _receivers, client_networks, _client_recv) = test_setup(n, vec![clientid]);
+    let client_network = client_networks.get(&clientid).unwrap().clone();
+
+    let mut client = AvssMPCClient::<Fr, Avid<AvssSessionId>, G>::new(
+        clientid,
+        n,
+        t,
+        instance_id,
+        vec![input],
+        1,
+    )
+    .unwrap();
+
+    for bad_sender in [n, n + 1] {
+        let msg = AvssInputMessage::new(bad_sender, instance_id, vec![]);
+        let result = client
+            .input
+            .process(bad_sender, msg, client_network.clone())
+            .await;
+        assert!(
+            result.is_err(),
+            "expected sender id {bad_sender} (outside 0..{n}) to be rejected"
+        );
+    }
+}

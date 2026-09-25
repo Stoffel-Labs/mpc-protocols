@@ -240,6 +240,11 @@ impl<F: FftField> OutputClient<F> {
                 "Output sender does not match authenticated peer".into(),
             ));
         }
+        if authenticated_sender_id >= self.n {
+            return Err(OutputError::InvalidInput(
+                "Authenticated sender is not an MPC committee member".into(),
+            ));
+        }
         self.output_handler(msg).await?;
         Ok(())
     }
@@ -364,6 +369,34 @@ mod tests {
             client.get_output(),
             None,
             "a stale-instance share must not be admitted into reconstruction state"
+        );
+    }
+
+    /// Regression test for missing committee-membership validation: a sender id
+    /// outside `0..n` must be rejected by `process` before the payload is even
+    /// parsed, since it can never be a legitimate committee member regardless of
+    /// what it claims to carry.
+    #[tokio::test]
+    async fn test_output_rejects_non_committee_sender() {
+        let n = 5;
+        let t = 1;
+        let input_len = 1;
+        let client_id = 7;
+
+        let mut client = OutputClient::<Fr>::new(client_id, n, t, 0, input_len).unwrap();
+
+        for bad_sender in [n, n + 1] {
+            let msg = OutputMessage::new(bad_sender, 0, vec![]);
+            let result = client.process(bad_sender, msg).await;
+            assert!(
+                result.is_err(),
+                "expected sender id {bad_sender} (outside 0..{n}) to be rejected"
+            );
+        }
+        assert_eq!(
+            client.get_output(),
+            None,
+            "a non-committee share must not be admitted into reconstruction state"
         );
     }
 }

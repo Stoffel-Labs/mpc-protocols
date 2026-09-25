@@ -332,3 +332,31 @@ async fn test_input_rejects_stale_instance() {
         "expected a mask share from a different instance to be rejected"
     );
 }
+
+/// Regression test for missing committee-membership validation: a sender id outside
+/// `0..n` must be rejected by `process` before the payload is even parsed, since it
+/// can never be a legitimate committee member regardless of what it claims to carry.
+#[tokio::test]
+async fn test_input_rejects_non_committee_sender() {
+    setup_tracing();
+    let n = 4;
+    let t = 1;
+    let clientid = 100;
+    let instance_id = 111;
+
+    let (_net, _server_recv, mut client_net, _client_recv) = test_setup(n, vec![clientid]);
+    let net_clone = client_net.remove(&clientid).unwrap();
+
+    let mut client =
+        InputClient::<Fr, Avid<SessionId>>::new(clientid, n, t, instance_id, vec![Fr::from(10)])
+            .unwrap();
+
+    for bad_sender in [n, n + 1] {
+        let msg = InputMessage::new(bad_sender, instance_id, vec![]);
+        let result = client.process(bad_sender, msg, net_clone.clone()).await;
+        assert!(
+            result.is_err(),
+            "expected sender id {bad_sender} (outside 0..{n}) to be rejected"
+        );
+    }
+}

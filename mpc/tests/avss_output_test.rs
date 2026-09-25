@@ -236,3 +236,33 @@ async fn test_avss_output_rejects_stale_instance() {
         "a stale-instance share must not be admitted into reconstruction state"
     );
 }
+
+/// Regression test for missing committee-membership validation: a sender id outside
+/// `0..n` must be rejected by `process` before the payload is even parsed, since it
+/// can never be a legitimate committee member regardless of what it claims to carry.
+#[tokio::test]
+async fn test_avss_output_rejects_non_committee_sender() {
+    setup_tracing();
+
+    let n = 5;
+    let t = 1;
+    let input_len = 1;
+    let client_id = 7;
+
+    let mut client =
+        AvssOutputClient::<Fr, G>::new(client_id, n, t, INSTANCE_ID, input_len).unwrap();
+
+    for bad_sender in [n, n + 1] {
+        let msg = AvssOutputMessage::new(bad_sender, INSTANCE_ID, vec![]);
+        let result = client.process(bad_sender, msg).await;
+        assert!(
+            result.is_err(),
+            "expected sender id {bad_sender} (outside 0..{n}) to be rejected"
+        );
+    }
+    assert_eq!(
+        client.get_output(),
+        None,
+        "a non-committee share must not be admitted into reconstruction state"
+    );
+}

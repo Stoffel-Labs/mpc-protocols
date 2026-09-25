@@ -255,6 +255,11 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
                 "Output sender does not match authenticated peer".into(),
             ));
         }
+        if authenticated_sender_id >= self.n {
+            return Err(AvssOutputError::InvalidInput(
+                "Authenticated sender is not an MPC committee member".into(),
+            ));
+        }
         self.output_handler(msg).await?;
         Ok(())
     }
