@@ -232,7 +232,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> HoneyBadgerMPCClient<F, R> {
             return Err(InputError::InvalidClientId(id, n).into());
         }
         let input = InputClient::new(id, n, t, instance_id, inputs)?;
-        let output = OutputClient::new(id, n, t, input_len)?;
+        let output = OutputClient::new(id, n, t, instance_id, input_len)?;
         Ok(Self { id, input, output })
     }
     pub async fn process<N: Network + Send + Sync>(
@@ -660,8 +660,14 @@ where
             RanShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
         let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold)?;
         let fpdiv_const_node = FPDivConstNode::new(id, params.n_parties, params.threshold)?;
-        let input = InputServer::new(id, params.n_parties, params.threshold, input_ids)?;
-        let output = OutputServer::new(id, params.n_parties)?;
+        let input = InputServer::new(
+            id,
+            params.n_parties,
+            params.threshold,
+            params.instance_id,
+            input_ids,
+        )?;
+        let output = OutputServer::new(id, params.n_parties, params.instance_id)?;
         let rand_bit_node = RandBit::new(id, params.n_parties, params.threshold)?;
         let zero_sha_node =
             ZeroShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;

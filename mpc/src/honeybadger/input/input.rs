@@ -76,6 +76,7 @@ pub enum InputType {
 pub struct InputServer<F: FftField, R: RBC> {
     pub id: usize,
     pub n: usize,
+    pub instance_id: u32,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<SessionId>>>,
     status_sender: Sender<HashMap<ClientId, (InputType, Vec<RobustShare<F>>)>>,
@@ -105,6 +106,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         id: usize,
         n: usize,
         t: usize,
+        instance_id: u32,
         input_ids: Vec<ClientId>,
     ) -> Result<Self, InputError> {
         if let Some(&overlapping) = input_ids
@@ -132,6 +134,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         Ok(Self {
             id,
             n,
+            instance_id,
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             status_sender,
@@ -257,7 +260,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
         if send_over_network {
             let mut payload = Vec::new();
             shares.serialize_compressed(&mut payload)?;
-            let msg = InputMessage::new(self.id, payload);
+            let msg = InputMessage::new(self.id, self.instance_id, payload);
             let wrapped = WrappedMessage::Input(msg);
             let bytes = bincode::serialize(&wrapped)?;
             net.send_to_client(client_id, &bytes).await?;
@@ -524,7 +527,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
 
             let mut payload = Vec::new();
             output.serialize_compressed(&mut payload)?;
-            let msg = InputMessage::new(self.client_id, payload);
+            let msg = InputMessage::new(self.client_id, self.instance_id, payload);
             let bytes = bincode::serialize(&msg)?;
 
             //Broadcast to servers
@@ -559,6 +562,11 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
         msg: InputMessage,
         net: Arc<N>,
     ) -> Result<(), InputError> {
+        if msg.instance_id != self.instance_id {
+            return Err(InputError::InvalidInput(
+                "Input message belongs to a different execution".into(),
+            ));
+        }
         if authenticated_sender_id != msg.sender_id {
             return Err(InputError::InvalidInput(
                 "Input sender does not match authenticated peer".into(),
@@ -637,7 +645,7 @@ pub mod tests {
             InputClient::<Fr, Avid<SessionId>>::new(clientid, n, t, 111, vec![input].clone())
                 .unwrap();
         let mut nodes: Vec<_> = (0..n)
-            .map(|i| InputServer::<Fr, Avid<SessionId>>::new(i, n, t, vec![clientid]).unwrap())
+            .map(|i| InputServer::<Fr, Avid<SessionId>>::new(i, n, t, 111, vec![clientid]).unwrap())
             .collect();
 
         // all but one node call init

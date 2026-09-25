@@ -12,6 +12,8 @@ use tokio::time::Duration;
 
 pub mod utils;
 
+const INSTANCE_ID: u32 = 1;
+
 /// Test that output reconstruction works correctly with t+1 shares.
 #[tokio::test]
 async fn test_avss_output_get_output() {
@@ -24,7 +26,8 @@ async fn test_avss_output_get_output() {
     let ids: Vec<usize> = (1..=n).collect();
     let mut rng = test_rng();
 
-    let mut client = AvssOutputClient::<Fr, G>::new(client_id, n, t, input_len).unwrap();
+    let mut client =
+        AvssOutputClient::<Fr, G>::new(client_id, n, t, INSTANCE_ID, input_len).unwrap();
     let secret = Fr::rand(&mut rng);
 
     // Generate FeldmanShamirShares for the secret
@@ -37,7 +40,7 @@ async fn test_avss_output_get_output() {
         vec![shares_vec[0].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = AvssOutputMessage::new(0, payload);
+        let msg = AvssOutputMessage::new(0, INSTANCE_ID, payload);
         client.output_handler(msg).await.unwrap();
     }
 
@@ -50,7 +53,7 @@ async fn test_avss_output_get_output() {
         vec![shares_vec[1].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = AvssOutputMessage::new(1, payload);
+        let msg = AvssOutputMessage::new(1, INSTANCE_ID, payload);
         client.output_handler(msg).await.unwrap();
     }
 
@@ -70,7 +73,8 @@ async fn test_avss_output_wait_for_output() {
     let ids: Vec<usize> = (1..=n).collect();
     let mut rng = test_rng();
 
-    let mut client = AvssOutputClient::<Fr, G>::new(client_id, n, t, input_len).unwrap();
+    let mut client =
+        AvssOutputClient::<Fr, G>::new(client_id, n, t, INSTANCE_ID, input_len).unwrap();
     let secret = Fr::rand(&mut rng);
 
     let shares_vec =
@@ -82,7 +86,7 @@ async fn test_avss_output_wait_for_output() {
         vec![shares_vec[0].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = AvssOutputMessage::new(0, payload);
+        let msg = AvssOutputMessage::new(0, INSTANCE_ID, payload);
         client.output_handler(msg).await.unwrap();
     }
 
@@ -99,7 +103,7 @@ async fn test_avss_output_wait_for_output() {
         vec![shares_vec[1].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = AvssOutputMessage::new(1, payload);
+        let msg = AvssOutputMessage::new(1, INSTANCE_ID, payload);
         client.output_handler(msg).await.unwrap();
     }
 
@@ -124,7 +128,8 @@ async fn test_avss_output_duplicate_rejection() {
     let ids: Vec<usize> = (1..=n).collect();
     let mut rng = test_rng();
 
-    let mut client = AvssOutputClient::<Fr, G>::new(client_id, n, t, input_len).unwrap();
+    let mut client =
+        AvssOutputClient::<Fr, G>::new(client_id, n, t, INSTANCE_ID, input_len).unwrap();
     let secret = Fr::rand(&mut rng);
 
     let shares_vec =
@@ -135,11 +140,11 @@ async fn test_avss_output_duplicate_rejection() {
     vec![shares_vec[0].clone()]
         .serialize_compressed(&mut payload)
         .unwrap();
-    let msg1 = AvssOutputMessage::new(0, payload.clone());
+    let msg1 = AvssOutputMessage::new(0, INSTANCE_ID, payload.clone());
     client.output_handler(msg1).await.unwrap();
 
     // Try sending from the same server again - should fail
-    let msg2 = AvssOutputMessage::new(0, payload);
+    let msg2 = AvssOutputMessage::new(0, INSTANCE_ID, payload);
     let result = client.output_handler(msg2).await;
     assert!(result.is_err(), "Expected duplicate error");
 }
@@ -156,7 +161,8 @@ async fn test_avss_output_multiple_values() {
     let ids: Vec<usize> = (1..=n).collect();
     let mut rng = test_rng();
 
-    let mut client = AvssOutputClient::<Fr, G>::new(client_id, n, t, input_len).unwrap();
+    let mut client =
+        AvssOutputClient::<Fr, G>::new(client_id, n, t, INSTANCE_ID, input_len).unwrap();
 
     let secrets: Vec<Fr> = (0..input_len).map(|_| Fr::rand(&mut rng)).collect();
 
@@ -179,7 +185,7 @@ async fn test_avss_output_multiple_values() {
         shares_for_server
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = AvssOutputMessage::new(server_idx, payload);
+        let msg = AvssOutputMessage::new(server_idx, INSTANCE_ID, payload);
         client.output_handler(msg).await.unwrap();
     }
 
@@ -189,4 +195,44 @@ async fn test_avss_output_multiple_values() {
     for (i, s) in secrets.iter().enumerate() {
         assert_eq!(output[i], *s, "Output mismatch at index {}", i);
     }
+}
+
+/// Regression test for the missing execution-binding vulnerability: a fresh
+/// `AvssOutputClient` for one instance must reject a share belonging to a different
+/// instance before it can influence reconstruction, even though the share is
+/// otherwise well-formed and correctly Feldman-verifies.
+#[tokio::test]
+async fn test_avss_output_rejects_stale_instance() {
+    setup_tracing();
+
+    let n = 5;
+    let t = 1;
+    let input_len = 1;
+    let client_id = 7;
+    let ids: Vec<usize> = (1..=n).collect();
+    let mut rng = test_rng();
+
+    let mut client =
+        AvssOutputClient::<Fr, G>::new(client_id, n, t, INSTANCE_ID, input_len).unwrap();
+    let secret = Fr::rand(&mut rng);
+
+    let shares_vec =
+        FeldmanShamirShare::<Fr, G>::compute_shares(secret, n, t, Some(&ids), &mut rng).unwrap();
+
+    let mut payload = Vec::new();
+    vec![shares_vec[0].clone()]
+        .serialize_compressed(&mut payload)
+        .unwrap();
+    let stale_msg = AvssOutputMessage::new(0, INSTANCE_ID + 1, payload);
+
+    let result = client.process(0, stale_msg).await;
+    assert!(
+        result.is_err(),
+        "expected a share from a different instance to be rejected"
+    );
+    assert_eq!(
+        client.get_output(),
+        None,
+        "a stale-instance share must not be admitted into reconstruction state"
+    );
 }

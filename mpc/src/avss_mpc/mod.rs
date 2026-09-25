@@ -140,7 +140,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             return Err(AvssInputError::InvalidClientId(id, n).into());
         }
         let input = AvssInputClient::new(id, n, t, instance_id, inputs)?;
-        let output = AvssOutputClient::new(id, n, t, input_len)?;
+        let output = AvssOutputClient::new(id, n, t, instance_id, input_len)?;
         Ok(Self { id, input, output })
     }
 
@@ -434,8 +434,14 @@ where
             params.pk_map.clone(),
         )?;
         let mul_node = Multiply::new(id, params.n_parties, params.threshold)?;
-        let input_server = AvssInputServer::new(id, params.n_parties, params.threshold, input_ids)?;
-        let output_server = AvssOutputServer::new(id, params.n_parties)?;
+        let input_server = AvssInputServer::new(
+            id,
+            params.n_parties,
+            params.threshold,
+            params.instance_id,
+            input_ids,
+        )?;
+        let output_server = AvssOutputServer::new(id, params.n_parties, params.instance_id)?;
         Ok(Self {
             id,
             preprocessing_material: Arc::new(Mutex::new(AvssMPCNodePreprocMaterial::empty())),

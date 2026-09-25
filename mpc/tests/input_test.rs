@@ -4,7 +4,7 @@ use crate::utils::test_utils::{
 };
 use ark_bls12_381::Fr;
 use futures::future::join_all;
-use stoffelcrypto::honeybadger::input::InputError;
+use stoffelcrypto::honeybadger::input::{InputError, InputMessage};
 use stoffelcrypto::honeybadger::SessionId;
 use stoffelcrypto::{
     common::{rbc::rbc::Avid, SecretSharingScheme, ShamirShare},
@@ -305,4 +305,30 @@ async fn test_input_with_too_many_faulty_shares() {
             "Server {i} should not have received input from client due to decoding failure"
         );
     }
+}
+
+/// Regression test for the missing execution-binding vulnerability: a fresh
+/// `InputClient` for one instance must reject a mask share belonging to a different
+/// instance before it ever reaches share parsing, even from an authenticated server.
+#[tokio::test]
+async fn test_input_rejects_stale_instance() {
+    setup_tracing();
+    let n = 4;
+    let t = 1;
+    let clientid = 100;
+    let instance_id = 111;
+
+    let (_net, _server_recv, mut client_net, _client_recv) = test_setup(n, vec![clientid]);
+    let net_clone = client_net.remove(&clientid).unwrap();
+
+    let mut client =
+        InputClient::<Fr, Avid<SessionId>>::new(clientid, n, t, instance_id, vec![Fr::from(10)])
+            .unwrap();
+
+    let stale_msg = InputMessage::new(0, instance_id + 1, vec![]);
+    let result = client.process(0, stale_msg, net_clone).await;
+    assert!(
+        result.is_err(),
+        "expected a mask share from a different instance to be rejected"
+    );
 }
