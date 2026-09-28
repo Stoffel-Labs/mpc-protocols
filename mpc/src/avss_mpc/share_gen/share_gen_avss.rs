@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use ark_ec::CurveGroup;
-use ark_ff::FftField;
+use ark_ff::{FftField, PrimeField};
 use ark_std::rand::Rng;
 use std::sync::Arc;
 use std::time::Instant;
@@ -153,6 +153,7 @@ where
     where
         N: Network + Send + Sync,
         G: Rng + Send,
+        F: PrimeField,
     {
         self.init_batch(session_id, 1, rng, network).await
     }
@@ -172,6 +173,7 @@ where
     where
         N: Network + Send + Sync,
         G: Rng + Send,
+        F: PrimeField,
     {
         info!("Receiving init for share from {0:?}", self.id);
         if batch_size == 0 {

@@ -3,7 +3,7 @@ pub mod utils;
 use crate::utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 use ark_bls12_381::{Fr, G1Projective as G};
 use ark_ec::PrimeGroup;
-use ark_ff::UniformRand;
+use ark_ff::{PrimeField, UniformRand};
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
 use ark_std::test_rng;
@@ -17,7 +17,7 @@ use stoffelcrypto::avss_mpc::{AvssSessionId, AvssWrappedMessage, ProtocolType};
 use stoffelcrypto::common::ProtocolSessionId;
 use stoffelcrypto::common::{rbc::rbc::Avid, ShamirShare};
 use stoffelcrypto::common::{
-    share::avss::{verify_feldman, AvssAgreementMessage, AvssMessage},
+    share::avss::{verify_feldman, AvssAgreementMessage, AvssMessage, DealerPoK},
     SecretSharingScheme,
 };
 use stoffelcrypto::common::{
@@ -445,6 +445,37 @@ fn test_encrypt(key: [u8; 32], plaintext: &[u8], rng: &mut impl Rng) -> Vec<u8> 
     out
 }
 
+/// Replicates `AvssNode::init`'s private `dealer_pok_prove` exactly, so a test can
+/// hand-craft a dealing carrying a genuine proof of knowledge of `sk_d` — same reason
+/// as `test_kdf_from_point`. Only usable by a caller who actually knows `sk_d`, which
+/// is the point: a copied `dealer_pk` from a different dealing can't produce one.
+fn test_dealer_pok_prove(
+    sk_d: Fr,
+    session_id: u128,
+    dealer_id: u8,
+    pk_d: G,
+    rng: &mut impl Rng,
+) -> DealerPoK {
+    const DOMAIN: &[u8] = b"AVSS-DEALER-POK-v1";
+    let beta = Fr::rand(rng);
+    let a = G::generator() * beta;
+
+    let mut buf = DOMAIN.to_vec();
+    buf.extend_from_slice(&session_id.to_le_bytes());
+    buf.push(dealer_id);
+    pk_d.serialize_compressed(&mut buf).unwrap();
+    a.serialize_compressed(&mut buf).unwrap();
+    let e = Fr::from_le_bytes_mod_order(&Sha256::digest(&buf));
+
+    let z = beta - sk_d * e;
+
+    let mut a_bytes = Vec::new();
+    a.serialize_compressed(&mut a_bytes).unwrap();
+    let mut z_bytes = Vec::new();
+    z.serialize_compressed(&mut z_bytes).unwrap();
+    DealerPoK::new(a_bytes, z_bytes)
+}
+
 /// Regression test for the AVSS completeness bug this module's OK/READY/Reveal
 /// agreement layer fixes: a dealer sends every party a valid row of the dealing
 /// except one, deliberately corrupted row for a single victim. Under plain AVSS the
@@ -542,7 +573,20 @@ async fn test_avss_targeted_victim_recovers_via_reveal() {
         }
     }
 
-    let msg = AvssMessage::new(session_id, pk_d_bytes, public_commitments, encrypted_shares);
+    let dealer_pok = test_dealer_pok_prove(
+        sk_d,
+        session_id.as_u128(),
+        session_id.dealer_id(),
+        pk_d,
+        &mut rng,
+    );
+    let msg = AvssMessage::new(
+        session_id,
+        pk_d_bytes,
+        dealer_pok,
+        public_commitments,
+        encrypted_shares,
+    );
     let bytes = bincode::serialize(&msg).unwrap();
     // Broadcast directly through RBC — bypassing `AvssNode::init`, whose crypto always
     // produces a valid row for every party — so every party (including the victim)

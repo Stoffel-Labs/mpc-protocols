@@ -86,12 +86,18 @@ pub enum AvssError {
     InvalidInput(String),
     #[error("pending session limit exceeded")]
     LimitExceeded,
+    #[error("dealer failed to prove knowledge of its ephemeral key")]
+    InvalidDealerProof,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvssMessage<Id: ProtocolSessionId> {
     pub session_id: Id,
     pub dealer_pk: Vec<u8>,
+    /// Proof that this dealer knows the discrete log of `dealer_pk`, bound to `session_id` and
+    /// the dealer's own id — see [`DealerPoK`]. Without it, `dealer_pk` could be copied
+    /// byte-for-byte out of a different, honest dealing.
+    pub dealer_pok: DealerPoK,
     pub public_commitments: Vec<Vec<Vec<u8>>>,
     pub encrypted_shares: Vec<Vec<Vec<u8>>>,
 }
@@ -103,12 +109,14 @@ where
     pub fn new(
         session_id: Id,
         dealer_pk: Vec<u8>,
+        dealer_pok: DealerPoK,
         public_commitments: Vec<Vec<Vec<u8>>>,
         encrypted_shares: Vec<Vec<Vec<u8>>>,
     ) -> Self {
         Self {
             session_id,
             dealer_pk,
+            dealer_pok,
             public_commitments,
             encrypted_shares,
         }
@@ -216,6 +224,96 @@ where
         return false;
     };
     a1 == g0.mul(z) + x.mul(e) && a2 == g1.mul(z) + y.mul(e)
+}
+
+/// Domain separator for [`DealerPoK`]'s Fiat-Shamir challenge. Bumping this invalidates every
+/// previously-issued proof — the version marker a wire-format change would need anyway.
+const DEALER_POK_DOMAIN: &[u8] = b"AVSS-DEALER-POK-v1";
+
+/// Non-interactive Schnorr proof of knowledge of the discrete log `sk_d` behind a dealer's
+/// ephemeral key `dealer_pk = G * sk_d`.
+///
+/// Required because `validate_dealing` otherwise accepts *any* well-formed nonzero curve point
+/// as `dealer_pk` — including one copied byte-for-byte out of a different, honest dealing. This
+/// proof is what stops that: a Byzantine dealer can only produce it for a `dealer_pk` whose
+/// discrete log it actually knows, so a copied point (whose secret belongs to someone else) is
+/// rejected before any key is derived from it. The challenge is bound to a domain separator plus
+/// the dealing's own session id and dealer id, so the proof itself can't be copied into a
+/// different session either — a valid `(dealer_pk, proof)` pair only ever verifies for the one
+/// session it was produced for.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DealerPoK {
+    pub a: Vec<u8>,
+    pub z: Vec<u8>,
+}
+
+impl DealerPoK {
+    pub fn new(a: Vec<u8>, z: Vec<u8>) -> Self {
+        Self { a, z }
+    }
+}
+
+fn dealer_pok_challenge<F, G>(
+    session_id: u128,
+    dealer_id: u8,
+    pk_d: &G,
+    a: &G,
+) -> Result<F, AvssError>
+where
+    F: PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    let mut buf = DEALER_POK_DOMAIN.to_vec();
+    buf.extend_from_slice(&session_id.to_le_bytes());
+    buf.push(dealer_id);
+    pk_d.serialize_compressed(&mut buf)?;
+    a.serialize_compressed(&mut buf)?;
+    Ok(F::from_le_bytes_mod_order(&Sha256::digest(&buf)))
+}
+
+/// Proves knowledge of `sk_d` for `pk_d = G * sk_d`, bound to `(session_id, dealer_id)`.
+fn dealer_pok_prove<F, G>(
+    sk_d: F,
+    session_id: u128,
+    dealer_id: u8,
+    pk_d: G,
+    rng: &mut impl Rng,
+) -> Result<DealerPoK, AvssError>
+where
+    F: PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    let beta = F::rand(rng);
+    let a = G::generator().mul(beta);
+    let e: F = dealer_pok_challenge(session_id, dealer_id, &pk_d, &a)?;
+    let z = beta - sk_d * e;
+
+    let mut a_bytes = Vec::new();
+    a.serialize_compressed(&mut a_bytes)?;
+    let mut z_bytes = Vec::new();
+    z.serialize_compressed(&mut z_bytes)?;
+
+    Ok(DealerPoK::new(a_bytes, z_bytes))
+}
+
+/// Verifies a [`DealerPoK`] for `pk_d`, under the same `(session_id, dealer_id)` binding used
+/// to produce it. A proof from a different session — even one carrying an identical `pk_d` — is
+/// rejected, because the recomputed challenge won't match.
+fn dealer_pok_verify<F, G>(proof: &DealerPoK, session_id: u128, dealer_id: u8, pk_d: G) -> bool
+where
+    F: PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    let (Ok(a), Ok(z)) = (
+        G::deserialize_compressed(&proof.a[..]),
+        F::deserialize_compressed(&proof.z[..]),
+    ) else {
+        return false;
+    };
+    let Ok(e) = dealer_pok_challenge::<F, G>(session_id, dealer_id, &pk_d, &a) else {
+        return false;
+    };
+    a == G::generator().mul(z) + pk_d.mul(e)
 }
 
 fn kdf_from_point<G: CanonicalSerialize>(p: &G) -> [u8; 32] {
@@ -618,6 +716,7 @@ where
     where
         N: Network + Sync + Send,
         Rnd: Rng,
+        F: PrimeField,
     {
         info!("Receiving init for avss from {0:?}", self.id);
         // Generate the random polynomial of degree `degree` with `secret` as constant term
@@ -636,6 +735,14 @@ where
 
         let mut pk_d_bytes = Vec::new();
         pk_d.serialize_compressed(&mut pk_d_bytes)?;
+
+        let dealer_pok = dealer_pok_prove(
+            sk_d,
+            session_id.as_u128(),
+            session_id.dealer_id(),
+            pk_d,
+            rng,
+        )?;
 
         let mut encrypted: Vec<Vec<Vec<u8>>> =
             vec![Vec::with_capacity(shares.len()); self.n_parties];
@@ -674,6 +781,7 @@ where
         let msg = AvssMessage {
             session_id: session_id,
             dealer_pk: pk_d_bytes,
+            dealer_pok,
             public_commitments,
             encrypted_shares: encrypted,
         };
@@ -690,17 +798,32 @@ where
         Ok(())
     }
 
-    /// Validates the shape of a dealing — deserializable `dealer_pk`, consistent lengths,
-    /// well-formed commitment points — everything that must hold before this node's own row
-    /// can even be decrypted. Kept separate from `process` so a failure here has a single,
-    /// centralized cleanup site instead of repeating it at each of the checks below.
+    /// Validates the shape of a dealing — deserializable `dealer_pk`, proof of the dealer's
+    /// knowledge of its discrete log, consistent lengths, well-formed commitment points —
+    /// everything that must hold before this node's own row can even be decrypted. Kept
+    /// separate from `process` so a failure here has a single, centralized cleanup site instead
+    /// of repeating it at each of the checks below.
     fn validate_dealing(
         &self,
         msg: &AvssMessage<Id>,
-    ) -> Result<(G, Vec<Vec<G>>, [u8; 32], Vec<Vec<u8>>), AvssError> {
+    ) -> Result<(G, Vec<Vec<G>>, [u8; 32], Vec<Vec<u8>>), AvssError>
+    where
+        F: PrimeField,
+    {
         let pk_d: G = CanonicalDeserialize::deserialize_compressed(&msg.dealer_pk[..])?;
         if pk_d.is_zero() {
             return Err(AvssError::InvalidShare);
+        }
+        // Reject a `dealer_pk` nobody here can prove ownership of before anything else — in
+        // particular before the ECDH derivation below, which would otherwise happily produce a
+        // usable key from a point copied out of a different, honest dealing. See `DealerPoK`.
+        if !dealer_pok_verify::<F, G>(
+            &msg.dealer_pok,
+            msg.session_id.as_u128(),
+            msg.session_id.dealer_id(),
+            pk_d,
+        ) {
+            return Err(AvssError::InvalidDealerProof);
         }
         if msg.encrypted_shares.len() != self.n_parties {
             return Err(AvssError::InvalidShareLength);
@@ -1448,6 +1571,94 @@ mod dleq_tests {
 }
 
 #[cfg(test)]
+mod dealer_pok_tests {
+    use super::*;
+    use ark_bls12_381::{Fr, G1Projective as G};
+    use ark_ec::PrimeGroup;
+    use ark_std::test_rng;
+    use ark_std::UniformRand;
+
+    /// Completeness: a proof generated with the real witness verifies against the
+    /// same `(session_id, dealer_id, pk_d)` it was produced for.
+    #[test]
+    fn valid_proof_verifies() {
+        let mut rng = test_rng();
+        let sk_d = Fr::rand(&mut rng);
+        let pk_d = G::generator() * sk_d;
+        let session_id = 12345u128;
+        let dealer_id = 2u8;
+
+        let proof = dealer_pok_prove(sk_d, session_id, dealer_id, pk_d, &mut rng).unwrap();
+        assert!(dealer_pok_verify::<Fr, G>(
+            &proof, session_id, dealer_id, pk_d
+        ));
+    }
+
+    /// The core property this proof exists for: a `(dealer_pk, proof)` pair
+    /// genuinely produced for one session must not verify under a *different*
+    /// session id, even though `pk_d` itself is identical. This is exactly what
+    /// stops a Byzantine dealer from copying an honest dealing's key into a
+    /// session of its own.
+    #[test]
+    fn proof_rejects_copied_into_different_session() {
+        let mut rng = test_rng();
+        let sk_d = Fr::rand(&mut rng);
+        let pk_d = G::generator() * sk_d;
+        let honest_session = 111u128;
+        let malicious_session = 222u128;
+        let dealer_id = 0u8;
+
+        let proof = dealer_pok_prove(sk_d, honest_session, dealer_id, pk_d, &mut rng).unwrap();
+        assert!(dealer_pok_verify::<Fr, G>(
+            &proof,
+            honest_session,
+            dealer_id,
+            pk_d
+        ));
+        assert!(!dealer_pok_verify::<Fr, G>(
+            &proof,
+            malicious_session,
+            dealer_id,
+            pk_d
+        ));
+    }
+
+    /// Same binding property, but for `dealer_id` instead of `session_id` — a
+    /// dealing claimed by one dealer slot can't reuse a proof produced for another.
+    #[test]
+    fn proof_rejects_wrong_dealer_id() {
+        let mut rng = test_rng();
+        let sk_d = Fr::rand(&mut rng);
+        let pk_d = G::generator() * sk_d;
+        let session_id = 999u128;
+
+        let proof = dealer_pok_prove(sk_d, session_id, 1, pk_d, &mut rng).unwrap();
+        assert!(!dealer_pok_verify::<Fr, G>(&proof, session_id, 2, pk_d));
+    }
+
+    /// A prover who doesn't actually know the discrete log of `pk_d` cannot
+    /// produce a verifying proof for it — the actual attack this closes: copying
+    /// someone else's real `pk_d` without knowing the matching `sk_d`.
+    #[test]
+    fn cannot_fake_proof_without_knowing_discrete_log() {
+        let mut rng = test_rng();
+        // `pk_d` is an honest dealer's real key; the attacker never learns `sk_d`.
+        let pk_d = G::generator() * Fr::rand(&mut rng);
+        let session_id = 42u128;
+        let dealer_id = 3u8;
+
+        // The attacker's best move is to run the honest prover with *some* scalar
+        // it knows and hope it slips through for the copied `pk_d` anyway.
+        let attacker_guess = Fr::rand(&mut rng);
+        let proof =
+            dealer_pok_prove(attacker_guess, session_id, dealer_id, pk_d, &mut rng).unwrap();
+        assert!(!dealer_pok_verify::<Fr, G>(
+            &proof, session_id, dealer_id, pk_d
+        ));
+    }
+}
+
+#[cfg(test)]
 mod reveal_tests {
     use super::*;
     use crate::avss_mpc::{AvssSessionId, AvssWrappedMessage, ProtocolType};
@@ -1556,9 +1767,18 @@ mod reveal_tests {
 
         let session_id =
             AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot(0, 0, 0), 999);
+        let dealer_pok = dealer_pok_prove(
+            sk_d,
+            session_id.as_u128(),
+            session_id.dealer_id(),
+            pk_d,
+            &mut rng,
+        )
+        .unwrap();
         let msg = AvssMessage {
             session_id,
             dealer_pk: pk_d_bytes,
+            dealer_pok,
             public_commitments,
             encrypted_shares,
         };
@@ -1658,5 +1878,113 @@ mod reveal_tests {
                 "node {i} did not help recover party {victim}'s genuinely broken row"
             );
         }
+    }
+
+    /// Regression test for the cross-session ECDH key-disclosure vulnerability
+    /// `DealerPoK` closes: an honest dealer's `dealer_pk`, its Feldman commitments,
+    /// and its full ciphertext matrix are retained verbatim (exactly as a Byzantine
+    /// party observing the honest dealing could) and replayed into a different
+    /// session under a different dealer slot. Before this fix, `validate_dealing`
+    /// accepted any well-formed nonzero `dealer_pk` unconditionally, so this copy
+    /// would derive a real decryption key and proceed. Now the proof's Fiat-Shamir
+    /// challenge is bound to `(session_id, dealer_id)`, so a proof genuinely produced
+    /// for the honest session fails to verify under the attacker's session — the
+    /// dealing is rejected before any key is ever derived from the copied point.
+    #[test]
+    fn copied_dealer_pk_and_proof_rejected_in_a_different_session() {
+        let mut rng = test_rng();
+        let n = 4;
+        let t = 1;
+
+        let mut sks = Vec::new();
+        let mut pks = Vec::new();
+        for _ in 0..n {
+            let sk = Fr::rand(&mut rng);
+            pks.push(G::generator() * sk);
+            sks.push(sk);
+        }
+        let pk_map = Arc::new(pks);
+
+        let (sender, _) = mpsc::channel(128);
+        let recipient: TestNode = AvssNode::new(
+            1,
+            n,
+            (1..=n).collect(),
+            t,
+            sks[1],
+            pk_map.clone(),
+            sender,
+            Arc::new(AvssWrappedMessage::rbc_wrap),
+            Arc::new(AvssWrappedMessage::avss_wrap),
+            Arc::new(AvssWrappedMessage::agreement_wrap),
+        )
+        .unwrap();
+
+        // An honest dealer (party 0) deals normally in its own session: a real
+        // `sk_d`/`pk_d`, a real ciphertext matrix, and a genuine proof bound to that
+        // session.
+        let sk_d = Fr::rand(&mut rng);
+        let pk_d = G::generator() * sk_d;
+        let mut pk_d_bytes = Vec::new();
+        pk_d.serialize_compressed(&mut pk_d_bytes).unwrap();
+
+        let secrets = vec![Fr::from(7)];
+        let ids: Vec<usize> = (1..=n).collect();
+        let shares: Vec<Vec<FeldmanShamirShare<Fr, G>>> =
+            FeldmanShamirShare::compute_shares_batch(&secrets, n, t, Some(&ids), &mut rng)
+                .unwrap();
+
+        let mut public_commitments = Vec::with_capacity(shares.len());
+        let mut encrypted_shares: Vec<Vec<Vec<u8>>> = vec![Vec::with_capacity(shares.len()); n];
+        for per_secret in &shares {
+            let commitment_bytes = per_secret[0]
+                .commitments
+                .iter()
+                .map(|c| {
+                    let mut b = Vec::new();
+                    c.serialize_compressed(&mut b).unwrap();
+                    b
+                })
+                .collect::<Vec<_>>();
+            public_commitments.push(commitment_bytes);
+            for (party_idx, share) in per_secret.iter().enumerate() {
+                let key = kdf_from_point(&(pk_map[party_idx] * sk_d));
+                let mut pt = Vec::new();
+                share.feldmanshare.serialize_compressed(&mut pt).unwrap();
+                encrypted_shares[party_idx].push(encrypt(key, &pt, &mut rng).unwrap());
+            }
+        }
+
+        let honest_session =
+            AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot(0, 0, 0), 1);
+        let honest_pok = dealer_pok_prove(
+            sk_d,
+            honest_session.as_u128(),
+            honest_session.dealer_id(),
+            pk_d,
+            &mut rng,
+        )
+        .unwrap();
+
+        // The attacker (party 3) never learns `sk_d` — it just retains the whole
+        // dealing (`dealer_pk`, commitments, ciphertext matrix, and even the proof
+        // itself) and replays it verbatim into its own session, under its own
+        // dealer slot.
+        let attacker_session =
+            AvssSessionId::new(ProtocolType::Avss, AvssSessionId::pack_slot(0, 3, 0), 1);
+        let malicious_msg = AvssMessage {
+            session_id: attacker_session,
+            dealer_pk: pk_d_bytes,
+            dealer_pok: honest_pok,
+            public_commitments,
+            encrypted_shares,
+        };
+
+        let result = recipient.validate_dealing(&malicious_msg);
+        assert!(
+            matches!(result, Err(AvssError::InvalidDealerProof)),
+            "expected a dealer_pk + proof copied verbatim from a different session to be \
+             rejected before any key could be derived from it, got {result:?}"
+        );
     }
 }
