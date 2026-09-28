@@ -6,7 +6,6 @@
 pub mod field;
 pub mod generic_field;
 pub mod poly;
-pub mod robust_interpolate;
 pub mod share;
 pub mod vandermonde;
 

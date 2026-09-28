@@ -32,6 +32,8 @@ pub mod gf_mul;
 pub mod gf_preprocessing;
 /// GF(2^k) equivalent of `ran_dou_sha` (hyperinvertible-matrix extraction + checksum)
 pub mod gf_ran_dou_sha;
+/// GF(2^k) equivalent of `robust_interpolate` (Gao/OEC decoding)
+pub mod gf_robust_interpolate;
 /// GF(2^k) equivalent of `share_gen` (RanSha)
 pub mod gf_share_gen;
 /// GF(2^k) equivalent of `triple_gen` (Beaver triple generation)

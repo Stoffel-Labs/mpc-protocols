@@ -1,17 +1,22 @@
 //! Robust reconstruction over a [`BinaryField`] domain — a mechanical port of
 //! `honeybadger::robust_interpolate::robust_interpolate`, with `ark_poly::DensePolynomial<F>`
 //! replaced by [`Poly<K>`] and `ark_ff::FftField` replaced by [`BinaryField`].
+//!
+//! Lives under `honeybadger/`, not `common/gf2k/`, matching where the `F`-domain original lives:
+//! this is HoneyBadgerMPC's own reconstruction strategy (Fig. 1 of the paper, Gao/OEC decoding),
+//! not a primitive every protocol family in this crate necessarily shares the same way — unlike
+//! `common/gf2k`'s field/poly/share/vandermonde pieces, which mirror `common/share`'s placement
+//! because those genuinely are shared across families.
 
 use ark_std::rand::Rng;
 use std::collections::HashSet;
 
+use crate::common::gf2k::field::{BinaryField, Gf2kDomain};
+use crate::common::gf2k::poly::{lagrange_interpolate, Poly};
+use crate::common::gf2k::share::GfShare;
+use crate::common::gf2k::Gf2kError;
 use crate::common::share::ShareError;
 use crate::common::SecretSharingScheme;
-
-use super::field::{BinaryField, Gf2kDomain};
-use super::poly::{lagrange_interpolate, Poly};
-use super::share::GfShare;
-use super::Gf2kError;
 
 impl<K: BinaryField> GfShare<K> {
     /// Full robust interpolation combining optimistic decoding and error correction.
@@ -531,8 +536,8 @@ fn oec_decode<K: BinaryField>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::field::Gf256;
     use super::*;
+    use crate::common::gf2k::field::Gf256;
     use ark_std::test_rng;
     use itertools::Itertools;
 

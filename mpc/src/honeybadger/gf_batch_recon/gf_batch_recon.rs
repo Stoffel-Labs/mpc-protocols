@@ -14,12 +14,12 @@ use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::gf2k::{
         field::BinaryField,
-        robust_interpolate::batch_recover_secret,
         share::GfShare,
         vandermonde::{apply_vandermonde, make_vandermonde},
     },
     honeybadger::{
         gf_batch_recon::{GfBatchReconError, GfBatchReconMsg, GfBatchReconMsgType, GfBatchReconStore},
+        gf_robust_interpolate::batch_recover_secret,
         SessionId, WrappedMessage,
     },
 };
