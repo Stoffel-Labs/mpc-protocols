@@ -113,8 +113,6 @@ async fn setup_mul_with_synthetic_triples(
             None,
             None,
             None,
-            None,
-            None,
         );
     }
 

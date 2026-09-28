@@ -26,11 +26,12 @@ use tracing::info;
 pub struct OutputServer {
     pub id: usize,
     pub n: usize,
+    pub instance_id: u32,
 }
 
 impl OutputServer {
-    pub fn new(id: usize, n: usize) -> Result<Self, OutputError> {
-        Ok(Self { id, n })
+    pub fn new(id: usize, n: usize, instance_id: u32) -> Result<Self, OutputError> {
+        Ok(Self { id, n, instance_id })
     }
 
     /// Called by each server to send its output shares to the client.
@@ -49,7 +50,7 @@ impl OutputServer {
 
         let mut payload = Vec::new();
         shares.serialize_compressed(&mut payload)?;
-        let msg = OutputMessage::new(self.id, payload);
+        let msg = OutputMessage::new(self.id, self.instance_id, payload);
         let wrapped = WrappedMessage::Output(msg);
         let bytes = bincode::serialize(&wrapped)?;
 
@@ -73,13 +74,20 @@ pub struct OutputClient<F: FftField> {
     pub client_id: usize,
     pub n: usize,
     pub t: usize,
+    pub instance_id: u32,
     pub input_len: usize,
     pub output_sender: Sender<OutputClientData<F>>,
     pub output_receiver: Receiver<OutputClientData<F>>,
 }
 
 impl<F: FftField> OutputClient<F> {
-    pub fn new(id: usize, n: usize, t: usize, input_len: usize) -> Result<Self, OutputError> {
+    pub fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        instance_id: u32,
+        input_len: usize,
+    ) -> Result<Self, OutputError> {
         let (output_sender, output_receiver) = channel(OutputClientData::<F> {
             output: None,
             output_shares: HashMap::new(),
@@ -89,6 +97,7 @@ impl<F: FftField> OutputClient<F> {
             client_id: id,
             n,
             t,
+            instance_id,
             input_len,
             output_sender,
             output_receiver,
@@ -216,7 +225,26 @@ impl<F: FftField> OutputClient<F> {
     }
 
     /// Process any message (used for both client and server roles).
-    pub async fn process(&mut self, msg: OutputMessage) -> Result<(), OutputError> {
+    pub async fn process(
+        &mut self,
+        authenticated_sender_id: usize,
+        msg: OutputMessage,
+    ) -> Result<(), OutputError> {
+        if msg.instance_id != self.instance_id {
+            return Err(OutputError::InvalidInput(
+                "Output message belongs to a different execution".into(),
+            ));
+        }
+        if authenticated_sender_id != msg.sender_id {
+            return Err(OutputError::InvalidInput(
+                "Output sender does not match authenticated peer".into(),
+            ));
+        }
+        if authenticated_sender_id >= self.n {
+            return Err(OutputError::InvalidInput(
+                "Authenticated sender is not an MPC committee member".into(),
+            ));
+        }
         self.output_handler(msg).await?;
         Ok(())
     }
@@ -240,7 +268,7 @@ mod tests {
         let client_id = 7;
         let mut rng = test_rng();
 
-        let mut client = OutputClient::<Fr>::new(client_id, n, t, input_len).unwrap();
+        let mut client = OutputClient::<Fr>::new(client_id, n, t, 0, input_len).unwrap();
         let secret = Fr::rand(&mut rng);
 
         // Use RobustShare::compute_shares to generate shares for the secret
@@ -252,7 +280,7 @@ mod tests {
             vec![shares_vec[i].clone()]
                 .serialize_compressed(&mut payload)
                 .unwrap();
-            let msg = OutputMessage::new(i, payload);
+            let msg = OutputMessage::new(i, 0, payload);
             client.output_handler(msg).await.unwrap();
         }
 
@@ -264,7 +292,7 @@ mod tests {
         vec![shares_vec[2].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = OutputMessage::new(2, payload);
+        let msg = OutputMessage::new(2, 0, payload);
         client.output_handler(msg).await.unwrap();
 
         // get_output should now return Some(secret)
@@ -279,7 +307,7 @@ mod tests {
         let client_id = 7;
         let mut rng = test_rng();
 
-        let mut client = OutputClient::<Fr>::new(client_id, n, t, input_len).unwrap();
+        let mut client = OutputClient::<Fr>::new(client_id, n, t, 0, input_len).unwrap();
         let secret = Fr::rand(&mut rng);
 
         // Use RobustShare::compute_shares to generate shares for the secret
@@ -291,7 +319,7 @@ mod tests {
             vec![shares_vec[i].clone()]
                 .serialize_compressed(&mut payload)
                 .unwrap();
-            let msg = OutputMessage::new(i, payload);
+            let msg = OutputMessage::new(i, 0, payload);
             client.output_handler(msg).await.unwrap();
         }
 
@@ -307,7 +335,7 @@ mod tests {
         vec![shares_vec[2].clone()]
             .serialize_compressed(&mut payload)
             .unwrap();
-        let msg = OutputMessage::new(2, payload);
+        let msg = OutputMessage::new(2, 0, payload);
         client.output_handler(msg).await.unwrap();
 
         // Now, call wait_for_output again (should succeed)
@@ -317,5 +345,58 @@ mod tests {
             "Expected output to be reconstructed after enough shares"
         );
         assert_eq!(result2.unwrap(), vec![secret]);
+    }
+
+    /// Regression test for the missing execution-binding vulnerability: a fresh
+    /// `OutputClient` for one instance must reject a share belonging to a different
+    /// instance before it can be admitted, even from an authenticated server.
+    #[tokio::test]
+    async fn test_output_rejects_stale_instance() {
+        let n = 5;
+        let t = 1;
+        let input_len = 1;
+        let client_id = 7;
+
+        let mut client = OutputClient::<Fr>::new(client_id, n, t, 0, input_len).unwrap();
+        let stale_msg = OutputMessage::new(0, 1, vec![]);
+
+        let result = client.process(0, stale_msg).await;
+        assert!(
+            result.is_err(),
+            "expected a share from a different instance to be rejected"
+        );
+        assert_eq!(
+            client.get_output(),
+            None,
+            "a stale-instance share must not be admitted into reconstruction state"
+        );
+    }
+
+    /// Regression test for missing committee-membership validation: a sender id
+    /// outside `0..n` must be rejected by `process` before the payload is even
+    /// parsed, since it can never be a legitimate committee member regardless of
+    /// what it claims to carry.
+    #[tokio::test]
+    async fn test_output_rejects_non_committee_sender() {
+        let n = 5;
+        let t = 1;
+        let input_len = 1;
+        let client_id = 7;
+
+        let mut client = OutputClient::<Fr>::new(client_id, n, t, 0, input_len).unwrap();
+
+        for bad_sender in [n, n + 1] {
+            let msg = OutputMessage::new(bad_sender, 0, vec![]);
+            let result = client.process(bad_sender, msg).await;
+            assert!(
+                result.is_err(),
+                "expected sender id {bad_sender} (outside 0..{n}) to be rejected"
+            );
+        }
+        assert_eq!(
+            client.get_output(),
+            None,
+            "a non-committee share must not be admitted into reconstruction state"
+        );
     }
 }

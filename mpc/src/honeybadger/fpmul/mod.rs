@@ -2,8 +2,8 @@ use crate::{
     common::{lagrange_interpolate, rbc::RbcError, share::ShareError},
     honeybadger::{
         batch_recon::BatchReconError,
-        fpmul::f256::{Gf256, Gf256Error},
         mul::MulError,
+        mul_pub::MulPubError,
         robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId,
     },
@@ -21,7 +21,7 @@ use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 pub mod f256;
 pub mod fpmul;
-pub mod prandbitd;
+pub mod prandint;
 pub mod rand_bit;
 pub mod truncpr;
 //--------------------------------------------Rand-bit--------------------------------------------
@@ -37,7 +37,7 @@ pub enum RandBitError {
     SquareRoot,
     #[error("the inverse does not exist")]
     Inverse,
-    #[error("number of random shares is not a multiple of (t+1)")]
+    #[error("number of random shares and degree-2t zero-sharings must match")]
     Incompatible,
     #[error("Duplicate input: {0}")]
     Duplicate(String),
@@ -61,6 +61,10 @@ pub enum RandBitError {
     SessionIdError(SessionId),
     #[error("cannot create {0:?} random bits at once")]
     ShareLimitError(usize),
+    #[error("mul pub error: {0:?}")]
+    MulPubError(MulPubError),
+    #[error("failed to clear the store for session {0:?}")]
+    ClearStoreError(SessionId),
     #[error("result already received: {0:?}")]
     ResultAlreadyReceived(SessionId),
     #[error("multiplication {0:?} did not complete in time")]
@@ -110,14 +114,16 @@ where
     }
 }
 
-//--------------------------------------------Prandbitd--------------------------------------------
+//--------------------------------------------PRandInt--------------------------------------------
 #[derive(Debug, Error)]
-pub enum PRandError {
+pub enum PRandIntError {
     /// The parameters for the precision are too big
     #[error("the parameters for k and l surpassed the field capacity")]
     SurpassedFieldCapacity,
     #[error("RISS equivocation detected from party {0} for tset {1:?}")]
     EquivocationDetected(usize, Vec<usize>),
+    #[error("error in RBC: {0:?}")]
+    RbcError(#[from] RbcError),
     /// The error occurs when communicating using the network.
     #[error("there was an error in the network: {0:?}")]
     NetworkError(#[from] NetworkError),
@@ -132,8 +138,6 @@ pub enum PRandError {
     Abort,
     #[error("Duplicate input: {0}")]
     Duplicate(String),
-    #[error("number of random shares is not a multiple of (t+1)")]
-    Incompatible,
     #[error("Not set:{0}")]
     NotSet(String),
     #[error("ShareError: {0}")]
@@ -144,12 +148,8 @@ pub enum PRandError {
     SendError(SessionId),
     #[error("error receiving the result: {0:?}")]
     ReceiveError(SessionId),
-    #[error("F2_8 Error: {0}")]
-    F2_8Error(#[from] Gf256Error),
     #[error("InterpolateError: {0}")]
     InterpolateError(#[from] InterpolateError),
-    #[error("error in batch reconstruction: {0:?}")]
-    BatchRecError(#[from] BatchReconError),
     #[error("no such session ID exists: {0:?}")]
     NoSuchSessionId(SessionId),
     #[error("result already received: {0:?}")]
@@ -160,64 +160,72 @@ pub enum PRandError {
     LimitError,
     #[error("Invalid message: {0}")]
     InvalidMessage(String),
+    #[error("no PRSS keys installed; run the key setup or use the RISS path")]
+    NoPrssKeys,
+    #[error("PRSS error: {0:?}")]
+    PrssError(#[from] crate::honeybadger::prss::PrssError),
 }
 
-/// Message sent in the Random Double Sharing protocol.
+/// Length of the blinding nonce in a RISS commitment.
+///
+/// The commitment must hide `r_T^i` from the parties inside `T`, who receive it over RBC. A bare
+/// `H(values)` would not: a mask width of 40 bits is `2^40` hashes to brute-force. The nonce makes
+/// hiding independent of whatever width the caller picked.
+pub const PRANDINT_NONCE_LEN: usize = 32;
+
+/// Length of a RISS commitment digest (SHA-256).
+pub const PRANDINT_COMMIT_LEN: usize = 32;
+
+/// One party's RISS contribution to one unqualified set, sent point-to-point to the parties
+/// outside `T`.
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct PRandBitDMessage {
+pub struct PRandIntMessage {
     /// ID of the sender of the message.
     pub sender_id: usize,
     pub session_id: SessionId,
     pub tset: Vec<usize>,
     pub r_t: Vec<BigUint>,
-    pub payload: Vec<u8>,
+    pub nonce: [u8; PRANDINT_NONCE_LEN],
 }
 
-impl PRandBitDMessage {
-    /// Creates a new PRandBitDMessage.
+impl PRandIntMessage {
+    /// Creates a new PRandIntMessage.
     pub fn new(
         sender_id: usize,
         session_id: SessionId,
         tset: Vec<usize>,
         r_t: Vec<BigUint>,
-        payload: Vec<u8>,
+        nonce: [u8; PRANDINT_NONCE_LEN],
     ) -> Self {
         Self {
             sender_id,
             session_id,
             tset,
             r_t,
-            payload,
+            nonce,
         }
     }
 }
 
-/// Echo message for RISS consistency verification.
-/// Sent by every non-T recipient after receiving a RISS contribution, carrying the
-/// value they received so all other non-T parties can detect equivocation.
+/// A sender's commitments to *all* of its `C(n,t)` RISS contributions, reliably broadcast once per
+/// session, indexed by the rank of the unqualified set in `all_tsets`.
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct PRandBitDEchoMessage {
-    pub echoer_id: usize,
-    pub original_sender: usize,
+pub struct PRandIntCommitMessage {
+    pub sender_id: usize,
     pub session_id: SessionId,
-    pub tset: Vec<usize>,
-    pub r_t: Vec<BigUint>,
+    pub commitments: Vec<[u8; PRANDINT_COMMIT_LEN]>,
 }
 
-impl PRandBitDEchoMessage {
+impl PRandIntCommitMessage {
     pub fn new(
-        echoer_id: usize,
-        original_sender: usize,
+        sender_id: usize,
         session_id: SessionId,
-        tset: Vec<usize>,
-        r_t: Vec<BigUint>,
+        commitments: Vec<[u8; PRANDINT_COMMIT_LEN]>,
     ) -> Self {
         Self {
-            echoer_id,
-            original_sender,
+            sender_id,
             session_id,
-            tset,
-            r_t,
+            commitments,
         }
     }
 }
@@ -225,71 +233,61 @@ impl PRandBitDEchoMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrandState {
     Initialized,
-    BitFinished,
     IntFinished,
 }
 
 #[derive(Debug)]
-pub struct PRandBitDStore<F: PrimeField, G: PrimeField> {
+pub struct PRandIntStore<G: PrimeField> {
     /// For every maximal unqualified set T that excludes this player,
     /// we store the full mask r_T = sum_i r_T^i
     pub batch_size: Option<usize>,
-    /// Messages that arrived before batch_size/r_t_bound were set; reprocessed once initialized.
-    pub pending_riss_messages: Vec<PRandBitDMessage>,
-    /// Echo messages that arrived before the session was initialized.
-    pub pending_echo_messages: Vec<PRandBitDEchoMessage>,
-    pub output_open: HashMap<u8, Vec<F>>,
-    /// Contributions verified by the echo protocol and accepted into the share sum.
+    /// Openings that arrived before this session was locally initialized, or before their sender's
+    /// commitment was delivered by RBC. Replayed from both of those points.
+    pub pending_riss_messages: Vec<PRandIntMessage>,
+    /// Running total of `riss_msg_weight` over every message currently in `pending_riss_messages`.
+    pub pending_riss_bytes: usize,
+    /// Contributions verified against their sender's commitment and accepted into the share sum.
     pub riss_shares: HashMap<Vec<usize>, HashMap<usize, Vec<BigUint>>>, // tset -> {sender -> val}
-    /// Raw values received directly from each RISS sender, held pending echo verification.
-    /// Key: (tset, original_sender)
-    pub riss_direct: HashMap<(Vec<usize>, usize), Vec<BigUint>>,
-    /// Echo messages received from other non-T parties for each (tset, original_sender).
-    /// Key: (tset, original_sender) -> {echoer_id -> echoed_value}
-    pub riss_echoes: HashMap<(Vec<usize>, usize), HashMap<usize, Vec<BigUint>>>,
+    /// RBC-delivered commitment vectors, keyed by sender, indexed by unqualified-set rank.
+    pub commitments: HashMap<usize, Vec<[u8; PRANDINT_COMMIT_LEN]>>,
+    /// This party's own contributions, held back until every party has committed.
+    ///
+    /// Committing before opening is only worth anything if the commitment is fixed *before* its
+    /// sender sees anyone else's values. Sending our openings the moment we broadcast would let a
+    /// corrupt party sit on its own broadcast, collect the honest openings, choose its values to
+    /// steer the sum, and only then commit — binding to a choice made after the fact constrains
+    /// nothing.
+    pub my_openings: Vec<(Vec<usize>, Vec<BigUint>, [u8; PRANDINT_NONCE_LEN])>,
+    /// Whether the barrier has already fired. The release path is reachable from both
+    /// `generate_riss` and every `drain_rbc_output`, and the openings must go out exactly once.
+    pub openings_sent: bool,
     pub r_t: HashMap<Vec<usize>, Vec<BigUint>>,
     pub no_of_tsets: Option<usize>,
-    pub share_r_q: Option<Vec<RobustShare<F>>>, //smaller field
-    pub share_r_p: Option<Vec<RobustShare<G>>>, // PrandInt output
-    pub share_b_q: Option<Vec<RobustShare<F>>>, //smaller field
-    pub share_r_2: Option<Vec<Gf256>>,
-    pub share_b_2: Vec<Gf256>,          //PrandBitD output
-    pub share_b_p: Vec<RobustShare<G>>, //PrandBitD/PrandBitL output
+    /// PRandInt output.
+    pub share_r_p: Option<Vec<RobustShare<G>>>,
     pub state: PrandState,
-    pub output_bit_sender: Option<Sender<Vec<(RobustShare<G>, Gf256)>>>,
     pub output_int_sender: Option<Sender<Vec<RobustShare<G>>>>,
-    pub output_bit_receiver: Option<Receiver<Vec<(RobustShare<G>, Gf256)>>>,
     pub output_int_receiver: Option<Receiver<Vec<RobustShare<G>>>>,
-    pub open_started: bool,
     pub r_t_bound: Option<BigUint>,
 }
 
-impl<F: PrimeField, G: PrimeField> PRandBitDStore<F, G> {
+impl<G: PrimeField> PRandIntStore<G> {
     pub fn empty() -> Self {
-        let (output_bit_sender, output_bit_receiver) = channel();
         let (output_int_sender, output_int_receiver) = channel();
         Self {
             batch_size: None,
             pending_riss_messages: Vec::new(),
-            pending_echo_messages: Vec::new(),
-            output_open: HashMap::new(),
+            pending_riss_bytes: 0,
             riss_shares: HashMap::new(),
-            riss_direct: HashMap::new(),
-            riss_echoes: HashMap::new(),
+            commitments: HashMap::new(),
+            my_openings: Vec::new(),
+            openings_sent: false,
             r_t: HashMap::new(),
             no_of_tsets: None,
-            share_r_q: None,
             share_r_p: None,
-            share_b_q: None,
-            share_r_2: None,
-            share_b_2: Vec::new(),
-            share_b_p: Vec::new(),
             state: PrandState::Initialized,
-            output_bit_sender: Some(output_bit_sender),
             output_int_sender: Some(output_int_sender),
-            output_bit_receiver: Some(output_bit_receiver),
             output_int_receiver: Some(output_int_receiver),
-            open_started: false,
             r_t_bound: None,
         }
     }
@@ -335,8 +333,6 @@ pub enum TruncPrError {
     Abort,
     #[error("Duplicate input: {0}")]
     Duplicate(usize),
-    #[error("Rbc error: {0}")]
-    RbcError(#[from] RbcError),
     #[error("ShareError: {0}")]
     ShareError(#[from] ShareError),
     #[error("error sending the result: {0:?}")]
@@ -355,6 +351,10 @@ pub enum TruncPrError {
     Timeout(SessionId),
     #[error("Store Limit")]
     LimitError,
+    /// `r_dash = sum_{i=0}^{m-1} 2^i r_i` needs exactly `m` random bit shares to mask the
+    /// low `m` bits of the opened value; fewer than that leaves those bits unmasked.
+    #[error("TruncPr needs {needed} random mask bits, got {got}")]
+    InsufficientRandBits { needed: usize, got: usize },
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

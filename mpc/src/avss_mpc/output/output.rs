@@ -23,11 +23,12 @@ use tracing::info;
 pub struct AvssOutputServer {
     pub id: usize,
     pub n: usize,
+    pub instance_id: u32,
 }
 
 impl AvssOutputServer {
-    pub fn new(id: usize, n: usize) -> Result<Self, AvssOutputError> {
-        Ok(Self { id, n })
+    pub fn new(id: usize, n: usize, instance_id: u32) -> Result<Self, AvssOutputError> {
+        Ok(Self { id, n, instance_id })
     }
 
     /// Called by each server to send its output shares to the client.
@@ -46,7 +47,7 @@ impl AvssOutputServer {
 
         let mut payload = Vec::new();
         shares.serialize_compressed(&mut payload)?;
-        let msg = AvssOutputMessage::new(self.id, payload);
+        let msg = AvssOutputMessage::new(self.id, self.instance_id, payload);
         let wrapped = AvssWrappedMessage::Output(msg);
         let bytes = bincode::serialize(&wrapped)?;
 
@@ -70,13 +71,20 @@ pub struct AvssOutputClient<F: FftField, G: CurveGroup<ScalarField = F>> {
     pub client_id: usize,
     pub n: usize,
     pub t: usize,
+    pub instance_id: u32,
     pub input_len: usize,
     output_sender: Sender<AvssOutputClientData<F, G>>,
     output_receiver: Receiver<AvssOutputClientData<F, G>>,
 }
 
 impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
-    pub fn new(id: usize, n: usize, t: usize, input_len: usize) -> Result<Self, AvssOutputError> {
+    pub fn new(
+        id: usize,
+        n: usize,
+        t: usize,
+        instance_id: u32,
+        input_len: usize,
+    ) -> Result<Self, AvssOutputError> {
         let (output_sender, output_receiver) = channel(AvssOutputClientData::<F, G> {
             output: None,
             output_shares: HashMap::new(),
@@ -86,6 +94,7 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
             client_id: id,
             n,
             t,
+            instance_id,
             input_len,
             output_sender,
             output_receiver,
@@ -231,7 +240,26 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
     }
 
     /// Process any message (used for both client and server roles).
-    pub async fn process(&mut self, msg: AvssOutputMessage) -> Result<(), AvssOutputError> {
+    pub async fn process(
+        &mut self,
+        authenticated_sender_id: usize,
+        msg: AvssOutputMessage,
+    ) -> Result<(), AvssOutputError> {
+        if msg.instance_id != self.instance_id {
+            return Err(AvssOutputError::InvalidInput(
+                "Output message belongs to a different execution".into(),
+            ));
+        }
+        if authenticated_sender_id != msg.sender_id {
+            return Err(AvssOutputError::InvalidInput(
+                "Output sender does not match authenticated peer".into(),
+            ));
+        }
+        if authenticated_sender_id >= self.n {
+            return Err(AvssOutputError::InvalidInput(
+                "Authenticated sender is not an MPC committee member".into(),
+            ));
+        }
         self.output_handler(msg).await?;
         Ok(())
     }

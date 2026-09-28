@@ -1,17 +1,17 @@
 use crate::utils::test_utils::{
     create_global_nodes, fan_in_inboxes, generate_independent_shares, receive, setup_tracing,
-    test_setup,
+    test_setup, unused_precision,
 };
 use ark_bls12_381::Fr;
 use futures::future::join_all;
-use stoffelcrypto::honeybadger::input::InputError;
+use stoffelcrypto::honeybadger::input::{InputError, InputMessage};
 use stoffelcrypto::honeybadger::SessionId;
 use stoffelcrypto::{
     common::{rbc::rbc::Avid, SecretSharingScheme, ShamirShare},
     honeybadger::{
         input::input::InputClient,
         robust_interpolate::robust_interpolate::{Robust, RobustShare},
-        HoneyBadgerMPCNode, WrappedMessage,
+        HoneyBadgerMPCNode, WrappedMessage, MIN_STATISTICAL_SECURITY,
     },
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
@@ -48,8 +48,8 @@ async fn test_multiple_clients_parallel_input() {
             111,
             0,
             0,
-            0,
-            0,
+            unused_precision(),
+            MIN_STATISTICAL_SECURITY,
             Duration::from_secs(30),
             client_ids.clone(),
         );
@@ -77,10 +77,13 @@ async fn test_multiple_clients_parallel_input() {
         let mut merged_rx = fan_in_inboxes(inbox);
         let net_clone = client_net.remove(&cid).unwrap();
         tokio::spawn(async move {
-            while let Some((_, raw)) = merged_rx.recv().await {
+            while let Some((sender, raw)) = merged_rx.recv().await {
+                let SenderId::Node(sender) = sender else {
+                    continue;
+                };
                 let wrapped: WrappedMessage = bincode::deserialize(&raw).ok().unwrap();
                 if let WrappedMessage::Input(msg) = wrapped {
-                    client.process(msg, net_clone.clone()).await.ok();
+                    client.process(sender, msg, net_clone.clone()).await.ok();
                 }
             }
         });
@@ -138,8 +141,8 @@ async fn test_input_recovery_with_missing_server() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![clientid],
     );
@@ -164,8 +167,11 @@ async fn test_input_recovery_with_missing_server() {
     let net_clone = client_net.remove(&clientid).unwrap();
     tokio::spawn(async move {
         while let Some(received) = merged_rx.recv().await {
+            let SenderId::Node(sender) = received.0 else {
+                continue;
+            };
             if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received.1) {
-                client.process(msg, net_clone.clone()).await.ok();
+                client.process(sender, msg, net_clone.clone()).await.ok();
             }
         }
     });
@@ -222,8 +228,8 @@ async fn test_input_with_too_many_faulty_shares() {
         111,
         0,
         0,
-        0,
-        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
         vec![client_id],
     );
@@ -251,9 +257,12 @@ async fn test_input_with_too_many_faulty_shares() {
     let net_clone = client_net.remove(&client_id).unwrap();
     tokio::spawn(async move {
         while let Some(received) = merged_rx.recv().await {
+            let SenderId::Node(sender) = received.0 else {
+                continue;
+            };
             if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received.1) {
                 // Client will fail internally when trying to decode faulty shares
-                let _ = client.process(msg, net_clone.clone()).await;
+                let _ = client.process(sender, msg, net_clone.clone()).await;
             }
         }
     });
@@ -294,6 +303,60 @@ async fn test_input_with_too_many_faulty_shares() {
         assert!(
             matches!(shares, Err(InputError::Timeout(_))),
             "Server {i} should not have received input from client due to decoding failure"
+        );
+    }
+}
+
+/// Regression test for the missing execution-binding vulnerability: a fresh
+/// `InputClient` for one instance must reject a mask share belonging to a different
+/// instance before it ever reaches share parsing, even from an authenticated server.
+#[tokio::test]
+async fn test_input_rejects_stale_instance() {
+    setup_tracing();
+    let n = 4;
+    let t = 1;
+    let clientid = 100;
+    let instance_id = 111;
+
+    let (_net, _server_recv, mut client_net, _client_recv) = test_setup(n, vec![clientid]);
+    let net_clone = client_net.remove(&clientid).unwrap();
+
+    let mut client =
+        InputClient::<Fr, Avid<SessionId>>::new(clientid, n, t, instance_id, vec![Fr::from(10)])
+            .unwrap();
+
+    let stale_msg = InputMessage::new(0, instance_id + 1, vec![]);
+    let result = client.process(0, stale_msg, net_clone).await;
+    assert!(
+        result.is_err(),
+        "expected a mask share from a different instance to be rejected"
+    );
+}
+
+/// Regression test for missing committee-membership validation: a sender id outside
+/// `0..n` must be rejected by `process` before the payload is even parsed, since it
+/// can never be a legitimate committee member regardless of what it claims to carry.
+#[tokio::test]
+async fn test_input_rejects_non_committee_sender() {
+    setup_tracing();
+    let n = 4;
+    let t = 1;
+    let clientid = 100;
+    let instance_id = 111;
+
+    let (_net, _server_recv, mut client_net, _client_recv) = test_setup(n, vec![clientid]);
+    let net_clone = client_net.remove(&clientid).unwrap();
+
+    let mut client =
+        InputClient::<Fr, Avid<SessionId>>::new(clientid, n, t, instance_id, vec![Fr::from(10)])
+            .unwrap();
+
+    for bad_sender in [n, n + 1] {
+        let msg = InputMessage::new(bad_sender, instance_id, vec![]);
+        let result = client.process(bad_sender, msg, net_clone.clone()).await;
+        assert!(
+            result.is_err(),
+            "expected sender id {bad_sender} (outside 0..{n}) to be rejected"
         );
     }
 }

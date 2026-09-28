@@ -45,6 +45,7 @@ pub struct AvssInputServer<F: FftField, R: RBC, G: CurveGroup<ScalarField = F>> 
     pub id: usize,
     pub n: usize,
     pub t: usize,
+    pub instance_id: u32,
     pub rbc: R,
     pub rbc_output: Arc<Mutex<tokio::sync::mpsc::Receiver<AvssSessionId>>>,
     status_sender: Sender<HashMap<ClientId, (InputType, Vec<FeldmanShamirShare<F, G>>)>>,
@@ -78,8 +79,15 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         id: usize,
         n: usize,
         t: usize,
+        instance_id: u32,
         input_ids: Vec<ClientId>,
     ) -> Result<Self, AvssInputError> {
+        if let Some(&overlapping) = input_ids
+            .iter()
+            .find(|&&cid| cid < n || cid > u8::MAX as usize)
+        {
+            return Err(AvssInputError::InvalidClientId(overlapping, n));
+        }
         let (rbc_sender, rbc_receiver) = tokio::sync::mpsc::channel(200);
         let rbc = R::new(
             id,
@@ -100,6 +108,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             id,
             n,
             t,
+            instance_id,
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             status_sender,
@@ -209,7 +218,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         if send_over_network {
             let mut payload = Vec::new();
             shares.serialize_compressed(&mut payload)?;
-            let msg = AvssInputMessage::new(self.id, payload);
+            let msg = AvssInputMessage::new(self.id, self.instance_id, payload);
             let wrapped = AvssWrappedMessage::Input(msg);
             let bytes = bincode::serialize(&wrapped)?;
             net.send_to_client(client_id, &bytes).await?;
@@ -535,9 +544,25 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
     /// Process any message (used for both client and server roles).
     pub async fn process<N: Network + Send + Sync>(
         &mut self,
+        authenticated_sender_id: usize,
         msg: AvssInputMessage,
         net: Arc<N>,
     ) -> Result<(), AvssInputError> {
+        if msg.instance_id != self.instance_id {
+            return Err(AvssInputError::InvalidInput(
+                "Input message belongs to a different execution".into(),
+            ));
+        }
+        if authenticated_sender_id != msg.sender_id {
+            return Err(AvssInputError::InvalidInput(
+                "Input sender does not match authenticated peer".into(),
+            ));
+        }
+        if authenticated_sender_id >= self.n {
+            return Err(AvssInputError::InvalidInput(
+                "Authenticated sender is not an MPC committee member".into(),
+            ));
+        }
         self.init_handler(msg, net).await
     }
 }

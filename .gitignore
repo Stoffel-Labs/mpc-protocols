@@ -3,3 +3,6 @@ Cargo.lock
 .DS_Store
 .cache
 .idea
+
+# Claude Code: skills are shared, per-machine permission overrides are not
+.claude/settings.local.json
