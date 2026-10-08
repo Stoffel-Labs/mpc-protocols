@@ -449,10 +449,23 @@ where
                 output = ?m,
                 "Consensus achieved; RBC instance ended"
             );
-            self.output_sender
-                .send(msg.session_id)
-                .await
-                .map_err(|_| RbcError::SendError)?;
+            match self.output_sender.try_send(msg.session_id) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!(
+                        id = self.id,
+                        session_id = msg.session_id.as_u128(),
+                        "RBC output channel full; dropping completion notification"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    warn!(
+                        id = self.id,
+                        session_id = msg.session_id.as_u128(),
+                        "RBC output receiver dropped; discarding completion notification"
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -1036,10 +1049,23 @@ impl<Id: ProtocolSessionId> Avid<Id> {
                 output = ?m,
                 "Consensus achieved; AVID instance ended"
             );
-            self.output_sender
-                .send(msg.session_id)
-                .await
-                .map_err(|_| RbcError::SendError)?;
+            match self.output_sender.try_send(msg.session_id) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!(
+                        id = self.id,
+                        session_id = msg.session_id.as_u128(),
+                        "RBC output channel full; dropping completion notification"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    warn!(
+                        id = self.id,
+                        session_id = msg.session_id.as_u128(),
+                        "RBC output receiver dropped; discarding completion notification"
+                    );
+                }
+            }
         }
         Ok(())
     }

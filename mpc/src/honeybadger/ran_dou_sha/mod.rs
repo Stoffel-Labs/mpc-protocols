@@ -4,7 +4,9 @@ use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{
         rbc::RbcError,
-        share::{apply_vandermonde, make_vandermonde, shamir::NonRobustShare, ShareError},
+        share::{
+            apply_vandermonde, make_hyperinvertible_matrix, shamir::NonRobustShare, ShareError,
+        },
         ProtocolSessionId, SecretSharingScheme, RBC,
     },
     honeybadger::{
@@ -400,17 +402,17 @@ where
             return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
         }
 
-        let vandermonde_matrix = make_vandermonde(self.n_parties, self.n_parties - 1)?;
+        let hyperinvertible_matrix = make_hyperinvertible_matrix(self.n_parties)?;
         // Implementation of Step 1.
         let mut r_deg_t = Vec::with_capacity(shares_deg_t_by_batch.len() * self.n_parties);
         for shares_deg_t in shares_deg_t_by_batch {
-            r_deg_t.extend(apply_vandermonde(&vandermonde_matrix, &shares_deg_t)?);
+            r_deg_t.extend(apply_vandermonde(&hyperinvertible_matrix, &shares_deg_t)?);
         }
 
         // Implementation of Step 2.
         let mut r_deg_2t = Vec::with_capacity(shares_deg_2t_by_batch.len() * self.n_parties);
         for shares_deg_2t in shares_deg_2t_by_batch {
-            r_deg_2t.extend(apply_vandermonde(&vandermonde_matrix, &shares_deg_2t)?);
+            r_deg_2t.extend(apply_vandermonde(&hyperinvertible_matrix, &shares_deg_2t)?);
         }
 
         // Save the shares of r of degree t and 2t into the storage.

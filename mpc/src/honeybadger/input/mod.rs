@@ -2,7 +2,7 @@ use crate::{common::rbc::RbcError, honeybadger::robust_interpolate::InterpolateE
 use ark_serialize::SerializationError;
 use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
-use stoffelnet::network_utils::NetworkError;
+use stoffelnet::network_utils::{ClientId, NetworkError};
 use thiserror::Error;
 use tokio::{sync::watch::error::RecvError, time::error::Elapsed};
 
@@ -32,6 +32,11 @@ pub enum InputError {
     Timeout(#[from] Elapsed),
     #[error("Channel closed")]
     Abort,
+    #[error(
+        "client id {0} is invalid: it must satisfy {1} <= id <= 255 (ids below {1} collide with \
+         consensus node ids; ids above 255 cannot fit the session id's 8-bit sub-id field)"
+    )]
+    InvalidClientId(ClientId, usize),
 }
 
 /// Message sent in the Random Double Sharing protocol.
@@ -39,12 +44,20 @@ pub enum InputError {
 pub struct InputMessage {
     /// ID of the sender of the message or the client
     pub sender_id: usize,
+    /// Execution this direct packet belongs to — checked against the receiving handler's own
+    /// `instance_id` before the packet is allowed to touch protocol state, so a share replayed
+    /// or delayed from a prior execution can't be mistaken for one from the current run.
+    pub instance_id: u32,
     /// Type of the message according to the handler.
     pub payload: Vec<u8>,
 }
 
 impl InputMessage {
-    pub fn new(sender_id: usize, payload: Vec<u8>) -> InputMessage {
-        Self { sender_id, payload }
+    pub fn new(sender_id: usize, instance_id: u32, payload: Vec<u8>) -> InputMessage {
+        Self {
+            sender_id,
+            instance_id,
+            payload,
+        }
     }
 }

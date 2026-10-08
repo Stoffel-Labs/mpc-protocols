@@ -31,6 +31,7 @@ bincode.workspace = true
 threshold_crypto.workspace = true
 async-trait.workspace = true
 sha2.workspace = true
+hmac.workspace = true
 rs_merkle.workspace = true
 reed-solomon-erasure.workspace = true
 rand.workspace = true

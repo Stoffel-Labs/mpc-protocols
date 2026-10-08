@@ -68,6 +68,7 @@ fn avss_e2e() {
                 sender_channels[i].clone(),
                 Arc::new(AvssWrappedMessage::rbc_wrap),
                 Arc::new(AvssWrappedMessage::avss_wrap),
+                Arc::new(AvssWrappedMessage::agreement_wrap),
             )
             .unwrap()
         })
@@ -114,7 +115,14 @@ fn avss_e2e() {
                                             .process(msg, network_arc.clone())
                                             .await
                                             .expect("The node should process the RBC message");
-                                        let _ = node.drain_rbc_output().await;
+                                        let _ = node.drain_rbc_output(network_arc.clone()).await;
+                                    }
+                                    AvssWrappedMessage::Agreement(msg) => {
+                                        node.process_agreement(msg, network_arc.clone())
+                                            .await
+                                            .expect(
+                                                "The node should process the agreement message",
+                                            );
                                     }
                                     _ => {}
                                 }
