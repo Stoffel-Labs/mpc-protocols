@@ -260,3 +260,16 @@ pub extern "C" fn instance_id(session_id: SessionIdBits) -> u32 {
     let session_id = unsafe { session_id.to_session_id() };
     session_id.instance_id()
 }
+
+/// Checks that `session_id`'s reserved bits are unset. A value built from raw `lo`/`hi` bits
+/// (rather than via `new_session_id`) can carry nonzero reserved bits yet still report the same
+/// `calling_protocol`/`exec_id`/`sub_id`/`round_id`/`instance_id` as its canonical counterpart —
+/// such a value hashes and compares as a *different* session id everywhere a `SessionId` is used
+/// as a map key. Callers constructing a `SessionIdBits` from a raw value (not from
+/// `new_session_id`) should check this before passing it to any function that admits or
+/// initiates a session.
+#[no_mangle]
+pub extern "C" fn is_canonical(session_id: SessionIdBits) -> bool {
+    let session_id = unsafe { session_id.to_session_id() };
+    session_id.is_canonical()
+}

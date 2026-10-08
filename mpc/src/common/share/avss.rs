@@ -1931,8 +1931,7 @@ mod reveal_tests {
         let secrets = vec![Fr::from(7)];
         let ids: Vec<usize> = (1..=n).collect();
         let shares: Vec<Vec<FeldmanShamirShare<Fr, G>>> =
-            FeldmanShamirShare::compute_shares_batch(&secrets, n, t, Some(&ids), &mut rng)
-                .unwrap();
+            FeldmanShamirShare::compute_shares_batch(&secrets, n, t, Some(&ids), &mut rng).unwrap();
 
         let mut public_commitments = Vec::with_capacity(shares.len());
         let mut encrypted_shares: Vec<Vec<Vec<u8>>> = vec![Vec::with_capacity(shares.len()); n];

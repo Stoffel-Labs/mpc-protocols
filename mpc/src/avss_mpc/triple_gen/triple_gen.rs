@@ -20,7 +20,7 @@ use ark_std::rand::Rng;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::{
     mpsc::{self},
@@ -414,12 +414,61 @@ where
         let mut round1_pending: HashMap<usize, Vec<FeldmanShamirShare<F, C>>> = HashMap::new();
         let mut expected_check_commitments: Option<Vec<Vec<C>>> = None;
 
+        // Every session this check will ever need is knowable in advance: one round-0
+        // and one round-1 TripleCheck session per party. `rbc_output` is a fixed-capacity
+        // channel shared with every TripleCheck session on this node, including
+        // unsolicited ones anyone can trigger for free by broadcasting a bogus RBC init;
+        // if it's full when a session we need completes, the RBC layer's `try_send`
+        // silently drops that notification rather than blocking (see rbc.rs). So treat
+        // the channel as a best-effort hint, and periodically re-poll `rbc.get_store`
+        // directly for whichever of these fixed IDs we're still missing — that's what
+        // actually guarantees this loop can't stall forever on a dropped notification.
+        let round0_ids: Vec<AvssSessionId> = (0..self.n_parties)
+            .map(|p| {
+                AvssSessionId::new(
+                    ProtocolType::TripleCheck,
+                    AvssSessionId::pack_slot(session_id.exec_id(), p as u8, 0),
+                    session_id.instance_id(),
+                )
+            })
+            .collect();
+        let round1_ids: Vec<AvssSessionId> = (0..self.n_parties)
+            .map(|p| {
+                AvssSessionId::new(
+                    ProtocolType::TripleCheck,
+                    AvssSessionId::pack_slot(session_id.exec_id(), p as u8, 1),
+                    session_id.instance_id(),
+                )
+            })
+            .collect();
+        let mut poll_interval = tokio::time::interval(Duration::from_millis(200));
+        poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut pending_poll: Vec<AvssSessionId> = Vec::new();
+
         let check_pub: Vec<F> = 'check: loop {
-            let id = {
-                let mut rx = self.rbc_output.lock().await;
-                match rx.recv().await {
-                    Some(id) => id,
-                    None => unreachable!(),
+            let id = if let Some(id) = pending_poll.pop() {
+                id
+            } else {
+                tokio::select! {
+                    maybe_id = async { self.rbc_output.lock().await.recv().await } => {
+                        match maybe_id {
+                            Some(id) => id,
+                            None => unreachable!(),
+                        }
+                    }
+                    _ = poll_interval.tick() => {
+                        pending_poll = round0_ids
+                            .iter()
+                            .filter(|id| !round0_received.contains_key(&(id.sub_id() as usize)))
+                            .chain(
+                                round1_ids.iter().filter(|id| {
+                                    !round1_pending.contains_key(&(id.sub_id() as usize))
+                                }),
+                            )
+                            .copied()
+                            .collect();
+                        continue 'check;
+                    }
                 }
             };
             if id.exec_id() != session_id.exec_id() || id.instance_id() != session_id.instance_id()
@@ -431,7 +480,12 @@ where
                 continue 'check;
             }
             let round = id.round_id();
-            let output = self.rbc.get_store(id).await?;
+            let output = match self.rbc.get_store(id).await {
+                Ok(o) => o,
+                // Not admitted yet (or still in progress) — expected when this id came
+                // from the poll fallback rather than a real completion notification.
+                Err(_) => continue 'check,
+            };
             let msg: TripleCheckMessage = match bincode::deserialize(&output) {
                 Ok(m) => m,
                 Err(_) => continue 'check,

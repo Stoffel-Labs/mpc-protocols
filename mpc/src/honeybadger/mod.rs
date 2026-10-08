@@ -529,7 +529,13 @@ pub struct HoneyBadgerMPCNodeOpts {
     /// Number of random shares needed.
     /// This is usually = No of inputs + 2 * no of triples
     pub n_random_shares: usize,
-    /// Instance ID
+    /// Identifies one execution of the whole n-party protocol — not a per-client id.
+    /// Must be identical across all n servers and every client participating in this
+    /// execution (multiple clients computing together share one value), checked against
+    /// it on every direct Input/Output message. Every new execution, including a retry
+    /// after a prior one failed or aborted, must use a value that was never used before:
+    /// reusing a dead run's id would let a message still in flight from that run be
+    /// accepted as belonging to the new one.
     pub instance_id: u32,
     ///Number of RandBit shares
     pub n_randbit: usize,
@@ -865,6 +871,23 @@ where
         if is_client_input_broadcast && sender_id < self.params.n_parties {
             warn!(
                 "Rejecting client input broadcast: sender {} is a consensus node id, not a client id",
+                sender_id
+            );
+            return Err(HoneyBadgerError::UnauthorizedSender(
+                sender_id,
+                self.params.n_parties,
+            ));
+        }
+        if is_client_input_broadcast
+            && !self
+                .preprocess
+                .input
+                .status_receiver
+                .borrow()
+                .contains_key(&sender_id)
+        {
+            warn!(
+                "Rejecting client input broadcast: sender {} is not a registered input client",
                 sender_id
             );
             return Err(HoneyBadgerError::UnauthorizedSender(

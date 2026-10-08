@@ -451,7 +451,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
         })
     }
 
-    pub async fn init_handler<N: Network + Send + Sync>(
+    async fn init_handler<N: Network + Send + Sync>(
         &self,
         msg: InputMessage,
         net: Arc<N>,

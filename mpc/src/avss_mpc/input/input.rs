@@ -116,6 +116,14 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         })
     }
 
+    /// Whether `client_id` was registered as an input client at construction time. Callers
+    /// should check this before admitting any client-dealt session for it — registration
+    /// happens here, not at the transport layer, so an id outside the consensus-party range
+    /// is not by itself proof of being an authorized client.
+    pub fn is_registered_client(&self, client_id: ClientId) -> bool {
+        self.status_sender.borrow().contains_key(&client_id)
+    }
+
     pub async fn drain_rbc_output(&mut self) -> Result<(), AvssInputError> {
         loop {
             let id = {
@@ -417,7 +425,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         })
     }
 
-    pub async fn init_handler<N: Network + Send + Sync>(
+    async fn init_handler<N: Network + Send + Sync>(
         &self,
         msg: AvssInputMessage,
         net: Arc<N>,

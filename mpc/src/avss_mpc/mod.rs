@@ -515,6 +515,13 @@ where
                             );
                             return Err(AvssMPCError::InvalidPartyId);
                         }
+                        if !self.input_server.is_registered_client(sender_id) {
+                            warn!(
+                                "Rejecting client input broadcast: sender {} is not a registered input client",
+                                sender_id
+                            );
+                            return Err(AvssMPCError::InvalidPartyId);
+                        }
                     } else if sender_id >= self.params.n_parties {
                         warn!(
                             "Rejecting dealer message: sender {} is not a consensus party id for protocol {:?}",

@@ -280,6 +280,17 @@ uint8_t round_id(struct SessionIdBits session_id);
 
 uint32_t instance_id(struct SessionIdBits session_id);
 
+/**
+ * Checks that `session_id`'s reserved bits are unset. A value built from raw `lo`/`hi` bits
+ * (rather than via `new_session_id`) can carry nonzero reserved bits yet still report the same
+ * `calling_protocol`/`exec_id`/`sub_id`/`round_id`/`instance_id` as its canonical counterpart —
+ * such a value hashes and compares as a *different* session id everywhere a `SessionId` is used
+ * as a map key. Callers constructing a `SessionIdBits` from a raw value (not from
+ * `new_session_id`) should check this before passing it to any function that admits or
+ * initiates a session.
+ */
+bool is_canonical(struct SessionIdBits session_id);
+
 struct HoneyBadgerMPCClientOpaque *new_honey_badger_mpc_client(uintptr_t id,
                                                                uintptr_t n,
                                                                uintptr_t t,

@@ -112,7 +112,7 @@ impl<F: FftField> OutputClient<F> {
     /// 3. Add the received shares.
     /// 4. If the output has not been reconstructed yet and enough shares have been received,
     ///    attempt to reconstruct the output using robust interpolation.
-    pub async fn output_handler(&mut self, msg: OutputMessage) -> Result<(), OutputError> {
+    async fn output_handler(&mut self, msg: OutputMessage) -> Result<(), OutputError> {
         if msg.payload.len() < 8 {
             return Err(OutputError::InvalidInput("Payload too short".to_string()));
         }

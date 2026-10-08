@@ -41,7 +41,7 @@ async fn test_avss_output_get_output() {
             .serialize_compressed(&mut payload)
             .unwrap();
         let msg = AvssOutputMessage::new(0, INSTANCE_ID, payload);
-        client.output_handler(msg).await.unwrap();
+        client.process(0, msg).await.unwrap();
     }
 
     // get_output should return None since not enough shares have been received
@@ -54,7 +54,7 @@ async fn test_avss_output_get_output() {
             .serialize_compressed(&mut payload)
             .unwrap();
         let msg = AvssOutputMessage::new(1, INSTANCE_ID, payload);
-        client.output_handler(msg).await.unwrap();
+        client.process(1, msg).await.unwrap();
     }
 
     // get_output should now return the reconstructed secret
@@ -87,7 +87,7 @@ async fn test_avss_output_wait_for_output() {
             .serialize_compressed(&mut payload)
             .unwrap();
         let msg = AvssOutputMessage::new(0, INSTANCE_ID, payload);
-        client.output_handler(msg).await.unwrap();
+        client.process(0, msg).await.unwrap();
     }
 
     // wait_for_output should timeout
@@ -104,7 +104,7 @@ async fn test_avss_output_wait_for_output() {
             .serialize_compressed(&mut payload)
             .unwrap();
         let msg = AvssOutputMessage::new(1, INSTANCE_ID, payload);
-        client.output_handler(msg).await.unwrap();
+        client.process(1, msg).await.unwrap();
     }
 
     // Now wait_for_output should succeed
@@ -141,11 +141,11 @@ async fn test_avss_output_duplicate_rejection() {
         .serialize_compressed(&mut payload)
         .unwrap();
     let msg1 = AvssOutputMessage::new(0, INSTANCE_ID, payload.clone());
-    client.output_handler(msg1).await.unwrap();
+    client.process(0, msg1).await.unwrap();
 
     // Try sending from the same server again - should fail
     let msg2 = AvssOutputMessage::new(0, INSTANCE_ID, payload);
-    let result = client.output_handler(msg2).await;
+    let result = client.process(0, msg2).await;
     assert!(result.is_err(), "Expected duplicate error");
 }
 
@@ -186,7 +186,7 @@ async fn test_avss_output_multiple_values() {
             .serialize_compressed(&mut payload)
             .unwrap();
         let msg = AvssOutputMessage::new(server_idx, INSTANCE_ID, payload);
-        client.output_handler(msg).await.unwrap();
+        client.process(server_idx, msg).await.unwrap();
     }
 
     // Should have reconstructed all secrets

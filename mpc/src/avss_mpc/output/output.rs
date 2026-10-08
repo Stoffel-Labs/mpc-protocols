@@ -109,7 +109,7 @@ impl<F: FftField, G: CurveGroup<ScalarField = F>> AvssOutputClient<F, G> {
     /// 4. Add the received shares.
     /// 5. If the output has not been reconstructed yet and enough verified shares have
     ///    been received (t+1), reconstruct the output.
-    pub async fn output_handler(&mut self, msg: AvssOutputMessage) -> Result<(), AvssOutputError> {
+    async fn output_handler(&mut self, msg: AvssOutputMessage) -> Result<(), AvssOutputError> {
         // 1.
         if msg.payload.len() < 8 {
             return Err(AvssOutputError::InvalidInput(
