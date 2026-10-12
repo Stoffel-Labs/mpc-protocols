@@ -71,6 +71,8 @@ pub struct DirectionalMsgCounts {
     pub input: AtomicU64,
     /// Client output messages (`AvssWrappedMessage::Output`).
     pub output: AtomicU64,
+    /// Peer-recovery agreement messages (`AvssWrappedMessage::Agreement`).
+    pub agreement: AtomicU64,
 }
 
 // ── top-level counters ────────────────────────────────────────────────────────
@@ -158,6 +160,7 @@ pub struct DirectionalMsgSnapshot {
     pub mul: u64,
     pub input: u64,
     pub output: u64,
+    pub agreement: u64,
 }
 
 impl From<&DirectionalMsgCounts> for DirectionalMsgSnapshot {
@@ -168,6 +171,7 @@ impl From<&DirectionalMsgCounts> for DirectionalMsgSnapshot {
             mul: c.mul.load(RELAX),
             input: c.input.load(RELAX),
             output: c.output.load(RELAX),
+            agreement: c.agreement.load(RELAX),
         }
     }
 }
@@ -237,6 +241,7 @@ impl fmt::Display for NodeStatisticsSnapshot {
         row!("Mul", self.sent.mul, self.received.mul);
         row!("Input", self.sent.input, self.received.input);
         row!("Output", self.sent.output, self.received.output);
+        row!("Agreement", self.sent.agreement, self.received.agreement);
         write!(
             f,
             "└───────────────────────────────────────┴──────────┴──────────┘"
@@ -286,6 +291,9 @@ pub(crate) fn record_received(msg: &AvssWrappedMessage, counts: &DirectionalMsgC
         }
         AvssWrappedMessage::Output(_) => {
             counts.output.fetch_add(1, RELAX);
+        }
+        AvssWrappedMessage::Agreement(_) => {
+            counts.agreement.fetch_add(1, RELAX);
         }
     }
 }
