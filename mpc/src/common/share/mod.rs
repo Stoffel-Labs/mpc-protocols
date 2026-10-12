@@ -177,6 +177,7 @@ where
 mod tests {
 
     use super::*;
+    use crate::common::SecretSharingScheme;
     use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use ark_bls12_381::Fr;
     use ark_ff::{Field, One, UniformRand, Zero};
@@ -304,6 +305,127 @@ mod tests {
             "hyperinvertible matrix should allow at most 1 coincidental zero row for a \
              2-column corruption, got {new_zero_rows}"
         );
+    }
+
+    /// End-to-end exploit, not just matrix algebra: 16 dealers each deal a real
+    /// degree-2t Shamir sharing (the ZeroSha shape — honest dealers share 0), the
+    /// 16 recipients combine them through the OLD, vulnerable `make_vandermonde`
+    /// matrix, and the 16 resulting rows are reconstructed with the real
+    /// `RobustShare::recover_secret` — the same function ZeroSha/RanDouSha use to
+    /// check and release rows. Two colluding dealers (0 and 8) deal a validly-shaped
+    /// but nonzero secret instead of zero. If this matrix were used for a
+    /// check-a-subset-trust-the-rest protocol (as it was before the fix), this
+    /// shows exactly which released "zero shares" come out corrupted.
+    ///
+    /// How a corrupted row like this gets weaponized downstream:
+    /// - ZeroSha -> MulPub/RandBit: masks a square with a nonzero "zero", so the
+    ///   opened value isn't a perfect square (abort/DoS) or its root isn't a bit
+    ///   (silently wrong comparisons/MUX downstream).
+    /// - RanSha -> masking a value before it's opened: the colluding dealers know
+    ///   their own injected bias, so they can subtract it back out of the public
+    ///   opening and recover the supposedly-secret masked value (confidentiality
+    ///   break, not just a correctness one).
+    /// - RanDouSha -> Beaver triple generation: mismatched bias at the t- and
+    ///   2t-levels breaks `[r]_t == [r]_2t`, so degree reduction yields a triple
+    ///   that isn't `(a,b,ab)` — every multiplication gate consuming it computes a
+    ///   silently wrong result with no abort at all.
+    #[test]
+    fn test_old_vandermonde_exploit_n16_t5_zero_share() {
+        let n = 16;
+        let t = 5;
+        let degree = 2 * t; // matches ZeroSha's degree-2t sharing requirement
+        let mut rng = StdRng::seed_from_u64(1234);
+
+        let colluding = [0usize, 8usize];
+        let bias = Fr::from(42u64); // the nonzero secret the colluding pair injects
+
+        // Every dealer deals a real degree-`degree` Shamir sharing. Honest dealers
+        // share 0 (as ZeroSha requires); the colluding pair shares `bias` instead —
+        // a validly-shaped sharing (right degree, fully consistent), just the wrong
+        // value. This is exactly the "inconsistent-dealing" check from a2eaa25
+        // passing, and the hyperinvertibility gap being the only remaining hole.
+        let shares_by_dealer: Vec<Vec<RobustShare<Fr>>> = (0..n)
+            .map(|dealer| {
+                let secret = if colluding.contains(&dealer) {
+                    bias
+                } else {
+                    Fr::zero()
+                };
+                RobustShare::compute_shares(secret, n, degree, None, &mut rng)
+                    .expect("compute_shares failed")
+            })
+            .collect();
+
+        let old_matrix = make_vandermonde::<Fr>(n, n - 1).expect("old matrix construction failed");
+
+        // Each recipient locally combines its own share from every dealer into its
+        // own share of each of the n output rows — exactly what apply_vandermonde
+        // does in the real protocol, no interaction required for this step.
+        let mut output_shares_by_row: Vec<Vec<RobustShare<Fr>>> = vec![Vec::with_capacity(n); n];
+        for recipient in 0..n {
+            let recipient_shares: Vec<RobustShare<Fr>> = (0..n)
+                .map(|dealer| shares_by_dealer[dealer][recipient].clone())
+                .collect();
+            let row_shares = apply_vandermonde(&old_matrix, &recipient_shares)
+                .expect("apply_vandermonde failed");
+            for (row, share) in row_shares.into_iter().enumerate() {
+                output_shares_by_row[row].push(share);
+            }
+        }
+
+        // Reconstruct every row's secret from all 16 recipients' shares, using the
+        // real recovery function the protocol itself uses to check/finalize rows.
+        let secrets: Vec<Fr> = (0..n)
+            .map(|row| {
+                RobustShare::recover_secret(&output_shares_by_row[row], n, t)
+                    .expect("recover_secret failed")
+                    .1
+            })
+            .collect();
+
+        // Q_j = alpha_j^0 + alpha_j^8 = 1 + (-1)^j: 2 on even rows, 0 on odd rows.
+        // Both colluding dealers' bias lands with this same weight, so an affected
+        // row's secret is bias*2, not bias*1.
+        let corrupted = bias + bias;
+
+        // Checked range (rows 0..2t): odd rows are genuinely clean, even rows
+        // genuinely show the bias — exactly t=5 of the 10 checked rows fail, which
+        // is exactly the malicious budget, i.e. this fits with no slack to spare.
+        let checked_failing: Vec<usize> = (0..2 * t).filter(|&j| j % 2 == 0).collect();
+        for &j in &checked_failing {
+            assert_eq!(
+                secrets[j], corrupted,
+                "checked row {j} should genuinely show the bias"
+            );
+        }
+        for j in (0..2 * t).filter(|j| j % 2 == 1) {
+            assert_eq!(
+                secrets[j],
+                Fr::zero(),
+                "checked row {j} should genuinely be clean"
+            );
+        }
+        assert_eq!(
+            checked_failing.len(),
+            t,
+            "the attack needs exactly t malicious verifiers to cover the checked failures"
+        );
+
+        // Released range (rows 2t..n): never checked by this protocol's design.
+        // Rows 10, 12, 14 are silently corrupted "zero shares" reaching the pool.
+        let smuggled: Vec<usize> = (2 * t..n).filter(|&j| secrets[j] == corrupted).collect();
+        assert_eq!(
+            smuggled,
+            vec![10, 12, 14],
+            "rows 10, 12, 14 should be corrupted and released with no check at all"
+        );
+        for j in (2 * t..n).filter(|j| j % 2 == 1) {
+            assert_eq!(
+                secrets[j],
+                Fr::zero(),
+                "released row {j} should genuinely be clean"
+            );
+        }
     }
 
     #[test]
