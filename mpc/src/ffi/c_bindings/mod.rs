@@ -68,15 +68,11 @@ pub enum ProtocolType {
     Dousha = 7,
     Mul = 8,
     PRandInt = 9,
-    PRandBit = 10,
     RandBit = 11,
     FpMul = 12,
     Trunc = 13,
     FpDivConst = 14,
-    TripleSmallField = 15,
-    RanShaSmallField = 16,
-    RanDouShaSmallField = 17,
-    DouShaSmallField = 18,
+    ZeroSha = 16,
 }
 
 impl From<ProtocolType> for crate::honeybadger::ProtocolType {
@@ -92,17 +88,11 @@ impl From<ProtocolType> for crate::honeybadger::ProtocolType {
             ProtocolType::Dousha => crate::honeybadger::ProtocolType::Dousha,
             ProtocolType::Mul => crate::honeybadger::ProtocolType::Mul,
             ProtocolType::PRandInt => crate::honeybadger::ProtocolType::PRandInt,
-            ProtocolType::PRandBit => crate::honeybadger::ProtocolType::PRandBit,
             ProtocolType::RandBit => crate::honeybadger::ProtocolType::RandBit,
             ProtocolType::FpMul => crate::honeybadger::ProtocolType::FpMul,
             ProtocolType::Trunc => crate::honeybadger::ProtocolType::Trunc,
             ProtocolType::FpDivConst => crate::honeybadger::ProtocolType::FpDivConst,
-            ProtocolType::TripleSmallField => crate::honeybadger::ProtocolType::TripleSmallField,
-            ProtocolType::RanShaSmallField => crate::honeybadger::ProtocolType::RanShaSmallField,
-            ProtocolType::RanDouShaSmallField => {
-                crate::honeybadger::ProtocolType::RanDouShaSmallField
-            }
-            ProtocolType::DouShaSmallField => crate::honeybadger::ProtocolType::DouShaSmallField,
+            ProtocolType::ZeroSha => crate::honeybadger::ProtocolType::ZeroSha,
         }
     }
 }
@@ -120,17 +110,11 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::Dousha => ProtocolType::Dousha,
             crate::honeybadger::ProtocolType::Mul => ProtocolType::Mul,
             crate::honeybadger::ProtocolType::PRandInt => ProtocolType::PRandInt,
-            crate::honeybadger::ProtocolType::PRandBit => ProtocolType::RandBit,
             crate::honeybadger::ProtocolType::RandBit => ProtocolType::RandBit,
             crate::honeybadger::ProtocolType::FpMul => ProtocolType::FpMul,
             crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
             crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
-            crate::honeybadger::ProtocolType::TripleSmallField => ProtocolType::TripleSmallField,
-            crate::honeybadger::ProtocolType::RanShaSmallField => ProtocolType::RanShaSmallField,
-            crate::honeybadger::ProtocolType::RanDouShaSmallField => {
-                ProtocolType::RanDouShaSmallField
-            }
-            crate::honeybadger::ProtocolType::DouShaSmallField => ProtocolType::DouShaSmallField,
+            crate::honeybadger::ProtocolType::ZeroSha => ProtocolType::ZeroSha,
         }
     }
 }
@@ -275,4 +259,17 @@ pub extern "C" fn round_id(session_id: SessionIdBits) -> u8 {
 pub extern "C" fn instance_id(session_id: SessionIdBits) -> u32 {
     let session_id = unsafe { session_id.to_session_id() };
     session_id.instance_id()
+}
+
+/// Checks that `session_id`'s reserved bits are unset. A value built from raw `lo`/`hi` bits
+/// (rather than via `new_session_id`) can carry nonzero reserved bits yet still report the same
+/// `calling_protocol`/`exec_id`/`sub_id`/`round_id`/`instance_id` as its canonical counterpart —
+/// such a value hashes and compares as a *different* session id everywhere a `SessionId` is used
+/// as a map key. Callers constructing a `SessionIdBits` from a raw value (not from
+/// `new_session_id`) should check this before passing it to any function that admits or
+/// initiates a session.
+#[no_mangle]
+pub extern "C" fn is_canonical(session_id: SessionIdBits) -> bool {
+    let session_id = unsafe { session_id.to_session_id() };
+    session_id.is_canonical()
 }

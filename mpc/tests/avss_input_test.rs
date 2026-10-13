@@ -2,10 +2,14 @@ use utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 
 use ark_bls12_381::{Fr, G1Projective as G};
 use ark_ff::UniformRand;
+use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use std::time::Duration;
 use stoffelcrypto::{
-    avss_mpc::{input::input::AvssInputServer, AvssMPCClient, AvssSessionId, AvssWrappedMessage},
+    avss_mpc::{
+        input::{input::AvssInputServer, AvssInputMessage},
+        AvssMPCClient, AvssSessionId, AvssWrappedMessage,
+    },
     common::{rbc::rbc::Avid, share::feldman::FeldmanShamirShare, SecretSharingScheme, RBC},
 };
 use stoffelmpc_network::fake_network::SenderId;
@@ -65,7 +69,8 @@ async fn test_avss_input_e2e() {
     // Create input servers
     let mut nodes: Vec<_> = (0..n)
         .map(|i| {
-            AvssInputServer::<Fr, Avid<AvssSessionId>, G>::new(i, n, t, vec![clientid]).unwrap()
+            AvssInputServer::<Fr, Avid<AvssSessionId>, G>::new(i, n, t, instance_id, vec![clientid])
+                .unwrap()
         })
         .collect();
 
@@ -84,14 +89,17 @@ async fn test_avss_input_e2e() {
 
     // Receive random shares at client and process them
     for _ in 0..(n - 1) {
-        let (_, raw) = client_recv.recv().await.unwrap();
+        let (sender, raw) = client_recv.recv().await.unwrap();
+        let SenderId::Node(sender) = sender else {
+            panic!("Unexpected sender kind");
+        };
         let wrapped: AvssWrappedMessage =
             bincode::deserialize(&raw).expect("deserialization error");
         match wrapped {
             AvssWrappedMessage::Input(msg) => {
                 assert!(client
                     .input
-                    .process(msg, client_network.clone())
+                    .process(sender, msg, client_network.clone())
                     .await
                     .is_ok());
             }
@@ -153,4 +161,93 @@ async fn test_avss_input_e2e() {
     let (_, recovered_input) = FeldmanShamirShare::<Fr, G>::recover_secret(&recovered_shares, n, t)
         .expect("recovery failed");
     assert_eq!(recovered_input, input, "Recovered input does not match");
+}
+
+/// Regression test for the missing execution-binding vulnerability: a fresh
+/// `AvssMPCClient` for one instance must reject a mask share belonging to a different
+/// instance before it can be admitted, even though it is otherwise well-formed,
+/// Feldman-verifies, and comes from an authenticated server.
+#[tokio::test]
+async fn test_avss_input_rejects_stale_instance() {
+    setup_tracing();
+
+    let n = 4;
+    let t = 1;
+    let clientid = 100;
+    let instance_id = 111;
+    let input = Fr::from(42u64);
+    let ids: Vec<usize> = (1..=n).collect();
+
+    let (_network, _receivers, client_networks, _client_recv) = test_setup(n, vec![clientid]);
+    let client_network = client_networks.get(&clientid).unwrap().clone();
+
+    let mut rng = test_rng();
+    let rand_secret = Fr::rand(&mut rng);
+    let rand_shares =
+        FeldmanShamirShare::<Fr, G>::compute_shares(rand_secret, n, t, Some(&ids), &mut rng)
+            .unwrap();
+
+    let mut client = AvssMPCClient::<Fr, Avid<AvssSessionId>, G>::new(
+        clientid,
+        n,
+        t,
+        instance_id,
+        vec![input],
+        1,
+    )
+    .unwrap();
+
+    let mut payload = Vec::new();
+    vec![rand_shares[0].clone()]
+        .serialize_compressed(&mut payload)
+        .unwrap();
+    let stale_msg = AvssInputMessage::new(0, instance_id + 1, payload);
+
+    let result = client
+        .input
+        .process(0, stale_msg, client_network.clone())
+        .await;
+    assert!(
+        result.is_err(),
+        "expected a mask share from a different instance to be rejected"
+    );
+}
+
+/// Regression test for missing committee-membership validation: a sender id outside
+/// `0..n` must be rejected by `process` before the payload is even parsed, since it
+/// can never be a legitimate committee member regardless of what it claims to carry.
+#[tokio::test]
+async fn test_avss_input_rejects_non_committee_sender() {
+    setup_tracing();
+
+    let n = 4;
+    let t = 1;
+    let clientid = 100;
+    let instance_id = 111;
+    let input = Fr::from(42u64);
+
+    let (_network, _receivers, client_networks, _client_recv) = test_setup(n, vec![clientid]);
+    let client_network = client_networks.get(&clientid).unwrap().clone();
+
+    let mut client = AvssMPCClient::<Fr, Avid<AvssSessionId>, G>::new(
+        clientid,
+        n,
+        t,
+        instance_id,
+        vec![input],
+        1,
+    )
+    .unwrap();
+
+    for bad_sender in [n, n + 1] {
+        let msg = AvssInputMessage::new(bad_sender, instance_id, vec![]);
+        let result = client
+            .input
+            .process(bad_sender, msg, client_network.clone())
+            .await;
+        assert!(
+            result.is_err(),
+            "expected sender id {bad_sender} (outside 0..{n}) to be rejected"
+        );
+    }
 }
