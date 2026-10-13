@@ -1,0 +1,101 @@
+# Generation Lemma
+
+2026-11-02 · Garry
+
+List item 17: straight-line simulators for the share-generation protocols (`RanSha`, `RanDouSha`, `zero_share`) — the constructions BTH08 proves perfect property-style but supplies no simulator for. Companion to the Perfect-Open and Masked-Open lemmas; closes the last trusted-by-citation hole in the perfect core and absorbs list item 14.
+
+No simulation proof of this construction appears in BTH08, DN07, AL17 (a different protocol family) or Rambaud–Urban 2021 (encryption-based). Abraham–Asharov and Choudhury–Patra are unchecked; a simulator found there would corroborate, not replace, this one.
+
+## 1. Scope and the three functionalities
+
+Model as in the companion lemmas: static active adversary, $|C| \le t < n/3$, security with abort, asynchronous delivery. These protocols are the *pool suppliers* — they realize the $\mathcal{F}_{\mathsf{pools}}$ that Perfect-Open and Masked-Open assume — so they sit below the ABB-hybrid: their proofs are in the (secure channels, RBC)-hybrid, with RBC per its own $t < n/3$ realization (agreement + totality assumed as the broadcast primitive, exactly as the sync→async bridge prescribes).
+
+All three functionalities are *input-free with abort*; the adversary's only inputs are its dealings and its verifiers' OK bits.
+
+- **$\mathcal{F}_{\mathsf{RanSha}}$** (batch $T = n-2t$), **corruption-aware** (AL17 Functionality-6.2 style): the adversary sends an abort flag and, if no abort, **the corrupt parties' shares of each of the T outputs** (t field points per output). F samples each output as a fresh uniform degree-t sharing *conditioned on passing through those t points*, hands honest parties their shares, stores the handles. The secrets $r_1..r_T$ stay uniform: t evaluations constrain a degree-t polynomial without fixing its constant term (0 is not an evaluation point).
+- **$\mathcal{F}_{\mathsf{RanDouSha}}$** (same interface): each output is a pair — a degree-t and a degree-2t sharing with equal constant term — sampled uniformly subject to the adversary's t points on each polynomial and the shared-constant constraint.
+- **$\mathcal{F}_{\mathsf{ZeroSha}}$** (same interface): every secret is 0; a single degree-2t sharing uniform on {deg $\le 2t$, $p(0) = 0$, agrees with the adversary's t points}.
+
+Why corruption-aware is forced, not a convenience: in the real protocol the corrupt parties' output shares are a *public linear function of shares already sent in phase 2* — they have zero conditional entropy given the adversary's view. A functionality that sampled them freshly would be distinguished with probability $1 - q^{-|C|\cdot T}$ by checking that linear identity. Nothing is weakened: honest shares and secrets remain uniform conditioned on the adversary's t points.
+
+What "uniform sharing" buys downstream, stated once: $\mathcal{F}_{\mathsf{RanSha}}$/$\mathcal{F}_{\mathsf{RanDouSha}}$ outputs are the masks whose full-field uniformity every Type-A reveal in the Perfect-Open Lemma consumes, and $\mathcal{F}_{\mathsf{ZeroSha}}$ outputs supply the residual polynomial uniformity that Perfect-Open §4 step 2 and Masked-Open §6B(ii) demand. This lemma is where those distributional guarantees stop being assumptions.
+
+## 2. Protocol structure and preconditions
+
+All three protocols share one shape (BTH08 DoubleShareRandom, code-confirmed):
+
+1. **Deal.** Every party i deals a fresh sharing of a secret $s_i$: `F::rand` for RanSha/RanDouSha (`double_share_generation.rs:159`, `share_gen.rs:257`), the constant 0 at degree 2t for zero_share. A corrupt dealer may send arbitrary, inconsistent values.
+2. **Combine.** Each party locally applies the hyperinvertible matrix M (BTH08 Construction 1, confirmed in code) to its n received shares, producing its shares of n combined sharings $r_1..r_n$.
+3. **Check.** 2t of the combined sharings are designated *check rows*; each is privately reconstructed toward one designated verifier — every party sends that verifier its share(s) of that row (RanDouSha: both degrees, `ran_dou_sha/mod.rs:452-481`; reconstruction at `:644-654`; zero_share: rows opened point-to-point, `zero_share.rs:407`). The verifier checks degree (and, per variant: equal constant terms across degrees / zero constant term) and **RBC-broadcasts a 1-bit OK/abort**. Any abort bit kills the whole session for everyone.
+4. **Keep.** The remaining $T = n-2t$ combined sharings are the output; check rows are discarded.
+
+**Precondition A — the degree-$\le$ fix (list item 16).** The lemma is stated for the verifier predicate "degree $\le d$" (BTH08's own predicate). The code's current exact-degree tests (`zero_share.rs:514`, `ran_dou_sha/mod.rs:661-662`, `share_gen.rs:644`) make honest OK bits depend on the leading coefficients of honest residuals: $\Theta(t/q)$ simulation error and $\Theta(t/q)$ honest-abort probability — zero-error is false until the fix lands. Everything below assumes $\le$.
+
+**Precondition B — RBC agreement + totality.** The OK bits ride on Bracha/AVID RBC ($t < n/3$). Agreement makes an abort unanimous; totality ensures every honest party eventually resolves each verifier's bit. Without totality, one honest party could abort while another outputs — a consistency break, not just liveness.
+
+**Precondition C — structural invariants.** Six code facts the ledger's zero slack makes load-bearing; all hold today (checked 2026-11-02), and changing any of them voids the lemma: (i) degree tests are degree-$\le$ (= Precondition A); (ii) check rows travel point-to-point to their designated verifier, never broadcast (`zero_share.rs:427`; SECURITY_PROOF.md invariant); (iii) verifier and output index assignments are fixed public functions of the party index, disjoint from each other; (iv) every batch element uses fresh dealings (`F::rand` per element, fresh `compute_shares`); (v) no output handle is opened inside the same session span — any later opening (batch_recon composition) must be accounted by the composition theorem, because the ledger has no slack to absorb it; (vi) RanDouSha's check-row reconstruction fires only once all n shares have arrived (`ran_dou_sha/mod.rs:620-621`), so corrupt shares cannot repair a broken row — accepting the first 2t+1 would make the repair attack constructive.
+
+**Two code-level observations the proof must respect** (not assumptions — facts that shape the simulator):
+
+- The degree-t check-row reconstruction accepts at 2t+1 shares via `NonRobustShare::recover_secret` (`ran_dou_sha/mod.rs:620-621`) — *non-robust*: a single corrupt party sending a wrong share to an honest verifier makes an honest row look inconsistent and triggers abort. Safety is unaffected (abort, never a wrong accepted output); it is an input-independent denial lever, absorbed into the abort flag.
+- The degree-2t side waits for **all n** shares — the familiar all-n liveness coupling (HBMPC Table 1), liveness-only.
+
+Finally, a wrong value can never be *output*: outputs are never reconstructed here at all — they remain sharings — and their consistency is exactly what the check phase establishes (§5, detectability).
+
+## 3. The dimension ledger
+
+Everything the adversary ever learns about the honest dealings, itemized. Let the free dimensions of one honest dealing be the number of independent random values its dealer samples, i.e. its total randomness before the adversary sees anything (RanSha: $t+1$ coefficients; RanDouSha: $(t+1)+(2t+1)$ minus the shared constant; zero_share: 2t with $p(0)=0$). The adversary's view consists of:
+
+1. **Its t shares of every honest dealing** (sent to corrupt parties in the deal phase) — by Shamir privacy, t evaluations constrain t dimensions per sharing and are jointly uniform, independent of the secrets.
+2. **Up to t full check rows** — the rows whose designated verifier is corrupt: that verifier receives *all n* shares, hence the entire row polynomial(s). Each such row is one known linear combination (hyperinvertible coefficients, public) of all n dealings.
+3. **The honest verifiers' OK bits** — under Precondition A these are functions of the *corrupt* dealings only (§5 phase 4), so they carry zero information about honest randomness.
+4. **Its t shares of each of the T outputs** — these are not new information (they are linear combinations of item 1), but they are the values that must match what F deals.
+
+**The anchor — BTH08 Lemma 2 (hyperinvertibility):** for any index sets A, B with $|A| + |B| = n$, the map taking {inputs in A, outputs in B} to the remaining inputs/outputs is an invertible linear function. Instantiation: A = the t corrupt dealings, B = (the $\le t$ corrupt-verifier check rows) $\cup$ (the $T = n-2t$ outputs), padded *inside that union* with honest-verifier rows to exactly $|B| = 2t+1$, so $|A| + |B| = n$. Equivalently: the $(2t+1)\times(2t+1)$ submatrix $M'$ of M on honest columns $\times$ (revealed $\cup$ kept) rows is invertible, so $M' \otimes I_V$ is a **bijection from the honest dealings' residual randomness onto (revealed-row residuals, kept-row residuals)**, where V is the per-dealing residual space left after phase 2 (ledger below). Consequences, in order:
+
+- The revealed rows and the T kept outputs are **jointly uniform on a product space** (uniform honest residuals pushed through the bijection $M' \otimes I_V$), and joint uniformity over a product *is* mutual independence. The no-abort event is measurable in $\sigma(\text{adversary's view} \cup \text{revealed rows})$, so conditioning on survival cannot bias the kept outputs — the law F samples from equals the real conditional law exactly.
+- The same bijection read backwards is the simulator's engine: given the corrupt output shares (which S *computes and sends to F* — §5 phase 5) and freshly sampled corrupt-visible rows, a consistent assignment of honest dealings exists, uniquely up to a uniform fiber — S never materializes it.
+- **Per-variant ledger** (V = residual space per honest dealing after phase-2's projections): RanSha — budget $t+1$, $\dim V = 1$, ledger $(2t+1)\cdot 1 = t\cdot 1 + (t+1)\cdot 1$. zero_share — budget 2t (constant pinned to 0), $\dim V = t$, ledger $(2t+1)\cdot t = t\cdot t + (t+1)\cdot t$. RanDouSha — budget $(t+1) + (2t+1) - 1 =$ **3t+1** (the shared constant is one free dimension, counted once), 2t projections, $\dim V =$ **t+1**, ledger $(2t+1)(t+1) = t(t+1) + (t+1)^2$. Tightness is **universal at n = 3t+1** — all three variants have zero slack, zero_share is not special; slack appears only for $n > 3t+1$. One extra revealed row, or one residual-dependent bit (the exact-degree OK bit), breaks exactness — Precondition A is load-bearing, not cosmetic.
+
+## 4. Lemma statement
+
+**Lemma (Generation).** In the (secure channels, RBC)-hybrid model, against a static active adversary corrupting $|C| \le t < n/3$ parties, and under Preconditions A (degree-$\le$ verifier predicate) and B (RBC agreement + totality), each of the three generation protocols realizes its functionality of §1 **with zero simulation error**, via a straight-line black-box simulator. Specifically:
+
+- **(Correctness / detectability.)** If any honest party produces output, then *every* input dealing — including every corrupt one — is a consistent sharing of the declared degree(s), and the T outputs are correct sharings. A broken dealing is detected with certainty: by hyperinvertibility, any inconsistent input renders *every* subset of t combined rows inconsistent, the $\ge t$ honest-verifier check rows included, so some honest verifier RBCs abort. (No error probability.) Scope note: over honest coordinates the degree-2t component of a dealing is unconstrained — any garbage degree-2t dealing is extensionally identical to *some* valid one — so "detected with certainty" means degree-t components, constant-term predicates, and cross-degree equality. That is exactly what the functionalities promise; the honest-coordinate framing is what makes the claim true.
+- **(Privacy / exactness.)** Conditioned on the adversary's entire view (items 1–4 of §3), the T output sharings are exactly jointly uniform over the functionality's output distribution — subject to the adversary's own t points per output, which the corruption-aware F takes as input (§1). Simulation error: 0.
+- **(Abort.)** The abort event is a deterministic function of adversarial messages only: corrupt dealings that fail an honest verifier's check, wrong shares sent to honest verifiers at the non-robust degree-t reconstruction, withheld shares at the all-n degree-2t wait, or a corrupt verifier's false abort bit. The simulator reproduces it bit-for-bit; it is input-independent (there are no inputs) and carries no information about honest randomness.
+- **(KLR lift.)** Perfect + straight-line black-box $\Rightarrow$ by KLR Thm 1.2, each generation protocol is secure under concurrent general composition (UC) with no further argument — subject to the same real-to-hybrid residue as the companion lemmas (RBC realization, SID uniqueness).
+
+With this lemma, the $\mathcal{F}_{\mathsf{pools}}$ assumed by Perfect-Open and Masked-Open are realized, and no component of the perfect core rests on citation alone.
+
+## 5. Proof
+
+**The simulator S, five phases, strictly in protocol order (straight-line).**
+
+**Phase 1 — learn the corrupt dealings completely.** S plays the honest parties. Each corrupt dealer sends shares to the $n-t \ge 2t+1$ simulated honest parties; 2t+1 evaluations determine a degree-$\le 2t$ polynomial uniquely, so S reconstructs every corrupt dealing in full (or establishes that no consistent polynomial exists — recorded for phase 4). Nothing is sent yet; no commitment made.
+
+**Phase 2 — commit the adversary-visible slice of the honest randomness.** S must now send, on behalf of honest dealers, their shares to corrupt parties (item 1 of §3). S samples them as what they are in the real world: jointly uniform field elements — Shamir privacy makes t shares of a fresh sharing exactly uniform and independent of everything, so no value choice is needed or possible yet. (Equivalently: S lazily samples each honest dealing's t-dimensional corrupt-visible projection and defers the rest.)
+
+**Phase 3 — check rows toward corrupt verifiers.** For each of the $\le t$ check rows whose verifier is corrupt, every simulated honest party must send its share of that row. The row is (known corrupt dealings) + (combination of honest dealings). S samples the honest contribution as a fresh uniform polynomial of the declared degree, **consistent with the already-committed projections of phase 2**. Exactness here is plain hyperinvertibility, not Lemma 2: the $t\times(2t+1)$ honest-column block of M contains an invertible $t\times t$ submatrix, hence has full row rank t, so in the real world the corrupt-visible rows are *jointly* uniform on their phase-2-consistent cosets — S's fresh coset sampling matches exactly. For RanDouSha, the two degrees of a row are sampled with matching constant term, as dealt (the stacked cross-degree system is full rank at the residual dim $t+1$). zero_share: constant 0.
+
+**Phase 4 — OK bits, deterministically.** Honest verifiers' bits: under Precondition A, an honest verifier's check fails iff the *corrupt* contribution to its row is broken — honest dealings are consistent by construction, consistency is linear, and the $\le$-predicate is invariant under adding a consistent honest codeword (exactly the repaired zero_share argument). Wrong shares sent by corrupt parties to honest verifiers (the non-robust degree-t reconstruction) are also messages S received, so the resulting spurious-abort decision is likewise computable. Hence every honest OK bit is a deterministic function of adversarial messages S already holds — computed and RBC'd exactly. Corrupt verifiers' bits arrive through RBC; agreement + totality (Precondition B) let S deliver them unanimously. If any bit is abort: S sends abort to F, every honest party aborts, views identical — done.
+
+**Phase 5 — outputs.** No abort: **S, not F, produces the corrupt output shares.** For every corrupt c and output row k, $g_k(\alpha_c) = \sum_{j\in C} M_{kj} f_j(\alpha_c) + \sum_{j\in H} M_{kj} f_j(\alpha_c)$ — the second sum is exactly the phase-2 projections, the first comes from the corrupt dealings extracted in phase 1. The corrupt output shares therefore have **zero conditional entropy** given the adversary's view. So S computes the determined values and sends them to the corruption-aware F (§1), and F samples the honest completion uniformly subject to those t points, the degree bound(s), and the variant constraint. Exactness: by the §3 bijection $M' \otimes I_V$, conditioned on (corrupt dealings, phase-2 projections, phase-3 rows, no-abort), the real kept outputs are uniform on exactly the set F samples from — joint equality, error 0. S never materializes the honest dealings. ∎
+
+**Why straight-line:** every phase consumes only messages already received and F's outputs, in protocol order; no rewinding, no lookahead, black-box in the adversary. **Why with-abort suffices:** the adversary's denial levers (phase 4) stop output but never corrupt it — matching the functionality's abort flag exactly.
+
+## 6. Variants
+
+**RanSha** (`share_gen.rs`) — the base case: single degree-t dealings, verifiers reconstruct check rows from all n shares (`:615, :636`), per-share consistency check plus the degree predicate (`:638-647`, the `:644` exact-degree site). The §5 simulator applies verbatim with the single-degree ledger ($t+1$ dims per dealing; t committed in phase 2, $\le t$ rows revealed in phase 3, T outputs).
+
+**RanDouSha** (`ran_dou_sha/mod.rs`) — the double-degree case. Two deltas: (i) the *cross-degree constraint* — each dealing's two polynomials share a constant term, so the honest free budget per dealing is $(t+1) + (2t+1) - 1 =$ **3t+1** (the shared constant counts once), leaving residual dim $t+1$ after the 2t phase-2 projections. Phases 3/5 sample under the matching-constant constraint; the check row verifies exactly this (equal 0-evaluations, `:661-664`), so an honest verifier's cross-degree bit is again a function of corrupt dealings only — with one order caveat: the constant-equality comparison is well-defined only after *both* degree tests pass, so the degree checks must run first (they do). (ii) The degree-t row reconstructs at 2t+1 shares while the degree-2t row waits for all n (`:620-621`) — verification confirmed the two counters are conjoined and inserted in lockstep, so reconstruction fires only at all n senders and feeds all n shares to a decoder that rejects degree $> t$: corrupt shares cannot repair a broken row (§7, surface 3).
+
+**zero_share** (`zero_share.rs`) — the constant-0 case, with one extra invariant. Deltas: (i) secrets are fixed (0), so privacy protects the *polynomials*, not values — the ledger is exactly the $(2t+1)\cdot t$ tight budget computed in the Perfect-Open verification; (ii) the verifier checks $p(0) = 0$ as well (`:514`) — again linear, again corrupt-measurable; (iii) **the opened-rows-point-to-point invariant** (SECURITY_PROOF.md): check rows go to their designated verifier over private channels, never broadcast. This is privacy-critical — broadcasting a check row would reveal an honest linear combination to *all* parties, spending t extra rows from a budget that has zero slack. The simulator relies on it in phase 3 (only $\le t$ rows become corrupt-visible); any future change that broadcasts check rows voids the lemma.
+
+One shared caveat, stated once: the outputs of one batch must not be correlated with another batch's through dealing reuse — each invocation deals fresh randomness (`F::rand` per call), so batches are independent by construction; this is the generation-side analogue of the mask single-use discipline.
+
+## 7. Engineering items
+
+To append to the engineering list: **18. Fix zero_share batch_size adoption and pending-entry purge (`zero_share.rs:324-328`, `:478-479`) — one wrong-length message kills a session; an oversized pre-init entry causes a remote panic (`:354-358`, `:486-489`). Port the share_gen/ran_dou_sha fix and its regression tests.**
+
+**19. Add a regression test pinning RanDouSha's all-n reconstruction predicate (`ran_dou_sha/mod.rs:620-621`)** — guards Precondition C (vi).
