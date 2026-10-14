@@ -27,6 +27,12 @@ pub enum FPDivConstError {
     Failed,
     #[error("Invalid divisor")]
     InvalidDivisor,
+    #[error("Divisor too small for precision (k={k}, f={f}): raw divisor {divisor_raw} would widen the reciprocal past the TruncPr mask bound")]
+    DivisorTooSmall {
+        k: usize,
+        f: usize,
+        divisor_raw: u128,
+    },
     #[error("Send error: {0:?}")]
     SendError(#[from] SendError<SessionId>),
     #[error("Type error: {0:?}")]
