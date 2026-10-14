@@ -45,6 +45,7 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerFPMulError,
     HoneyBadgerTruncPrError,
     HoneyBadgerFPDivConstError,
+    HoneyBadgerFpDivError,
     HoneyBadgerTypesError,
     HoneyBadgerAlreadyReservedError,
     HoneyBadgerInvalidThesholdError,
@@ -55,6 +56,8 @@ pub enum HoneyBadgerErrorCode {
     // Appended last to keep the existing discriminants ABI-stable for current SDK consumers.
     HoneyBadgerUnauthorizedSenderError,
     HoneyBadgerInvalidSessionIdError,
+    HoneyBadgerShareError,
+    HoneyBadgerComparisonError,
 }
 
 impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
@@ -86,6 +89,15 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::FPError(_) => Self::HoneyBadgerFPMulError,
             HoneyBadgerError::TruncPrError(_) => Self::HoneyBadgerTruncPrError,
             HoneyBadgerError::FPDivConstError(_) => Self::HoneyBadgerFPDivConstError,
+            HoneyBadgerError::FpDivError(_)
+            | HoneyBadgerError::PreMod2mError(_)
+            | HoneyBadgerError::Mod2Error(_)
+            | HoneyBadgerError::PreMulCError(_) => Self::HoneyBadgerFpDivError,
+            HoneyBadgerError::LTZError(_)
+            | HoneyBadgerError::EQZError(_)
+            | HoneyBadgerError::RandInvPairError(_)
+            | HoneyBadgerError::KOrCSError(_)
+            | HoneyBadgerError::KOrCLError(_) => Self::HoneyBadgerComparisonError,
             HoneyBadgerError::TypeError(_) => Self::HoneyBadgerTypesError,
             HoneyBadgerError::LimitError => Self::HoneyBadgerLimitError,
             HoneyBadgerError::InstanceIdError(_) => Self::HoneyBadgerInstanceIdError,
@@ -95,6 +107,7 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::InvalidPartySize => Self::HoneyBadgerInvalidPartySizeError,
             HoneyBadgerError::InvalidPartyId => Self::HoneyBadgerInvalidPartyIdError,
             HoneyBadgerError::InvalidSessionId(_) => Self::HoneyBadgerInvalidSessionIdError,
+            HoneyBadgerError::ShareError(_) => Self::HoneyBadgerShareError,
         }
     }
 }

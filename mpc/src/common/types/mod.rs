@@ -13,8 +13,8 @@ pub mod integer;
 
 #[derive(Error, Debug)]
 pub enum TypeError {
-    #[error("error operating incompatible types - self precision: {current:?}, other precision: {other:?}")]
-    IncompatibleIntegerPrecision { current: usize, other: usize },
+    #[error("error operating incompatible bit length - self bit length: {current:?}, other bitlength: {other:?}")]
+    IncompatibleIntegerBitLength { current: usize, other: usize },
     #[error("error operating incompatible types - self precision: {current:?}, other precision: {other:?}")]
     IncompatibleFixedPointPrecision {
         current: FixedPointPrecision,

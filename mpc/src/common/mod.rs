@@ -450,6 +450,15 @@ where
         net: Arc<N>,
     ) -> Result<Self::Sfix, Self::Error>;
 
+    /// Fixed-point division with a secret divisor: x / y, plus a flag
+    /// indicating whether y was zero
+    async fn div_fixed(
+        &mut self,
+        x: Self::Sfix,
+        y: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<(Self::Sfix, S), Self::Error>;
+
     /// Integer addition (int8/16/32/64)
     async fn add_int(
         &self,
@@ -471,6 +480,136 @@ where
         y: Vec<Self::Sint>,
         net: Arc<N>,
     ) -> Result<Vec<Self::Sint>, Self::Error>;
+
+    /// x<0 Integer comparison (int8/16/32/64)
+    async fn ltz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
+    /// x > 0
+    async fn gtz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
+    /// x ≤ 0
+    async fn lez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
+    /// x ≥ 0
+    async fn gez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
+    /// a < b
+    async fn lt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error>;
+    /// a > b
+    async fn gt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error>;
+    /// a ≤ b
+    async fn le_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error>;
+    /// a ≥ b
+    async fn ge_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error>;
+    /// a = 0: returns 1 if a = 0, else 0
+    async fn eqz_int(&mut self, a: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error>;
+    /// a = b: returns 1 if a = b, else 0
+    async fn eq_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error>;
+
+    // ── Fixed-point comparison ────────────────────────────────────────────────
+    //
+    // A `Sfix` at precision (k, f) holds a k-bit signed integer `x` denoting
+    // `x / 2^f`. Since operands share `f`, comparing values is comparing the
+    // underlying integers, so these run the same LTZ/EQZ protocols the integer
+    // ops do — no separate machinery.
+    //
+    // Results are `Sfix` in the same precision: false is `0.0`, true is `1.0`
+    // (encoded `2^f`), so a comparison result can feed straight into further
+    // fixed-point arithmetic (`cond * x`, etc.).
+    //
+    // Binary comparisons evaluate `a - b`, which needs k+1 bits to hold the
+    // full range of a difference of two k-bit values. They therefore run one
+    // bit wider than the unary forms, which is what keeps a comparison of
+    // opposite-extreme operands from wrapping. Declare preprocessing
+    // accordingly: `add_ltz_ops(k, ..)` for unary, `add_ltz_ops(k + 1, ..)`
+    // for binary.
+
+    /// x < 0
+    async fn ltz_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error>;
+    /// x > 0
+    async fn gtz_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error>;
+    /// x <= 0
+    async fn lez_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error>;
+    /// x >= 0
+    async fn gez_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error>;
+    /// a < b
+    async fn lt_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error>;
+    /// a > b
+    async fn gt_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error>;
+    /// a <= b
+    async fn le_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error>;
+    /// a >= b
+    async fn ge_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error>;
+
+    /// `|x| < 2^tol_bits` in scaled units — `x` is zero once the low
+    /// `tol_bits` bits are ignored.
+    ///
+    /// Equality is a tolerance test rather than an exact one because
+    /// fixed-point values that *should* match routinely differ in the low bits
+    /// after a truncating multiply. `tol_bits = p` ignores differences below
+    /// `2^p` scaled units, i.e. below `2^{p-f}` in real terms. `tol_bits = 0`
+    /// degenerates to exact equality: scaled values are integers, so a
+    /// difference strictly below one is a difference of zero.
+    ///
+    /// The window is strict and symmetric, `(-2^tol_bits, 2^tol_bits)`, so the
+    /// test is commutative. The bound is a power of two only because that is
+    /// the natural granularity for fixed-point; the implementation is a
+    /// two-sided comparison and would accept an arbitrary bound just as well.
+    async fn eqz_fixed(
+        &mut self,
+        x: Self::Sfix,
+        tol_bits: usize,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error>;
+    /// `|a - b| < 2^tol_bits` in scaled units. See `eqz_fixed`.
+    async fn eq_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        tol_bits: usize,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error>;
 }
 
 /// A protocol identifier that fits into 8 bits.

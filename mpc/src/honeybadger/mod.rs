@@ -19,6 +19,8 @@ pub mod double_share;
 /// Implements a Beaver triple generation protocol for the HoneyBadgerMPC protocol.
 pub mod triple_gen;
 
+pub mod bitwise;
+pub mod comparison;
 pub mod fpdiv;
 pub mod fpmul;
 pub mod input;
@@ -27,6 +29,7 @@ pub mod mul_pub;
 pub mod output;
 pub mod preprocessing;
 pub mod prss;
+pub mod rand_inv_pair;
 pub mod share_gen;
 #[cfg(feature = "statistics")]
 pub mod statistics;
@@ -45,7 +48,13 @@ use crate::{
     },
     honeybadger::{
         batch_recon::{BatchReconError, BatchReconMsg},
+        bitwise::{
+            kor_cs::KOrCSPrep, pre_mulc::PreMulCOfflineNode, KOrCLError, KOrCSError, KOrClMessage,
+            Mod2Error, Mod2Message, PreMod2mError, PreMod2mMessage, PreMulCError, PreMulCPrep,
+        },
+        comparison::{eqz::EQZNode, ltz::LTZNode, EQZError, EqzMessage, LTZError},
         double_share::{double_share_generation, DouShaError, DouShaMessage, DoubleShamirShare},
+        fpdiv::fpdiv::{FpDivError, FpDivNode},
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
             fpmul::{FPError, FPMulNode},
@@ -63,9 +72,17 @@ use crate::{
             output::{OutputClient, OutputServer},
             OutputError, OutputMessage,
         },
-        preprocessing::HoneyBadgerMPCNodePreprocMaterial,
+        preprocessing::{
+            demand_for_eqz, demand_for_fpdiv, demand_for_fpdiv_const, demand_for_fpmul,
+            demand_for_ltz, demand_for_mul, demand_for_rand, HoneyBadgerMPCNodePreprocMaterial,
+            PreprocDemand,
+        },
         prss::prss::{PrssKeys, PRSS_KEY_ENTROPY_BITS},
         ran_dou_sha::messages::RanDouShaMessage,
+        rand_inv_pair::{
+            rand_inv_pair::{RandInvPairNode, RandInvPairPrep},
+            RandInvPairError,
+        },
         robust_interpolate::robust_interpolate::Robust,
         share_gen::{share_gen::RanShaNode, RanShaError, RanShaMessage},
         triple_gen::TripleGenError,
@@ -169,6 +186,26 @@ pub enum HoneyBadgerError {
     FPError(#[from] FPError),
     #[error("error in FPDiv_Const: {0:?}")]
     FPDivConstError(#[from] FPDivConstError),
+    #[error("error in FpDiv: {0:?}")]
+    FpDivError(#[from] FpDivError),
+    #[error("error in PreMod2m: {0:?}")]
+    PreMod2mError(#[from] PreMod2mError),
+    #[error("error in Mod2: {0:?}")]
+    Mod2Error(#[from] Mod2Error),
+    #[error("error in PreMulC: {0:?}")]
+    PreMulCError(#[from] PreMulCError),
+    #[error("error in LTZ: {0:?}")]
+    LTZError(#[from] LTZError),
+    #[error("error in EQZ: {0:?}")]
+    EQZError(#[from] EQZError),
+    #[error("error in RandInvPair: {0:?}")]
+    RandInvPairError(#[from] RandInvPairError),
+    #[error("error in KOrCS: {0:?}")]
+    KOrCSError(#[from] KOrCSError),
+    #[error("error in KOrCL: {0:?}")]
+    KOrCLError(#[from] KOrCLError),
+    #[error("share error: {0:?}")]
+    ShareError(#[from] crate::common::share::ShareError),
     #[error("error in Truncation: {0:?}")]
     TruncPrError(#[from] TruncPrError),
     #[error("error in types: {0:?}")]
@@ -434,6 +471,9 @@ pub struct Operation<F: FftField> {
 pub struct TypeOperations<F: PrimeField> {
     pub fpmul: FPMulNode<F>,
     pub fpdiv_const: FPDivConstNode<F>,
+    pub fpdiv: FpDivNode<F>,
+    pub ltz: LTZNode<F>,
+    pub eqz: EQZNode<F>,
 }
 
 #[derive(Clone, Debug)]
@@ -450,6 +490,12 @@ pub struct PreprocessNodes<F: PrimeField, R: RBC> {
     pub rand_bit: RandBit<F>,
     /// Produces the degree-`2t` zero-sharings that re-randomise RandBit's MulPub opening.
     pub zero_sha: ZeroShaNode<F, R>,
+    /// PreMulC's offline (preprocessing) phase: generates the correlated
+    /// (w, z, r) from fresh random shares,
+    /// zero-sharings, and Beaver triples.
+    pub premulc_offline: PreMulCOfflineNode<F>,
+    /// Produces the ([r], [r^-1]) pairs consumed by EQZ's KOrCS.
+    pub rand_inv_pair: RandInvPairNode<F>,
 }
 
 #[derive(Clone, Debug)]
@@ -496,6 +542,11 @@ pub struct SubProtocolCounters {
     pub fpmul_counter: SubProtocolCounter,
     pub fpdiv_const_counter: SubProtocolCounter,
     pub zero_sha_counter: SubProtocolCounter,
+    pub fpdiv_counter: SubProtocolCounter,
+    pub premulc_off_counter: SubProtocolCounter,
+    pub ltz_counter: SubProtocolCounter,
+    pub eqz_counter: SubProtocolCounter,
+    pub rand_inv_pair_counter: SubProtocolCounter,
 }
 
 impl SubProtocolCounters {
@@ -511,7 +562,12 @@ impl SubProtocolCounters {
             prand_int_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             fpmul_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             fpdiv_const_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            fpdiv_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
             zero_sha_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            premulc_off_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            ltz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            eqz_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
+            rand_inv_pair_counter: SubProtocolCounter(Arc::new(Mutex::new(Some(0)))),
         }
     }
 }
@@ -524,11 +580,6 @@ pub struct HoneyBadgerMPCNodeOpts {
     pub n_parties: usize,
     /// Upper bound of corrupt parties.
     pub threshold: usize,
-    /// Number of random double sharing pairs that need to be generated.
-    pub n_triples: usize,
-    /// Number of random shares needed.
-    /// This is usually = No of inputs + 2 * no of triples
-    pub n_random_shares: usize,
     /// Identifies one execution of the whole n-party protocol — not a per-client id.
     /// Must be identical across all n servers and every client participating in this
     /// execution (multiple clients computing together share one value), checked against
@@ -537,15 +588,6 @@ pub struct HoneyBadgerMPCNodeOpts {
     /// reusing a dead run's id would let a message still in flight from that run be
     /// accepted as belonging to the new one.
     pub instance_id: u32,
-    ///Number of RandBit shares
-    pub n_randbit: usize,
-    ///Number of PrandInt shares
-    pub n_prandint: usize,
-    /// Number of degree-`2t` zero-sharings to generate. Its own preprocessing material with its
-    /// own `ensure_zero_shares` phase, not derived at point of use. `new` seeds it from
-    /// `n_randbit` because RandBit's MulPub squaring is the only consumer today (one per bit);
-    /// set it directly when another protocol starts drawing from the pool.
-    pub n_zero_shares: usize,
     /// Fixed-point precision this node's preprocessing is sized for.
     ///
     /// The mask pool is generated once, before any value exists, so its width has to be decided
@@ -560,6 +602,38 @@ pub struct HoneyBadgerMPCNodeOpts {
     /// value is what silently decouples the configured κ from the delivered one.
     pub statistical_security: usize,
     pub timeout: Duration,
+    /// Planned online workload, declared up front as `(bit_width, count)` so the
+    /// offline phase can generate everything in bulk.
+    ///
+    /// HoneyBadger is preprocessing-based — the online path should only *draw*
+    /// material, never generate it. Declaring the workload here lets
+    /// `run_preprocessing` derive every raw pool size (via `PreprocDemand`)
+    /// instead of each call site recomputing it. Multiple entries are allowed,
+    /// so a node can serve mixed widths (int8 and int64) in one program.
+    pub ltz_ops: Vec<(usize, usize)>,
+    /// Planned `eqz_int`/`eq_int` workload as `(bit_width, count)`.
+    pub eqz_ops: Vec<(usize, usize)>,
+    /// Planned `div_fixed` workload as `(k, f, count)`.
+    pub fpdiv_ops: Vec<(usize, usize, usize)>,
+    /// Planned secure multiplications — `mul` calls, plus one per element of
+    /// each `mul_int`/`mul_fixed` batch.
+    pub mul_ops: usize,
+    /// Planned `mul_fixed` workload as `(f, count)`.
+    pub fpmul_ops: Vec<(usize, usize)>,
+    /// Planned `div_with_const_fixed` workload as `(f, count)`.
+    pub fpdiv_const_ops: Vec<(usize, usize)>,
+    /// Planned raw random-share draws: `rand` calls and input masks.
+    pub rand_ops: usize,
+    /// Material to generate on top of what the declared operations imply.
+    ///
+    /// The declarations above are the normal way to size preprocessing. This is
+    /// the one escape hatch, for the cases that genuinely aren't an operation —
+    /// benchmarking generation throughput, or reserving stock for a consumer
+    /// that draws from `preprocessing_material` directly (the input protocol
+    /// hands its masks to `InputServer::init`, so the embedder pulls those
+    /// itself). It is the same `PreprocDemand` the model uses internally, so
+    /// there is still exactly one vocabulary for "material needed".
+    pub extra_demand: PreprocDemand,
 }
 
 impl HoneyBadgerMPCNodeOpts {
@@ -567,11 +641,7 @@ impl HoneyBadgerMPCNodeOpts {
     pub fn new(
         n_parties: usize,
         threshold: usize,
-        n_triples: usize,
-        n_random_shares: usize,
         instance_id: u32,
-        n_randbit: usize,
-        n_prandint: usize,
         precision: FixedPointPrecision,
         statistical_security: usize,
         timeout: Duration,
@@ -595,15 +665,18 @@ impl HoneyBadgerMPCNodeOpts {
         Ok(Self {
             n_parties,
             threshold,
-            n_triples,
-            n_random_shares,
             instance_id,
-            n_randbit,
-            n_prandint,
-            n_zero_shares: n_randbit,
             precision,
             statistical_security,
             timeout,
+            ltz_ops: Vec::new(),
+            eqz_ops: Vec::new(),
+            fpdiv_ops: Vec::new(),
+            mul_ops: 0,
+            fpmul_ops: Vec::new(),
+            fpdiv_const_ops: Vec::new(),
+            rand_ops: 0,
+            extra_demand: PreprocDemand::default(),
         })
     }
     pub fn set_timeout(&mut self, secs: u64) {
@@ -629,9 +702,83 @@ impl HoneyBadgerMPCNodeOpts {
     pub fn max_masked_width(precision: FixedPointPrecision) -> usize {
         (2usize * precision.k()).saturating_sub(precision.f())
     }
-    /// Override the zero-sharing pool size, which `new` seeds from `n_randbit`.
-    pub fn set_n_zero_shares(&mut self, n_zero_shares: usize) {
-        self.n_zero_shares = n_zero_shares
+
+    /// Declares `count` planned `ltz_int` calls at bit width `bit_len`
+    /// (`gtz`/`lez`/`gez`/`lt`/`gt`/`le`/`ge` each cost one LTZ too).
+    ///
+    /// Accumulates, so calling it repeatedly with different widths provisions
+    /// for all of them.
+    pub fn add_ltz_ops(&mut self, bit_len: usize, count: usize) {
+        self.ltz_ops.push((bit_len, count));
+    }
+
+    /// Declares `count` planned `eqz_int`/`eq_int` calls at bit width `bit_len`.
+    pub fn add_eqz_ops(&mut self, bit_len: usize, count: usize) {
+        self.eqz_ops.push((bit_len, count));
+    }
+
+    /// Declares `count` planned `div_fixed` calls at precision `(k, f)`.
+    pub fn add_fpdiv_ops(&mut self, k: usize, f: usize, count: usize) {
+        self.fpdiv_ops.push((k, f, count));
+    }
+
+    /// Declares `count` planned secure multiplications (one Beaver triple each).
+    /// A `mul_int`/`mul` batch of `n` elements counts as `n`.
+    pub fn add_mul_ops(&mut self, count: usize) {
+        self.mul_ops += count;
+    }
+
+    /// Declares `count` planned `mul_fixed` calls at fractional precision `f`.
+    pub fn add_fpmul_ops(&mut self, f: usize, count: usize) {
+        self.fpmul_ops.push((f, count));
+    }
+
+    /// Declares `count` planned `div_with_const_fixed` calls at precision `f`.
+    pub fn add_fpdiv_const_ops(&mut self, f: usize, count: usize) {
+        self.fpdiv_const_ops.push((f, count));
+    }
+
+    /// Declares `count` planned raw random-share draws (`rand`, input masks).
+    pub fn add_rand_ops(&mut self, count: usize) {
+        self.rand_ops += count;
+    }
+
+    /// Total raw material implied by every declared operation.
+    ///
+    /// This is the single place operations are translated into pool sizes;
+    /// `run_preprocessing` adds it on top of the explicitly-configured
+    /// declared operations.
+    pub fn declared_demand(&self) -> PreprocDemand {
+        let mut total = PreprocDemand::default();
+        for &(bit_len, count) in &self.ltz_ops {
+            if bit_len >= 3 && count > 0 {
+                total.add(&demand_for_ltz(bit_len).scaled(count));
+            }
+        }
+        for &(bit_len, count) in &self.eqz_ops {
+            if bit_len >= 1 && count > 0 {
+                total.add(&demand_for_eqz(bit_len).scaled(count));
+            }
+        }
+        for &(k, f, count) in &self.fpdiv_ops {
+            if k >= 3 && count > 0 {
+                total.add(&demand_for_fpdiv(k, f).scaled(count));
+            }
+        }
+        for &(f, count) in &self.fpmul_ops {
+            if count > 0 {
+                total.add(&demand_for_fpmul(f).scaled(count));
+            }
+        }
+        for &(f, count) in &self.fpdiv_const_ops {
+            if count > 0 {
+                total.add(&demand_for_fpdiv_const(f).scaled(count));
+            }
+        }
+        total.add(&demand_for_mul(self.mul_ops));
+        total.add(&demand_for_rand(self.rand_ops));
+        total.add(&self.extra_demand);
+        total
     }
 }
 
@@ -666,6 +813,11 @@ where
             RanShaNode::new(id, params.n_parties, params.threshold, params.threshold + 1)?;
         let fpmul_node = FPMulNode::new(id, params.n_parties, params.threshold)?;
         let fpdiv_const_node = FPDivConstNode::new(id, params.n_parties, params.threshold)?;
+        let fpdiv_node = FpDivNode::new(id, params.n_parties, params.threshold)?;
+        let ltz_node = LTZNode::new(id, params.n_parties, params.threshold)?;
+        let eqz_node = EQZNode::new(id, params.n_parties, params.threshold)?;
+        let rand_inv_pair_node = RandInvPairNode::new(id, params.n_parties, params.threshold)?;
+        let premulc_offline_node = PreMulCOfflineNode::new(id, params.n_parties, params.threshold)?;
         let input = InputServer::new(
             id,
             params.n_parties,
@@ -693,11 +845,16 @@ where
                 prand_int: prand_int_node,
                 rand_bit: rand_bit_node,
                 zero_sha: zero_sha_node,
+                premulc_offline: premulc_offline_node,
+                rand_inv_pair: rand_inv_pair_node,
             },
             operations: Operation { mul: mul_node },
             type_ops: TypeOperations {
                 fpmul: fpmul_node,
                 fpdiv_const: fpdiv_const_node,
+                fpdiv: fpdiv_node,
+                ltz: ltz_node,
+                eqz: eqz_node,
             },
             output,
             counters: SubProtocolCounters::new(),
@@ -954,6 +1111,271 @@ where
                     }
                 }
             }
+            WrappedMessage::Mult(mult_msg) => {
+                if sender_id != mult_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if mult_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        mult_msg.session_id.instance_id(),
+                    ));
+                }
+                match mult_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::Mul) => {
+                        self.operations
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::FpMul) => {
+                        self.type_ops
+                            .fpmul
+                            .mult_node
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::PreMulCOff) => {
+                        self.preprocess
+                            .premulc_offline
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::FpDivMulA) | Some(ProtocolType::FpDivMulB) => {
+                        self.type_ops
+                            .fpdiv
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::LTZBitMul) => {
+                        self.type_ops
+                            .ltz
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::LTZ) => {
+                        self.type_ops
+                            .ltz
+                            .pre_mod2m
+                            .pre_bitlt
+                            .suf_mul_inv
+                            .inner
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::KOr1) | Some(ProtocolType::KOr2) => {
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::PreBitMul3) => {
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .bit_dec
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::PreBitMul)
+                    | Some(ProtocolType::PreBitMul1)
+                    | Some(ProtocolType::PreBitMul2) => {
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::SufOr) => {
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .suf_or
+                            .inner
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    Some(ProtocolType::FpDiv) => {
+                        // BitDec's nested SufMulInv's embedded Multiply.
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .bit_dec
+                            .pre_mod2m
+                            .pre_bitlt
+                            .suf_mul_inv
+                            .inner
+                            .mul
+                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
+                            .await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in Mult",
+                            mult_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::Trunc(trunc_msg) => {
+                if sender_id != trunc_msg.sender_id {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if trunc_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        trunc_msg.session_id.instance_id(),
+                    ));
+                }
+                match trunc_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::FpMul) => {
+                        self.type_ops.fpmul.trunc_node.process(trunc_msg).await?;
+                    }
+                    Some(ProtocolType::FpDivConst) => {
+                        self.type_ops
+                            .fpdiv_const
+                            .trunc_node
+                            .process(trunc_msg)
+                            .await?;
+                    }
+                    Some(ProtocolType::FpDivTrunc) => {
+                        self.type_ops.fpdiv.trunc.process(trunc_msg).await?;
+                    }
+                    Some(ProtocolType::FpDiv) => {
+                        // AppRec's own final TruncPr reveal.
+                        self.type_ops.fpdiv.app_rec.trunc.process(trunc_msg).await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in Trunc",
+                            trunc_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::Mod2(mod2_msg) => {
+                if sender_id != mod2_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if mod2_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        mod2_msg.session_id.instance_id(),
+                    ));
+                }
+                match mod2_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::LTZ) => {
+                        self.type_ops
+                            .ltz
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mod2
+                            .process(mod2_msg)
+                            .await?;
+                    }
+                    Some(ProtocolType::FpDiv) => {
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .bit_dec
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mod2
+                            .process(mod2_msg)
+                            .await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in Mod2",
+                            mod2_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::PreMod2m(pre_mod2m_msg) => {
+                if sender_id != pre_mod2m_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if pre_mod2m_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        pre_mod2m_msg.session_id.instance_id(),
+                    ));
+                }
+                match pre_mod2m_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::LTZ) => {
+                        self.type_ops.ltz.pre_mod2m.process(pre_mod2m_msg).await?;
+                    }
+                    Some(ProtocolType::FpDiv) => {
+                        // BitDec's own PreMod2m reveal.
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .bit_dec
+                            .pre_mod2m
+                            .process(pre_mod2m_msg)
+                            .await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in PreMod2m",
+                            pre_mod2m_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::KOrCl(kor_cl_msg) => {
+                if sender_id != kor_cl_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if kor_cl_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        kor_cl_msg.session_id.instance_id(),
+                    ));
+                }
+                match kor_cl_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::EQZ) => {
+                        self.type_ops.eqz.kor_cl.process(kor_cl_msg).await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in KOrCl",
+                            kor_cl_msg.session_id
+                        );
+                    }
+                }
+            }
+            WrappedMessage::Eqz(eqz_msg) => {
+                if sender_id != eqz_msg.sender {
+                    return Err(HoneyBadgerError::InvalidPartyId);
+                }
+                if eqz_msg.session_id.instance_id() != self.params.instance_id {
+                    return Err(HoneyBadgerError::InstanceIdError(
+                        eqz_msg.session_id.instance_id(),
+                    ));
+                }
+                match eqz_msg.session_id.calling_protocol() {
+                    Some(ProtocolType::EQZ) => {
+                        self.type_ops.eqz.process(eqz_msg).await?;
+                    }
+                    _ => {
+                        warn!(
+                            "Unknown protocol ID in session ID: {:?} in Eqz",
+                            eqz_msg.session_id
+                        );
+                    }
+                }
+            }
 
             WrappedMessage::RanSha(rs_msg) => {
                 if sender_id != rs_msg.sender_id {
@@ -1043,6 +1465,278 @@ where
                             .drain_batch_recon_output()
                             .await?;
                     }
+                    Some(ProtocolType::PreMulCOff) if batch_msg.session_id.round_id() == 0 => {
+                        self.preprocess
+                            .premulc_offline
+                            .mul_pub
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.preprocess
+                            .premulc_offline
+                            .mul_pub
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::PreMulCOff) => {
+                        self.preprocess
+                            .premulc_offline
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.preprocess
+                            .premulc_offline
+                            .mul
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::FpDivMulA) | Some(ProtocolType::FpDivMulB) => {
+                        self.type_ops
+                            .fpdiv
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops.fpdiv.mul.drain_batch_recon_output().await?;
+                    }
+                    Some(ProtocolType::PreBitMul3) => {
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .bit_dec
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .bit_dec
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mul
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::LTZBitMul) => {
+                        self.type_ops
+                            .ltz
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .ltz
+                            .pre_mod2m
+                            .pre_bitlt
+                            .mul
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::LTZ) => {
+                        // round 0 = SufMulInv's own reveal, round 1 = its
+                        // inner Multiply's — mirrors the FpDiv arm below.
+                        let round = batch_msg.session_id.round_id();
+                        if round == 0 {
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .batch_recon
+                                .process(batch_msg, net)
+                                .await?;
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .drain_batch_recon_output()
+                                .await?;
+                        } else if round == 1 {
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .mul
+                                .batch_recon
+                                .process(batch_msg, net)
+                                .await?;
+                            self.type_ops
+                                .ltz
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .mul
+                                .drain_batch_recon_output()
+                                .await?;
+                        } else {
+                            warn!("unexpected LTZ BatchRecon round_id {round}");
+                        }
+                    }
+                    Some(ProtocolType::KOr1) | Some(ProtocolType::KOr2) => {
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .mul
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::EQZ) => {
+                        // KOrCS's own d_j openings (its Multiply rounds carry
+                        // the KOr1/KOr2 tags handled above).
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .eqz
+                            .kor_cl
+                            .kor_cs
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::RandInvPair) => {
+                        self.preprocess
+                            .rand_inv_pair
+                            .mul_pub
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.preprocess
+                            .rand_inv_pair
+                            .mul_pub
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::PreBitMul)
+                    | Some(ProtocolType::PreBitMul1)
+                    | Some(ProtocolType::PreBitMul2) => {
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .mul
+                            .batch_recon
+                            .process(batch_msg, net)
+                            .await?;
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .mul
+                            .drain_batch_recon_output()
+                            .await?;
+                    }
+                    Some(ProtocolType::SufOr) => {
+                        if batch_msg.session_id.round_id() == 0 {
+                            self.type_ops
+                                .fpdiv
+                                .app_rec
+                                .suf_or
+                                .inner
+                                .batch_recon
+                                .process(batch_msg, net)
+                                .await?;
+                            self.type_ops
+                                .fpdiv
+                                .app_rec
+                                .suf_or
+                                .inner
+                                .drain_batch_recon_output()
+                                .await?;
+                        } else {
+                            self.type_ops
+                                .fpdiv
+                                .app_rec
+                                .suf_or
+                                .inner
+                                .mul
+                                .batch_recon
+                                .process(batch_msg, net)
+                                .await?;
+                            self.type_ops
+                                .fpdiv
+                                .app_rec
+                                .suf_or
+                                .inner
+                                .mul
+                                .drain_batch_recon_output()
+                                .await?;
+                        }
+                    }
+                    Some(ProtocolType::FpDiv) => {
+                        let round = batch_msg.session_id.round_id();
+                        if round == 0 {
+                            self.type_ops
+                                .fpdiv
+                                .app_rec
+                                .bit_dec
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .batch_recon
+                                .process(batch_msg, net)
+                                .await?;
+                            self.type_ops
+                                .fpdiv
+                                .app_rec
+                                .bit_dec
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .drain_batch_recon_output()
+                                .await?;
+                        } else if round == 1 {
+                            self.type_ops
+                                .fpdiv
+                                .app_rec
+                                .bit_dec
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .mul
+                                .batch_recon
+                                .process(batch_msg, net)
+                                .await?;
+                            self.type_ops
+                                .fpdiv
+                                .app_rec
+                                .bit_dec
+                                .pre_mod2m
+                                .pre_bitlt
+                                .suf_mul_inv
+                                .inner
+                                .mul
+                                .drain_batch_recon_output()
+                                .await?;
+                        } else {
+                            warn!("unexpected FpDiv BatchRecon round_id {round}");
+                        }
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} at Batch reconstruction",
@@ -1062,65 +1756,6 @@ where
                 }
                 self.preprocess.prand_int.process(prand_message).await?;
             }
-            WrappedMessage::Mult(mult_msg) => {
-                if sender_id != mult_msg.sender {
-                    return Err(HoneyBadgerError::InvalidPartyId);
-                }
-                if mult_msg.session_id.instance_id() != self.params.instance_id {
-                    return Err(HoneyBadgerError::InstanceIdError(
-                        mult_msg.session_id.instance_id(),
-                    ));
-                }
-                match mult_msg.session_id.calling_protocol() {
-                    Some(ProtocolType::Mul) => {
-                        self.operations
-                            .mul
-                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
-                            .await?;
-                    }
-                    Some(ProtocolType::FpMul) => {
-                        self.type_ops
-                            .fpmul
-                            .mult_node
-                            .process(mult_msg.sender, mult_msg.session_id, mult_msg.payload)
-                            .await?;
-                    }
-                    _ => {
-                        warn!(
-                            "Unknown protocol ID in session ID: {:?} for direct Mult open",
-                            mult_msg.session_id
-                        );
-                    }
-                }
-            }
-            WrappedMessage::Trunc(trunc_msg) => {
-                if sender_id != trunc_msg.sender_id {
-                    return Err(HoneyBadgerError::InvalidPartyId);
-                }
-                if trunc_msg.session_id.instance_id() != self.params.instance_id {
-                    return Err(HoneyBadgerError::InstanceIdError(
-                        trunc_msg.session_id.instance_id(),
-                    ));
-                }
-                match trunc_msg.session_id.calling_protocol() {
-                    Some(ProtocolType::FpMul) => {
-                        self.type_ops.fpmul.trunc_node.process(trunc_msg).await?;
-                    }
-                    Some(ProtocolType::FpDivConst) => {
-                        self.type_ops
-                            .fpdiv_const
-                            .trunc_node
-                            .process(trunc_msg)
-                            .await?;
-                    }
-                    _ => {
-                        warn!(
-                            "Unknown protocol ID in session ID: {:?} for direct Trunc open",
-                            trunc_msg.session_id
-                        );
-                    }
-                }
-            }
             WrappedMessage::ZeroSha(zs_msg) => {
                 if sender_id != zs_msg.sender_id {
                     return Err(HoneyBadgerError::InvalidPartyId);
@@ -1132,6 +1767,7 @@ where
                 }
                 self.preprocess.zero_sha.process(zs_msg, net).await?;
             }
+
             WrappedMessage::Input(_) => warn!("Incorrect message recieved at process function"),
             WrappedMessage::Output(_) => warn!("Incorrect message recieved at process function"),
         }
@@ -1311,6 +1947,72 @@ where
             .map_err(HoneyBadgerError::from)
     }
 
+    /// Fixed-point division with a secret divisor: x / y, plus a flag
+    /// indicating whether y was zero (output is only meaningful when the
+    /// flag is false).
+    async fn div_fixed(
+        &mut self,
+        x: SecretFixedPoint<F, RobustShare<F>>,
+        y: SecretFixedPoint<F, RobustShare<F>>,
+        net: Arc<N>,
+    ) -> Result<(SecretFixedPoint<F, RobustShare<F>>, RobustShare<F>), Self::Error> {
+        if x.precision() != y.precision() {
+            return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
+        }
+        let k = x.precision().k();
+        let f = x.precision().f();
+
+        // Top up if the pool is short. Sizing lives in `PreprocDemand` and is
+        // applied by `run_preprocessing` from the declared workload
+        // (`add_fpdiv_ops`); FpDiv needs two PreMulC bundles at pk = k-1.
+        let need = demand_for_fpdiv(k, f);
+        let pk = k - 1;
+        let mut rng = StdRng::from_rng(OsRng).unwrap();
+        let short = {
+            let store = self.preprocessing_material.lock().await;
+            let len = store.length();
+            len.beaver_triples < need.triples
+                || len.random_shr < need.random_shares
+                || len.randbit < need.randbit
+                || len.prandint < need.prandint
+                || store.premulc_len(pk) < 2
+        };
+        if short {
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        let prep = {
+            let mut store = self.preprocessing_material.lock().await;
+            let bitdec_suf_mul_inv_prep = store.take_premulc_prep(pk)?;
+            let sufor_prep = store.take_premulc_prep(pk)?;
+            store.build_fpdiv_prep(k, f, bitdec_suf_mul_inv_prep, sufor_prep)?
+        };
+
+        let session_id = SessionId::new(
+            ProtocolType::FpDiv,
+            SessionId::pack_slot(self.counters.fpdiv_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        let (c, z) = self
+            .type_ops
+            .fpdiv
+            .init(
+                x.value().clone(),
+                y.value().clone(),
+                x.precision().k(),
+                x.precision().f(),
+                prep,
+                session_id,
+                net.clone(),
+                self.params.timeout,
+            )
+            .await
+            .map_err(HoneyBadgerError::from)?;
+
+        Ok((c, z))
+    }
+
     /// Integer addition (int8/16/32/64)
     async fn add_int(
         &self,
@@ -1396,6 +2098,218 @@ where
             .collect();
         Ok(output)
     }
+    /// x<0 Integer comparison (int8/16/32/64)
+    async fn ltz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        let bit = self.ltz_on_share(x.share().clone(), k, net).await?;
+        Ok(SecretInt::new(bit, k))
+    }
+    async fn gtz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        let neg_x = (x * ClearInt::new(-F::one(), k))?;
+        self.ltz_int(neg_x, net).await
+    }
+
+    async fn lez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        let neg_x = (x * ClearInt::new(-F::one(), k))?;
+        let ltz = self.ltz_int(neg_x, net).await?;
+        let k2 = ltz.bit_length();
+        let neg_ltz = (ltz * ClearInt::new(-F::one(), k2))?;
+        Ok((neg_ltz + ClearInt::new(F::one(), k2))?)
+    }
+
+    async fn gez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int(x, net).await?;
+        let k = ltz.bit_length();
+        let neg_ltz = (ltz * ClearInt::new(-F::one(), k))?;
+        Ok((neg_ltz + ClearInt::new(F::one(), k))?)
+    }
+
+    async fn lt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.ltz_int((a - b)?, net).await
+    }
+
+    async fn gt_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.ltz_int((b - a)?, net).await
+    }
+
+    async fn le_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int((b - a)?, net).await?;
+        let k = ltz.bit_length();
+        Ok(((ltz * ClearInt::new(-F::one(), k))? + ClearInt::new(F::one(), k))?)
+    }
+
+    async fn ge_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        let ltz = self.ltz_int((a - b)?, net).await?;
+        let k = ltz.bit_length();
+        Ok(((ltz * ClearInt::new(-F::one(), k))? + ClearInt::new(F::one(), k))?)
+    }
+    async fn eqz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
+        let k = x.bit_length();
+        let bit = self.eqz_on_share(x.share().clone(), k, net).await?;
+        Ok(SecretInt::new(bit, k))
+    }
+
+    async fn eq_int(
+        &mut self,
+        a: Self::Sint,
+        b: Self::Sint,
+        net: Arc<N>,
+    ) -> Result<Self::Sint, Self::Error> {
+        self.eqz_int((a - b)?, net).await
+    }
+
+    // ── Fixed-point comparison ────────────────────────────────────────────────
+    //
+    // Each of these is the corresponding integer comparison run on the
+    // underlying scaled integer: at a shared precision (k, f), `a < b` holds
+    // exactly when the stored k-bit integers compare that way. The result bit is
+    // scaled by `2^f` on the way out so `true` reads as `1.0`.
+
+    async fn ltz_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error> {
+        let precision = *x.precision();
+        let bit = self
+            .ltz_on_share(x.value().clone(), precision.k(), net)
+            .await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn gtz_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error> {
+        let precision = *x.precision();
+        let neg = (x.value().clone() * (-F::one()))?;
+        let bit = self.ltz_on_share(neg, precision.k(), net).await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn lez_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error> {
+        // x <= 0  <=>  not (x > 0)  <=>  not ltz(-x)
+        let precision = *x.precision();
+        let neg = (x.value().clone() * (-F::one()))?;
+        let bit = self.ltz_on_share(neg, precision.k(), net).await?;
+        let bit = ((bit * (-F::one()))? + F::one())?; // NOT
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn gez_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error> {
+        let precision = *x.precision();
+        let bit = self
+            .ltz_on_share(x.value().clone(), precision.k(), net)
+            .await?;
+        let bit = ((bit * (-F::one()))? + F::one())?; // NOT
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn lt_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        let diff = (a - b)?;
+        let precision = *diff.precision();
+        let bit = self
+            .ltz_on_share(diff.value().clone(), precision.k() + 1, net)
+            .await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn gt_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        let diff = (b - a)?;
+        let precision = *diff.precision();
+        let bit = self
+            .ltz_on_share(diff.value().clone(), precision.k() + 1, net)
+            .await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn le_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        // a <= b  <=>  not (b < a)
+        let diff = (b - a)?;
+        let precision = *diff.precision();
+        let bit = self
+            .ltz_on_share(diff.value().clone(), precision.k() + 1, net)
+            .await?;
+        let bit = ((bit * (-F::one()))? + F::one())?; // NOT
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn ge_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        let diff = (a - b)?;
+        let precision = *diff.precision();
+        let bit = self
+            .ltz_on_share(diff.value().clone(), precision.k() + 1, net)
+            .await?;
+        let bit = ((bit * (-F::one()))? + F::one())?; // NOT
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn eqz_fixed(
+        &mut self,
+        x: Self::Sfix,
+        tol_bits: usize,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        // The two comparisons inside evaluate `x -/+ 2^tol_bits`, one bit wider
+        // than `x` itself.
+        let precision = *x.precision();
+        let bit = self
+            .abs_below_pow2(x.value().clone(), precision.k() + 1, tol_bits, net)
+            .await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
+
+    async fn eq_fixed(
+        &mut self,
+        a: Self::Sfix,
+        b: Self::Sfix,
+        tol_bits: usize,
+        net: Arc<N>,
+    ) -> Result<Self::Sfix, Self::Error> {
+        // `a - b` spans one more bit than either operand, and the comparisons
+        // inside add one more on top of that.
+        let diff = (a - b)?;
+        let precision = *diff.precision();
+        let bit = self
+            .abs_below_pow2(diff.value().clone(), precision.k() + 2, tol_bits, net)
+            .await?;
+        Ok(SecretFixedPoint::from_bit(bit, precision)?)
+    }
 }
 
 #[async_trait]
@@ -1437,41 +2351,21 @@ where
             trace_preprocessing_phase(self.id, "prss_setup", 1, phase_start);
         }
 
-        // Get how many triples and random shares are already available
-        let (no_of_triples_avail, no_of_random_shares_avail) = {
+        // What the declared workload needs, and what that leaves to generate
+        // once the pools are accounted for. Both are computed by the demand
+        // model rather than here — see `PreprocDemand::to_generate` for the two
+        // wrinkles it folds in (TripleGen's `2t+1` group rounding, and the 2
+        // random shares each generated triple consumes).
+        let demand = self.params.declared_demand();
+        let plan = {
             let store = self.preprocessing_material.lock().await;
-            (store.length().beaver_triples, store.length().random_shr)
+            demand.to_generate(&store.length(), self.params.threshold)
         };
-
-        // Desired total counts from protocol parameters
-        let mut no_of_triples = self.params.n_triples;
-        let mut no_of_random_shares = self.params.n_random_shares;
-        // Each triple batch produces (2t + 1) triples at a time
         let group_size = 2 * self.params.threshold + 1;
-        let total_triples_to_generate = if no_of_triples_avail >= no_of_triples {
-            no_of_triples = 0;
-            0
-        } else {
-            ((no_of_triples - no_of_triples_avail + group_size - 1) / group_size) * group_size
-        };
+        let total_triples_to_generate = plan.triples;
+        let total_random_shares_to_generate = plan.random_shares;
 
-        let total_random_shares_to_generate = if total_triples_to_generate > 0 {
-            // Always add 2× per triple group
-            let baseline = if no_of_random_shares_avail < no_of_random_shares {
-                no_of_random_shares - no_of_random_shares_avail
-            } else {
-                no_of_random_shares = 0;
-                0
-            };
-            baseline + 2 * total_triples_to_generate
-        } else if no_of_random_shares_avail < no_of_random_shares {
-            no_of_random_shares - no_of_random_shares_avail
-        } else {
-            no_of_random_shares = 0;
-            0
-        };
-
-        if no_of_triples == 0 && no_of_random_shares == 0 {
+        if plan.is_empty() {
             info!("There are enough Random shares and Beaver triples");
             // return Ok(());
         } else {
@@ -1590,31 +2484,54 @@ where
         // Step 5. Generate zero shares (degree-2t zero-sharings)
         // ------------------------
         let phase_start = Instant::now();
-        self.ensure_zero_shares(network.clone(), rng, self.params.n_zero_shares)
+        self.ensure_zero_shares(network.clone(), rng, demand.zero_shares)
             .await?;
-        trace_preprocessing_phase(
-            self.id,
-            "zero_shares",
-            self.params.n_zero_shares,
-            phase_start,
-        );
+        trace_preprocessing_phase(self.id, "zero_shares", demand.zero_shares, phase_start);
         info!("Zero share generation done");
 
         // ------------------------
         // Step 6. Generate Random bits
         // ------------------------
         let phase_start = Instant::now();
-        self.ensure_randbit_shares(network.clone()).await?;
-        trace_preprocessing_phase(self.id, "randbit", self.params.n_randbit, phase_start);
+        self.ensure_randbit_shares(network.clone(), demand.randbit)
+            .await?;
+        trace_preprocessing_phase(self.id, "randbit", demand.randbit, phase_start);
         info!("RandBit share generation done");
 
         // ------------------------
         // Step 7. Generate Random Int
         // ------------------------
         let phase_start = Instant::now();
-        self.ensure_prandint_shares().await?;
-        trace_preprocessing_phase(self.id, "prandint", self.params.n_prandint, phase_start);
+        self.ensure_prandint_shares(demand.prandint).await?;
+        trace_preprocessing_phase(self.id, "prandint", demand.prandint, phase_start);
         info!("PrandInt share generation done");
+
+        // ------------------------
+        // Step 8. Generate PreMulC preprocessing bundles
+        // ------------------------
+        let phase_start = Instant::now();
+        self.ensure_premulc_shares(network.clone()).await?;
+        trace_preprocessing_phase(
+            self.id,
+            "premulc",
+            demand.premulc.values().sum(),
+            phase_start,
+        );
+        info!("PreMulC prep generation done");
+
+        // ------------------------
+        // Step 9. Generate ([r], [r^-1]) pairs for EQZ's KOrCS
+        // ------------------------
+        let phase_start = Instant::now();
+        self.ensure_rand_inv_pairs(network.clone(), demand.rand_inv_pairs)
+            .await?;
+        trace_preprocessing_phase(
+            self.id,
+            "rand_inv_pairs",
+            demand.rand_inv_pairs,
+            phase_start,
+        );
+        info!("RandInvPair generation done");
 
         Ok(())
     }
@@ -1624,6 +2541,181 @@ where
     F: PrimeField,
     R: RBC<Id = SessionId>,
 {
+    /// LTZ over a raw share: returns a share of 1 if `x < 0`, else 0.
+    ///
+    /// `k` is the signed width the operand is known to occupy. Shared by the
+    /// integer and fixed-point entry points, which differ only in where `k`
+    /// comes from and how the resulting bit is wrapped.
+    pub(crate) async fn ltz_on_share<N>(
+        &mut self,
+        x: RobustShare<F>,
+        k: usize,
+        net: Arc<N>,
+    ) -> Result<RobustShare<F>, HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        Self: PreprocessingMPCProtocol<F, RobustShare<F>, N, Error = HoneyBadgerError>,
+    {
+        if k < 3 {
+            return Err(HoneyBadgerError::LTZError(LTZError::InvalidInput(format!(
+                "k must be >= 3 (got {k}); PreMod2m requires m = k-1 >= 2"
+            ))));
+        }
+        // LTZ runs PreMod2m(a, k, m = k-1); its inner PreBitLT operates on m
+        // bits and needs one PreMulC bundle sized at exactly pk = m.
+        let m = k - 1;
+        let pk = m;
+
+        // Top up if the pool is short, mirroring `mul`. The sizing itself lives
+        // in `PreprocDemand` and is applied by `run_preprocessing` from the
+        // declared workload (`add_ltz_ops`) — nothing is computed or configured
+        // here, so the online path stays a pure draw whenever the offline phase
+        // was provisioned correctly.
+        let need = demand_for_ltz(k);
+        let short = {
+            let store = self.preprocessing_material.lock().await;
+            let len = store.length();
+            len.beaver_triples < need.triples
+                || len.randbit < need.randbit
+                || len.prandint < need.prandint
+                || store.premulc_len(pk) < 1
+        };
+        if short {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        let prep = {
+            let mut store = self.preprocessing_material.lock().await;
+            let suf_mul_inv_prep = store.take_premulc_prep(pk)?;
+            store.build_premod2m_prep(m, suf_mul_inv_prep)?
+        };
+
+        let session = SessionId::new(
+            ProtocolType::LTZ,
+            SessionId::pack_slot(self.counters.ltz_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        Ok(self
+            .type_ops
+            .ltz
+            .run(x, k, prep, session, net, self.params.timeout)
+            .await?)
+    }
+
+    /// EQZ over a raw share: returns a share of 1 if `x == 0` (mod 2^k), else 0.
+    pub(crate) async fn eqz_on_share<N>(
+        &mut self,
+        x: RobustShare<F>,
+        k: usize,
+        net: Arc<N>,
+    ) -> Result<RobustShare<F>, HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        Self: PreprocessingMPCProtocol<F, RobustShare<F>, N, Error = HoneyBadgerError>,
+    {
+        if k == 0 {
+            return Err(HoneyBadgerError::EQZError(EQZError::LengthError));
+        }
+        let m = (k as u32).ilog2() as usize + 1;
+
+        // Top up if short — see the note in `ltz_on_share`. EQZ needs no PreMulC
+        // bundle; its derived material is the ([r],[r^-1]) pairs KOrCS consumes.
+        let need = demand_for_eqz(k);
+        let short = {
+            let store = self.preprocessing_material.lock().await;
+            let len = store.length();
+            len.beaver_triples < need.triples
+                || len.randbit < need.randbit
+                || len.prandint < need.prandint
+                || len.rand_inv_pairs < need.rand_inv_pairs
+        };
+        if short {
+            let mut rng = StdRng::from_rng(OsRng).unwrap();
+            self.run_preprocessing(net.clone(), &mut rng).await?;
+        }
+
+        let (eqz_prandm, kor_cl_prandm, kor_cs_prep) = {
+            let mut store = self.preprocessing_material.lock().await;
+            let rand_inv_pairs = store.take_rand_inv_pairs(m)?;
+            let triples_round1 = store.take_beaver_triples(m.saturating_sub(1))?;
+            let triples_round2 = store.take_beaver_triples(m)?;
+            let eqz_prandm = store.take_prandm_prep(k)?;
+            let kor_cl_prandm = store.take_prandm_prep(m)?;
+            (
+                eqz_prandm,
+                kor_cl_prandm,
+                KOrCSPrep {
+                    rand_inv_pairs,
+                    triples_round1,
+                    triples_round2,
+                },
+            )
+        };
+
+        let session = SessionId::new(
+            ProtocolType::EQZ,
+            SessionId::pack_slot(self.counters.eqz_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        Ok(self
+            .type_ops
+            .eqz
+            .run(
+                x,
+                k,
+                eqz_prandm,
+                kor_cl_prandm,
+                kor_cs_prep,
+                session,
+                net,
+                self.params.timeout,
+            )
+            .await?)
+    }
+
+    /// `|x| < 2^p` for a raw share, as a 0/1 share.
+    ///
+    /// Two-sided by construction: `(x - 2^p < 0) AND (-x - 2^p < 0)`. The AND
+    /// is free — see below — so the cost is exactly two LTZ calls.
+    /// `k` is the width the two LTZ calls run at, so it must cover `x - 2^p`:
+    /// one bit wider than `x`'s own width. The tolerance is a power of two
+    /// because that is the natural notion for fixed-point — "equal once the low
+    /// `p` bits are ignored".
+    pub(crate) async fn abs_below_pow2<N>(
+        &mut self,
+        x: RobustShare<F>,
+        k: usize,
+        p: usize,
+        net: Arc<N>,
+    ) -> Result<RobustShare<F>, HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+        Self: PreprocessingMPCProtocol<F, RobustShare<F>, N, Error = HoneyBadgerError>,
+    {
+        if p + 1 >= k {
+            return Err(HoneyBadgerError::LTZError(LTZError::InvalidInput(format!(
+                "tolerance exponent p={p} needs p+1 < k (k={k})"
+            ))));
+        }
+
+        let two_p = F::from(2u64).pow([p as u64]);
+        let neg_x = (x.clone() * (-F::one()))?;
+
+        // x < 2^p
+        let below = self.ltz_on_share((x - two_p)?, k, net.clone()).await?;
+        // -x < 2^p, i.e. x > -2^p
+        let above = self.ltz_on_share((neg_x - two_p)?, k, net.clone()).await?;
+
+        // The two half-lines `x < 2^p` and `x > -2^p` overlap, so their
+        // indicators are never both 0: that would need `2^p <= x <= -2^p`, i.e.
+        // `2^{p+1} <= 0`. The sum is therefore 1 or 2 and the intersection is
+        // `below + above - 1` — no multiplication, no triple, no extra round.
+        Ok(((below + above)? - F::one())?)
+    }
+
     /// Ensure we have enough random shares by repeatedly running ShareGen if needed.
     async fn ensure_random_shares<G, N>(
         &mut self,
@@ -1879,7 +2971,11 @@ where
     /// RandBit directly in `F` produces the same `RobustShare<F>` bit shares without that detour,
     /// and shares its random-share pool with the rest of the node instead of requiring a
     /// dedicated small-field preprocessing pipeline.
-    async fn ensure_randbit_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
+    async fn ensure_randbit_shares<N>(
+        &mut self,
+        network: Arc<N>,
+        target: usize,
+    ) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
     {
@@ -1889,14 +2985,14 @@ where
             store.length().randbit
         };
 
-        if no_shares >= self.params.n_randbit {
+        if no_shares >= target {
             info!("There are enough RandBit shares");
             return Ok(());
         }
 
         // Computing the amount of needed shares. MulPub pads its last `2t+1`-wide group
         // internally, so the count no longer has to be a multiple of anything.
-        let total_to_generate = self.params.n_randbit.saturating_sub(no_shares);
+        let total_to_generate = target.saturating_sub(no_shares);
 
         // MulPub sends a whole session's groups in one batch-reconstruction message per
         // recipient, so it caps how much a single `init` may open. Ask it rather than
@@ -1957,7 +3053,7 @@ where
         Ok(())
     }
 
-    /// Tops the PRandInt mask pool up to `n_prandint`, deriving locally from PRSS keys.
+    /// Tops the PRandInt mask pool up to the declared target, deriving locally from PRSS keys.
     ///
     /// No network: the keys were established once by [`Self::setup_prss_keys`], and every mask
     /// after that is a local PRF evaluation. Masks are addressed by `prandint_cursor` — the total
@@ -1968,18 +3064,18 @@ where
     /// driven purely by how much has been generated so far, which every honest party computes
     /// identically; a counter that drifted between parties would silently yield shares of
     /// different secrets, with no message exchange left to catch it.
-    async fn ensure_prandint_shares(&mut self) -> Result<(), HoneyBadgerError> {
+    async fn ensure_prandint_shares(&mut self, target: usize) -> Result<(), HoneyBadgerError> {
         let no_shares = {
             let store = self.preprocessing_material.lock().await;
             store.length().prandint
         };
 
-        if no_shares >= self.params.n_prandint {
+        if no_shares >= target {
             info!("There are enough PRandInt shares");
             return Ok(());
         }
 
-        let missing = self.params.n_prandint.saturating_sub(no_shares);
+        let missing = target.saturating_sub(no_shares);
         info!("PRandInt share generation");
 
         let bits = self.params.mask_bits();
@@ -1997,6 +3093,205 @@ where
             .lock()
             .await
             .add(None, None, None, Some(output));
+        Ok(())
+    }
+
+    /// Ensure the `rand_inv_pairs` pool has `target` ([r], [r^-1]) pairs ready,
+    /// generating the shortfall via RandInvPairNode (one MulPub round).
+    async fn ensure_rand_inv_pairs<N>(
+        &mut self,
+        network: Arc<N>,
+        target: usize,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
+        let no_have = {
+            let store = self.preprocessing_material.lock().await;
+            store.length().rand_inv_pairs
+        };
+        if no_have >= target {
+            return Ok(());
+        }
+        let missing = target - no_have;
+
+        // Each pair consumes two fresh random shares (r, r') and one zero-sharing
+        // to mask the MulPub reveal of r·r'.
+        let r_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(missing)?;
+        let r_prime_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(missing)?;
+        let zero_shares = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_zero_shares(missing)?;
+
+        let session = SessionId::new(
+            ProtocolType::RandInvPair,
+            SessionId::pack_slot(self.counters.rand_inv_pair_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+        self.preprocess
+            .rand_inv_pair
+            .run(
+                RandInvPairPrep {
+                    r_shares,
+                    r_prime_shares,
+                    zero_shares,
+                },
+                session,
+                network,
+                self.params.timeout,
+            )
+            .await?;
+        let pairs = self
+            .preprocess
+            .rand_inv_pair
+            .wait_for_result(session, self.params.timeout)
+            .await?;
+        self.preprocess.rand_inv_pair.clear_store(session).await;
+        self.preprocessing_material
+            .lock()
+            .await
+            .add_rand_inv_pairs(pairs);
+        Ok(())
+    }
+
+    /// Tops up every PreMulC bundle pool the declared workload calls for.
+    async fn ensure_premulc_shares<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
+        // Bundles are width-specific, so targets are tracked per `pk`. A node
+        // serving FpDiv at k=16 and LTZ on an int8 needs stock at both pk=15
+        // and pk=7 simultaneously, which is why this is a map rather than a
+        // single (count, size) setting.
+        for (pk, target) in self.params.declared_demand().premulc {
+            self.ensure_premulc_shares_at(pk, target, network.clone())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Tops the pool up to `target` PreMulC bundles sized at exactly `pk`.
+    async fn ensure_premulc_shares_at<N>(
+        &mut self,
+        pk: usize,
+        target: usize,
+        network: Arc<N>,
+    ) -> Result<(), HoneyBadgerError>
+    where
+        N: Network + Send + Sync + 'static,
+    {
+        if pk == 0 || target == 0 {
+            return Ok(());
+        }
+        let no_have = {
+            let store = self.preprocessing_material.lock().await;
+            store.premulc_len(pk)
+        };
+        if no_have >= target {
+            info!("There are enough PreMulC preps at pk={pk}");
+            return Ok(());
+        }
+        let missing = target - no_have;
+        let total = missing * pk;
+
+        let mut r_pool = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(total)?;
+        let mut s_pool = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_random_shares(total)?;
+        let mut u_zero_pool = self
+            .preprocessing_material
+            .lock()
+            .await
+            .take_zero_shares(total)?;
+
+        let mut premulc_sessions = Vec::with_capacity(missing);
+        for _ in 0..missing {
+            let r: Vec<_> = r_pool.drain(0..pk).collect();
+            let s: Vec<_> = s_pool.drain(0..pk).collect();
+            let u_zero_shares: Vec<_> = u_zero_pool.drain(0..pk).collect();
+            let v_triples = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_beaver_triples(pk - 1)?;
+            let premulc_session = SessionId::new(
+                ProtocolType::PreMulCOff,
+                SessionId::pack_slot(self.counters.premulc_off_counter.get_next().await?, 0, 0),
+                self.params.instance_id,
+            );
+            let gen_result = self
+                .preprocess
+                .premulc_offline
+                .generate_preprocessing(
+                    r,
+                    s,
+                    u_zero_shares,
+                    v_triples,
+                    premulc_session,
+                    network.clone(),
+                    self.params.timeout,
+                )
+                .await;
+            if gen_result.is_err() {
+                if let Err(e) = self
+                    .preprocess
+                    .premulc_offline
+                    .clear_store(premulc_session)
+                    .await
+                {
+                    warn!("PreMulC preprocessing: failed to clear store for session {premulc_session:?}: {e:?}");
+                }
+            }
+            gen_result?;
+            premulc_sessions.push(premulc_session);
+        }
+        for premulc_session in premulc_sessions {
+            let result = self
+                .preprocess
+                .premulc_offline
+                .wait_for_preprocessing(premulc_session, self.params.timeout)
+                .await;
+            if let Err(e) = self
+                .preprocess
+                .premulc_offline
+                .clear_store(premulc_session)
+                .await
+            {
+                warn!("PreMulC preprocessing: failed to clear store for session {premulc_session:?}: {e:?}");
+            }
+            let (w, z, r_out) = result?;
+            let triples = self
+                .preprocessing_material
+                .lock()
+                .await
+                .take_beaver_triples(pk)?;
+            self.preprocessing_material
+                .lock()
+                .await
+                .add_premulc_prep(PreMulCPrep {
+                    w,
+                    z,
+                    r: r_out,
+                    triples,
+                });
+        }
+
         Ok(())
     }
 }
@@ -2033,6 +3328,10 @@ pub enum WrappedMessage {
     /// Direct point-to-point opening of a TruncPr share of `(b + r)`. Same rationale as `Mult`.
     Trunc(TruncPrMessage),
     ZeroSha(zero_share::ZeroShaMessage),
+    Mod2(Mod2Message),
+    PreMod2m(PreMod2mMessage),
+    KOrCl(KOrClMessage),
+    Eqz(EqzMessage),
 }
 
 impl WrappedMessage {
@@ -2062,6 +3361,37 @@ pub enum ProtocolType {
     Trunc = 13,
     FpDivConst = 14,
     ZeroSha = 15,
+    PreMulCOff = 16,
+    FpDiv = 17,
+    PreBitMul = 18,
+    PreBitMul1 = 19,
+    PreBitMul2 = 20,
+    PreBitMul3 = 21,
+    SufOr = 22,
+    FpDivTrunc = 23,
+    FpDivMulA = 24,
+    FpDivMulB = 25,
+    /// KOrCS's own Round 1 Multiply ([tmp_j] = [r_{j-1}^{-1}]·[a]).
+    KOr1 = 26,
+    /// KOrCS's own Round 2 Multiply ([d_j] = [tmp_j]·[r_j]).
+    KOr2 = 27,
+    /// EQZ's own top-level tag. Unlike FpDiv/PreMod2m, EQZ's dependency
+    /// chain (KOrCL, KOrCS) reconstructs its parent-session tag dynamically
+    /// from the incoming message rather than hardcoding one, so EQZ is free
+    /// to use its own dedicated tag instead of reusing FpDiv.
+    EQZ = 28,
+    /// LTZ's own top-level tag. Now that PreMod2mNode::drain_rbc_output
+    /// reads its parent-session tag dynamically instead of hardcoding
+    /// FpDiv, LTZ (built on PreMod2m) can use its own tag too.
+    LTZ = 29,
+    /// RandInvPair's own preprocessing tag: generates the ([r], [r^-1]) pairs
+    /// KOrCS consumes, via a single MulPub reveal.
+    RandInvPair = 30,
+    /// PreBitLT's Phase-4 Multiply when reached via LTZ rather than FpDiv.
+    /// PreBitLT keys this round on a standalone tag (not the parent's), so
+    /// LTZ and FpDiv would otherwise collide at the same exec_id — both
+    /// counters start at 0. See `PreBitLTNode::init`.
+    LTZBitMul = 31,
 }
 
 impl ProtocolTag for ProtocolType {
@@ -2088,6 +3418,22 @@ impl ProtocolTag for ProtocolType {
             13 => Some(Self::Trunc),
             14 => Some(Self::FpDivConst),
             15 => Some(Self::ZeroSha),
+            16 => Some(Self::PreMulCOff),
+            17 => Some(Self::FpDiv),
+            18 => Some(Self::PreBitMul),
+            19 => Some(Self::PreBitMul1),
+            20 => Some(Self::PreBitMul2),
+            21 => Some(Self::PreBitMul3),
+            22 => Some(Self::SufOr),
+            23 => Some(Self::FpDivTrunc),
+            24 => Some(Self::FpDivMulA),
+            25 => Some(Self::FpDivMulB),
+            26 => Some(Self::KOr1),
+            27 => Some(Self::KOr2),
+            28 => Some(Self::EQZ),
+            29 => Some(Self::LTZ),
+            30 => Some(Self::RandInvPair),
+            31 => Some(Self::LTZBitMul),
             _ => None,
         }
     }
@@ -2290,6 +3636,17 @@ impl SessionId {
     #[inline]
     pub fn pack_slot(exec_id: u64, sub_id: u8, round_id: u8) -> u128 {
         ((exec_id as u128) << 16) | ((sub_id as u128) << 8) | (round_id as u128)
+    }
+
+    /// The 8 bits above `caller` (120..128)
+    pub fn extra_bits(self) -> u8 {
+        (self.0 >> 120) as u8
+    }
+
+    /// Returns a copy of this `SessionId` with its extra bits (120..128)
+    /// set to `extra_bits`, leaving every other field unchanged.
+    pub fn with_extra_bits(self, extra_bits: u8) -> Self {
+        SessionId((self.0 & !(0xFFu128 << 120)) | ((extra_bits as u128) << 120))
     }
 }
 

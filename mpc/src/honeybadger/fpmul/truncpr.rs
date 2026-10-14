@@ -247,9 +247,9 @@ impl<F: PrimeField> TruncPrNode<F> {
             "TruncPr open handler"
         );
 
-        if msg.session_id.sub_id() != 0 || msg.session_id.round_id() != 0 {
+        if msg.session_id.sub_id() != 0 {
             error!(
-                "Wrong session. Sub ID or Round ID is not zero. Session ID: {:?}",
+                "Wrong session. Sub ID is not zero. Session ID: {:?}",
                 msg.session_id
             );
             return Err(TruncPrError::SessionIdError(msg.session_id));
