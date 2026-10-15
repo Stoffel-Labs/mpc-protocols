@@ -95,6 +95,9 @@ jobs:
           # about-to-be-published stoffelmpc-network. Fails fast if an internal
           # path dependency is missing a version. Does not need the token.
           cargo publish --workspace --dry-run
+          # Multi-package publish dry-runs may leave only temporary archives.
+          # Materialize canonical archives for staging and signing below.
+          cargo package --workspace --no-verify
 
       - name: Stage release artifacts
         id: stage
@@ -141,11 +144,12 @@ jobs:
       - name: Sign packaged crates
         id: sign
         run: |
+          stage="${{ steps.stage.outputs.dir }}"
           bundle_dir="$RUNNER_TEMP/bundles"
           mkdir -p "$bundle_dir"
           for name in ${{ steps.meta.outputs.names }}; do
             base="$name-${{ steps.meta.outputs.version }}.crate"
-            crate="target/package/$base"
+            crate="$stage/$base"
             if [ ! -f "$crate" ]; then
               echo "Expected $crate but it is not there" >&2
               exit 1
