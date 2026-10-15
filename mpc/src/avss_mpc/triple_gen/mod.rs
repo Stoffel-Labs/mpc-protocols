@@ -7,6 +7,7 @@ use crate::{
 };
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
@@ -49,6 +50,18 @@ pub enum TripleGenError {
     Timeout(AvssSessionId),
     #[error("Store Limit")]
     LimitError,
+    #[error("sacrifice check failed for session {0:?}: at least one generated triple is invalid")]
+    CheckFailed(AvssSessionId),
+    #[error("invalid batch size: gen_triple needs at least one real triple plus one sacrifice")]
+    InvalidBatchSize,
+    #[error("error while serializing an arkworks object: {0:?}")]
+    ArkSerialization(#[from] ark_serialize::SerializationError),
+    #[error("error while deserializing an arkworks object: {0:?}")]
+    ArkDeserialization(ark_serialize::SerializationError),
+    #[error("error during bincode serialization: {0:?}")]
+    BincodeSerializationError(#[from] Box<bincode::ErrorKind>),
+    #[error("unauthenticated or malformed sacrifice-check message from sender {0}")]
+    InvalidCheckMessage(usize),
 }
 
 /// Store for one triple session
@@ -70,6 +83,45 @@ impl<F: FftField, C: CurveGroup<ScalarField = F>> TripleGenStore<F, C> {
             output: None,
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
+        }
+    }
+}
+
+/// Message carrying this party's own share(s) for one round of the sacrifice-check
+/// opening (round 0: rho/sigma, round 1: check)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TripleCheckMessage {
+    pub sender: usize,
+    pub session_id: AvssSessionId,
+    pub payload: Vec<u8>,
+}
+
+impl TripleCheckMessage {
+    pub fn new(sender: usize, session_id: AvssSessionId, payload: Vec<u8>) -> Self {
+        Self {
+            sender,
+            session_id,
+            payload,
+        }
+    }
+}
+
+/// Raw per-sender receive buffer for the sacrifice-check opening rounds. Deliberately
+/// dumb: it only stores what arrived from each sender. All threshold/verification/
+/// finalization logic lives in `gen_triple` itself, which is the only place that knows
+/// the expected commitments, the batch size, and the Fiat-Shamir challenge.
+#[derive(Debug)]
+pub struct TripleCheckStore<F: FftField, C: CurveGroup<ScalarField = F>> {
+    pub received_rho_sigma:
+        HashMap<usize, (Vec<FeldmanShamirShare<F, C>>, Vec<FeldmanShamirShare<F, C>>)>,
+    pub received_check: HashMap<usize, Vec<FeldmanShamirShare<F, C>>>,
+}
+
+impl<F: FftField, C: CurveGroup<ScalarField = F>> TripleCheckStore<F, C> {
+    pub fn empty() -> Self {
+        Self {
+            received_rho_sigma: HashMap::new(),
+            received_check: HashMap::new(),
         }
     }
 }

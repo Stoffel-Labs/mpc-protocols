@@ -37,12 +37,20 @@ pub enum AvssOutputError {
 pub struct AvssOutputMessage {
     /// ID of the sender of the message
     pub sender_id: usize,
+    /// Execution this direct packet belongs to — checked against the receiving handler's own
+    /// `instance_id` before the packet is allowed to touch protocol state, so a share replayed
+    /// or delayed from a prior execution can't be mistaken for one from the current run.
+    pub instance_id: u32,
     /// Serialized payload
     pub payload: Vec<u8>,
 }
 
 impl AvssOutputMessage {
-    pub fn new(sender_id: usize, payload: Vec<u8>) -> AvssOutputMessage {
-        Self { sender_id, payload }
+    pub fn new(sender_id: usize, instance_id: u32, payload: Vec<u8>) -> AvssOutputMessage {
+        Self {
+            sender_id,
+            instance_id,
+            payload,
+        }
     }
 }

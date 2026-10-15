@@ -38,11 +38,19 @@ pub enum OutputError {
 pub struct OutputMessage {
     /// ID of the sender of the message or the client
     pub sender_id: usize,
+    /// Execution this direct packet belongs to — checked against the receiving handler's own
+    /// `instance_id` before the packet is allowed to touch protocol state, so a share replayed
+    /// or delayed from a prior execution can't be mistaken for one from the current run.
+    pub instance_id: u32,
     pub payload: Vec<u8>,
 }
 
 impl OutputMessage {
-    pub fn new(sender_id: usize, payload: Vec<u8>) -> OutputMessage {
-        Self { sender_id, payload }
+    pub fn new(sender_id: usize, instance_id: u32, payload: Vec<u8>) -> OutputMessage {
+        Self {
+            sender_id,
+            instance_id,
+            payload,
+        }
     }
 }

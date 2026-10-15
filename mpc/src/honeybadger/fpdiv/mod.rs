@@ -10,6 +10,7 @@ pub fn fixed_point_reciprocal_scaled<F: PrimeField>(
 ) -> Result<ClearFixedPoint<F>, FPDivConstError> {
     let precision = denom.precision();
     let f = precision.f();
+    let k = precision.k();
 
     // --------------------------
     // Step 1: extract denom integer b̄
@@ -42,6 +43,22 @@ pub fn fixed_point_reciprocal_scaled<F: PrimeField>(
     // Step 3: rounded division w̄ = round(2^f / b̄)
     // --------------------------
     let w_u128 = (num_u128 + (b_u128 >> 1)) / b_u128;
+
+    // `div_with_const_fixed` feeds a*w into TruncPr, whose mask pool is sized for
+    // max_masked_width = 2k-f bits assuming the secret numerator a < 2^k. That bound only
+    // holds if w <= 2^(k-f); a divisor small enough to push w past that inflates the
+    // pre-truncation value beyond the mask's coverage and leaks the numerator's high bits
+    // through TruncPr's public opening instead of failing.
+    //
+    // To allow smaller divisors, widen k-f (not f) -- w depends only on f, the threshold only
+    // on k-f, so growing f alone doesn't help.
+    if w_u128 > (1u128 << (k - f)) {
+        return Err(FPDivConstError::DivisorTooSmall {
+            k,
+            f,
+            divisor_raw: b_u128,
+        });
+    }
 
     // --------------------------
     // Step 4: convert u128 → F::BigInt

@@ -3,7 +3,7 @@ pub mod feldman;
 pub mod shamir;
 use std::ops::{Add, Mul};
 
-use ark_ff::FftField;
+use ark_ff::{batch_inversion, FftField};
 use ark_poly::EvaluationDomain;
 use thiserror::Error;
 
@@ -28,6 +28,13 @@ pub enum ShareError {
 
 /// Creates a Vandermonde matrix `V` of size `n x (t+1)`.
 /// Each row `j` contains powers of `domain.element(j)`: `[1, alpha_j, alpha_j^2, ..., alpha_j^t]`.
+///
+/// This is a plain power-basis matrix, not a hyperinvertible one: it is only sound for
+/// uses that don't rely on "check a fixed subset of rows, trust the rest" (e.g. batch
+/// reconstruction, which relies on Reed-Solomon minimum-distance decoding on the
+/// receiving end instead). For that "check some rows, release the rest as trusted
+/// preprocessing" pattern, use [`make_hyperinvertible_matrix`] instead — see its doc
+/// comment for why this matrix is unsound there.
 pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Result<Vec<Vec<F>>, ShareError> {
     let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
         .ok_or(ShareError::NoSuitableDomain(n))?;
@@ -44,9 +51,100 @@ pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Result<Vec<Vec<F>>, 
     Ok(matrix)
 }
 
-/// Computes the matrix-vector product: `V * shares`.
-/// This effectively evaluates a polynomial (defined by `shares` as coefficients)
-/// at the domain elements corresponding to the Vandermonde matrix rows.
+/// Builds an `n x n` hyperinvertible matrix `M`: every square submatrix (any subset of
+/// rows crossed with any equal-size subset of columns) is invertible.
+///
+/// # Background: why this function exists
+///
+/// RanSha, ZeroSha and RanDouSha all follow the same pattern: `n` parties each deal one
+/// input sharing, a fixed public matrix `M` combines the `n` inputs into `n` output
+/// sharings, and *only some* of the outputs are ever reconstructed and checked — the rest
+/// are trusted and released straight into the preprocessing pool. That pattern is only
+/// sound if `M` is hyperinvertible: checking a subset of outputs implies the rest are
+/// valid *only* because every square submatrix of `M` is invertible (see
+/// Beerliová-Trubíniová & Hirt, "Perfectly-Secure MPC with Linear Communication
+/// Complexity", TCC 2008, Definition 2).
+///
+/// The matrix this codebase used before (`make_vandermonde(n, n-1)`, i.e.
+/// `M[j][d] = alpha_j^d` for a single FFT domain `alpha`) is *not* hyperinvertible: on a
+/// power-of-two domain, `alpha^(n/2) = -1`, so columns at distance `n/2` cancel
+/// identically across an entire parity class of rows. A pair of colluding dealers could
+/// pick that column pair and pass every checked row while corrupting the unchecked rows
+/// released into the pool. Confirmed both algebraically and against the real crate (see
+/// `test_hyperinvertible_matrix_closes_n16_t5_attack` below).
+///
+/// # The construction actually used
+///
+/// This is Construction 1 from Beerliová-Trubíniová & Hirt (TCC 2008, Section 3.2):
+/// interpolate a degree-<n polynomial through one set of `n` points (`delta`) and
+/// evaluate it at a second, *disjoint* set of `n` points (`gamma`). Lemma 1 of that paper
+/// proves this is hyperinvertible for *any* choice of `2n` pairwise-distinct field
+/// elements — the proof only uses that no `delta` ever equals any `gamma`, nothing about
+/// how either set is otherwise structured. That's the whole reason this is safe where the
+/// single-domain Vandermonde wasn't: reusing one FFT domain for both roles is what let
+/// the two roles' shared algebraic structure (`alpha^(n/2) = -1`) leak into an
+/// exploitable relation between columns and rows.
+///
+/// Concretely: `delta_d` is the *existing* per-party evaluation domain (the same points
+/// shares are already evaluated at elsewhere in this crate) — kept as-is so nothing about
+/// share evaluation/reconstruction changes. `gamma_j` is a disjoint coset of that same
+/// domain, shifted by `F::GENERATOR` (see the comment at its use below for why that's
+/// guaranteed disjoint). `M[j][d]` is then the Lagrange coefficient for "evaluate at
+/// `gamma_j` the unique degree-<n polynomial through `(delta_0, y_0), ..., (delta_{n-1},
+/// y_{n-1})`" — computed via the barycentric form of that formula (Berrut & Trefethen,
+/// "Barycentric Lagrange Interpolation", SIAM Review 46(3), 2004) so the whole matrix
+/// costs `O(n)` field inversions (batched) instead of `O(n^2)`.
+pub fn make_hyperinvertible_matrix<F: FftField>(n: usize) -> Result<Vec<Vec<F>>, ShareError> {
+    let domain = crate::common::get_or_create_evaluation_domain::<F>(n)
+        .ok_or(ShareError::NoSuitableDomain(n))?;
+    // A coset is "the domain, uniformly shifted": every element multiplied by a fixed
+    // offset. get_coset(offset) returns the domain {offset * delta : delta in domain}.
+    // F::GENERATOR has multiplicative order F::MODULUS - 1, which is astronomically
+    // larger than (and so never divides) the domain's own subgroup order — so
+    // GENERATOR is never itself a domain element, which is exactly what guarantees
+    // offset*delta_j never lands back on some other domain element delta_k. That's the
+    // whole disjointness property Construction 1 needs; nothing about *which* nonzero
+    // non-domain offset is chosen matters beyond that.
+    let coset = domain
+        .get_coset(F::GENERATOR)
+        .ok_or(ShareError::NoSuitableDomain(n))?;
+
+    let deltas: Vec<F> = (0..n).map(|d| domain.element(d)).collect();
+    let gammas: Vec<F> = (0..n).map(|j| coset.element(j)).collect();
+
+    // Barycentric weights: w_d = 1 / prod_{k != d} (delta_d - delta_k). Depends only on
+    // the deltas, so computed once and reused for every row below.
+    let mut weights: Vec<F> = (0..n)
+        .map(|d| {
+            deltas
+                .iter()
+                .enumerate()
+                .filter(|&(k, _)| k != d)
+                .fold(F::one(), |acc, (_, &delta_k)| acc * (deltas[d] - delta_k))
+        })
+        .collect();
+    batch_inversion(&mut weights);
+
+    let mut matrix = vec![vec![F::zero(); n]; n];
+    for j in 0..n {
+        let gamma_j = gammas[j];
+        // Node polynomial value at gamma_j: prod_k (gamma_j - delta_k).
+        let ell_j: F = deltas
+            .iter()
+            .fold(F::one(), |acc, &delta_k| acc * (gamma_j - delta_k));
+
+        // M[j][d] = w_d * ell_j / (gamma_j - delta_d), batched over one row at a time.
+        let mut denoms: Vec<F> = deltas.iter().map(|&delta_d| gamma_j - delta_d).collect();
+        batch_inversion(&mut denoms);
+        for d in 0..n {
+            matrix[j][d] = weights[d] * ell_j * denoms[d];
+        }
+    }
+
+    Ok(matrix)
+}
+
+/// Computes the matrix-vector product: `M * shares`.
 pub fn apply_vandermonde<F: FftField, P>(
     vandermonde: &[Vec<F>],
     shares: &[ShamirShare<F, 1, P>],
@@ -79,10 +177,256 @@ where
 mod tests {
 
     use super::*;
+    use crate::common::SecretSharingScheme;
     use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
     use ark_bls12_381::Fr;
-    use ark_ff::{Field, One};
-    use ark_poly::GeneralEvaluationDomain;
+    use ark_ff::{Field, One, UniformRand, Zero};
+    use ark_poly::{DenseUVPolynomial, GeneralEvaluationDomain, Polynomial};
+    use ark_std::rand::{rngs::StdRng, SeedableRng};
+
+    /// Gaussian elimination over a field: true iff `rows` (a square matrix, given as a
+    /// list of equal-length rows) is invertible. Test-only; not meant to be efficient.
+    fn is_invertible<F: Field>(mut rows: Vec<Vec<F>>) -> bool {
+        let k = rows.len();
+        for col in 0..k {
+            let Some(pivot) = (col..k).find(|&r| !rows[r][col].is_zero()) else {
+                return false;
+            };
+            rows.swap(col, pivot);
+            let inv = rows[col][col].inverse().unwrap();
+            for r in (col + 1)..k {
+                let factor = rows[r][col] * inv;
+                for c in col..k {
+                    let term = rows[col][c] * factor;
+                    rows[r][c] -= term;
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn test_hyperinvertible_matrix_dimensions() {
+        let n = 11;
+        let matrix = make_hyperinvertible_matrix::<Fr>(n).expect("matrix construction failed");
+        assert_eq!(matrix.len(), n);
+        for row in &matrix {
+            assert_eq!(row.len(), n);
+        }
+    }
+
+    #[test]
+    fn test_hyperinvertible_matrix_lagrange_correctness() {
+        // M[j][d] should be the Lagrange coefficient mapping evaluations at the party
+        // domain to evaluations at the disjoint coset: for any degree-<n polynomial P,
+        // sum_d M[j][d] * P(delta_d) == P(gamma_j) for every output row j.
+        let n = 9;
+        let mut rng = StdRng::seed_from_u64(42);
+        let domain = GeneralEvaluationDomain::<Fr>::new(n).unwrap();
+        let coset = domain.get_coset(Fr::GENERATOR).unwrap();
+        let matrix = make_hyperinvertible_matrix::<Fr>(n).expect("matrix construction failed");
+
+        for _ in 0..5 {
+            let poly = ark_poly::univariate::DensePolynomial::<Fr>::rand(n - 1, &mut rng);
+            let evals_at_deltas: Vec<Fr> =
+                (0..n).map(|d| poly.evaluate(&domain.element(d))).collect();
+            for j in 0..n {
+                let expected = poly.evaluate(&coset.element(j));
+                let actual: Fr = (0..n).map(|d| matrix[j][d] * evals_at_deltas[d]).sum();
+                assert_eq!(actual, expected, "row {j} mismatch");
+            }
+        }
+    }
+
+    #[test]
+    fn test_hyperinvertible_matrix_random_submatrices_invertible() {
+        let n = 16;
+        let matrix = make_hyperinvertible_matrix::<Fr>(n).expect("matrix construction failed");
+        let mut rng = StdRng::seed_from_u64(7);
+
+        for k in 1..=n {
+            for _ in 0..5 {
+                let mut rows: Vec<usize> = (0..n).collect();
+                let mut cols: Vec<usize> = (0..n).collect();
+                // Fisher-Yates-ish partial shuffle via random swaps, then take first k.
+                for i in 0..n {
+                    let j = (u64::rand(&mut rng) as usize) % n;
+                    rows.swap(i, j);
+                    let j2 = (u64::rand(&mut rng) as usize) % n;
+                    cols.swap(i, j2);
+                }
+                rows.truncate(k);
+                cols.truncate(k);
+                let submatrix: Vec<Vec<Fr>> = rows
+                    .iter()
+                    .map(|&r| cols.iter().map(|&c| matrix[r][c]).collect())
+                    .collect();
+                assert!(
+                    is_invertible(submatrix),
+                    "submatrix rows={rows:?} cols={cols:?} (k={k}) should be invertible"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_hyperinvertible_matrix_closes_n16_t5_attack() {
+        // Regression test for the FFT-Vandermonde verification bypass: with the old
+        // plain power-basis Vandermonde matrix (M[j][d] = alpha_j^d over a single order-16
+        // FFT domain), columns 0 and 8 satisfy alpha_j^0 + alpha_j^8 = 1 + (-1)^j, which is
+        // exactly 0 on all 8 odd rows and 2 on all 8 even rows - including the unchecked
+        // rows 10, 12, 14 that a "check first 2t=10 rows, trust the rest" protocol releases
+        // straight into the preprocessing pool. Two colluding dealers at columns 0 and 8
+        // could deal a matching nonzero secret that cancels on every odd checked row while
+        // silently surviving in the unchecked, released output.
+        //
+        // With a genuinely hyperinvertible matrix, that pair can zero out at most
+        // k-1 = 1 of the n rows (a 2-column corruption can't force more than 1 row to
+        // vanish without contradicting invertibility of some 2x2 submatrix) - nowhere near
+        // the 8-row parity-class wipeout the broken matrix allowed.
+        let n = 16;
+
+        let old_matrix = make_vandermonde::<Fr>(n, n - 1).expect("old matrix construction failed");
+        let old_zero_rows = (0..n)
+            .filter(|&j| (old_matrix[j][0] + old_matrix[j][8]).is_zero())
+            .count();
+        assert_eq!(
+            old_zero_rows, 8,
+            "sanity check: the old matrix should reproduce the known 8-row cancellation"
+        );
+
+        let new_matrix =
+            make_hyperinvertible_matrix::<Fr>(n).expect("new matrix construction failed");
+        let new_zero_rows = (0..n)
+            .filter(|&j| (new_matrix[j][0] + new_matrix[j][8]).is_zero())
+            .count();
+        assert!(
+            new_zero_rows <= 1,
+            "hyperinvertible matrix should allow at most 1 coincidental zero row for a \
+             2-column corruption, got {new_zero_rows}"
+        );
+    }
+
+    /// End-to-end exploit, not just matrix algebra: 16 dealers each deal a real
+    /// degree-2t Shamir sharing (the ZeroSha shape — honest dealers share 0), the
+    /// 16 recipients combine them through the OLD, vulnerable `make_vandermonde`
+    /// matrix, and the 16 resulting rows are reconstructed with the real
+    /// `RobustShare::recover_secret` — the same function ZeroSha/RanDouSha use to
+    /// check and release rows. Two colluding dealers (0 and 8) deal a validly-shaped
+    /// but nonzero secret instead of zero. If this matrix were used for a
+    /// check-a-subset-trust-the-rest protocol (as it was before the fix), this
+    /// shows exactly which released "zero shares" come out corrupted.
+    ///
+    /// How a corrupted row like this gets weaponized downstream:
+    /// - ZeroSha -> MulPub/RandBit: masks a square with a nonzero "zero", so the
+    ///   opened value isn't a perfect square (abort/DoS) or its root isn't a bit
+    ///   (silently wrong comparisons/MUX downstream).
+    /// - RanSha -> masking a value before it's opened: the colluding dealers know
+    ///   their own injected bias, so they can subtract it back out of the public
+    ///   opening and recover the supposedly-secret masked value (confidentiality
+    ///   break, not just a correctness one).
+    /// - RanDouSha -> Beaver triple generation: mismatched bias at the t- and
+    ///   2t-levels breaks `[r]_t == [r]_2t`, so degree reduction yields a triple
+    ///   that isn't `(a,b,ab)` — every multiplication gate consuming it computes a
+    ///   silently wrong result with no abort at all.
+    #[test]
+    fn test_old_vandermonde_exploit_n16_t5_zero_share() {
+        let n = 16;
+        let t = 5;
+        let degree = 2 * t; // matches ZeroSha's degree-2t sharing requirement
+        let mut rng = StdRng::seed_from_u64(1234);
+
+        let colluding = [0usize, 8usize];
+        let bias = Fr::from(42u64); // the nonzero secret the colluding pair injects
+
+        // Every dealer deals a real degree-`degree` Shamir sharing. Honest dealers
+        // share 0 (as ZeroSha requires); the colluding pair shares `bias` instead —
+        // a validly-shaped sharing (right degree, fully consistent), just the wrong
+        // value. This is exactly the "inconsistent-dealing" check from a2eaa25
+        // passing, and the hyperinvertibility gap being the only remaining hole.
+        let shares_by_dealer: Vec<Vec<RobustShare<Fr>>> = (0..n)
+            .map(|dealer| {
+                let secret = if colluding.contains(&dealer) {
+                    bias
+                } else {
+                    Fr::zero()
+                };
+                RobustShare::compute_shares(secret, n, degree, None, &mut rng)
+                    .expect("compute_shares failed")
+            })
+            .collect();
+
+        let old_matrix = make_vandermonde::<Fr>(n, n - 1).expect("old matrix construction failed");
+
+        // Each recipient locally combines its own share from every dealer into its
+        // own share of each of the n output rows — exactly what apply_vandermonde
+        // does in the real protocol, no interaction required for this step.
+        let mut output_shares_by_row: Vec<Vec<RobustShare<Fr>>> = vec![Vec::with_capacity(n); n];
+        for recipient in 0..n {
+            let recipient_shares: Vec<RobustShare<Fr>> = (0..n)
+                .map(|dealer| shares_by_dealer[dealer][recipient].clone())
+                .collect();
+            let row_shares = apply_vandermonde(&old_matrix, &recipient_shares)
+                .expect("apply_vandermonde failed");
+            for (row, share) in row_shares.into_iter().enumerate() {
+                output_shares_by_row[row].push(share);
+            }
+        }
+
+        // Reconstruct every row's secret from all 16 recipients' shares, using the
+        // real recovery function the protocol itself uses to check/finalize rows.
+        let secrets: Vec<Fr> = (0..n)
+            .map(|row| {
+                RobustShare::recover_secret(&output_shares_by_row[row], n, t)
+                    .expect("recover_secret failed")
+                    .1
+            })
+            .collect();
+
+        // Q_j = alpha_j^0 + alpha_j^8 = 1 + (-1)^j: 2 on even rows, 0 on odd rows.
+        // Both colluding dealers' bias lands with this same weight, so an affected
+        // row's secret is bias*2, not bias*1.
+        let corrupted = bias + bias;
+
+        // Checked range (rows 0..2t): odd rows are genuinely clean, even rows
+        // genuinely show the bias — exactly t=5 of the 10 checked rows fail, which
+        // is exactly the malicious budget, i.e. this fits with no slack to spare.
+        let checked_failing: Vec<usize> = (0..2 * t).filter(|&j| j % 2 == 0).collect();
+        for &j in &checked_failing {
+            assert_eq!(
+                secrets[j], corrupted,
+                "checked row {j} should genuinely show the bias"
+            );
+        }
+        for j in (0..2 * t).filter(|j| j % 2 == 1) {
+            assert_eq!(
+                secrets[j],
+                Fr::zero(),
+                "checked row {j} should genuinely be clean"
+            );
+        }
+        assert_eq!(
+            checked_failing.len(),
+            t,
+            "the attack needs exactly t malicious verifiers to cover the checked failures"
+        );
+
+        // Released range (rows 2t..n): never checked by this protocol's design.
+        // Rows 10, 12, 14 are silently corrupted "zero shares" reaching the pool.
+        let smuggled: Vec<usize> = (2 * t..n).filter(|&j| secrets[j] == corrupted).collect();
+        assert_eq!(
+            smuggled,
+            vec![10, 12, 14],
+            "rows 10, 12, 14 should be corrupted and released with no check at all"
+        );
+        for j in (2 * t..n).filter(|j| j % 2 == 1) {
+            assert_eq!(
+                secrets[j],
+                Fr::zero(),
+                "released row {j} should genuinely be clean"
+            );
+        }
+    }
 
     #[test]
     fn test_make_vandermonde_basic() {
