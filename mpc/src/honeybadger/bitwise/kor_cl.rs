@@ -315,7 +315,10 @@ impl<F: PrimeField> KOrCLNode<F> {
         // KOrCS on the m d_bits. KOrCL called it, so KOrCL clears it — on every
         // exit path, not just success, or a failure here leaks KOrCS's session
         // (and its own nested Multiply/batch-recon sub-sessions) permanently.
-        let kor_cs_result = self.kor_cs.run(d_bits, kor_cs_prep, session, network, duration).await;
+        let kor_cs_result = self
+            .kor_cs
+            .run(d_bits, kor_cs_prep, session, network, duration)
+            .await;
         let e_result = match kor_cs_result {
             Ok(()) => self.kor_cs.wait_for_result(session, duration).await,
             Err(e) => Err(e),

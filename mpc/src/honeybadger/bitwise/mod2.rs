@@ -98,7 +98,8 @@ pub struct Mod2Node<F: PrimeField> {
     pub n: usize,
     pub t: usize,
     store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<Mod2Store<F>>>)>>>,
-    batch_store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<Mod2BatchStore<F>>>)>>>,
+    batch_store:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<Mod2BatchStore<F>>>)>>>,
 }
 
 impl<F: PrimeField> Mod2Node<F> {

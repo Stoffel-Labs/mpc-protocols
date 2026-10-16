@@ -116,7 +116,8 @@ pub struct PreMulCOfflineNode<F: PrimeField + FftField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    prep_store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PreMulCPrepStore<F>>>)>>>,
+    prep_store:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PreMulCPrepStore<F>>>)>>>,
     pub mul_pub: MulPubNode<F>,
     pub mul: Multiply<F>,
 }
@@ -313,7 +314,8 @@ pub struct PreMulCOnlineNode<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    online_store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PreMulCOnlineStore<F>>>)>>>,
+    online_store:
+        Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PreMulCOnlineStore<F>>>)>>>,
     pub mul: Multiply<F>,
     pub batch_recon: BatchReconNode<F>,
     batch_output: Arc<Mutex<Receiver<SessionId>>>,
