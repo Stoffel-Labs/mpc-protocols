@@ -448,6 +448,29 @@ mod tests {
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
 
     #[tokio::test]
+    async fn test_triple_gen_storage_limit() {
+        let mut node = TripleGenNode::<Fr>::new(0, 4, 1).unwrap();
+
+        let per_peer_limit = MAX_TRIPLE_GEN_SESSIONS / 4;
+        for i in 0..per_peer_limit as u64 {
+            let sid = SessionId::new(ProtocolType::Triple, SessionId::pack_slot(i, 0, 0), 111);
+            let _ = node.get_or_create_store(sid, 0).await;
+        }
+        assert_eq!(node.store_len().await, per_peer_limit);
+
+        // One more session attributed to the same peer must be rejected.
+        let over = SessionId::new(
+            ProtocolType::Triple,
+            SessionId::pack_slot(per_peer_limit as u64, 0, 0),
+            111,
+        );
+        assert!(
+            node.get_or_create_store(over, 0).await.is_none(),
+            "Should reject sessions past the per-peer limit"
+        );
+    }
+
+    #[tokio::test]
     async fn buffers_batch_reconstruction_that_finishes_before_local_init() {
         let mut node = TripleGenNode::<Fr>::new(0, 5, 1).unwrap();
         let session_id = SessionId::new(ProtocolType::Triple, SessionId::pack_slot(7, 0, 0), 42);

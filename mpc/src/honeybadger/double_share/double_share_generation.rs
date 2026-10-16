@@ -348,3 +348,71 @@ where
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::honeybadger::ProtocolType;
+    use ark_bls12_381::Fr;
+
+    fn session(index: u64) -> SessionId {
+        SessionId::new(ProtocolType::Dousha, SessionId::pack_slot(index, 0, 0), 111)
+    }
+
+    #[tokio::test]
+    async fn test_dousha_storage_limit() {
+        let mut node = DoubleShareNode::<Fr>::new(0, 4, 1);
+
+        let per_peer_limit = MAX_DOUSHA_SESSIONS / 4;
+        for i in 0..per_peer_limit as u64 {
+            let _ = node.get_or_create_store(session(i), 0).await;
+        }
+        assert_eq!(node.store_len().await, per_peer_limit);
+
+        // One more session attributed to the same peer must be rejected.
+        let result = node
+            .get_or_create_store(session(per_peer_limit as u64), 0)
+            .await;
+        assert!(
+            result.is_none(),
+            "Should reject sessions past the per-peer limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dousha_per_peer_limit_is_attributed_to_message_sender() {
+        // `receive_double_shares_handler` charges a session to `recv_message.sender_id` -- the
+        // peer whose message happened to arrive first -- not to the session's actual dealer.
+        // So the same number of sessions either trips the per-peer cap or sails past it purely
+        // based on which peer won the race to create each store. This is why the preprocessing
+        // stress repro never reproduced a rejection: `ensure_ran_dou_sha_pair` opens all of its
+        // DoubleShare sessions concurrently, and they scatter across all n initiator buckets.
+        let n_parties = 4;
+        let per_peer_limit = MAX_DOUSHA_SESSIONS / n_parties;
+        let over_limit = per_peer_limit + 32;
+
+        // Same sender for every session: rejected once the per-peer bucket fills.
+        let mut node = DoubleShareNode::<Fr>::new(0, n_parties, 1);
+        for i in 0..over_limit as u64 {
+            let _ = node.get_or_create_store(session(i), 0).await;
+        }
+        assert_eq!(
+            node.store_len().await,
+            per_peer_limit,
+            "a single attributed sender must be capped at the per-peer limit"
+        );
+
+        // Identical session count, but attribution spread across peers: all admitted.
+        let mut node = DoubleShareNode::<Fr>::new(0, n_parties, 1);
+        for i in 0..over_limit as u64 {
+            let _ = node
+                .get_or_create_store(session(i), i as usize % n_parties)
+                .await;
+        }
+        assert_eq!(
+            node.store_len().await,
+            over_limit,
+            "spreading the same sessions across senders bypasses the per-peer limit entirely"
+        );
+    }
+}
