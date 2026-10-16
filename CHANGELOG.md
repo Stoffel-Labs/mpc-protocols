@@ -21,6 +21,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ### Fixed
 
+- Aligned the exact Serde pin with the `serde_core`/`serde_derive` versions selected through StoffelNet's `serde_with` dependency to avoid a resolver conflict.
 - Corrected TruncPr broadcast ordering to avoid a deadlock.
 - Rejected repaired shares during RanSha/ZeroSha verification rather than accepting them based only on polynomial degree.
 
