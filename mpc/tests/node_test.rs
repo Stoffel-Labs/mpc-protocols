@@ -1,3 +1,4 @@
+use crate::utils::comparison_utils::{field_to_signed_real, share_signed_fixed};
 use crate::utils::test_utils::{
     construct_e2e_input, construct_e2e_input_mul, create_clients, create_global_nodes,
     fan_in_inboxes, generate_independent_shares, initialize_global_nodes_randousha,
@@ -614,6 +615,13 @@ async fn mul_e2e_with_preprocessing() {
         Duration::from_secs(30),
         vec![clientid[0]],
     );
+    for node in nodes.iter_mut() {
+        node.params.add_mul_ops(no_of_multiplications);
+        // The input protocol's masks are drawn straight out of the pool below
+        // (`take_random_shares(2)` -> `InputServer::init`), so they are declared
+        // rather than derived from an operation.
+        node.params.add_rand_ops(2);
+    }
 
     //Create Clients
     let mut clients =
@@ -787,7 +795,7 @@ async fn preprocessing_e2e() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         no_of_triples,
@@ -800,6 +808,11 @@ async fn preprocessing_e2e() {
         Duration::from_secs(30),
         vec![],
     );
+    for node in nodes.iter_mut() {
+        // RandBit's MulPub pipeline consumes one zero-sharing per bit; `extra_demand`
+        // has no positional slot for it above, so it's set directly here.
+        node.params.extra_demand.zero_shares = n_randbit;
+    }
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
@@ -883,11 +896,15 @@ async fn test_rand_bit() {
     // assumes each party holds shares of some secrets
     let mut a = Vec::new();
     let mut shares_a = Vec::new();
+    let mut shares_zero = Vec::new();
     for _ in 0..no_of_rand_bits {
         let a_value = Fr::rand(&mut rng);
         a.push(a_value);
         let shares = RobustShare::compute_shares(a_value, n_parties, t, None, &mut rng).unwrap();
         shares_a.push(shares);
+        let zero_shares =
+            RobustShare::compute_shares(Fr::from(0u64), n_parties, 2 * t, None, &mut rng).unwrap();
+        shares_zero.push(zero_shares);
     }
 
     //----------------------------------------SETUP NODES----------------------------------------
@@ -924,8 +941,10 @@ async fn test_rand_bit() {
 
         // Prepare the input shares for this party
         let mut a_value = Vec::new();
+        let mut zero_value = Vec::new();
         for i in 0..no_of_rand_bits {
             a_value.push(shares_a[i][pid].clone());
+            zero_value.push(shares_zero[i][pid].clone());
         }
         assert!(a_value.len() == no_of_rand_bits);
 
@@ -1158,7 +1177,7 @@ async fn fpmul_e2e_with_preprocessing() {
 
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         n_triples,
@@ -1171,6 +1190,11 @@ async fn fpmul_e2e_with_preprocessing() {
         Duration::from_secs(30),
         vec![],
     );
+    for node in nodes.iter_mut() {
+        // RandBit's MulPub pipeline consumes one zero-sharing per bit; `extra_demand`
+        // has no positional slot for it above, so it's set directly here.
+        node.params.extra_demand.zero_shares = n_randbit;
+    }
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
@@ -1521,7 +1545,7 @@ async fn mul_int_e2e_with_preprocessing() {
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
 
     //----------------------------------------SETUP NODES----------------------------------------
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         /*beaver triples*/ 2, // safe for one mul
@@ -1534,6 +1558,9 @@ async fn mul_int_e2e_with_preprocessing() {
         Duration::from_secs(30),
         vec![],
     );
+    for node in nodes.iter_mut() {
+        node.params.add_mul_ops(1);
+    }
 
     //----------------------------------------SECRET-SHARE INPUTS----------------------------------------
     let x_shares = RobustShare::compute_shares(x_val, n_parties, t, None, &mut rng).unwrap();
@@ -1728,17 +1755,6 @@ async fn fpdiv_const_e2e() {
     assert_eq!(rec, Fr::from(44u64));
 }
 
-/// `div_with_const_fixed` feeds a 2k-bit value into TruncPr, which broadcasts
-/// `b + 2^m*r_int + r'` in the clear. `r_int` is the only thing hiding `b` above bit `m`, so a
-/// mask pool narrower than `2k - f` leaks rather than failing — the arithmetic stays correct
-/// either way, which is exactly why this went unnoticed until it was checked for.
-///
-/// The pool is sized from `params.precision` before any value exists, so the way to get it wrong
-/// is now to configure the node for a *different* precision than the values it is handed. That
-/// is what this sets up, and what `check_mask_security` has to catch.
-///
-/// Guard the guard: without this test the width check can be deleted and every existing fpdiv
-/// test still passes.
 #[tokio::test]
 async fn fpdiv_const_rejects_undersized_prandint_mask() {
     setup_tracing();
@@ -1877,4 +1893,317 @@ async fn prss_setup_from_riss_then_local_masks() {
         .generate_prss_at(instance_id + 1, 0, count, bits)
         .unwrap();
     assert_ne!(other, per_party[0]);
+}
+
+#[tokio::test]
+async fn fpdiv_e2e() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+
+    let k = 16;
+    let f = 4;
+    let precision = FixedPointPrecision::new(k, f);
+    // a=6.0 (96), b=2.0 (32) -> c ~= 3.0
+    let a_bar: i128 = 96;
+    let b_bar: i128 = 32;
+
+    let a_shares = share_signed_fixed(a_bar, n_parties, t);
+    let b_shares = share_signed_fixed(b_bar, n_parties, t);
+
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        333,
+        0,
+        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+    for node in nodes.iter_mut() {
+        // Declared workload only — the two PreMulC bundles at pk=k-1 and every
+        // raw pool size come from `demand_for_fpdiv`.
+        node.params.add_fpdiv_ops(k, f, 1);
+    }
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let a = SecretFixedPoint::new_with_precision(a_shares[pid].clone(), precision);
+        let b = SecretFixedPoint::new_with_precision(b_shares[pid].clone(), precision);
+        handles.push(tokio::spawn(async move {
+            node.div_fixed(a, b, net[pid].clone())
+                .await
+                .expect("division failed")
+        }));
+    }
+
+    let outputs: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.expect("task panicked"))
+        .collect();
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let c_shares: Vec<_> = outputs
+        .iter()
+        .map(|(c, _)| {
+            assert_eq!(*c.precision(), precision);
+            c.value().clone()
+        })
+        .collect();
+    let z_shares: Vec<_> = outputs.iter().map(|(_, z)| z.clone()).collect();
+
+    let (_, c_val) =
+        RobustShare::recover_secret(&c_shares, n_parties, t).expect("interpolate c failed");
+    let (_, z_val) =
+        RobustShare::recover_secret(&z_shares, n_parties, t).expect("interpolate z failed");
+
+    assert_eq!(z_val, Fr::from(0u64), "z must be 0 for b != 0");
+    let c_real = field_to_signed_real(c_val, f);
+    let rel_err = (c_real - 3.0f64).abs() / 3.0f64;
+    assert!(
+        rel_err < 0.2,
+        "FpDiv(6.0/2.0) = {c_real}, relative error {rel_err} exceeds tolerance"
+    );
+}
+
+//----------------------------------------COMPARISON----------------------------------------
+
+/// Drives one `ltz_int` call through the real preprocessing path and checks
+/// the reconstructed result is 1 for negative inputs, 0 otherwise.
+async fn ltz_int_e2e_run(u_bar: i128, k: usize) {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+
+    let a_shares = share_signed_fixed(u_bar, n_parties, t);
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+
+    // The only preprocessing configuration is the declared workload; every
+    // pool size is derived from it by `run_preprocessing`.
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        333,
+        0,
+        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+    for node in nodes.iter_mut() {
+        node.params.add_ltz_ops(k, 1);
+    }
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let a = SecretInt::new(a_shares[pid].clone(), k);
+        handles.push(tokio::spawn(async move {
+            node.ltz_int(a, net[pid].clone()).await.expect("ltz failed")
+        }));
+    }
+
+    let outputs: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.expect("task panicked"))
+        .collect();
+
+    let shares: Vec<_> = outputs.iter().map(|s| s.share().clone()).collect();
+    let (_, val) = RobustShare::recover_secret(&shares, n_parties, t).expect("interpolate failed");
+    let expected = if u_bar < 0 {
+        Fr::from(1u64)
+    } else {
+        Fr::from(0u64)
+    };
+    assert_eq!(val, expected, "ltz_int({u_bar}, k={k})");
+}
+
+#[tokio::test]
+async fn ltz_int_e2e_negative() {
+    ltz_int_e2e_run(-5, 8).await;
+}
+
+#[tokio::test]
+async fn ltz_int_e2e_positive() {
+    ltz_int_e2e_run(5, 8).await;
+}
+
+#[tokio::test]
+async fn ltz_int_e2e_zero() {
+    ltz_int_e2e_run(0, 8).await;
+}
+
+/// Drives one `eqz_int` call through the real preprocessing path and checks
+/// the reconstructed result is 1 for zero, 0 otherwise.
+async fn eqz_int_e2e_run(a_val: u64, k: usize) {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+
+    let a_shares = share_signed_fixed(a_val as i128, n_parties, t);
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+
+    // As in `ltz_int_e2e_run`: declare the workload, derive the rest.
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        333,
+        0,
+        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+    for node in nodes.iter_mut() {
+        node.params.add_eqz_ops(k, 1);
+    }
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let mut node = nodes[pid].clone();
+        let net = network.clone();
+        let a = SecretInt::new(a_shares[pid].clone(), k);
+        handles.push(tokio::spawn(async move {
+            node.eqz_int(a, net[pid].clone()).await.expect("eqz failed")
+        }));
+    }
+
+    let outputs: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.expect("task panicked"))
+        .collect();
+
+    let shares: Vec<_> = outputs.iter().map(|s| s.share().clone()).collect();
+    let (_, val) = RobustShare::recover_secret(&shares, n_parties, t).expect("interpolate failed");
+    let expected = if a_val == 0 {
+        Fr::from(1u64)
+    } else {
+        Fr::from(0u64)
+    };
+    assert_eq!(val, expected, "eqz_int({a_val}, k={k})");
+}
+
+#[tokio::test]
+async fn eqz_int_e2e_zero() {
+    eqz_int_e2e_run(0, 8).await;
+}
+
+#[tokio::test]
+async fn eqz_int_e2e_nonzero() {
+    eqz_int_e2e_run(42, 8).await;
+}
+
+/// One node serving `x < 0` at several integer widths, as an ordinary program
+/// holding both an `int8` and an `int16` would.
+///
+/// Note this is *not* a comparison between operands of different widths — that
+/// is rejected outright by `SecretInt` (`IncompatibleIntegerBitLength`), the
+/// same way C requires an explicit cast. Each call below is self-contained and
+/// unary.
+///
+/// What is actually under test is the PreMulC pool: `ltz_int(k)` consumes a
+/// bundle sized `pk = k-1`, so these calls want pk=7, pk=15, then pk=7 again.
+/// The pool must hold both widths at once, and coming back to pk=7 must not
+/// discard the pk=15 stock — the widths are bucketed precisely so neither is
+/// thrown away.
+#[tokio::test]
+async fn ltz_int_e2e_pool_serves_several_widths() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        333,
+        0,
+        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+    // Both widths declared up front — this is what a single stored bit-length
+    // could not express, and it provisions PreMulC bundles at pk=7 and pk=15.
+    for node in nodes.iter_mut() {
+        node.params.add_ltz_ops(8, 2);
+        node.params.add_ltz_ops(16, 1);
+    }
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    // (value, bit width, expected LTZ result)
+    for (u_bar, k, expected) in [
+        (-5i128, 8usize, 1u64),
+        (-300i128, 16usize, 1u64),
+        (7i128, 8usize, 0u64),
+    ] {
+        let a_shares = share_signed_fixed(u_bar, n_parties, t);
+        let mut handles = Vec::new();
+        for pid in 0..n_parties {
+            let mut node = nodes[pid].clone();
+            let net = network.clone();
+            let a = SecretInt::new(a_shares[pid].clone(), k);
+            handles.push(tokio::spawn(async move {
+                node.ltz_int(a, net[pid].clone()).await.expect("ltz failed")
+            }));
+        }
+        let outputs: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.expect("task panicked"))
+            .collect();
+        let shares: Vec<_> = outputs.iter().map(|s| s.share().clone()).collect();
+        let (_, val) =
+            RobustShare::recover_secret(&shares, n_parties, t).expect("interpolate failed");
+        assert_eq!(val, Fr::from(expected), "ltz_int({u_bar}, k={k})");
+    }
 }

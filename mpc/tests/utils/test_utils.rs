@@ -546,19 +546,19 @@ where
     S: SecretSharingScheme<F>,
     HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts>,
 {
-    let parameters = HoneyBadgerMPCNodeOpts::new(
+    let mut parameters = HoneyBadgerMPCNodeOpts::new(
         n_parties,
         t,
-        n_triples,
-        n_random_shares,
         instance_id,
-        n_randbit,
-        n_prandint,
         precision,
         statistical_security,
         timeout,
     )
     .unwrap();
+    parameters.extra_demand.triples = n_triples;
+    parameters.extra_demand.random_shares = n_random_shares;
+    parameters.extra_demand.randbit = n_randbit;
+    parameters.extra_demand.prandint = n_prandint;
     (0..n_parties)
         .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), input_ids.clone()).unwrap())
         .collect()
