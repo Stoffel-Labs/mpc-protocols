@@ -2660,7 +2660,7 @@ where
             self.params.instance_id,
         );
 
-        Ok(self
+        let result = self
             .type_ops
             .eqz
             .run(
@@ -2673,7 +2673,11 @@ where
                 net,
                 self.params.timeout,
             )
-            .await?)
+            .await;
+        // EQZ owns its own c_share-open session (unlike LTZ, which is pure
+        // composition); clear it on every exit path, not just success.
+        self.type_ops.eqz.clear_store(session).await;
+        Ok(result?)
     }
 
     /// `|x| < 2^p` for a raw share, as a 0/1 share.
@@ -3138,7 +3142,8 @@ where
             SessionId::pack_slot(self.counters.rand_inv_pair_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
-        self.preprocess
+        let run_result = self
+            .preprocess
             .rand_inv_pair
             .run(
                 RandInvPairPrep {
@@ -3150,13 +3155,20 @@ where
                 network,
                 self.params.timeout,
             )
-            .await?;
-        let pairs = self
-            .preprocess
-            .rand_inv_pair
-            .wait_for_result(session, self.params.timeout)
-            .await?;
+            .await;
+        let pairs_result = match run_result {
+            Ok(()) => {
+                self.preprocess
+                    .rand_inv_pair
+                    .wait_for_result(session, self.params.timeout)
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        // Clear on every exit path, not just success, or a failure above leaks
+        // this session (and its inner MulPub session) permanently.
         self.preprocess.rand_inv_pair.clear_store(session).await;
+        let pairs = pairs_result?;
         self.preprocessing_material
             .lock()
             .await

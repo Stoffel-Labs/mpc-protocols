@@ -25,7 +25,10 @@
 //! No additional substitutions are needed in this protocol.
 
 use crate::{
-    common::{ProtocolSessionId, SecretSharingScheme},
+    common::{
+        session_store::{Admission, SessionStore},
+        ProtocolSessionId, SecretSharingScheme,
+    },
     honeybadger::{
         bitwise::{
             pre_bitlt::PreBitLTNode, pre_mulc::PhaseState, PreMod2mError, PreMod2mMessage,
@@ -37,12 +40,13 @@ use crate::{
 };
 
 use ark_ff::{BigInteger, FftField, PrimeField};
-use std::{collections::HashMap, sync::Arc};
+use std::{sync::Arc, time::Instant};
 use stoffelnet::network_utils::Network;
 use tokio::{
     sync::Mutex,
     time::{timeout, Duration},
 };
+use tracing::warn;
 
 const MAX_PRE_MOD2M_SESSIONS: usize = 1024;
 
@@ -53,10 +57,7 @@ pub struct PreMod2mNode<F: PrimeField + FftField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    // Tagged with the party attributed with creating each entry, so a single
-    // party can't flood this store past its own per-peer share of the cap
-    // (same heuristic as Bracha/Avid's own session stores).
-    store: Arc<Mutex<HashMap<SessionId, (usize, Arc<Mutex<PreMod2mStore<F>>>)>>>,
+    store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PreMod2mStore<F>>>)>>>,
     /// Owned so `try_finalize` can run Phase 3 (PreBitLT) directly, without
     /// every caller having to thread a shared instance through each call.
     pub pre_bitlt: PreBitLTNode<F>,
@@ -68,7 +69,7 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
             id,
             n,
             t,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             pre_bitlt: PreBitLTNode::new(id, n, t)?,
         })
     }
@@ -77,30 +78,29 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
         &self,
         session: SessionId,
         initiator_id: usize,
-    ) -> Result<Arc<Mutex<PreMod2mStore<F>>>, PreMod2mError> {
-        let mut map = self.store.lock().await;
-        if !map.contains_key(&session) {
-            if map.len() >= MAX_PRE_MOD2M_SESSIONS {
-                return Err(PreMod2mError::LimitError);
-            }
-            let per_peer_limit = MAX_PRE_MOD2M_SESSIONS / self.n;
-            let peer_count = map.values().filter(|(id, _)| *id == initiator_id).count();
-            if peer_count >= per_peer_limit {
-                return Err(PreMod2mError::LimitError);
+    ) -> Option<Arc<Mutex<PreMod2mStore<F>>>> {
+        match self.store.lock().await.get_or_admit(
+            session,
+            initiator_id,
+            MAX_PRE_MOD2M_SESSIONS,
+            MAX_PRE_MOD2M_SESSIONS / self.n,
+            || Arc::new(Mutex::new(PreMod2mStore::new())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("PreMod2m session limit reached");
+                None
             }
         }
-        Ok(map
-            .entry(session)
-            .or_insert_with(|| (initiator_id, Arc::new(Mutex::new(PreMod2mStore::new()))))
-            .1
-            .clone())
     }
 
     pub async fn clear_store(&self, session: SessionId) -> Result<(), PreMod2mError> {
-        let mut map = self.store.lock().await;
-        map.remove(&session)
-            .map(|_| ())
-            .ok_or(PreMod2mError::ClearStoreError(session))
+        if self.store.lock().await.retire(session) {
+            Ok(())
+        } else {
+            Err(PreMod2mError::ClearStoreError(session))
+        }
     }
 
     /// Handles a directly-opened share of `v`, handing it to
@@ -142,7 +142,10 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
         // Attributed to `sender` — whichever party's message happens to
         // create this entry, so no single sender can flood past its own
         // per-peer share of the cap.
-        let store = self.get_or_create_store(parent, sender).await?;
+        let store = match self.get_or_create_store(parent, sender).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let ready = {
             let mut s = store.lock().await;
             if s.state == PhaseState::Finished {
@@ -339,7 +342,10 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
         // the reveal — set before starting the RBC broadcast so a
         // fast-arriving share can never race ahead of this being in place.
         {
-            let store = self.get_or_create_store(session, self.id).await?;
+            let store = self
+                .get_or_create_store(session, self.id)
+                .await
+                .ok_or(PreMod2mError::LimitError)?;
             let mut s = store.lock().await;
             s.m = Some(m);
             s.r_prime_bits = Some(prep.prandm.r_prime_bits);
@@ -370,7 +376,7 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
                 .lock()
                 .await
                 .get(&session)
-                .map(|(_, s)| s.clone())
+                .map(|(_, _, s)| s.clone())
                 .ok_or(PreMod2mError::NoSuchSessionId(session))?;
             let ready = {
                 let s = store.lock().await;
@@ -391,7 +397,7 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
                     .lock()
                     .await
                     .get(&session)
-                    .map(|(_, s)| s.clone())
+                    .map(|(_, _, s)| s.clone())
                     .ok_or(PreMod2mError::NoSuchSessionId(session))?;
                 let mut s = store.lock().await;
                 s.output_receiver

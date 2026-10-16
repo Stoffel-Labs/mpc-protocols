@@ -10,17 +10,23 @@
 //! Session routing:
 //!   BatchRecon → self.mul_pub.batch_recon
 
-use crate::honeybadger::{
-    mul_pub::mul_pub::MulPubNode, rand_inv_pair::RandInvPairError,
-    robust_interpolate::robust_interpolate::RobustShare, SessionId,
+use crate::{
+    common::session_store::{Admission, SessionStore},
+    honeybadger::{
+        mul_pub::mul_pub::MulPubNode, rand_inv_pair::RandInvPairError,
+        robust_interpolate::robust_interpolate::RobustShare, SessionId,
+    },
 };
 use ark_ff::{FftField, PrimeField};
-use std::{collections::HashMap, sync::Arc};
+use std::{sync::Arc, time::Instant};
 use stoffelnet::network_utils::Network;
 use tokio::{
     sync::Mutex,
     time::{timeout, Duration},
 };
+use tracing::warn;
+
+const MAX_RAND_INV_PAIR_SESSIONS: usize = 256;
 
 // ── Prep ───────────────────────────────────────────────────────────────────────
 
@@ -62,7 +68,7 @@ pub struct RandInvPairNode<F: PrimeField + FftField> {
     pub n: usize,
     pub t: usize,
     pub mul_pub: MulPubNode<F>,
-    store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<RandInvPairStore<F>>>>>>,
+    store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<RandInvPairStore<F>>>)>>>,
 }
 
 impl<F: PrimeField + FftField> RandInvPairNode<F> {
@@ -72,27 +78,34 @@ impl<F: PrimeField + FftField> RandInvPairNode<F> {
             n,
             t,
             mul_pub: MulPubNode::new(id, n, t)?,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
         })
     }
 
     async fn get_or_create_store(
         &self,
         session: SessionId,
-    ) -> Result<Arc<Mutex<RandInvPairStore<F>>>, RandInvPairError> {
-        let mut map = self.store.lock().await;
-        if map.len() >= 256 && !map.contains_key(&session) {
-            return Err(RandInvPairError::LimitError);
+        initiator_id: usize,
+    ) -> Option<Arc<Mutex<RandInvPairStore<F>>>> {
+        match self.store.lock().await.get_or_admit(
+            session,
+            initiator_id,
+            MAX_RAND_INV_PAIR_SESSIONS,
+            MAX_RAND_INV_PAIR_SESSIONS / self.n,
+            || Arc::new(Mutex::new(RandInvPairStore::new())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("RandInvPair session limit reached");
+                None
+            }
         }
-        Ok(map
-            .entry(session)
-            .or_insert_with(|| Arc::new(Mutex::new(RandInvPairStore::new())))
-            .clone())
     }
 
     pub async fn clear_store(&self, session: SessionId) -> bool {
         self.mul_pub.clear_store(session).await;
-        self.store.lock().await.remove(&session).is_some()
+        self.store.lock().await.retire(session)
     }
 
     pub async fn wait_for_result(
@@ -102,7 +115,7 @@ impl<F: PrimeField + FftField> RandInvPairNode<F> {
     ) -> Result<Vec<(RobustShare<F>, RobustShare<F>)>, RandInvPairError> {
         let rx = {
             let map = self.store.lock().await;
-            let inner = map
+            let (_, _, inner) = map
                 .get(&session)
                 .ok_or(RandInvPairError::NoSuchSessionId(session))?
                 .clone();
@@ -133,7 +146,9 @@ impl<F: PrimeField + FftField> RandInvPairNode<F> {
             return Err(RandInvPairError::LengthError);
         }
 
-        self.get_or_create_store(session).await?;
+        self.get_or_create_store(session, self.id)
+            .await
+            .ok_or(RandInvPairError::LimitError)?;
 
         self.mul_pub
             .init(
@@ -161,7 +176,10 @@ impl<F: PrimeField + FftField> RandInvPairNode<F> {
             pairs.push((prep.r_shares[j].clone(), r_inv));
         }
 
-        let store = self.get_or_create_store(session).await?;
+        let store = self
+            .get_or_create_store(session, self.id)
+            .await
+            .ok_or(RandInvPairError::LimitError)?;
         let sender = {
             let mut s = store.lock().await;
             s.output_sender

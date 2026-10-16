@@ -15,7 +15,10 @@
 //!
 
 use crate::{
-    common::ProtocolSessionId,
+    common::{
+        session_store::{Admission, SessionStore},
+        ProtocolSessionId,
+    },
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         bitwise::{pre_mulc::PhaseState, KOrCSError},
@@ -27,12 +30,16 @@ use crate::{
 };
 use ark_ff::{FftField, PrimeField};
 use ark_serialize::CanonicalDeserialize;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
+use std::time::Instant;
 use stoffelnet::network_utils::Network;
 use tokio::{
     sync::{mpsc::Receiver, Mutex},
     time::{timeout, Duration},
 };
+use tracing::warn;
+
+const MAX_KOR_CS_SESSIONS: usize = 256;
 
 /// Preprocessing for the KOrCS protocol with k input bits.
 #[derive(Clone, Debug)]
@@ -85,7 +92,7 @@ pub struct KOrCSNode<F: PrimeField> {
     /// BatchRecon node for opening d_j values.
     pub batch_recon: BatchReconNode<F>,
     batch_output: Arc<Mutex<Receiver<SessionId>>>,
-    store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<KOrCSStore<F>>>>>>,
+    store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<KOrCSStore<F>>>)>>>,
 }
 
 impl<F: PrimeField> KOrCSNode<F> {
@@ -100,22 +107,56 @@ impl<F: PrimeField> KOrCSNode<F> {
             mul,
             batch_recon,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
         })
     }
 
     async fn get_or_create_store(
         &self,
         session: SessionId,
-    ) -> Result<Arc<Mutex<KOrCSStore<F>>>, KOrCSError> {
-        let mut map = self.store.lock().await;
-        if map.len() >= 256 && !map.contains_key(&session) {
-            return Err(KOrCSError::LimitError);
+        initiator_id: usize,
+    ) -> Option<Arc<Mutex<KOrCSStore<F>>>> {
+        match self.store.lock().await.get_or_admit(
+            session,
+            initiator_id,
+            MAX_KOR_CS_SESSIONS,
+            MAX_KOR_CS_SESSIONS / self.n,
+            || Arc::new(Mutex::new(KOrCSStore::new())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("KOrCS session limit reached");
+                None
+            }
         }
-        Ok(map
-            .entry(session)
-            .or_insert_with(|| Arc::new(Mutex::new(KOrCSStore::new())))
-            .clone())
+    }
+
+    /// Clears this session's own store along with every sub-session it opened
+    /// internally (both `Multiply` rounds and the batch-reconstruction reveal) —
+    /// otherwise those would leak even once this top-level entry is retired.
+    pub async fn clear_store(&self, session: SessionId) -> bool {
+        let sid1 = SessionId::new(
+            ProtocolType::KOr1,
+            SessionId::pack_slot(session.exec_id(), 0, 0),
+            session.instance_id(),
+        );
+        let sid2 = SessionId::new(
+            ProtocolType::KOr2,
+            SessionId::pack_slot(session.exec_id(), 0, 0),
+            session.instance_id(),
+        );
+        self.mul.clear_store(sid1).await;
+        self.mul.clear_store(sid2).await;
+        if let Some(calling_proto) = session.calling_protocol() {
+            let batch_session = SessionId::new(
+                calling_proto,
+                SessionId::pack_slot(session.exec_id(), 0, 0),
+                session.instance_id(),
+            );
+            self.batch_recon.clear_store(batch_session).await;
+        }
+        self.store.lock().await.retire(session)
     }
 
     /// Drive completed batch-recon chunks for the d_j opening step.
@@ -150,7 +191,10 @@ impl<F: PrimeField> KOrCSNode<F> {
     }
 
     async fn handle_open(&mut self, parent: SessionId, vals: Vec<F>) -> Result<(), KOrCSError> {
-        let store = self.get_or_create_store(parent).await?;
+        let store = match self.get_or_create_store(parent, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         {
             let mut s = store.lock().await;
             if s.state == PhaseState::Finished {
@@ -229,7 +273,7 @@ impl<F: PrimeField> KOrCSNode<F> {
     ) -> Result<RobustShare<F>, KOrCSError> {
         let rx = {
             let map = self.store.lock().await;
-            let inner = map
+            let (_, _, inner) = map
                 .get(&session)
                 .ok_or(KOrCSError::NoSuchSessionId(session))?
                 .clone();
@@ -370,7 +414,10 @@ impl<F: PrimeField> KOrCSNode<F> {
         // Setup per-session store before initiating batch recon.
         let alpha = Self::lagrange_coeffs(k);
         {
-            let store = self.get_or_create_store(session).await?;
+            let store = self
+                .get_or_create_store(session, self.id)
+                .await
+                .ok_or(KOrCSError::LimitError)?;
             let mut s = store.lock().await;
             s.k = k;
             s.pk = pk;
@@ -392,7 +439,10 @@ impl<F: PrimeField> KOrCSNode<F> {
             .init_batch_reconstruct_many(&padded_d, batch_session, Arc::clone(&network))
             .await?;
         {
-            let store = self.get_or_create_store(session).await?;
+            let store = self
+                .get_or_create_store(session, self.id)
+                .await
+                .ok_or(KOrCSError::LimitError)?;
             let ready = {
                 let s = store.lock().await;
                 !s.r_shares.is_empty() && s.open.is_some()

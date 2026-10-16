@@ -11,7 +11,10 @@
 //!   5. [e] ← KOrCS([d_1], ..., [d_m])
 
 use crate::{
-    common::{ProtocolSessionId, SecretSharingScheme},
+    common::{
+        session_store::{Admission, SessionStore},
+        ProtocolSessionId, SecretSharingScheme,
+    },
     honeybadger::{
         bitwise::{
             kor_cs::{KOrCSNode, KOrCSPrep},
@@ -23,12 +26,15 @@ use crate::{
     },
 };
 use ark_ff::{BigInteger, PrimeField};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use stoffelnet::network_utils::Network;
 use tokio::{
     sync::Mutex,
     time::{timeout, Duration},
 };
+use tracing::warn;
+
+const MAX_KOR_CL_SESSIONS: usize = 256;
 
 // ── Store ──────────────────────────────────────────────────────────────────────
 #[derive(Debug)]
@@ -62,7 +68,7 @@ pub struct KOrCLNode<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<KOrCLStore<F>>>>>>,
+    store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<KOrCLStore<F>>>)>>>,
     pub kor_cs: KOrCSNode<F>,
 }
 
@@ -72,7 +78,7 @@ impl<F: PrimeField> KOrCLNode<F> {
             id,
             n,
             t,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             kor_cs: KOrCSNode::new(id, n, t)?,
         })
     }
@@ -80,22 +86,28 @@ impl<F: PrimeField> KOrCLNode<F> {
     async fn get_or_create_store(
         &self,
         session: SessionId,
-    ) -> Result<Arc<Mutex<KOrCLStore<F>>>, KOrCLError> {
-        let mut map = self.store.lock().await;
-        if map.len() >= 256 && !map.contains_key(&session) {
-            return Err(KOrCLError::LimitError);
+        initiator_id: usize,
+    ) -> Option<Arc<Mutex<KOrCLStore<F>>>> {
+        match self.store.lock().await.get_or_admit(
+            session,
+            initiator_id,
+            MAX_KOR_CL_SESSIONS,
+            MAX_KOR_CL_SESSIONS / self.n,
+            || Arc::new(Mutex::new(KOrCLStore::new())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("KOrCL session limit reached");
+                None
+            }
         }
-        Ok(map
-            .entry(session)
-            .or_insert_with(|| Arc::new(Mutex::new(KOrCLStore::new())))
-            .clone())
     }
 
-    pub async fn clear_store(&self, session: SessionId) -> Result<(), KOrCLError> {
-        let mut map = self.store.lock().await;
-        map.remove(&session)
-            .map(|_| ())
-            .ok_or(KOrCLError::ClearStoreError(session))
+    /// Clears this session's own store. `run` is itself responsible for
+    /// clearing the inner `KOrCS` session it drives — see the end of `run`.
+    pub async fn clear_store(&self, session: SessionId) -> bool {
+        self.store.lock().await.retire(session)
     }
 
     /// Handles a directly-opened share of `c`. `msg.sender` must already be
@@ -115,7 +127,10 @@ impl<F: PrimeField> KOrCLNode<F> {
             id.instance_id(),
         );
 
-        let store = self.get_or_create_store(parent).await?;
+        let store = match self.get_or_create_store(parent, sender).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let ready = {
             let mut s = store.lock().await;
             if s.state == PhaseState::Finished {
@@ -138,7 +153,7 @@ impl<F: PrimeField> KOrCLNode<F> {
     ) -> Result<Vec<RobustShare<F>>, KOrCLError> {
         let rx = {
             let map = self.store.lock().await;
-            let inner = map
+            let (_, _, inner) = map
                 .get(&session)
                 .ok_or(KOrCLError::NoSuchSessionId(session))?
                 .clone();
@@ -253,7 +268,10 @@ impl<F: PrimeField> KOrCLNode<F> {
         let c_share = (((prandm.r_double_prime * two_pow_m)? + prandm.r_prime)? + sum)?;
 
         {
-            let store = self.get_or_create_store(session).await?;
+            let store = self
+                .get_or_create_store(session, self.id)
+                .await
+                .ok_or(KOrCLError::LimitError)?;
             let mut s = store.lock().await;
             s.m = m;
             s.r_prime_bits = Some(prandm.r_prime_bits);
@@ -274,7 +292,10 @@ impl<F: PrimeField> KOrCLNode<F> {
         network.broadcast(&bytes_wrapped).await?;
         // Eagerly finalize if all shares arrived before run() stored local state.
         {
-            let store = self.get_or_create_store(session).await?;
+            let store = self
+                .get_or_create_store(session, self.id)
+                .await
+                .ok_or(KOrCLError::LimitError)?;
             let ready = {
                 let s = store.lock().await;
                 s.r_prime_bits.is_some() && s.received_shares.len() >= 2 * self.t + 1
@@ -285,13 +306,21 @@ impl<F: PrimeField> KOrCLNode<F> {
         }
 
         // Wait until drain_rbc_output reconstructs c and computes d_bits.
-        let d_bits = self.wait_for_d_bits(session, duration).await?;
+        let d_bits_result = self.wait_for_d_bits(session, duration).await;
+        // This party's own c_share-open phase is done either way; clear it before
+        // propagating so a failure here doesn't leak the slot.
+        self.clear_store(session).await;
+        let d_bits = d_bits_result?;
 
-        // KOrCS on the m d_bits.
-        self.kor_cs
-            .run(d_bits, kor_cs_prep, session, network, duration)
-            .await?;
-        let e = self.kor_cs.wait_for_result(session, duration).await?;
-        Ok(e)
+        // KOrCS on the m d_bits. KOrCL called it, so KOrCL clears it — on every
+        // exit path, not just success, or a failure here leaks KOrCS's session
+        // (and its own nested Multiply/batch-recon sub-sessions) permanently.
+        let kor_cs_result = self.kor_cs.run(d_bits, kor_cs_prep, session, network, duration).await;
+        let e_result = match kor_cs_result {
+            Ok(()) => self.kor_cs.wait_for_result(session, duration).await,
+            Err(e) => Err(e),
+        };
+        self.kor_cs.clear_store(session).await;
+        Ok(e_result?)
     }
 }

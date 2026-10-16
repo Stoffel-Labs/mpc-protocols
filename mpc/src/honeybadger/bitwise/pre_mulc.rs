@@ -13,7 +13,10 @@
 //!   PreMulCOn mul RBC:         round_id = 2
 
 use crate::{
-    common::ProtocolSessionId,
+    common::{
+        session_store::{Admission, SessionStore},
+        ProtocolSessionId,
+    },
     honeybadger::{
         batch_recon::batch_recon::BatchReconNode,
         bitwise::{PreMulCError, PreMulCPrep},
@@ -26,12 +29,16 @@ use crate::{
 };
 use ark_ff::{FftField, PrimeField};
 use ark_serialize::CanonicalDeserialize;
-use std::{collections::HashMap, sync::Arc};
+use std::{sync::Arc, time::Instant};
 use stoffelnet::network_utils::Network;
 use tokio::{
     sync::{mpsc::Receiver, Mutex},
     time::{timeout, Duration},
 };
+use tracing::warn;
+
+const MAX_PRE_MULC_PREP_SESSIONS: usize = 256;
+const MAX_PRE_MULC_ONLINE_SESSIONS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhaseState {
@@ -109,7 +116,7 @@ pub struct PreMulCOfflineNode<F: PrimeField + FftField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    prep_store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PreMulCPrepStore<F>>>>>>,
+    prep_store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PreMulCPrepStore<F>>>)>>>,
     pub mul_pub: MulPubNode<F>,
     pub mul: Multiply<F>,
 }
@@ -120,7 +127,7 @@ impl<F: PrimeField + FftField> PreMulCOfflineNode<F> {
             id,
             n,
             t,
-            prep_store: Arc::new(Mutex::new(HashMap::new())),
+            prep_store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             mul_pub: MulPubNode::new(id, n, t)?,
             mul: Multiply::new(id, n, t)?,
         })
@@ -129,24 +136,32 @@ impl<F: PrimeField + FftField> PreMulCOfflineNode<F> {
     async fn get_or_create_prep(
         &self,
         session: SessionId,
-    ) -> Result<Arc<Mutex<PreMulCPrepStore<F>>>, PreMulCError> {
-        let mut map = self.prep_store.lock().await;
-        if map.len() >= 256 && !map.contains_key(&session) {
-            return Err(PreMulCError::LimitError);
+        initiator_id: usize,
+    ) -> Option<Arc<Mutex<PreMulCPrepStore<F>>>> {
+        match self.prep_store.lock().await.get_or_admit(
+            session,
+            initiator_id,
+            MAX_PRE_MULC_PREP_SESSIONS,
+            MAX_PRE_MULC_PREP_SESSIONS / self.n,
+            || Arc::new(Mutex::new(PreMulCPrepStore::new())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("PreMulC prep session limit reached");
+                None
+            }
         }
-        Ok(map
-            .entry(session)
-            .or_insert_with(|| Arc::new(Mutex::new(PreMulCPrepStore::new())))
-            .clone())
     }
 
     pub async fn clear_store(&self, session: SessionId) -> Result<(), PreMulCError> {
         self.mul_pub.clear_store(session).await;
         self.mul.clear_store(session).await;
-        let mut pmap = self.prep_store.lock().await;
-        pmap.remove(&session)
-            .map(|_| ())
-            .ok_or(PreMulCError::ClearStoreError(session))
+        if self.prep_store.lock().await.retire(session) {
+            Ok(())
+        } else {
+            Err(PreMulCError::ClearStoreError(session))
+        }
     }
 
     pub async fn wait_for_preprocessing(
@@ -163,7 +178,7 @@ impl<F: PrimeField + FftField> PreMulCOfflineNode<F> {
     > {
         let rx = {
             let map = self.prep_store.lock().await;
-            let inner = map
+            let (_, _, inner) = map
                 .get(&session)
                 .ok_or(PreMulCError::NoSuchSessionId(session))?
                 .clone();
@@ -215,7 +230,9 @@ impl<F: PrimeField + FftField> PreMulCOfflineNode<F> {
             .calling_protocol()
             .ok_or(PreMulCError::SessionIdError(session))?;
 
-        self.get_or_create_prep(session).await?;
+        self.get_or_create_prep(session, self.id)
+            .await
+            .ok_or(PreMulCError::LimitError)?;
 
         // Start both sub-protocols before blocking on either.
         self.mul_pub
@@ -266,7 +283,10 @@ impl<F: PrimeField + FftField> PreMulCOfflineNode<F> {
             z.push((s[i].clone() * u_inv)?);
         }
 
-        let store_mutex = self.get_or_create_prep(session).await?;
+        let store_mutex = self
+            .get_or_create_prep(session, self.id)
+            .await
+            .ok_or(PreMulCError::LimitError)?;
         let sender = {
             let mut s = store_mutex.lock().await;
             if s.state == PhaseState::Finished {
@@ -293,7 +313,7 @@ pub struct PreMulCOnlineNode<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    online_store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<PreMulCOnlineStore<F>>>>>>,
+    online_store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PreMulCOnlineStore<F>>>)>>>,
     pub mul: Multiply<F>,
     pub batch_recon: BatchReconNode<F>,
     batch_output: Arc<Mutex<Receiver<SessionId>>>,
@@ -308,7 +328,7 @@ impl<F: PrimeField> PreMulCOnlineNode<F> {
             id,
             n,
             t,
-            online_store: Arc::new(Mutex::new(HashMap::new())),
+            online_store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             mul,
             batch_recon,
             batch_output: Arc::new(Mutex::new(batch_receiver)),
@@ -318,24 +338,32 @@ impl<F: PrimeField> PreMulCOnlineNode<F> {
     async fn get_or_create_online(
         &self,
         session: SessionId,
-    ) -> Result<Arc<Mutex<PreMulCOnlineStore<F>>>, PreMulCError> {
-        let mut map = self.online_store.lock().await;
-        if map.len() >= 256 && !map.contains_key(&session) {
-            return Err(PreMulCError::LimitError);
+        initiator_id: usize,
+    ) -> Option<Arc<Mutex<PreMulCOnlineStore<F>>>> {
+        match self.online_store.lock().await.get_or_admit(
+            session,
+            initiator_id,
+            MAX_PRE_MULC_ONLINE_SESSIONS,
+            MAX_PRE_MULC_ONLINE_SESSIONS / self.n,
+            || Arc::new(Mutex::new(PreMulCOnlineStore::new())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("PreMulC online session limit reached");
+                None
+            }
         }
-        Ok(map
-            .entry(session)
-            .or_insert_with(|| Arc::new(Mutex::new(PreMulCOnlineStore::new())))
-            .clone())
     }
 
     pub async fn clear_store(&self, session: SessionId) -> Result<(), PreMulCError> {
         self.batch_recon.clear_entire_store().await;
         self.mul.clear_store(session).await;
-        let mut omap = self.online_store.lock().await;
-        omap.remove(&session)
-            .map(|_| ())
-            .ok_or(PreMulCError::ClearStoreError(session))
+        if self.online_store.lock().await.retire(session) {
+            Ok(())
+        } else {
+            Err(PreMulCError::ClearStoreError(session))
+        }
     }
 
     /// Returns `(p_shares, Some(p_inv))` when all M_j != 0, or `(p_shares, None)`
@@ -348,7 +376,7 @@ impl<F: PrimeField> PreMulCOnlineNode<F> {
     ) -> Result<OnlineResult<F>, PreMulCError> {
         let rx = {
             let map = self.online_store.lock().await;
-            let inner = map
+            let (_, _, inner) = map
                 .get(&session)
                 .ok_or(PreMulCError::NoSuchSessionId(session))?
                 .clone();
@@ -430,7 +458,10 @@ impl<F: PrimeField> PreMulCOnlineNode<F> {
         }
 
         {
-            let store = self.get_or_create_online(session).await?;
+            let store = self
+                .get_or_create_online(session, self.id)
+                .await
+                .ok_or(PreMulCError::LimitError)?;
             let mut s = store.lock().await;
             s.z_shares = Some(prep.z);
             s.r_shares = Some(prep.r);
@@ -443,7 +474,10 @@ impl<F: PrimeField> PreMulCOnlineNode<F> {
             .init_batch_reconstruct_many(&m_shares, session, Arc::clone(&network))
             .await?;
         {
-            let store = self.get_or_create_online(session).await?;
+            let store = self
+                .get_or_create_online(session, self.id)
+                .await
+                .ok_or(PreMulCError::LimitError)?;
             let ready = {
                 let s = store.lock().await;
                 s.z_shares.is_some() && s.m_vals.is_some()
@@ -461,7 +495,10 @@ impl<F: PrimeField> PreMulCOnlineNode<F> {
         session: SessionId,
         vals: Vec<F>,
     ) -> Result<(), PreMulCError> {
-        let store = self.get_or_create_online(session).await?;
+        let store = match self.get_or_create_online(session, self.id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         {
             let mut s = store.lock().await;
             if s.state == PhaseState::Finished {
@@ -550,22 +587,22 @@ mod tests {
     #[tokio::test]
     async fn test_premulc_session_limit() {
         let node = PreMulCOnlineNode::<Fr>::new(0, 5, 1).unwrap();
-        for i in 0u64..=255 {
+        // A single peer (id 7) can't exceed its per-peer share of the global cap,
+        // even though the global cap itself is far from full.
+        let per_peer_cap = MAX_PRE_MULC_ONLINE_SESSIONS / node.n;
+        for i in 0..per_peer_cap as u64 {
             let sid = SessionId::new(
                 crate::honeybadger::ProtocolType::Trunc,
                 SessionId::pack_slot(i, 0, 0),
                 111,
             );
-            let _ = node.get_or_create_online(sid).await;
+            assert!(node.get_or_create_online(sid, 7).await.is_some());
         }
         let sid = SessionId::new(
             crate::honeybadger::ProtocolType::Trunc,
-            SessionId::pack_slot(0, 1, 0),
+            SessionId::pack_slot(per_peer_cap as u64, 0, 0),
             111,
         );
-        assert!(matches!(
-            node.get_or_create_online(sid).await,
-            Err(PreMulCError::LimitError)
-        ));
+        assert!(node.get_or_create_online(sid, 7).await.is_none());
     }
 }

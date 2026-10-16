@@ -24,7 +24,10 @@
 //! deliberately absent here.
 
 use crate::{
-    common::{ProtocolSessionId, SecretSharingScheme},
+    common::{
+        session_store::{Admission, SessionStore},
+        ProtocolSessionId, SecretSharingScheme,
+    },
     honeybadger::{
         bitwise::{kor_cl::KOrCLNode, kor_cs::KOrCSPrep, pre_mulc::PhaseState, PRandMPrep},
         comparison::{EQZError, EqzMessage},
@@ -33,12 +36,15 @@ use crate::{
     },
 };
 use ark_ff::{BigInteger, PrimeField};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use stoffelnet::network_utils::Network;
 use tokio::{
     sync::Mutex,
     time::{timeout, Duration},
 };
+use tracing::warn;
+
+const MAX_EQZ_SESSIONS: usize = 256;
 
 // ── Store ──────────────────────────────────────────────────────────────────────
 #[derive(Debug)]
@@ -72,7 +78,7 @@ pub struct EQZNode<F: PrimeField> {
     pub id: usize,
     pub n: usize,
     pub t: usize,
-    store: Arc<Mutex<HashMap<SessionId, Arc<Mutex<EQZStore<F>>>>>>,
+    store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<EQZStore<F>>>)>>>,
     pub kor_cl: KOrCLNode<F>,
 }
 
@@ -82,7 +88,7 @@ impl<F: PrimeField> EQZNode<F> {
             id,
             n,
             t,
-            store: Arc::new(Mutex::new(HashMap::new())),
+            store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             kor_cl: KOrCLNode::new(id, n, t)?,
         })
     }
@@ -90,22 +96,28 @@ impl<F: PrimeField> EQZNode<F> {
     async fn get_or_create_store(
         &self,
         session: SessionId,
-    ) -> Result<Arc<Mutex<EQZStore<F>>>, EQZError> {
-        let mut map = self.store.lock().await;
-        if map.len() >= 256 && !map.contains_key(&session) {
-            return Err(EQZError::LimitError);
+        initiator_id: usize,
+    ) -> Option<Arc<Mutex<EQZStore<F>>>> {
+        match self.store.lock().await.get_or_admit(
+            session,
+            initiator_id,
+            MAX_EQZ_SESSIONS,
+            MAX_EQZ_SESSIONS / self.n,
+            || Arc::new(Mutex::new(EQZStore::new())),
+        ) {
+            Admission::Got(arc) => Some(arc),
+            Admission::Retired => None,
+            Admission::Rejected => {
+                warn!("EQZ session limit reached");
+                None
+            }
         }
-        Ok(map
-            .entry(session)
-            .or_insert_with(|| Arc::new(Mutex::new(EQZStore::new())))
-            .clone())
     }
 
-    pub async fn clear_store(&self, session: SessionId) -> Result<(), EQZError> {
-        let mut map = self.store.lock().await;
-        map.remove(&session)
-            .map(|_| ())
-            .ok_or(EQZError::ClearStoreError(session))
+    /// Clears this session's own store. `run` is itself responsible for
+    /// clearing the inner `KOrCL` session it drives — see the end of `run`.
+    pub async fn clear_store(&self, session: SessionId) -> bool {
+        self.store.lock().await.retire(session)
     }
 
     /// Handles a directly-opened share of `c`. `msg.sender` must already be
@@ -123,7 +135,10 @@ impl<F: PrimeField> EQZNode<F> {
             id.instance_id(),
         );
 
-        let store = self.get_or_create_store(parent).await?;
+        let store = match self.get_or_create_store(parent, sender).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let ready = {
             let mut s = store.lock().await;
             if s.state == PhaseState::Finished {
@@ -146,7 +161,7 @@ impl<F: PrimeField> EQZNode<F> {
     ) -> Result<Vec<RobustShare<F>>, EQZError> {
         let rx = {
             let map = self.store.lock().await;
-            let inner = map
+            let (_, _, inner) = map
                 .get(&session)
                 .ok_or(EQZError::NoSuchSessionId(session))?
                 .clone();
@@ -266,7 +281,10 @@ impl<F: PrimeField> EQZNode<F> {
         let c_share = (((prandm.r_double_prime * two_pow_k)? + prandm.r_prime)? + a)?;
 
         {
-            let store = self.get_or_create_store(session).await?;
+            let store = self
+                .get_or_create_store(session, self.id)
+                .await
+                .ok_or(EQZError::LimitError)?;
             let mut s = store.lock().await;
             s.k = k;
             s.r_prime_bits = Some(prandm.r_prime_bits);
@@ -286,7 +304,10 @@ impl<F: PrimeField> EQZNode<F> {
         network.broadcast(&bytes_wrapped).await?;
 
         {
-            let store = self.get_or_create_store(session).await?;
+            let store = self
+                .get_or_create_store(session, self.id)
+                .await
+                .ok_or(EQZError::LimitError)?;
             let ready = {
                 let s = store.lock().await;
                 s.r_prime_bits.is_some() && s.received_shares.len() >= 2 * self.t + 1
@@ -297,10 +318,15 @@ impl<F: PrimeField> EQZNode<F> {
         }
 
         // Wait until `process` reconstructs c and computes d_bits.
-        let d_bits = self.wait_for_d_bits(session, duration).await?;
+        let d_bits_result = self.wait_for_d_bits(session, duration).await;
+        // This party's own c_share-open phase is done either way; clear it
+        // before propagating so a failure here doesn't leak the slot.
+        self.clear_store(session).await;
+        let d_bits = d_bits_result?;
 
-        // KOrCL on the k d_bits, then negate.
-        let u = self
+        // KOrCL on the k d_bits, then negate. EQZ called it, so EQZ clears it
+        // on every exit path, not just success.
+        let u_result = self
             .kor_cl
             .run(
                 d_bits,
@@ -310,7 +336,9 @@ impl<F: PrimeField> EQZNode<F> {
                 network,
                 duration,
             )
-            .await?;
+            .await;
+        self.kor_cl.clear_store(session).await;
+        let u = u_result?;
 
         // Return 1 − u.
         let neg_one = F::zero() - F::one();
