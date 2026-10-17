@@ -1061,6 +1061,37 @@ impl AvssSessionId {
     }
 }
 
+pub fn deser_bounded_feldman_vec<F, G>(
+    r: &mut &[u8],
+    max_outer: usize,
+    max_commitments: usize,
+) -> Result<Vec<FeldmanShamirShare<F, G>>, SerializationError>
+where
+    F: FftField,
+    G: CurveGroup<ScalarField = F>,
+{
+    if r.len() < 8 {
+        return Err(SerializationError::InvalidData);
+    }
+    let (head, tail) = r.split_at(8);
+    let len = u64::from_le_bytes(head.try_into().unwrap());
+    if len > max_outer as u64 {
+        return Err(SerializationError::InvalidData);
+    }
+    let len = len as usize;
+    *r = tail;
+    (0..len)
+        .map(|_| {
+            let feldmanshare = Shamirshare::<F>::deserialize_compressed(&mut *r)?;
+            let commitments = deser_bounded_vec::<G>(r, max_commitments)?;
+            Ok(FeldmanShamirShare {
+                feldmanshare,
+                commitments,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod avss_session_id_tests {
     use super::*;
@@ -1091,35 +1122,4 @@ mod avss_session_id_tests {
             assert!(!alias.is_canonical());
         }
     }
-}
-
-pub fn deser_bounded_feldman_vec<F, G>(
-    r: &mut &[u8],
-    max_outer: usize,
-    max_commitments: usize,
-) -> Result<Vec<FeldmanShamirShare<F, G>>, SerializationError>
-where
-    F: FftField,
-    G: CurveGroup<ScalarField = F>,
-{
-    if r.len() < 8 {
-        return Err(SerializationError::InvalidData);
-    }
-    let (head, tail) = r.split_at(8);
-    let len = u64::from_le_bytes(head.try_into().unwrap());
-    if len > max_outer as u64 {
-        return Err(SerializationError::InvalidData);
-    }
-    let len = len as usize;
-    *r = tail;
-    (0..len)
-        .map(|_| {
-            let feldmanshare = Shamirshare::<F>::deserialize_compressed(&mut *r)?;
-            let commitments = deser_bounded_vec::<G>(r, max_commitments)?;
-            Ok(FeldmanShamirShare {
-                feldmanshare,
-                commitments,
-            })
-        })
-        .collect()
 }
