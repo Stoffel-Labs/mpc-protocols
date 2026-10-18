@@ -52,6 +52,17 @@ Small-field arithmetic is also supported (GF(256) and the Goldilocks field) for 
 
 The workspace contains two crates: **`stoffelcrypto`** (the MPC protocols, in `mpc/`) and **`stoffelmpc-network`** (test network implementations, in `network/`).
 
+The 0.1.2 release includes security hardening and preprocessing API changes; see the [changelog](CHANGELOG.md#012---2026-10-15). Use exact requirements to select this release:
+
+```toml
+[dependencies]
+stoffelcrypto = "=0.1.2"
+# Only needed when using the test network adapters directly:
+stoffelmpc-network = "=0.1.2"
+```
+
+Direct dependency versions are pinned in the workspace manifests. Transitive dependencies still follow their own version requirements; applications should retain their `Cargo.lock` for reproducible builds.
+
 ```
 mpc-protocols/
 ├── Cargo.toml                  # Workspace definition
@@ -71,7 +82,9 @@ mpc-protocols/
 │   │   │   ├── double_share/   # Basic double-share generation
 │   │   │   ├── triple_gen/     # Beaver triple generator
 │   │   │   ├── mul/            # Secure Beaver multiplication
-│   │   │   ├── fpmul/          # Fixed-point mul, truncation, RandBit/PRandBitD, GF(256)
+│   │   │   ├── fpmul/          # Fixed-point mul, truncation, RandBit/PRandInt, GF(256)
+│   │   │   ├── prss/           # Pseudorandom secret sharing for PRandInt masks
+│   │   │   ├── mul_pub/, zero_share/ # Public multiplication and zero-sharing preprocessing
 │   │   │   ├── fpdiv/          # Fixed-point division by a public constant
 │   │   │   ├── input/, output/ # MPC I/O protocols via RBC
 │   │   │   └── preprocessing.rs # Preprocessing material store
@@ -131,6 +144,7 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::time::Duration;
+use stoffelcrypto::common::types::fixed::FixedPointPrecision;
 use stoffelcrypto::common::{rbc::rbc::Avid, MPCProtocol, SecretSharingScheme};
 use stoffelcrypto::honeybadger::{
     robust_interpolate::robust_interpolate::RobustShare, SessionId,
@@ -163,10 +177,10 @@ async fn test_mul() {
         0,                       // n_triples (preprocessing target)
         0,                       // n_random_shares
         111,                     // instance id
-        0,                       // n_prandbit
+        0,                       // n_randbit
         0,                       // n_prandint
-        0,                       // l: fixed-point bit size
-        0,                       // k: security parameter
+        FixedPointPrecision::new(64, 16), // fixed-point bit length and fractional bits
+        40,                      // statistical security parameter
         Duration::from_secs(30), // per-operation timeout
         vec![],                  // client ids for input
     );
@@ -183,8 +197,6 @@ async fn test_mul() {
     for pid in 0..n_parties {
         nodes[pid].preprocessing_material.lock().await.add(
             Some(triples[pid].clone()),
-            None,
-            None,
             None,
             None,
             None,
@@ -262,12 +274,14 @@ This fills the node's preprocessing store with:
 
 - Random Shamir shares (optionally over a small field)
 - Beaver triples (optionally over a small field)
-- PRandBit outputs
+- RandBit outputs
 - PRandInt outputs
 
 Double shares and random double shares are generated and consumed internally during triple generation.
 
-The amounts are controlled by `HoneyBadgerMPCNodeOpts` (`n_triples`, `n_random_shares`, `n_prandbit`, `n_prandint`).
+The amounts are controlled by `HoneyBadgerMPCNodeOpts` (`n_triples`, `n_random_shares`, `n_randbit`, `n_prandint`). RandBit consumes degree-`2t` zero-shares generated during preprocessing; PRandInt masks are derived locally after PRSS key setup. Fixed-point configuration uses `FixedPointPrecision` and a statistical-security parameter.
+
+All servers and clients in one execution must share the same `instance_id`. Use a never-before-used value for each new execution, including retries after a failure or abort, so delayed messages from an earlier run cannot be accepted by the new run.
 
 ---
 
