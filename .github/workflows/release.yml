@@ -38,8 +38,8 @@ jobs:
           ref: ${{ steps.ref.outputs.ref }}
           fetch-depth: 0
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@1.92.0
         with:
           components: rustfmt, clippy
 
