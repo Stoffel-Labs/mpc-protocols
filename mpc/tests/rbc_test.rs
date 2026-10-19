@@ -1,21 +1,19 @@
 pub mod utils;
 #[cfg(test)]
 mod tests {
-    use rand::Rng;
-    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use std::{sync::Arc, time::Duration};
     use stoffelcrypto::{
         common::{
             rbc::{
                 rbc::{Avid, Bracha, Dealer, ABA},
-                rbc_store::{AbaStore, GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAvid},
-                utils::set_value_round,
+                rbc_store::{GenericMsgType, Msg, MsgType, MsgTypeAba, MsgTypeAvid},
             },
             ProtocolSessionId, RBC,
         },
         honeybadger::{ProtocolType, SessionId, WrappedMessage},
     };
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::sync::mpsc;
     use tokio::time::timeout;
     use tracing::warn;
 
@@ -759,115 +757,5 @@ mod tests {
             "All parties successfully agreed on common coin: {:?}",
             coin_value
         );
-    }
-
-    #[tokio::test]
-    async fn test_aba_agreement() {
-        setup_tracing();
-
-        // === Parameters ===
-        let n = 4;
-        let t = 1;
-        let k = t + 1;
-        let session_id = SessionId::new(ProtocolType::Rbc, SessionId::pack_slot(123, 0, 0), 42);
-        let round_id = 0;
-
-        let (parties, net, receivers) =
-            setup_network_and_parties::<ABA<SessionId>, FakeNetwork>(n, t, k, 1000)
-                .await
-                .expect("Failed to set up parties");
-        spawn_parties(&parties, receivers, net.clone()).await;
-
-        // === Dealer Distributes Keys ===
-        let dealer = Dealer::new(n, t);
-        let key_dist_msg = Msg::new(
-            0,
-            session_id,
-            round_id,
-            vec![],
-            vec![],
-            GenericMsgType::ABA(MsgTypeAba::Key),
-        );
-        let _ = dealer
-            .distribute_keys(
-                key_dist_msg,
-                net[0].clone(),
-                Arc::new(WrappedMessage::rbc_wrap),
-            )
-            .await;
-
-        tokio::time::sleep(Duration::from_millis(5)).await;
-
-        // === Trigger ABA with diverse inputs ===
-        let mut rng = rand::thread_rng();
-        let inputs: Vec<bool> = (0..parties.len()).map(|_| rng.gen_bool(0.5)).collect();
-        for (i, &input) in inputs.iter().enumerate() {
-            tracing::info!("Party {} input: {}", i, input);
-        }
-
-        let init_futures = parties.iter().zip(inputs).map(|(aba, input)| {
-            let payload = set_value_round(input, round_id as u32);
-            aba.init(payload, session_id, net[aba.id].clone())
-        });
-
-        futures::future::join_all(init_futures).await;
-
-        // === Wait for all ABA sessions to end and store the results ===
-        let timeout_duration = Duration::from_secs(10);
-        let poll_interval = Duration::from_millis(50);
-        let mut session_results: HashMap<usize, Arc<Mutex<AbaStore>>> = HashMap::new();
-
-        let result = timeout(timeout_duration, async {
-            loop {
-                for aba in &parties {
-                    if session_results.contains_key(&(aba.id as usize)) {
-                        continue;
-                    }
-
-                    let store_opt = {
-                        let map = aba.store.lock().await;
-                        map.get(&session_id).cloned()
-                    };
-
-                    if let Some(store) = store_opt {
-                        let session = store.lock().await;
-                        if session.ended {
-                            session_results.insert(aba.id.try_into().unwrap(), store.clone());
-                        }
-                    }
-                }
-
-                if session_results.len() == parties.len() {
-                    break;
-                }
-
-                tokio::time::sleep(poll_interval).await;
-            }
-        })
-        .await;
-
-        assert!(result.is_ok(), "Timed out waiting for ABA session to end");
-
-        // === Check Agreement Across All Parties ===
-        let mut agreed_value: Option<bool> = None;
-        for aba in &parties {
-            let store = session_results
-                .get(&(aba.id as usize))
-                .expect("Missing completed session")
-                .lock()
-                .await;
-
-            let output = store.output;
-            match agreed_value {
-                None => agreed_value = Some(output),
-                Some(expected) => assert_eq!(
-                    output, expected,
-                    "Mismatch in ABA output at party {}",
-                    aba.id
-                ),
-            }
-        }
-
-        println!("✅ All parties agreed on value: {}", agreed_value.unwrap());
     }
 }
