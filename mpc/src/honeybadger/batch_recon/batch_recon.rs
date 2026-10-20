@@ -412,8 +412,16 @@ impl<F: FftField> BatchReconNode<F> {
                             .collect();
                         let decoded = batch_recover_secret(&agreeing, self.n, self.degree, self.t)?;
                         // The opened value per chunk is the constant term P(0).
-                        let y_j_values: Vec<F> =
-                            decoded.into_iter().map(|coeffs| coeffs[0]).collect();
+                        let y_j_values: Vec<F> = decoded
+                            .into_iter()
+                            .map(|coeffs| {
+                                coeffs.first().copied().ok_or_else(|| {
+                                    BatchReconError::InvalidInput(
+                                        "empty chunk from batch recovery".to_string(),
+                                    )
+                                })
+                            })
+                            .collect::<Result<_, _>>()?;
 
                         store.y_j_batch = Some(y_j_values.clone());
                         drop(store);
@@ -485,7 +493,9 @@ impl<F: FftField> BatchReconNode<F> {
                         let decoded = batch_recover_secret(&agreeing, self.n, self.degree, self.t)?;
                         let mut result = Vec::with_capacity(decoded.len() * (self.degree + 1));
                         for coeffs in decoded {
-                            // `batch_recover_secret` already resizes each chunk to `degree + 1`.
+                            // `batch_recover_secret` normalizes every chunk to `degree + 1`,
+                            // on the optimistic and the OEC fallback branch alike, so the
+                            // flattened layout is a fixed `degree + 1` stride per chunk.
                             result.extend(coeffs);
                         }
 

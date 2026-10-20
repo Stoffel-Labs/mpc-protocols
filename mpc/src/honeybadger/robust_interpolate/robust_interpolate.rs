@@ -434,7 +434,20 @@ pub fn batch_recover_secret<F: FftField>(
                 .iter()
                 .map(|(id, vals)| RobustShare::new(vals[c], *id, degree))
                 .collect();
-            let (coeffs, _) = RobustShare::recover_secret(&shares, n, t)?;
+            let (mut coeffs, _) = RobustShare::recover_secret(&shares, n, t)?;
+            // `recover_secret` returns *normalized* coefficients: ark-poly drops trailing
+            // zeros, so a chunk whose top secret is zero comes back short and an all-zero
+            // chunk comes back empty. The protocol width is `degree + 1`, never `deg(P) + 1` —
+            // without this the flattened batch shifts every value after a short chunk. The
+            // optimistic branch above already allocates the full width.
+            if coeffs.len() > degree + 1 {
+                return Err(InterpolateError::InvalidInput(format!(
+                    "recovered polynomial has {} coefficients, exceeding the declared width {}",
+                    coeffs.len(),
+                    degree + 1
+                )));
+            }
+            coeffs.resize(degree + 1, F::zero());
             results.push(coeffs);
         }
     }
@@ -964,5 +977,77 @@ mod tests {
                 "corrupted chunk {c} secret mismatch"
             );
         }
+    }
+
+    /// Evaluations of `chunks` (each a coefficient vector of the chunk's secrets) at every
+    /// sender point, optionally corrupting sender 0 in every chunk to force the OEC fallback.
+    fn chunk_evals(chunks: &[Vec<Fr>], n: usize, corrupt: bool) -> Vec<(usize, Vec<Fr>)> {
+        use ark_poly::EvaluationDomain;
+        let domain = crate::common::get_or_create_evaluation_domain::<Fr>(n).unwrap();
+        let mut evals: Vec<(usize, Vec<Fr>)> = (0..n)
+            .map(|id| {
+                let x = domain.element(id);
+                let vals = chunks
+                    .iter()
+                    .map(|c| DensePolynomial::from_coefficients_vec(c.clone()).evaluate(&x))
+                    .collect();
+                (id, vals)
+            })
+            .collect();
+        if corrupt {
+            for c in 0..chunks.len() {
+                evals[0].1[c] += Fr::from(99_u64);
+            }
+        }
+        evals
+    }
+
+    /// Every chunk must come back exactly `degree + 1` wide even when the OEC fallback runs,
+    /// because `recover_secret` returns *normalized* coefficients and ark-poly drops trailing
+    /// zeros. Without the resize, a chunk whose top secret is zero comes back short, and the
+    /// flattened batch shifts every value after it into the wrong position.
+    #[test]
+    fn test_batch_recover_secret_pads_zero_terminated_chunks() {
+        let (n, t, degree) = (4_usize, 1_usize, 1_usize);
+        let a = Fr::from(7_u64);
+        let (b, c) = (Fr::from(11_u64), Fr::from(13_u64));
+
+        // Trailing zero: secrets [7, 0] would normalize to a single coefficient.
+        let chunks = vec![vec![a, Fr::zero()]];
+        let decoded = batch_recover_secret(&chunk_evals(&chunks, n, true), n, degree, t).unwrap();
+        assert_eq!(decoded, vec![vec![a, Fr::zero()]]);
+
+        // All-zero: would normalize to an empty vector and panic any `coeffs[0]` consumer.
+        let chunks = vec![vec![Fr::zero(), Fr::zero()]];
+        let decoded = batch_recover_secret(&chunk_evals(&chunks, n, true), n, degree, t).unwrap();
+        assert_eq!(decoded, vec![vec![Fr::zero(), Fr::zero()]]);
+
+        // A short chunk ahead of a full one: the alignment case. Flattening must keep the
+        // fixed `degree + 1` stride, so `b` and `c` stay in chunk 1.
+        let chunks = vec![vec![a, Fr::zero()], vec![b, c]];
+        let decoded = batch_recover_secret(&chunk_evals(&chunks, n, true), n, degree, t).unwrap();
+        let flat: Vec<Fr> = decoded.into_iter().flatten().collect();
+        assert_eq!(flat, vec![a, Fr::zero(), b, c]);
+
+        // The honest (optimistic) path must agree with the fallback on the same secrets.
+        let decoded = batch_recover_secret(&chunk_evals(&chunks, n, false), n, degree, t).unwrap();
+        let flat: Vec<Fr> = decoded.into_iter().flatten().collect();
+        assert_eq!(flat, vec![a, Fr::zero(), b, c]);
+    }
+
+    /// The fallback needs `degree + t + 2` evaluations for OEC, so a quorum of exactly
+    /// `degree + t + 1` containing a corrupt sender must fail rather than return a value; one
+    /// extra evaluation then lets it recover at the full width.
+    #[test]
+    fn test_batch_recover_secret_retry_after_short_quorum() {
+        let (n, t, degree) = (4_usize, 1_usize, 1_usize);
+        let chunks = vec![vec![Fr::from(7_u64), Fr::zero()]];
+        let evals = chunk_evals(&chunks, n, true);
+
+        let quorum = degree + t + 1;
+        assert!(batch_recover_secret(&evals[..quorum], n, degree, t).is_err());
+
+        let decoded = batch_recover_secret(&evals, n, degree, t).unwrap();
+        assert_eq!(decoded, vec![vec![Fr::from(7_u64), Fr::zero()]]);
     }
 }

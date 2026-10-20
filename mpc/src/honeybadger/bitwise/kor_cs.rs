@@ -221,8 +221,11 @@ impl<F: PrimeField> KOrCSNode<F> {
             let Some(opened) = s.open.clone() else {
                 return Ok(());
             };
-            if opened.len() < s.k {
-                return Err(KOrCSError::Abort);
+            // Exact padded width, not `>= k`: a short vector shifts real values into the
+            // padding positions the `[..k]` trim below drops, which a `>= k` check accepts
+            // silently.
+            if opened.len() != s.pk {
+                return Err(KOrCSError::LengthError);
             }
             (s.r_shares.clone(), s.alpha.clone(), opened, s.k)
         };
