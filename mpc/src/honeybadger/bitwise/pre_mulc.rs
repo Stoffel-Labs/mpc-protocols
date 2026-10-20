@@ -359,7 +359,7 @@ impl<F: PrimeField> PreMulCOnlineNode<F> {
     }
 
     pub async fn clear_store(&self, session: SessionId) -> Result<(), PreMulCError> {
-        self.batch_recon.clear_entire_store().await;
+        self.batch_recon.clear_store(session).await;
         self.mul.clear_store(session).await;
         if self.online_store.lock().await.retire(session) {
             Ok(())

@@ -998,10 +998,8 @@ where
             statistics::record_received(&wrapped, &self.statistics_counters.received);
         }
 
-        if let WrappedMessage::Rbc(m) = &wrapped {
-            if !m.session_id.is_canonical() {
-                return Err(HoneyBadgerError::InvalidSessionId(m.session_id));
-            }
+        if let Some(session_id) = wrapped.non_canonical_session_id() {
+            return Err(HoneyBadgerError::InvalidSessionId(session_id));
         }
 
         let is_client_input_broadcast = match &wrapped {
@@ -3360,6 +3358,44 @@ impl WrappedMessage {
         let wrapped = WrappedMessage::Rbc(msg);
         Ok(bincode::serialize(&wrapped)?)
     }
+
+    /// Returns the message's session id when it is a non-canonical alias that must be rejected
+    /// before routing or admission (see [`SessionId::is_canonical`]).
+    ///
+    /// Two groups of messages are exempt. `Input`/`Output` carry no session id at all — theirs
+    /// is rebuilt locally from `instance_id`. And `FpDivMulA`-tagged `Mult`/`BatchRecon` messages
+    /// legitimately carry a nonzero reserved byte: FpDiv encodes its per-Multiply-call index
+    /// there via [`SessionId::with_extra_bits`] and `Multiplication` propagates it to that call's
+    /// child BatchRecon sessions. Those cannot be range-checked here either, since the receiver
+    /// has no way to know how many refinement iterations the sender's `k` implies — so for that
+    /// one tag the byte stays unvalidated.
+    pub fn non_canonical_session_id(&self) -> Option<SessionId> {
+        let session_id = match self {
+            WrappedMessage::RanDouSha(m) => m.session_id,
+            WrappedMessage::Rbc(m) => m.session_id,
+            WrappedMessage::BatchRecon(m) => m.session_id,
+            WrappedMessage::RanSha(m) => m.session_id,
+            WrappedMessage::Dousha(m) => m.session_id,
+            WrappedMessage::PRandInt(m) => m.session_id,
+            WrappedMessage::Mult(m) => m.session_id,
+            WrappedMessage::Trunc(m) => m.session_id,
+            WrappedMessage::ZeroSha(m) => m.session_id,
+            WrappedMessage::Mod2(m) => m.session_id,
+            WrappedMessage::PreMod2m(m) => m.session_id,
+            WrappedMessage::KOrCl(m) => m.session_id,
+            WrappedMessage::Eqz(m) => m.session_id,
+            WrappedMessage::Input(_) | WrappedMessage::Output(_) => return None,
+        };
+
+        let carries_fpdiv_call_index = session_id.calling_protocol()
+            == Some(ProtocolType::FpDivMulA)
+            && matches!(
+                self,
+                WrappedMessage::Mult(_) | WrappedMessage::BatchRecon(_)
+            );
+
+        (!carries_fpdiv_call_index && !session_id.is_canonical()).then_some(session_id)
+    }
 }
 
 //-----------------Session-ID-----------------
@@ -3674,6 +3710,7 @@ impl SessionId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::honeybadger::batch_recon::BatchReconMsgType;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -3755,6 +3792,45 @@ mod tests {
             assert_eq!(alias.instance_id(), session_id.instance_id());
             assert!(!alias.is_canonical());
         }
+    }
+
+    /// Every message type that carries a session id over the wire must have its reserved byte
+    /// rejected at the dispatcher, not just RBC. `FpDivMulA`-tagged Mult/BatchRecon traffic is
+    /// the sole exemption, because FpDiv's per-call index lives in that byte.
+    #[test]
+    fn test_non_canonical_session_id_rejected_per_message_type() {
+        let alias = |protocol| {
+            let canonical = SessionId::new(protocol, SessionId::pack_slot(4, 0, 0), 9);
+            (canonical, canonical.with_extra_bits(1))
+        };
+
+        let (canonical, aliased) = alias(ProtocolType::Trunc);
+        let msg = |sid| WrappedMessage::Trunc(TruncPrMessage::new(0, sid, vec![]));
+        assert_eq!(msg(aliased).non_canonical_session_id(), Some(aliased));
+        assert_eq!(msg(canonical).non_canonical_session_id(), None);
+
+        let (canonical, aliased) = alias(ProtocolType::LTZ);
+        let msg = |sid| WrappedMessage::Mod2(Mod2Message::new(0, sid, vec![]));
+        assert_eq!(msg(aliased).non_canonical_session_id(), Some(aliased));
+        assert_eq!(msg(canonical).non_canonical_session_id(), None);
+
+        // Mult/BatchRecon under any other tag are still checked...
+        let (_, aliased) = alias(ProtocolType::Mul);
+        let msg = WrappedMessage::Mult(MultMessage::new(0, aliased, vec![]));
+        assert_eq!(msg.non_canonical_session_id(), Some(aliased));
+
+        // ...but FpDivMulA legitimately encodes its Multiply call index there, on both the
+        // parent Mult session and the child BatchRecon sessions derived from it.
+        let (_, aliased) = alias(ProtocolType::FpDivMulA);
+        let msg = WrappedMessage::Mult(MultMessage::new(0, aliased, vec![]));
+        assert_eq!(msg.non_canonical_session_id(), None);
+        let msg = WrappedMessage::BatchRecon(BatchReconMsg::new(
+            0,
+            aliased,
+            BatchReconMsgType::Eval,
+            vec![],
+        ));
+        assert_eq!(msg.non_canonical_session_id(), None);
     }
 
     #[tokio::test]

@@ -478,17 +478,18 @@ where
             statistics::record_received(&wrapped, &self.statistics_counters.received);
         }
 
+        // Reject session ids with nonzero reserved bits before any routing or admission
+        // decision is made from them: left unchecked, such a value hashes and compares
+        // as a distinct session id from its canonical counterpart while every accessor
+        // reports the same protocol/round/sub/exec/instance fields, letting a single
+        // logical session be re-admitted many times against session-count caps (see
+        // `AvssSessionId::is_canonical`).
+        if let Some(session_id) = wrapped.non_canonical_session_id() {
+            return Err(AvssMPCError::InvalidSessionId(session_id));
+        }
+
         match wrapped {
             AvssWrappedMessage::Rbc(rbc_msg) => {
-                // Reject session ids with nonzero reserved bits before any routing or admission
-                // decision is made from them: left unchecked, such a value hashes and compares
-                // as a distinct session id from its canonical counterpart while every accessor
-                // reports the same protocol/round/sub/exec/instance fields, letting a single
-                // logical session be re-admitted many times against session-count caps (see
-                // `AvssSessionId::is_canonical`).
-                if !rbc_msg.session_id.is_canonical() {
-                    return Err(AvssMPCError::InvalidSessionId(rbc_msg.session_id));
-                }
                 if sender_id != rbc_msg.sender_id {
                     return Err(AvssMPCError::InvalidPartyId);
                 }
@@ -935,6 +936,21 @@ impl AvssWrappedMessage {
     pub fn agreement_wrap(msg: AvssAgreementMessage<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = AvssWrappedMessage::Agreement(msg);
         Ok(bincode::serialize(&wrapped)?)
+    }
+
+    /// Returns the message's session id when it is a non-canonical alias that must be rejected
+    /// before routing or admission (see [`AvssSessionId::is_canonical`]). `Input`/`Output` carry
+    /// no session id — theirs is rebuilt locally from `instance_id`.
+    pub fn non_canonical_session_id(&self) -> Option<AvssSessionId> {
+        let session_id = match self {
+            AvssWrappedMessage::Rbc(m) => m.session_id,
+            AvssWrappedMessage::Avss(m) => m.session_id,
+            AvssWrappedMessage::Mul(m) => m.session_id,
+            AvssWrappedMessage::Agreement(m) => m.session_id(),
+            AvssWrappedMessage::Input(_) | AvssWrappedMessage::Output(_) => return None,
+        };
+
+        (!session_id.is_canonical()).then_some(session_id)
     }
 }
 
