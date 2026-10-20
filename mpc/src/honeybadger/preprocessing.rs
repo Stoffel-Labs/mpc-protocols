@@ -1,5 +1,5 @@
 use crate::honeybadger::{
-    bitwise::{AppRecPrep, PRandMPrep, PreBitLTPrep, PreMod2mPrep, PreMulCPrep},
+    bitwise::{AppRecPrep, PRandMPrep, PreBitLTPrep, PreMod2mPrep, PreMulCPrep, SufOrPrep},
     fpdiv::{
         fpdiv::{FpDivIterPrep, FpDivPrep},
         fpdiv_theta,
@@ -542,6 +542,18 @@ where
         sufor_prep: PreMulCPrep<F>,
     ) -> Result<FpDivPrep<F>, HoneyBadgerError> {
         let bitdec_prep = self.build_premod2m_prep(k - 1, bitdec_suf_mul_inv_prep)?;
+
+        // SufOr runs on k-1 inputs (AppRec's xor_bits); PreOrC needs a Mod2
+        // call for each of those but the first — see suf_or.rs.
+        let sufor_mod2_count = (k - 1).saturating_sub(1);
+        let mut sufor_mod2_preps = Vec::with_capacity(sufor_mod2_count);
+        for _ in 0..sufor_mod2_count {
+            sufor_mod2_preps.push(self.take_mod2_prandm_prep()?);
+        }
+        let sufor_prep = SufOrPrep {
+            premulc_prep: sufor_prep,
+            mod2_preps: sufor_mod2_preps,
+        };
 
         let apprec_trunc_prandm = self.take_prandm_prep(2 * (k - f - 1))?;
         let app_rec_prep = AppRecPrep {

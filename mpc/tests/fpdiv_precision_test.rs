@@ -99,14 +99,23 @@ fn spawn_fpdiv_receiver_tasks(
                             .expect("bitdec pre_mod2m process failed");
                     }
                     WrappedMessage::Mod2(msg) => {
-                        node.app_rec
-                            .bit_dec
-                            .pre_mod2m
-                            .pre_bitlt
-                            .mod2
-                            .process(msg)
-                            .await
-                            .expect("nested mod2 process failed");
+                        if msg.session_id.calling_protocol() == Some(ProtocolType::SufOr) {
+                            node.app_rec
+                                .suf_or
+                                .mod2
+                                .process(msg)
+                                .await
+                                .expect("sufor mod2 process failed");
+                        } else {
+                            node.app_rec
+                                .bit_dec
+                                .pre_mod2m
+                                .pre_bitlt
+                                .mod2
+                                .process(msg)
+                                .await
+                                .expect("nested mod2 process failed");
+                        }
                     }
                     WrappedMessage::Mult(msg) => {
                         let proto = msg.session_id.calling_protocol();

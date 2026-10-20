@@ -5,7 +5,7 @@ use ark_std::test_rng;
 use itertools::izip;
 use stoffelcrypto::common::SecretSharingScheme;
 use stoffelcrypto::honeybadger::bitwise::{
-    kor_cs::KOrCSPrep, AppRecPrep, PRandMPrep, PreBitLTPrep, PreMod2mPrep, PreMulCPrep,
+    kor_cs::KOrCSPrep, AppRecPrep, PRandMPrep, PreBitLTPrep, PreMod2mPrep, PreMulCPrep, SufOrPrep,
 };
 use stoffelcrypto::honeybadger::fpdiv::fpdiv::{FpDivIterPrep, FpDivPrep};
 use stoffelcrypto::honeybadger::fpdiv::fpdiv_theta;
@@ -176,6 +176,24 @@ pub fn make_zero_shares(n: usize, t: usize, k: usize) -> Vec<Vec<RobustShare<Fr>
     per_party
 }
 
+/// SufOr preprocessing for k inputs: PreMulC prep for k (shifted-by-one)
+/// inputs, plus k-1 independent PRandMPrep sets for the k-1 parallel Mod2
+/// calls (PreOrC's `p_1` needs none).
+pub fn make_sufor_prep(k: usize, n: usize, t: usize) -> Vec<SufOrPrep<Fr>> {
+    let premulc_prep = make_premulc_prep(k, n, t);
+    let mod2_count = k.saturating_sub(1);
+    let mod2_preps_per_bit: Vec<Vec<PRandMPrep<Fr>>> =
+        (0..mod2_count).map(|_| make_mod2_prep(k, n, t)).collect();
+    (0..n)
+        .map(|p| SufOrPrep {
+            premulc_prep: premulc_prep[p].clone(),
+            mod2_preps: (0..mod2_count)
+                .map(|b| mod2_preps_per_bit[b][p].clone())
+                .collect(),
+        })
+        .collect()
+}
+
 /// PreBitLT preprocessing for k bits: SufMulInv prep for k inputs, k-1 Beaver
 /// triples (phase 4's Multiply), and k independent PRandMPrep sets (one per
 /// parallel Mod2 call in phase 5).
@@ -218,7 +236,7 @@ pub fn make_apprec_prep(
     t: usize,
 ) -> Vec<AppRecPrep<Fr>> {
     let mut bitdec_prep = make_premod2m_prep(dp_bits, k - 1, n, t).into_iter();
-    let mut sufor_prep = make_premulc_prep(k - 1, n, t).into_iter();
+    let mut sufor_prep = make_sufor_prep(k - 1, n, t).into_iter();
     let mut xor_triples = make_triples(n, t, k - 1).into_iter();
     let mut batch_triples = make_triples(n, t, 2).into_iter();
     let mut final_triple = make_triples(n, t, 1).into_iter();

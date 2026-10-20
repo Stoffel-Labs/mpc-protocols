@@ -238,6 +238,29 @@ pub enum PreBitLTError {
     ShareError(#[from] ShareError),
 }
 
+/// All preprocessing material required for one SufOr execution on k inputs
+/// (Protocol 4.4 PreOrC, reversed).
+#[derive(Clone, Debug)]
+pub struct SufOrPrep<F: FftField> {
+    /// Preprocessing for the inner PreMulC call on the (shifted-by-one) inputs.
+    pub premulc_prep: PreMulCPrep<F>,
+    /// k-1 PRandMPrep values for the k-1 parallel Mod2 calls (PreOrC lines
+    /// 2 onward — the first output needs no Mod2, only the remaining k-1 do).
+    pub mod2_preps: Vec<PRandMPrep<F>>,
+}
+
+#[derive(Debug, Error)]
+pub enum SufOrError {
+    #[error("PreMulC error: {0}")]
+    PreMulCError(#[from] PreMulCError),
+    #[error("Mod2 error: {0}")]
+    Mod2Error(#[from] Mod2Error),
+    #[error("share error: {0}")]
+    ShareError(#[from] ShareError),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+}
+
 // ── Preprocessing ──────────────────────────────────────────────────────────────
 
 /// All preprocessing for one PreMod2m execution.
@@ -418,7 +441,7 @@ pub struct AppRecPrep<F: FftField> {
     /// BitDec's own preprocessing (internally PreMod2m with m = k-1).
     pub bitdec_prep: PreMod2mPrep<F>,
     /// SufOr's preprocessing, sized for k-1 inputs.
-    pub sufor_prep: PreMulCPrep<F>,
+    pub sufor_prep: SufOrPrep<F>,
     /// k-1 triples for step 3's XOR round (`b_i * b_{k-1}`).
     pub xor_triples: Vec<ShamirBeaverTriple<F>>,
     /// 2 triples for the batched round: `v*b` (step 7) and `c_0*b_{k-1}` (step 6).

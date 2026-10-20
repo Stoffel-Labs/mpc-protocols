@@ -1,59 +1,54 @@
-//! SufOr — suffix OR over shared bits (Catrina & de Hoogh 2010, Section 4.2).
+//! SufOr — suffix OR over shared bits (Catrina & de Hoogh 2010, Section 4.2,
+//! Protocol 4.4 PreOrC, reversed).
 //!
 //! Computes [SufOr_j] = b_j OR b_{j+1} OR ... OR b_k  for each j in [1..k].
 //!
-//! # Why complements?
+//! # Construction (PreOrC)
 //!
-//! OR cannot be computed directly as a field operation. De Morgan's law gives
-//! the algebraic bridge:
+//! De Morgan's law gives the algebraic bridge from product to OR:
 //!
-//!   OR(b_j, ..., b_k) = 1 - (1-b_j)(1-b_{j+1})...(1-b_k)
+//!   OR(a_1, ..., a_i) = 1 - (1-a_1)(1-a_2)...(1-a_i)
 //!
-//! For bits b_i in {0,1}, each complement (1-b_i) is also in {0,1}, so their
-//! product is in {0,1}: it equals 1 iff ALL bits are 0, and 0 iff ANY bit is 1.
-//! Complementing the product recovers OR. This means OR reduces to a product
-//! computation — exactly what PreMulC does efficiently.
+//! but complementing the bits first and feeding `(1-a_i)` straight into
+//! PreMulC — this module's previous construction — reveals each bit directly:
+//! PreMulC's online phase opens a mask times the raw input at every position,
+//! and a multiplicative mask can never hide whether its input was zero
+//! (`w * 0 = 0` for any `w`). `(1-a_i)` is zero exactly when `a_i` is 1, so
+//! that reveal leaked the bit on every honest execution (see pre_mulc.rs's
+//! precondition doc, and project history: this was the secret-divisor-bit
+//! leak in FXDiv's AppRec).
+//!
+//! PreOrC avoids this by shifting instead of complementing: feed `(a_i + 1)`
+//! into PreMulC. Each factor is in {1, 2} — always non-zero regardless of
+//! `a_i` — so the masked reveal carries no information about any individual
+//! bit (same safety argument as SufMulInv's `d_i + 1`). The prefix product
+//! `b_i = Π_{j=1}^i (a_j + 1)` is then odd iff every `a_j` in the prefix is 0,
+//! and even iff any is 1 — so OR is recovered from `b_i`'s *parity alone*,
+//! extracted via Mod2's own (additive, equally safe) masked reveal:
+//!
+//!   [b_1],...,[b_k] ← PreMulC([a_1]+1, ..., [a_k]+1)
+//!   [p_1] ← [a_1]
+//!   [p_i] ← 1 - Mod2([b_i], k)   for i ∈ [2..k]
 //!
 //! # Why reverse?
 //!
-//! Without reversal, complement → PreMulC → complement gives PREFIX OR:
-//!
-//!   PrefOr_j = OR(b_1, ..., b_j)        [products grow left-to-right]
-//!
-//! Reversing the input before PreMulC makes the prefix products grow
-//! right-to-left over the original array. Reversing the output maps them back
-//! to the original index order, giving SUFFIX OR:
-//!
-//!   SufOr_j = OR(b_j, ..., b_k)         [same formula, reversed direction]
-//!
-//! Reversal is the only difference between Prefix OR and Suffix OR.
-//! The paper states this directly: "SufOr is PreOr with inputs and outputs
-//! in inverse order."
-//!
-//! # Steps (all local except the embedded PreMulCOnline call)
-//!
-//!   1. [c_i] = 1 - [b_i]                complement each bit (De Morgan)
-//!   2. reverse [c_1..c_k] → [c_k..c_1]  so PreMulC runs right-to-left
-//!   3. PreMulCOnline → prefix products of reversed complements
-//!   4. reverse output → suffix products of complements in original order
-//!   5. [SufOr_j] = 1 - [S_j]            complement recovers OR from product
-//!
-//! # Efficiency vs paper's PreOrC
-//!
-//! The paper's PreOrC feeds (b_i + 1) into PreMulC and then calls Mod2 on each
-//! product to extract its LSB. That extra Mod2 step costs 1 round and 2k
-//! invocations. Since our inputs are guaranteed bits, (1-b_i) is already in
-//! {0,1} and the product is already a bit — Mod2 is unnecessary.
-//!   My SufOr:  2 rounds, 3k-1 invocations
-//!   PreOrC:    3 rounds, 5k-1 invocations
+//! PreOrC computes PREFIX OR. Reversing the input before it and the output
+//! after it turns prefix-OR over the reversed array into SUFFIX OR over the
+//! original array — the paper states this directly: "SufOr is PreOr with
+//! inputs and outputs in inverse order." Reversal is the only difference
+//! between the two; it's unchanged by this fix.
 //!
 //! # Preprocessing
 //!
-//! Identical to PreMulC: call PreMulCOfflineNode offline and pass the resulting
-//! PreMulCPrep here. No new message types or session IDs are introduced.
+//! `SufOrPrep` bundles the inner PreMulC bundle (sized for k inputs) with
+//! k-1 PRandMPrep values for the k-1 Mod2 calls (`p_1` needs none).
 
 use crate::honeybadger::{
-    bitwise::{pre_mulc::PreMulCOnlineNode, PreMulCError, PreMulCPrep},
+    bitwise::{
+        mod2::Mod2Node,
+        pre_mulc::PreMulCOnlineNode,
+        {SufOrError, SufOrPrep},
+    },
     robust_interpolate::robust_interpolate::RobustShare,
     SessionId,
 };
@@ -66,80 +61,145 @@ use tracing::warn;
 #[derive(Clone, Debug)]
 pub struct SufOrNode<F: PrimeField> {
     pub inner: PreMulCOnlineNode<F>,
+    pub mod2: Mod2Node<F>,
 }
 
 impl<F: PrimeField> SufOrNode<F> {
-    pub fn new(id: usize, n: usize, t: usize) -> Result<Self, PreMulCError> {
+    pub fn new(id: usize, n: usize, t: usize) -> Result<Self, SufOrError> {
         Ok(Self {
             inner: PreMulCOnlineNode::new(id, n, t)?,
+            mod2: Mod2Node::new(id, n, t)?,
         })
     }
 
     /// Runs suffix-OR on shared bits [b_1, ..., b_k] to completion and returns
     /// [SufOr_1, ..., SufOr_k] in original (non-reversed) order.
     ///
+    /// `k_bits`: public bit-width passed through to Mod2's reveal offset
+    /// (`2^{k_bits-1}`) — reuse the caller's own outer bit-width here, the
+    /// same convention PreBitLT follows for its internal Mod2 calls on
+    /// derived (not full-width) quantities; it only needs to exceed every
+    /// prefix product's possible magnitude (bounded by `2^bits.len()`).
+    ///
     /// Inputs must be secret-shared bits (values in {0,1}).
-    /// Blocks internally on the embedded PreMulCOnline round until the result
-    /// is ready or `duration` elapses. The outer message loop must keep
-    /// routing incoming batch-recon messages to `inner.batch_recon` and
-    /// calling `inner.drain_batch_recon_output()` concurrently while this
-    /// call is in flight, or it will time out.
+    /// Blocks internally on the embedded PreMulCOnline round and the Mod2
+    /// batch round until the result is ready or `duration` elapses. The
+    /// outer message loop must keep routing incoming batch-recon messages to
+    /// `inner.batch_recon`/`inner.mul.batch_recon` and Mod2 messages to
+    /// `mod2`, calling the respective drain functions concurrently while
+    /// this call is in flight, or it will time out.
     pub async fn init<N: Network + Send + Sync>(
         &mut self,
         bits: Vec<RobustShare<F>>,
-        prep: PreMulCPrep<F>,
+        k_bits: usize,
+        prep: SufOrPrep<F>,
         session: SessionId,
         network: Arc<N>,
         mul_duration: Duration,
         duration: Duration,
-    ) -> Result<Vec<RobustShare<F>>, PreMulCError> {
-        let neg_one = -F::one();
-
-        // Step 1: [c_i] = 1 - [b_i].
-        let mut complements: Vec<RobustShare<F>> = Vec::with_capacity(bits.len());
-        for b in bits {
-            let c = ((b * neg_one)? + F::one())?;
-            complements.push(c);
+    ) -> Result<Vec<RobustShare<F>>, SufOrError> {
+        let k = bits.len();
+        if prep.mod2_preps.len() != k.saturating_sub(1) {
+            return Err(SufOrError::InvalidInput(format!(
+                "mod2_preps.len() ({}) != k-1 ({})",
+                prep.mod2_preps.len(),
+                k.saturating_sub(1)
+            )));
         }
 
-        // Step 2: reverse complements [c_1..c_k] → [c_k..c_1].
-        complements.reverse();
+        // Step 1: reverse input so PreMulC's prefix runs right-to-left over
+        // the original array — prefix-OR of the reversed array is suffix-OR
+        // of the original (see module docs).
+        let mut rev = bits;
+        rev.reverse();
 
-        // Step 3: prefix products of reversed complements via PreMulC.
-        // P'_j = c_k * c_{k-1} * ... * c_{k-j+1} = ∏_{i=k-j+1}^{k} (1-b_i)
+        // Step 2: [a_i + 1] — always in {1,2}, non-zero regardless of a_i.
+        let shifted: Vec<RobustShare<F>> = rev
+            .iter()
+            .map(|a| a.clone() + F::one())
+            .collect::<Result<_, _>>()?;
+
+        // Step 3: prefix products of the shifted array via PreMulC.
         let init_result = self
             .inner
-            .init(complements, prep, session, network, mul_duration)
+            .init(
+                shifted,
+                prep.premulc_prep,
+                session,
+                Arc::clone(&network),
+                mul_duration,
+            )
             .await;
         if init_result.is_err() {
             if let Err(e) = self.inner.clear_store(session).await {
-                warn!("SufOr: failed to clear store for session {session:?}: {e:?}");
+                warn!("SufOr: failed to clear premulc store for session {session:?}: {e:?}");
             }
         }
         init_result?;
-        let result = self.inner.wait_for_result(session, duration).await;
+        let inner_result = self.inner.wait_for_result(session, duration).await;
         if let Err(e) = self.inner.clear_store(session).await {
-            warn!("SufOr: failed to clear store for session {session:?}: {e:?}");
+            warn!("SufOr: failed to clear premulc store for session {session:?}: {e:?}");
         }
-        let (mut p, _) = result?;
+        let (b_vals, _) = inner_result?;
+        if b_vals.len() != k {
+            return Err(SufOrError::InvalidInput(format!(
+                "PreMulC returned {} values, expected {k}",
+                b_vals.len()
+            )));
+        }
 
-        // Step 4: reverse prefix products back to original index order.
-        // After reversal, position j holds S_j = ∏_{i=j}^{k} (1-b_i),
-        // which is the suffix product of complements starting at j.
+        // Step 4: p_1 = a_1 directly; p_i = 1 - Mod2(b_i, k) for i = 2..k,
+        // batched into one combined Mod2 round (b_vals[1..], i.e. b_2..b_k).
+        let mut p: Vec<RobustShare<F>> = Vec::with_capacity(k);
+        p.push(rev[0].clone());
+
+        if k > 1 {
+            let mod2_inputs = b_vals[1..].to_vec();
+            let mod2_result = self
+                .mod2
+                .init_batch(
+                    mod2_inputs,
+                    k_bits,
+                    prep.mod2_preps,
+                    session,
+                    Arc::clone(&network),
+                )
+                .await;
+            if mod2_result.is_err() {
+                if let Err(e) = self.mod2.clear_store(session).await {
+                    warn!("SufOr: failed to clear mod2 store for session {session:?}: {e:?}");
+                }
+            }
+            mod2_result?;
+            let mod2_out = self.mod2.wait_for_batch_result(session, duration).await;
+            if let Err(e) = self.mod2.clear_store(session).await {
+                warn!("SufOr: failed to clear mod2 store for session {session:?}: {e:?}");
+            }
+            let mod2_vals = mod2_out?;
+            if mod2_vals.len() != k - 1 {
+                return Err(SufOrError::InvalidInput(format!(
+                    "Mod2 returned {} values, expected {}",
+                    mod2_vals.len(),
+                    k - 1
+                )));
+            }
+
+            let one = RobustShare::new(F::one(), self.inner.id, self.inner.t);
+            for m in mod2_vals {
+                p.push((one.clone() - m)?);
+            }
+        }
+
+        // Step 5: reverse back — prefix-OR of the reversed array, in
+        // reversed-index order, is suffix-OR of the original array, in
+        // original index order.
         p.reverse();
-
-        // Step 5: [SufOr_j] = 1 - [S_j].
-        // S_j = 0 if any b_i = 1 for i in [j..k], else S_j = 1.
-        // Complementing gives SufOr_j = OR(b_j, ..., b_k).
-        let mut result = Vec::with_capacity(p.len());
-        for s in p {
-            let or_j = ((s * neg_one)? + F::one())?;
-            result.push(or_j);
-        }
-        Ok(result)
+        Ok(p)
     }
 
-    pub async fn clear_store(&self, session: SessionId) -> Result<(), PreMulCError> {
-        self.inner.clear_store(session).await
+    pub async fn clear_store(&self, session: SessionId) -> Result<(), SufOrError> {
+        self.inner.clear_store(session).await?;
+        self.mod2.clear_store(session).await?;
+        Ok(())
     }
 }

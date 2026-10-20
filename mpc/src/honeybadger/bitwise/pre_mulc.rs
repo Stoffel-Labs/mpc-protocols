@@ -419,6 +419,19 @@ impl<F: PrimeField> PreMulCOnlineNode<F> {
 
     /// Protocol 4.2 lines 9–12. k must be a multiple of (t+1).
     ///
+    /// # Precondition: every `a_i` must be non-zero for every value its
+    /// underlying secret can take — not just "usually nonzero in practice."
+    ///
+    /// This function reveals `m_i = w_i * a_i` for each input (via Multiply +
+    /// batch reconstruction, below). Multiplying by a uniformly random
+    /// non-zero mask `w_i` hides *which* non-zero value `a_i` is, but can
+    /// never hide *whether* `a_i` is zero: `0 * w_i = 0` regardless of `w_i`,
+    /// however securely it was generated. If `a_i` is an application secret
+    /// that can legitimately be zero (e.g. a raw bit), this reveal leaks that
+    /// bit on every honest, successful execution — no caller can check this
+    /// at runtime either, since a single share of a non-zero secret is
+    /// locally indistinguishable from a share of zero.
+    ///
     /// Drive `drain_batch_recon_output` until `wait_for_result` resolves.
     ///
     /// On error, callers must clear `online_store` for `session` themselves —

@@ -1295,6 +1295,15 @@ where
                             .process(mod2_msg)
                             .await?;
                     }
+                    Some(ProtocolType::SufOr) => {
+                        self.type_ops
+                            .fpdiv
+                            .app_rec
+                            .suf_or
+                            .mod2
+                            .process(mod2_msg)
+                            .await?;
+                    }
                     _ => {
                         warn!(
                             "Unknown protocol ID in session ID: {:?} in Mod2",

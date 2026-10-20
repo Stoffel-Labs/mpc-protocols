@@ -26,13 +26,17 @@ pub fn fpdiv_theta(k: usize) -> usize {
 ///
 /// Cross-checked numerically against the fully-composed version for several
 /// (k, f) pairs. Step 8 (Round B: 1 triple, `2f` prandbit, 1 prandint) runs
-/// once total, not once per loop iteration
+/// once total, not once per loop iteration. `sufor_mod2 = (k-1)-1 = k-2`
+/// accounts for SufOr's PreOrC-based Mod2 calls (one per input but the
+/// first; SufOr runs on AppRec's k-1 xor_bits) — each draws 1 randbit + 1
+/// prandint via `take_mod2_prandm_prep`.
 pub fn fpdiv_prep_counts(k: usize, f: usize) -> (usize, usize, usize, usize) {
     let num_iters = fpdiv_theta(k).saturating_sub(1);
+    let sufor_mod2 = k.saturating_sub(2);
     let triples = 6 * k - 3 + 2 * num_iters;
     let random_shares = 4 * k - 4;
-    let prandbit = 4 * k + f - 4 + 4 * f * num_iters;
-    let prandint = k + 3 + 2 * num_iters;
+    let prandbit = 4 * k + f - 4 + 4 * f * num_iters + sufor_mod2;
+    let prandint = k + 3 + 2 * num_iters + sufor_mod2;
     (triples, random_shares, prandbit, prandint)
 }
 

@@ -2,8 +2,8 @@ pub mod utils;
 
 use crate::utils::comparison_utils::{
     field_to_signed_real, make_apprec_prep, make_fpdiv_prep, make_mod2_prep, make_prebitlt_prep,
-    make_premod2m_prep, make_premulc_prep, make_triples, make_zero_shares, share_signed_fixed,
-    share_value,
+    make_premod2m_prep, make_premulc_prep, make_sufor_prep, make_triples, make_zero_shares,
+    share_signed_fixed, share_value,
 };
 use crate::utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 use ark_bls12_381::Fr;
@@ -497,6 +497,9 @@ fn spawn_sufor_receiver_tasks(
                             .await
                             .expect("mul process failed");
                     }
+                    WrappedMessage::Mod2(msg) => {
+                        node.mod2.process(msg).await.expect("mod2 process failed");
+                    }
                     _ => warn!("unexpected message type"),
                 }
             }
@@ -526,7 +529,7 @@ async fn suf_or_run(bit_vals: Vec<u64>) {
         }
     }
 
-    let prep = make_premulc_prep(k, n, t);
+    let prep = make_sufor_prep(k, n, t);
     let (network, receivers, _, _) = test_setup(n, vec![]);
     let nodes: Vec<SufOrNode<Fr>> = (0..n).map(|id| SufOrNode::new(id, n, t).unwrap()).collect();
     let _recv = spawn_sufor_receiver_tasks(n, receivers, nodes.clone(), network.clone());
@@ -538,7 +541,7 @@ async fn suf_or_run(bit_vals: Vec<u64>) {
         let bits = b_pp[i].clone();
         let p = prep[i].clone();
         init_set.spawn(async move {
-            node.init(bits, p, session, net, mul_duration, duration)
+            node.init(bits, k, p, session, net, mul_duration, duration)
                 .await
                 .unwrap()
         });
@@ -1450,14 +1453,23 @@ fn spawn_apprec_receiver_tasks(
                         node.trunc.process(msg).await.expect("trunc process failed");
                     }
                     WrappedMessage::Mod2(msg) => {
-                        // BitDec's nested batched Mod2.
-                        node.bit_dec
-                            .pre_mod2m
-                            .pre_bitlt
-                            .mod2
-                            .process(msg)
-                            .await
-                            .expect("nested mod2 process failed");
+                        if msg.session_id.calling_protocol() == Some(ProtocolType::SufOr) {
+                            // AppRec's own SufOr call's PreOrC Mod2 batch.
+                            node.suf_or
+                                .mod2
+                                .process(msg)
+                                .await
+                                .expect("sufor mod2 process failed");
+                        } else {
+                            // BitDec's nested batched Mod2.
+                            node.bit_dec
+                                .pre_mod2m
+                                .pre_bitlt
+                                .mod2
+                                .process(msg)
+                                .await
+                                .expect("nested mod2 process failed");
+                        }
                     }
                     WrappedMessage::Mult(msg) => {
                         let proto = msg.session_id.calling_protocol();
@@ -1768,15 +1780,25 @@ fn spawn_fpdiv_receiver_tasks(
                             .expect("bitdec pre_mod2m process failed");
                     }
                     WrappedMessage::Mod2(msg) => {
-                        // BitDec's nested batched Mod2.
-                        node.app_rec
-                            .bit_dec
-                            .pre_mod2m
-                            .pre_bitlt
-                            .mod2
-                            .process(msg)
-                            .await
-                            .expect("nested mod2 process failed");
+                        if msg.session_id.calling_protocol() == Some(ProtocolType::SufOr) {
+                            // AppRec's own SufOr call's PreOrC Mod2 batch.
+                            node.app_rec
+                                .suf_or
+                                .mod2
+                                .process(msg)
+                                .await
+                                .expect("sufor mod2 process failed");
+                        } else {
+                            // BitDec's nested batched Mod2.
+                            node.app_rec
+                                .bit_dec
+                                .pre_mod2m
+                                .pre_bitlt
+                                .mod2
+                                .process(msg)
+                                .await
+                                .expect("nested mod2 process failed");
+                        }
                     }
                     WrappedMessage::Mult(msg) => {
                         let proto = msg.session_id.calling_protocol();

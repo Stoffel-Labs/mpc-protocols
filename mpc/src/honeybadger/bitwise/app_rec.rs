@@ -22,9 +22,7 @@
 use crate::{
     common::ProtocolSessionId,
     honeybadger::{
-        bitwise::{
-            bit_dec::BitDecNode, suf_or::SufOrNode, AppRecPrep, PreMod2mError, PreMulCError,
-        },
+        bitwise::{bit_dec::BitDecNode, suf_or::SufOrNode, AppRecPrep, PreMod2mError, SufOrError},
         fpmul::{truncpr::TruncPrNode, TruncPrError},
         mul::{multiplication::Multiply, MulError},
         robust_interpolate::robust_interpolate::RobustShare,
@@ -43,8 +41,8 @@ use tracing::warn;
 pub enum AppRecError {
     #[error("BitDec/PreMod2m error: {0}")]
     BitDecError(#[from] PreMod2mError),
-    #[error("SufOr/PreMulC error: {0}")]
-    SufOrError(#[from] PreMulCError),
+    #[error("SufOr error: {0}")]
+    SufOrError(#[from] SufOrError),
     #[error("Multiply error: {0}")]
     MulError(#[from] MulError),
     #[error("TruncPr error: {0}")]
@@ -184,6 +182,7 @@ impl<F: PrimeField + FftField> AppRecNode<F> {
             .suf_or
             .init(
                 xor_bits,
+                k,
                 prep.sufor_prep,
                 sufor_session,
                 Arc::clone(&network),
