@@ -10,6 +10,7 @@
 //!   4. [d_i] ← c_i + [r'_i] − 2·c_i·[r'_i]   (= XOR(c_i, [r'_i]); local)
 //!   5. [e] ← KOrCS([d_1], ..., [d_m])
 
+use crate::common::wire_format;
 use crate::{
     common::{
         session_store::{Admission, SessionStore},
@@ -288,7 +289,7 @@ impl<F: PrimeField> KOrCLNode<F> {
         c_share.share[0].serialize_compressed(&mut payload)?;
         let kor_cl_msg = KOrClMessage::new(self.id, wire_session, payload);
         let wrapped = WrappedMessage::KOrCl(kor_cl_msg);
-        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        let bytes_wrapped = wire_format::serialize(&wrapped)?;
         network.broadcast(&bytes_wrapped).await?;
         // Eagerly finalize if all shares arrived before run() stored local state.
         {

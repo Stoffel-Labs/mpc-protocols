@@ -1,4 +1,5 @@
 use crate::common::session_store::{Admission, SessionStore};
+use crate::common::wire_format;
 use crate::{
     common::{
         share::ShareError, utils::deser_bounded_vec, ProtocolSessionId, SecretSharingScheme,
@@ -396,7 +397,7 @@ impl<F: FftField> Multiply<F> {
 
             let mult_msg = MultMessage::new(self.id, sessionid, bytes_rec_message);
             let wrapped = WrappedMessage::Mult(mult_msg);
-            let bytes_wrapped = bincode::serialize(&wrapped)?;
+            let bytes_wrapped = wire_format::serialize(&wrapped)?;
 
             network.broadcast(&bytes_wrapped).await?;
         }
@@ -840,7 +841,7 @@ pub mod tests {
             tokio::spawn(async move {
                 while let Some(raw_msg) = merged_rx.recv().await {
                     let wrapped: WrappedMessage =
-                        bincode::deserialize(&raw_msg.1).expect("deserialization error");
+                        wire_format::deserialize(&raw_msg.1).expect("deserialization error");
 
                     match wrapped {
                         WrappedMessage::BatchRecon(batchrecon_msg) => {

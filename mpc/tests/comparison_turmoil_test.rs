@@ -33,6 +33,7 @@ use crate::utils::{
 };
 use ark_bls12_381::Fr;
 use std::sync::Arc;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::{
     common::{ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
@@ -58,7 +59,7 @@ async fn run_ltz_receiver(
     net: Arc<TurmoilNetwork>,
 ) {
     while let Some((_sender, bytes)) = rx.recv().await {
-        let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+        let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
             Ok(m) => m,
             Err(_) => {
                 warn!("ltz turmoil: deserialize failed");
@@ -283,7 +284,7 @@ async fn run_eqz_receiver(
     net: Arc<TurmoilNetwork>,
 ) {
     while let Some((_sender, bytes)) = rx.recv().await {
-        let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+        let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
             Ok(m) => m,
             Err(_) => {
                 warn!("eqz turmoil: deserialize failed");

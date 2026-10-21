@@ -17,6 +17,7 @@ use ark_std::{
 };
 use chacha20poly1305::aead::OsRng;
 use std::sync::Arc;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::{
     common::{
         rbc::rbc::Avid,
@@ -392,7 +393,7 @@ fn test_input_protocol_e2e_turmoil() {
                         let SenderId::Node(sender) = sender else {
                             continue;
                         };
-                        let wrapped: WrappedMessage = match bincode::deserialize(&msg) {
+                        let wrapped: WrappedMessage = match wire_format::deserialize(&msg) {
                             Ok(w) => w,
                             Err(_) => continue,
                         };
@@ -3045,7 +3046,7 @@ fn batch_reconstruction_with_partition(hold_nodes: Vec<usize>, n_parties: usize,
                             Some((sender, raw_msg)) => {
                                 msg_count += 1;
                                 let wrapped: WrappedMessage =
-                                    bincode::deserialize(&raw_msg).unwrap();
+                                    wire_format::deserialize(&raw_msg).unwrap();
                                 match wrapped {
                                     WrappedMessage::BatchRecon(msg) => {
                                         node.process(msg, network_arc.clone()).await.unwrap();

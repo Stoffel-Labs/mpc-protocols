@@ -33,6 +33,7 @@ use crate::utils::{
 };
 use ark_bls12_381::Fr;
 use std::sync::Arc;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::{
     common::{types::fixed::FixedPointPrecision, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
@@ -67,7 +68,7 @@ fn spawn_fpdiv_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");

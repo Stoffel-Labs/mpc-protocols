@@ -1,6 +1,7 @@
 use crate::avss_mpc::input::{AvssInputError, AvssInputMessage};
 use crate::avss_mpc::{deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, ProtocolType};
 use crate::common::share::{avss::verify_feldman, feldman::FeldmanShamirShare};
+use crate::common::wire_format;
 use crate::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -228,7 +229,7 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
             shares.serialize_compressed(&mut payload)?;
             let msg = AvssInputMessage::new(self.id, self.instance_id, payload);
             let wrapped = AvssWrappedMessage::Input(msg);
-            let bytes = bincode::serialize(&wrapped)?;
+            let bytes = wire_format::serialize(&wrapped)?;
             net.send_to_client(client_id, &bytes).await?;
             info!("Server {} sent MaskShare to client {}", self.id, client_id);
         }

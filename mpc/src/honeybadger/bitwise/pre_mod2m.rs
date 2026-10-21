@@ -24,6 +24,7 @@
 //! PreBitLT already uses Beaver Mul instead of local degree-2t products.
 //! No additional substitutions are needed in this protocol.
 
+use crate::common::wire_format;
 use crate::{
     common::{
         session_store::{Admission, SessionStore},
@@ -366,7 +367,7 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
         v_share.share[0].serialize_compressed(&mut payload)?;
         let pre_mod2m_msg = PreMod2mMessage::new(self.id, wire_session, payload);
         let wrapped = WrappedMessage::PreMod2m(pre_mod2m_msg);
-        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        let bytes_wrapped = wire_format::serialize(&wrapped)?;
         network.broadcast(&bytes_wrapped).await?;
 
         // If n-t shares already arrived during init, finalize immediately.

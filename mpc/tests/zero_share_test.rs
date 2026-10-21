@@ -5,6 +5,7 @@ use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use std::{sync::Arc, time::Duration};
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::{
     common::{rbc::rbc::Avid, ProtocolSessionId as _, SecretSharingScheme, RBC},
     honeybadger::{
@@ -119,7 +120,7 @@ async fn run_rbc_joinset(
         set.spawn(async move {
             let _ = timeout(Duration::from_secs(1), async {
                 while let Some(received) = merged_rx.recv().await {
-                    let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
+                    let wrapped: WrappedMessage = match wire_format::deserialize(&received.1) {
                         Ok(w) => w,
                         Err(_) => continue,
                     };
@@ -368,7 +369,7 @@ async fn zero_share_e2e(n: usize, t: usize, batch_size: usize) {
 
         set.spawn(async move {
             while let Some((_, bytes)) = merged_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => continue,
                 };

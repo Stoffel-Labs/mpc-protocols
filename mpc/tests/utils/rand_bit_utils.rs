@@ -3,6 +3,7 @@ use ark_ff::FftField;
 use ark_std::test_rng;
 use std::sync::Arc;
 use std::time::Duration;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::SecretSharingScheme;
 use stoffelcrypto::honeybadger::fpmul::rand_bit::RandBit;
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -75,7 +76,7 @@ where
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&bytes).unwrap();
+                let wrapped: WrappedMessage = wire_format::deserialize(&bytes).unwrap();
                 // MulPub opens `a^2` in a single batch-reconstruction session keyed by the
                 // RandBit session id, so every BatchRecon message routes to the same place.
                 if let WrappedMessage::BatchRecon(msg) = wrapped {

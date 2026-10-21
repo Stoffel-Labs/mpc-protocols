@@ -1,4 +1,5 @@
 use crate::common::session_store::{Admission, SessionStore};
+use crate::common::wire_format;
 use crate::{
     common::{
         share::{shamir::NonRobustShare, ShareError},
@@ -188,7 +189,7 @@ where
             // Create and serialize the generic message.
             let generic_message =
                 WrappedMessage::Dousha(DouShaMessage::new(self.id, session_id, payload));
-            let bytes_generic_msg = bincode::serialize(&generic_message)?;
+            let bytes_generic_msg = wire_format::serialize(&generic_message)?;
 
             info!(
                 "sending double shares from {:?} to {:?}",

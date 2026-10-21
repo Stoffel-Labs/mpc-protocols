@@ -65,6 +65,7 @@ use ark_ff::UniformRand;
 use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use std::sync::Arc;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::{
     common::{ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
@@ -91,7 +92,7 @@ async fn run_fpdiv_receiver(
     net: Arc<TurmoilNetwork>,
 ) {
     while let Some((_sender, bytes)) = rx.recv().await {
-        let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+        let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
             Ok(m) => m,
             Err(_) => {
                 warn!("fpdiv turmoil: deserialize failed");

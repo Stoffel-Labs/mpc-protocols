@@ -23,6 +23,7 @@
 //! when `a = 0`, and EQZ would answer 0 for a zero input. It is therefore
 //! deliberately absent here.
 
+use crate::common::wire_format;
 use crate::{
     common::{
         session_store::{Admission, SessionStore},
@@ -300,7 +301,7 @@ impl<F: PrimeField> EQZNode<F> {
         c_share.share[0].serialize_compressed(&mut payload)?;
         let eqz_msg = EqzMessage::new(self.id, wire_session, payload);
         let wrapped = WrappedMessage::Eqz(eqz_msg);
-        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        let bytes_wrapped = wire_format::serialize(&wrapped)?;
         network.broadcast(&bytes_wrapped).await?;
 
         {

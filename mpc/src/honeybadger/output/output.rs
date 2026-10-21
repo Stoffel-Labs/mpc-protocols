@@ -1,3 +1,4 @@
+use crate::common::wire_format;
 use crate::common::SecretSharingScheme;
 use crate::honeybadger::output::{OutputError, OutputMessage};
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -52,7 +53,7 @@ impl OutputServer {
         shares.serialize_compressed(&mut payload)?;
         let msg = OutputMessage::new(self.id, self.instance_id, payload);
         let wrapped = WrappedMessage::Output(msg);
-        let bytes = bincode::serialize(&wrapped)?;
+        let bytes = wire_format::serialize(&wrapped)?;
 
         net.send_to_client(client_id, &bytes).await?;
         info!(

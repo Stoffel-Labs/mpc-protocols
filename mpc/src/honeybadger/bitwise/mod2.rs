@@ -25,6 +25,7 @@
 //! this: there is exactly one store per batched session, keyed the same way
 //! `init_batch`'s caller-supplied session already is.
 
+use crate::common::wire_format;
 use crate::{
     common::{
         session_store::{Admission, SessionStore},
@@ -239,7 +240,7 @@ impl<F: PrimeField> Mod2Node<F> {
 
         let mod2_msg = Mod2Message::new(self.id, wire_session, payload);
         let wrapped = WrappedMessage::Mod2(mod2_msg);
-        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        let bytes_wrapped = wire_format::serialize(&wrapped)?;
         network.broadcast(&bytes_wrapped).await?;
         // If n-t shares already arrived before r_prime was stored, finalize now.
         {
@@ -316,7 +317,7 @@ impl<F: PrimeField> Mod2Node<F> {
 
         let mod2_msg = Mod2Message::new(self.id, wire_session, payload);
         let wrapped = WrappedMessage::Mod2(mod2_msg);
-        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        let bytes_wrapped = wire_format::serialize(&wrapped)?;
         network.broadcast(&bytes_wrapped).await?;
         // If n-t shares already arrived before r_primes was stored, finalize now.
         {

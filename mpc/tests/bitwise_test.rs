@@ -10,6 +10,7 @@ use ark_bls12_381::Fr;
 use ark_ff::{BigInteger, Field, PrimeField, UniformRand};
 use ark_std::test_rng;
 use std::sync::Arc;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::{
     types::fixed::FixedPointPrecision, ProtocolSessionId, SecretSharingScheme,
 };
@@ -50,7 +51,7 @@ fn spawn_premulc_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -116,7 +117,7 @@ fn spawn_premulcoff_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -336,7 +337,7 @@ fn spawn_mod2_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -454,7 +455,7 @@ fn spawn_sufor_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -621,7 +622,7 @@ fn spawn_sufmulinv_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -789,7 +790,7 @@ fn spawn_prebitlt_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -1032,7 +1033,7 @@ fn spawn_premod2m_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -1217,7 +1218,7 @@ fn spawn_bitdec_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -1432,7 +1433,7 @@ fn spawn_apprec_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -1744,7 +1745,7 @@ fn spawn_fpdiv_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");

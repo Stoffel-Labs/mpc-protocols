@@ -16,6 +16,7 @@ use ark_std::{
 };
 use futures::future::join_all;
 use std::collections::HashMap;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::{
     common::{
         rbc::rbc::Avid,
@@ -249,7 +250,7 @@ async fn test_input_protocol_e2e() {
             let SenderId::Node(sender) = received.0 else {
                 continue;
             };
-            let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
+            let wrapped: WrappedMessage = match wire_format::deserialize(&received.1) {
                 Ok(w) => w,
                 Err(_) => continue,
             };
@@ -365,7 +366,7 @@ async fn gen_masks_for_input_e2e() {
             let SenderId::Node(sender) = received.0 else {
                 continue;
             };
-            let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
+            let wrapped: WrappedMessage = match wire_format::deserialize(&received.1) {
                 Ok(w) => w,
                 Err(_) => continue,
             };

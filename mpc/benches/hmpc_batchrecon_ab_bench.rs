@@ -27,6 +27,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelcrypto::honeybadger::{
     batch_recon::batch_recon::BatchReconNode, robust_interpolate::robust_interpolate::RobustShare,
@@ -157,7 +158,7 @@ fn run(n: usize, t: usize, secrets: &[Fr], mode: Mode) -> (Duration, u64, Vec<Fr
                             match msg {
                                 Some((_sender, raw)) => {
                                     counter.fetch_add(1, Ordering::Relaxed);
-                                    let w: WrappedMessage = match bincode::deserialize(&raw) {
+                                    let w: WrappedMessage = match wire_format::deserialize(&raw) {
                                         Ok(w) => w,
                                         Err(_) => continue,
                                     };

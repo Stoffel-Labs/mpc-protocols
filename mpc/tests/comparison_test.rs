@@ -9,6 +9,7 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::sync::Arc;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelcrypto::honeybadger::bitwise::kor_cl::KOrCLNode;
 use stoffelcrypto::honeybadger::bitwise::kor_cs::KOrCSNode;
@@ -46,7 +47,7 @@ fn spawn_ltz_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -298,7 +299,7 @@ fn spawn_rand_inv_pair_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -409,7 +410,7 @@ fn spawn_kor_cs_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -557,7 +558,7 @@ fn spawn_kor_cl_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
@@ -712,7 +713,7 @@ fn spawn_eqz_receiver_tasks(
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&bytes) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&bytes) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("deserialize failed");
