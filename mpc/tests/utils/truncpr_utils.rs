@@ -4,6 +4,7 @@ use ark_std::rand::Rng;
 use ark_std::test_rng;
 use num_integer::binomial;
 use std::sync::Arc;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::SecretSharingScheme;
 use stoffelcrypto::honeybadger::fpmul::truncpr::TruncPrNode;
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -34,7 +35,7 @@ where
         let mut merge_rx = fan_in_inboxes(inbox);
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&bytes).unwrap();
+                let wrapped: WrappedMessage = wire_format::deserialize(&bytes).unwrap();
                 match wrapped {
                     WrappedMessage::Trunc(msg) => match node.process(msg).await {
                         Ok(()) => {}

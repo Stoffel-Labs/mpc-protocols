@@ -1,6 +1,8 @@
+use crate::common::wire_format;
 use crate::common::SecretSharingScheme;
 use crate::honeybadger::output::{OutputError, OutputMessage};
 use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use crate::honeybadger::robust_interpolate::InterpolateError;
 use crate::honeybadger::WrappedMessage;
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
@@ -52,7 +54,7 @@ impl OutputServer {
         shares.serialize_compressed(&mut payload)?;
         let msg = OutputMessage::new(self.id, self.instance_id, payload);
         let wrapped = WrappedMessage::Output(msg);
-        let bytes = bincode::serialize(&wrapped)?;
+        let bytes = wire_format::serialize(&wrapped)?;
 
         net.send_to_client(client_id, &bytes).await?;
         info!(
@@ -176,6 +178,12 @@ impl<F: FftField> OutputClient<F> {
                 for output_elem in r_shares {
                     let secret = match RobustShare::recover_secret(&output_elem, self.n, self.t) {
                         Ok(secret) => secret,
+                        // OEC needs degree+t+2 shares before it can correct even one error, so
+                        // a bad share makes this fail routinely at the quorum. Leave `output`
+                        // unset so the next arriving share retries, rather than failing.
+                        Err(InterpolateError::DecodingError(_)) if output_elem.len() < self.n => {
+                            return false
+                        }
                         Err(e) => {
                             recovery_err = Some(e);
                             return false;
@@ -296,6 +304,56 @@ mod tests {
         client.output_handler(msg).await.unwrap();
 
         // get_output should now return Some(secret)
+        assert_eq!(client.get_output(), Some(vec![secret]));
+    }
+
+    /// A bad share at the `2t+1` quorum must not fail the output.
+    ///
+    /// OEC needs `degree + t + 2` shares to correct one error, so at the quorum a Byzantine
+    /// share makes reconstruction fail every time — the routine state, not a terminal one. The
+    /// handler has to stay live and retry as the remaining shares arrive. This test propagates
+    /// the handler's `Err` instead of discarding it, which is what the integration harness does
+    /// and why the stall this guards against was invisible there.
+    #[tokio::test]
+    async fn output_survives_bad_share_at_quorum() {
+        let (n, t, input_len) = (5, 1, 1);
+        let mut rng = test_rng();
+
+        let mut client = OutputClient::<Fr>::new(7, n, t, 0, input_len).unwrap();
+        let secret = Fr::rand(&mut rng);
+        let shares_vec = RobustShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
+
+        let msg_from = |share: RobustShare<Fr>, from: usize| {
+            let mut payload = Vec::new();
+            vec![share].serialize_compressed(&mut payload).unwrap();
+            OutputMessage::new(from, 0, payload)
+        };
+
+        // Party 1 is Byzantine: right id, corrupted value.
+        let mut bad = shares_vec[1].clone();
+        bad.share[0] += Fr::from(1u64);
+
+        client
+            .process(0, msg_from(shares_vec[0].clone(), 0))
+            .await
+            .unwrap();
+        client
+            .process(1, msg_from(bad, 1))
+            .await
+            .expect("bad share at the quorum must not fail the output");
+        client
+            .process(2, msg_from(shares_vec[2].clone(), 2))
+            .await
+            .expect("bad share at the quorum must not fail the output");
+
+        // 2t+1 shares held, one of them bad: OEC cannot correct yet, so no output and no error.
+        assert_eq!(client.get_output(), None);
+
+        // The 4th share gives OEC the degree+t+2 points it needs to correct the bad one.
+        client
+            .process(3, msg_from(shares_vec[3].clone(), 3))
+            .await
+            .unwrap();
         assert_eq!(client.get_output(), Some(vec![secret]));
     }
 

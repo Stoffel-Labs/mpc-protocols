@@ -233,12 +233,17 @@ impl<F: FftField> MulPubNode<F> {
 
         let batch_size = 2 * self.threshold + 1;
         let num_batches = (store.k + batch_size - 1) / batch_size;
-        let coeffs: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), num_batches * batch_size)
+        let expected = num_batches * batch_size;
+        let coeffs: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), expected)
             .map_err(MulPubError::ArkSerialization)?;
 
-        if coeffs.len() < store.k {
-            warn!("MulPub: short coefficient vector for session {session_id:?}");
-            return Ok(());
+        // Exact padded width, not `>= k`: a short vector shifts real values into the padding
+        // positions `take(k)` keeps, which a `>= k` check accepts silently.
+        if coeffs.len() != expected {
+            return Err(MulPubError::InvalidInput(format!(
+                "batch recon returned {} values for session {session_id:?}, expected {expected}",
+                coeffs.len()
+            )));
         }
 
         // Only the first store.k values are real; the rest is padding from

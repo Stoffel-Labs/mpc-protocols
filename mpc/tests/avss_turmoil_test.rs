@@ -9,6 +9,7 @@ use ark_std::test_rng;
 use chacha20poly1305::aead::OsRng;
 use std::sync::Arc;
 use stoffelcrypto::avss_mpc::{AvssSessionId, AvssWrappedMessage, ProtocolType};
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::ProtocolSessionId;
 use stoffelcrypto::common::{rbc::rbc::Avid, ShamirShare};
 use stoffelcrypto::common::{share::avss::verify_feldman, SecretSharingScheme};
@@ -106,8 +107,9 @@ fn avss_e2e() {
                     loop {
                         match rx.recv().await {
                             Some((_, message)) => {
-                                let wrapped: AvssWrappedMessage = bincode::deserialize(&message)
-                                    .expect("The deserialization must work correctly");
+                                let wrapped: AvssWrappedMessage =
+                                    wire_format::deserialize(&message)
+                                        .expect("The deserialization must work correctly");
                                 msg_count += 1;
                                 match wrapped {
                                     AvssWrappedMessage::Rbc(msg) => {

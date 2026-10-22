@@ -1,5 +1,6 @@
 use super::*;
 use crate::common::session_store::{Admission, SessionStore};
+use crate::common::wire_format;
 use crate::{
     common::{
         share::{apply_vandermonde, make_vandermonde},
@@ -7,7 +8,10 @@ use crate::{
         SecretSharingScheme,
     },
     honeybadger::{
-        robust_interpolate::robust_interpolate::{batch_recover_secret, RobustShare},
+        robust_interpolate::{
+            robust_interpolate::{batch_recover_secret, RobustShare},
+            InterpolateError,
+        },
         WrappedMessage,
     },
 };
@@ -153,7 +157,7 @@ impl<F: FftField> BatchReconNode<F> {
             let wrapped = WrappedMessage::BatchRecon(msg);
             //Send share y_j to each Party j
             let encoded_msg =
-                bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
+                wire_format::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
 
             let _ = net.send(j, &encoded_msg).await?;
         }
@@ -201,7 +205,7 @@ impl<F: FftField> BatchReconNode<F> {
                 BatchReconMsg::new(self.id, session_id, BatchReconMsgType::EvalBatch, payload);
             let wrapped = WrappedMessage::BatchRecon(msg);
             let encoded_msg =
-                bincode::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
+                wire_format::serialize(&wrapped).map_err(BatchReconError::SerializationError)?;
 
             let _ = net.send(j, &encoded_msg).await?;
         }
@@ -282,13 +286,17 @@ impl<F: FftField> BatchReconNode<F> {
                             //Wrap the msg in global enum
                             let wrapped = WrappedMessage::BatchRecon(new_msg);
                             // Broadcast our computed `y_j` to all other parties.
-                            let encoded = bincode::serialize(&wrapped)
+                            let encoded = wire_format::serialize(&wrapped)
                                 .map_err(BatchReconError::SerializationError)?;
                             let _ = net
                                 .broadcast(&encoded)
                                 .await
                                 .map_err(|e| BatchReconError::NetworkError(e))?;
                         }
+                        // OEC needs degree+t+2 shares before it can correct even one error,
+                        // so a bad eval makes this fail routinely at the quorum. Wait.
+                        Err(InterpolateError::DecodingError(_))
+                            if store.evals_received.len() < self.n => {}
                         Err(e) => {
                             warn!(self_id = self.id, "Interpolation of y_j failed: {:?}", e);
                             return Err(BatchReconError::InterpolateError(e));
@@ -347,6 +355,10 @@ impl<F: FftField> BatchReconNode<F> {
                                 .await
                                 .map_err(|_| BatchReconError::SendError)?;
                         }
+                        // OEC needs degree+t+2 shares before it can correct even one error,
+                        // so a bad reveal makes this fail routinely at the quorum. Wait.
+                        Err(InterpolateError::DecodingError(_))
+                            if store.reveals_received.len() < self.n => {}
                         Err(e) => {
                             error!(
                                 self_id = self.id, error = ?e,
@@ -412,8 +424,16 @@ impl<F: FftField> BatchReconNode<F> {
                             .collect();
                         let decoded = batch_recover_secret(&agreeing, self.n, self.degree, self.t)?;
                         // The opened value per chunk is the constant term P(0).
-                        let y_j_values: Vec<F> =
-                            decoded.into_iter().map(|coeffs| coeffs[0]).collect();
+                        let y_j_values: Vec<F> = decoded
+                            .into_iter()
+                            .map(|coeffs| {
+                                coeffs.first().copied().ok_or_else(|| {
+                                    BatchReconError::InvalidInput(
+                                        "empty chunk from batch recovery".to_string(),
+                                    )
+                                })
+                            })
+                            .collect::<Result<_, _>>()?;
 
                         store.y_j_batch = Some(y_j_values.clone());
                         drop(store);
@@ -428,7 +448,7 @@ impl<F: FftField> BatchReconNode<F> {
                         );
 
                         let wrapped = WrappedMessage::BatchRecon(new_msg);
-                        let encoded = bincode::serialize(&wrapped)
+                        let encoded = wire_format::serialize(&wrapped)
                             .map_err(BatchReconError::SerializationError)?;
                         let _ = net.broadcast(&encoded).await?;
                     }
@@ -485,7 +505,9 @@ impl<F: FftField> BatchReconNode<F> {
                         let decoded = batch_recover_secret(&agreeing, self.n, self.degree, self.t)?;
                         let mut result = Vec::with_capacity(decoded.len() * (self.degree + 1));
                         for coeffs in decoded {
-                            // `batch_recover_secret` already resizes each chunk to `degree + 1`.
+                            // `batch_recover_secret` normalizes every chunk to `degree + 1`,
+                            // on the optimistic and the OEC fallback branch alike, so the
+                            // flattened layout is a fixed `degree + 1` stride per chunk.
                             result.extend(coeffs);
                         }
 

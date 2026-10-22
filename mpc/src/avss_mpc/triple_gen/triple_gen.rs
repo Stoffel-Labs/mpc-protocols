@@ -1,4 +1,5 @@
 use crate::common::session_store::{Admission, SessionStore};
+use crate::common::wire_format;
 use crate::{
     avss_mpc::{
         mul::{multiplication::verify_share_against_commitments, ReconstructionMessage},
@@ -397,7 +398,7 @@ where
         let round0_msg = TripleCheckMessage::new(self.id, session_id, bytes_rec_message);
         self.rbc
             .init(
-                bincode::serialize(&round0_msg)?,
+                wire_format::serialize(&round0_msg)?,
                 round0_sid,
                 network.clone(),
             )
@@ -486,7 +487,7 @@ where
                 // from the poll fallback rather than a real completion notification.
                 Err(_) => continue 'check,
             };
-            let msg: TripleCheckMessage = match bincode::deserialize(&output) {
+            let msg: TripleCheckMessage = match wire_format::deserialize(&output) {
                 Ok(m) => m,
                 Err(_) => continue 'check,
             };
@@ -568,7 +569,7 @@ where
                         let round1_msg = TripleCheckMessage::new(self.id, session_id, bytes_check);
                         self.rbc
                             .init(
-                                bincode::serialize(&round1_msg)?,
+                                wire_format::serialize(&round1_msg)?,
                                 round1_sid,
                                 network.clone(),
                             )

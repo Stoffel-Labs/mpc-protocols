@@ -2,6 +2,7 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::sync::Arc;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::{
     common::{share::shamir::NonRobustShare, SecretSharingScheme},
     honeybadger::{
@@ -112,7 +113,7 @@ pub fn spawn_receiver_tasks(
                     Some(msg) => msg,
                     None => break,
                 };
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg.1) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&msg.1) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("Malformed or unrecognized message format.");

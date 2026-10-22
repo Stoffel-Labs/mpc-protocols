@@ -1,6 +1,6 @@
 ---
 name: sub-protocol-review
-description: Review a new or modified MPC sub-protocol in this repo (mpc/src/honeybadger/*, mpc/src/avss_mpc/*, mpc/src/common/*) for the BFT-correctness and DoS-resilience issues that recur across this codebase - async message ordering, sender authentication, session admission caps, store cleanup, resource limits, RBC/batch-recon drain wiring, share-index consistency, channel backpressure, panic safety, statistical mask width, adversarial test coverage. Use when the user asks to review, audit, or check a new sub-protocol / protocol addition / preprocessing primitive for correctness or security issues.
+description: Review a new or modified MPC sub-protocol in this repo (mpc/src/honeybadger/*, mpc/src/avss_mpc/*, mpc/src/common/*) for the BFT-correctness and DoS-resilience issues that recur across this codebase - async message ordering, sender authentication, session admission caps, store cleanup, resource limits, RBC/batch-recon drain wiring, share-index consistency, channel backpressure, panic safety, statistical mask width, adversarial test coverage, and whether a ported/composed sub-protocol's actual security guarantee (adversary model, what it reveals) matches what the specific module it's joining assumes (this can differ by module). Use when the user asks to review, audit, or check a new sub-protocol / protocol addition / preprocessing primitive for correctness or security issues, including malicious-security review of a protocol ported from an academic paper.
 ---
 
 # Sub-protocol review
@@ -92,6 +92,17 @@ on:
   length-prefixed `Vec`/allocation straight from attacker bytes.
 - Limits are enforced *before* the expensive work (allocation, crypto verification), not
   after.
+- Any new (de)serialization of a wire message goes through
+  `crate::common::wire_format::{serialize, deserialize, deserialize_limited}`, never
+  `bincode::serialize`/`bincode::deserialize`/`bincode::DefaultOptions::new()` called
+  directly. Every wire message type needs its serialize and deserialize sides to agree
+  on encoding (fixint vs. varint) — `wire_format` is the single place that's pinned, so a
+  stray direct `bincode::` call bypasses it and silently reverts to bincode's fixint
+  default, breaking compatibility with every other site decoding that same message type.
+
+  Red flag: `bincode::serialize(`, `bincode::deserialize(`, or
+  `bincode::DefaultOptions::new()` appearing in a new/changed file instead of a
+  `wire_format::` call.
 
 ### 6. RBC/batch-recon drain wired into the process loop
 
@@ -250,12 +261,48 @@ Red flag: a consistency-check/verifier path that calls a correcting decoder and 
 only the final polynomial's degree or value — never whether the decoder had to correct
 anything to get there.
 
+### 14. A new sub-protocol must match the security assumptions of the module it joins — not a codebase-wide default
+
+Security assumptions are a per-module fact, not a repo-wide constant. `mpc/src/honeybadger/*`
+and `mpc/src/avss_mpc/*` both currently assume up to `t` *actively* malicious parties, but
+that's incidental agreement between two modules today, not a guarantee every module shares
+it, including ones added later. So the question for a new sub-protocol is never "does this
+satisfy BFT in general" — it's "does this satisfy what *the specific module it's joining*
+assumes." A sub-protocol doesn't inherit that from its pieces being individually sound:
+composition is only as strong as its weakest named ideal functionality.
+
+Before trusting a new or newly-composed sub-protocol:
+
+- Find the adversary model and reveal set *the module it's joining* actually requires, and
+  check the sub-protocol's own source (paper, prior implementation) was built for at least
+  that — not something weaker like the semi-honest model, which is a stated precondition in
+  several classic MPC papers this codebase ports from, not an incidental detail.
+- Trace every value the implementation actually opens back to its inputs. Each one must be
+  either not an application secret, or unconditionally transformed so its revealed form
+  matches what the source's own security argument allows — not a superset of it, regardless
+  of how sound the surrounding primitives (multiplication, reconstruction, etc.) are.
+
+Concrete instance this already caught: `SufOr` fed a secret bit's complement directly into
+`PreMulC`'s masked reveal ([suf_or.rs](mpc/src/honeybadger/bitwise/suf_or.rs),
+[pre_mulc.rs](mpc/src/honeybadger/bitwise/pre_mulc.rs)). A multiplicative mask can't hide
+*whether* its input is zero (`w·0 = 0` for any `w`), so this leaked the bit on every honest
+execution — no cheating required, so item 10's adversarial testing wouldn't have caught it.
+`PreBitLT`/`SufMulInv`'s `d_plus_1` shift is the same codebase's own correct version of the
+same construction, proving the gap was a per-call-site mismatch, not a flaw in `PreMulC`
+itself or in the module's assumptions generally.
+
+Related: a precondition like `PreMulC`'s (every input non-zero for every value its secret
+can take) can't be runtime-checked — a share of a non-zero secret is locally
+indistinguishable from a share of zero. It has to live in the function's own doc comment,
+not be left for each caller to infer from a sibling's behavior (see
+`PreMulCOnlineNode::init` in `pre_mulc.rs`).
+
 ## How to run the review
 
 1. Identify the module(s) in scope (new/changed files, or what the user points at).
 2. Read the module's `process`/`init`/`drain_*`/`get_or_create_store`/`clear_store`
    functions in full.
-3. Walk items 1-13 against that code. For each, either confirm the pattern matches the
+3. Walk items 1-14 against that code. For each, either confirm the pattern matches the
    referenced known-good example or record a finding.
 4. Use grep to sanity-check adjacent evidence, e.g.:
    - `grep -n "get_or_admit\|get_or_create_store" <file>`
@@ -263,6 +310,8 @@ anything to get there.
    - `grep -n "authenticated_sender\|sender_id !=" <file>`
    - `grep -n "clear_store\|clear_session" <file>`
    - `grep -n "MAX_.*SESSIONS\|deser_bounded_vec" <file>`
+   - `grep -n "bincode::serialize\|bincode::deserialize\|DefaultOptions::new" <file>` —
+     any hit should be inside `wire_format.rs` itself, not a new call site (item 5)
    - `grep -n "\.unwrap()\|\.expect(" <file>`
    - `grep -n "take_prandint_shares\|check_mask_security\|max_masked_width" <file>`
    - `grep -n "\.iter()\.take(\|\.zip(" <file>` — for masking/randomness parameters,
@@ -272,11 +321,20 @@ anything to get there.
      just degree/value (item 12)
    - In `init`/entry-point functions: confirm any local finalize/decode helper call is
      ordered *after* this party's own broadcast/send, not before (item 13)
+   - For a protocol ported from a paper or adapted from a sibling: identify what the
+     *module it's joining* assumes, then the source's own adversary model and ideal
+     functionality, then trace every `Reveal`/`Output`/batch-recon-opened value back to
+     its input — confirm each one is either not an application secret, or is
+     unconditionally shifted/transformed so its revealed form carries no information the
+     source's own security proof didn't already account for (item 14)
 5. Report findings with the `ReportFindings` tool, most severe first (liveness/DoS/
    soundness breaks before style issues). Use the checklist item's topic as `category`
    (e.g. `session-admission`, `drain-wiring`, `sender-auth`, `panic-safety`,
-   `test-coverage`, `mask-width`). Each finding needs a concrete `failure_scenario`: what a Byzantine
-   party or adversarial network schedule does, and what breaks as a result — not just
-   "this doesn't match the pattern."
+   `test-coverage`, `mask-width`, `security-model-mismatch`). Each finding needs a concrete
+   `failure_scenario`: what a Byzantine party or adversarial network schedule does, and
+   what breaks as a result — not just "this doesn't match the pattern." For item 14
+   findings specifically, state explicitly whether the failure scenario requires any party
+   to deviate from the protocol, since "no, a fully honest execution already leaks this" is
+   the detail that distinguishes it from every other item on this list.
 6. If a checklist item doesn't apply to this module (e.g. it uses neither RBC nor
    batch-recon, so items 6/8 are moot), skip it silently rather than forcing a finding.

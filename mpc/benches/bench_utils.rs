@@ -62,14 +62,10 @@ pub fn create_nodes(
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(60));
 
-    let opts = HoneyBadgerMPCNodeOpts::new(
+    let mut opts = HoneyBadgerMPCNodeOpts::new(
         n_parties,
         t,
-        n_triples,
-        n_shares,
         instance_id,
-        n_randbit,
-        n_prandint,
         // Benches never run below the node's configured precision, so size the mask pool for the
         // library default rather than threading a precision through every bench.
         FixedPointPrecision::new(32, 16),
@@ -77,6 +73,12 @@ pub fn create_nodes(
         timeout,
     )
     .unwrap();
+    // Benches measure raw generation throughput rather than running declared
+    // operations, so they ask for material directly.
+    opts.extra_demand.triples = n_triples;
+    opts.extra_demand.random_shares = n_shares;
+    opts.extra_demand.randbit = n_randbit;
+    opts.extra_demand.prandint = n_prandint;
 
     (0..n_parties)
         .map(|id| {

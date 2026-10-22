@@ -5,6 +5,7 @@ use ark_bls12_381::Fr;
 use bench_utils::{fan_in_inboxes, test_setup};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::time::Duration;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::{
     common::ProtocolSessionId,
     honeybadger::{
@@ -66,7 +67,7 @@ async fn run_batch_recon(n_parties: usize, t: usize, n_secrets: usize) {
                     Ok(Some(v)) => v,
                     _ => continue,
                 };
-                if let Ok(WrappedMessage::BatchRecon(m)) = bincode::deserialize(&raw) {
+                if let Ok(WrappedMessage::BatchRecon(m)) = wire_format::deserialize(&raw) {
                     node.process(m, net.clone()).await.ok();
                 }
             }

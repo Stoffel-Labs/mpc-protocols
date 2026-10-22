@@ -1,4 +1,5 @@
 use crate::common::session_store::{Admission, SessionStore};
+use crate::common::wire_format;
 use crate::{
     common::{share::ShareError, ProtocolSessionId, SecretSharingScheme},
     honeybadger::{
@@ -231,7 +232,7 @@ impl<F: PrimeField> TruncPrNode<F> {
         open_share.serialize_compressed(&mut payload)?;
         let trunc_msg = TruncPrMessage::new(self.id, session, payload);
         let wrapped = WrappedMessage::Trunc(trunc_msg);
-        let bytes_wrapped = bincode::serialize(&wrapped)?;
+        let bytes_wrapped = wire_format::serialize(&wrapped)?;
 
         network.broadcast(&bytes_wrapped).await?;
 
@@ -247,9 +248,9 @@ impl<F: PrimeField> TruncPrNode<F> {
             "TruncPr open handler"
         );
 
-        if msg.session_id.sub_id() != 0 || msg.session_id.round_id() != 0 {
+        if msg.session_id.sub_id() != 0 {
             error!(
-                "Wrong session. Sub ID or Round ID is not zero. Session ID: {:?}",
+                "Wrong session. Sub ID is not zero. Session ID: {:?}",
                 msg.session_id
             );
             return Err(TruncPrError::SessionIdError(msg.session_id));
@@ -364,7 +365,7 @@ mod tests {
         let msg = inboxes[0][3]
             .try_recv()
             .expect("party 3 must broadcast its own opening even when it can't finalize yet");
-        let wrapped: WrappedMessage = bincode::deserialize(&msg).unwrap();
+        let wrapped: WrappedMessage = wire_format::deserialize(&msg).unwrap();
         match wrapped {
             WrappedMessage::Trunc(trunc_msg) => assert_eq!(trunc_msg.sender_id, 3),
             other => panic!("expected a Trunc open message, got {other:?}"),

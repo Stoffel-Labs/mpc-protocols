@@ -4,6 +4,7 @@ use crate::utils::test_utils::{
 };
 use ark_bls12_381::Fr;
 use futures::future::join_all;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::honeybadger::input::{InputError, InputMessage};
 use stoffelcrypto::honeybadger::SessionId;
 use stoffelcrypto::{
@@ -81,7 +82,7 @@ async fn test_multiple_clients_parallel_input() {
                 let SenderId::Node(sender) = sender else {
                     continue;
                 };
-                let wrapped: WrappedMessage = bincode::deserialize(&raw).ok().unwrap();
+                let wrapped: WrappedMessage = wire_format::deserialize(&raw).ok().unwrap();
                 if let WrappedMessage::Input(msg) = wrapped {
                     client.process(sender, msg, net_clone.clone()).await.ok();
                 }
@@ -170,7 +171,7 @@ async fn test_input_recovery_with_missing_server() {
             let SenderId::Node(sender) = received.0 else {
                 continue;
             };
-            if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received.1) {
+            if let Ok(WrappedMessage::Input(msg)) = wire_format::deserialize(&received.1) {
                 client.process(sender, msg, net_clone.clone()).await.ok();
             }
         }
@@ -260,7 +261,7 @@ async fn test_input_with_too_many_faulty_shares() {
             let SenderId::Node(sender) = received.0 else {
                 continue;
             };
-            if let Ok(WrappedMessage::Input(msg)) = bincode::deserialize(&received.1) {
+            if let Ok(WrappedMessage::Input(msg)) = wire_format::deserialize(&received.1) {
                 // Client will fail internally when trying to decode faulty shares
                 let _ = client.process(sender, msg, net_clone.clone()).await;
             }
