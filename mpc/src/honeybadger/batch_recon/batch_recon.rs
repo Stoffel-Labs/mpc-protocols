@@ -8,7 +8,10 @@ use crate::{
         SecretSharingScheme,
     },
     honeybadger::{
-        robust_interpolate::robust_interpolate::{batch_recover_secret, RobustShare},
+        robust_interpolate::{
+            robust_interpolate::{batch_recover_secret, RobustShare},
+            InterpolateError,
+        },
         WrappedMessage,
     },
 };
@@ -290,6 +293,10 @@ impl<F: FftField> BatchReconNode<F> {
                                 .await
                                 .map_err(|e| BatchReconError::NetworkError(e))?;
                         }
+                        // OEC needs degree+t+2 shares before it can correct even one error,
+                        // so a bad eval makes this fail routinely at the quorum. Wait.
+                        Err(InterpolateError::DecodingError(_))
+                            if store.evals_received.len() < self.n => {}
                         Err(e) => {
                             warn!(self_id = self.id, "Interpolation of y_j failed: {:?}", e);
                             return Err(BatchReconError::InterpolateError(e));
@@ -348,6 +355,10 @@ impl<F: FftField> BatchReconNode<F> {
                                 .await
                                 .map_err(|_| BatchReconError::SendError)?;
                         }
+                        // OEC needs degree+t+2 shares before it can correct even one error,
+                        // so a bad reveal makes this fail routinely at the quorum. Wait.
+                        Err(InterpolateError::DecodingError(_))
+                            if store.reveals_received.len() < self.n => {}
                         Err(e) => {
                             error!(
                                 self_id = self.id, error = ?e,

@@ -646,6 +646,33 @@ mod tests {
     use ark_poly::GeneralEvaluationDomain;
     use ark_std::test_rng;
 
+    /// Pins the share counts the reveal handlers' retry logic is built on: with one corrupted
+    /// share, `oec_decode` can correct nothing at the `2t+1` quorum (it needs `degree+t+2`
+    /// before it even attempts a repair) and only succeeds once the next share arrives. This is
+    /// why a decode failure at the quorum is a wait condition rather than an abort.
+    #[test]
+    fn oec_cannot_correct_at_the_reveal_quorum() {
+        let (n, t) = (5, 1);
+        let mut rng = test_rng();
+        let secret = Fr::from(42u64);
+        let shares = RobustShare::compute_shares(secret, n, t, None, &mut rng).unwrap();
+
+        let mut corrupted = shares.clone();
+        corrupted[1].share[0] += Fr::from(1u64);
+
+        // 2t+1 = 3 shares, one bad: degree+t+1+r = 4 > 3, so OEC never attempts a repair.
+        let at_quorum = RobustShare::recover_secret(&corrupted[..2 * t + 1], n, t);
+        assert!(
+            matches!(at_quorum, Err(InterpolateError::DecodingError(_))),
+            "expected DecodingError at the quorum, got {at_quorum:?}"
+        );
+
+        // One more share reaches degree+t+2 = 4 and the bad one gets corrected.
+        let (_, recovered) =
+            RobustShare::recover_secret(&corrupted[..2 * t + 2], n, t).expect("correctable");
+        assert_eq!(recovered, secret);
+    }
+
     #[test]
     fn test_poly_derivative() {
         let coeffs = vec![Fr::from(3), Fr::from(2), Fr::from(1)]; // 3 + 2x + x^2

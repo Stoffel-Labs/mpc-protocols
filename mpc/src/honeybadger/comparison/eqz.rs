@@ -32,7 +32,7 @@ use crate::{
     honeybadger::{
         bitwise::{kor_cl::KOrCLNode, kor_cs::KOrCSPrep, pre_mulc::PhaseState, PRandMPrep},
         comparison::{EQZError, EqzMessage},
-        robust_interpolate::robust_interpolate::RobustShare,
+        robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId, WrappedMessage,
     },
 };
@@ -201,8 +201,15 @@ impl<F: PrimeField> EQZNode<F> {
             .iter()
             .map(|(&id, &val)| RobustShare::new(val, id, self.t))
             .collect();
-        let (_, c) = RobustShare::recover_secret(&robust_shares, self.n, self.t)
-            .map_err(|_| EQZError::Abort)?;
+        let c = match RobustShare::recover_secret(&robust_shares, self.n, self.t) {
+            Ok((_, c)) => c,
+            // OEC needs degree+t+2 shares before it can correct even one error, so a
+            // bad share makes this fail routinely at the quorum. Wait for the rest.
+            Err(InterpolateError::DecodingError(_)) if robust_shares.len() < self.n => {
+                return Ok(())
+            }
+            Err(_) => return Err(EQZError::Abort),
+        };
 
         let c_int = c.into_bigint();
         let two = F::one() + F::one();

@@ -33,7 +33,7 @@ use crate::{
     },
     honeybadger::{
         bitwise::{pre_mulc::PhaseState, Mod2Error, Mod2Message, PRandMPrep},
-        robust_interpolate::robust_interpolate::RobustShare,
+        robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId, WrappedMessage,
     },
 };
@@ -433,8 +433,15 @@ impl<F: PrimeField> Mod2Node<F> {
             .map(|(&id, &val)| RobustShare::new(val, id, self.t))
             .collect();
 
-        let (_, c) = RobustShare::recover_secret(&robust_shares, self.n, self.t)
-            .map_err(|_| Mod2Error::Abort)?;
+        let c = match RobustShare::recover_secret(&robust_shares, self.n, self.t) {
+            Ok((_, c)) => c,
+            // OEC needs degree+t+2 shares before it can correct even one error, so a
+            // bad share makes this fail routinely at the quorum. Wait for the rest.
+            Err(InterpolateError::DecodingError(_)) if robust_shares.len() < self.n => {
+                return Ok(())
+            }
+            Err(_) => return Err(Mod2Error::Abort),
+        };
 
         let c0 = if c.into_bigint().is_odd() {
             F::one()
@@ -507,8 +514,16 @@ impl<F: PrimeField> Mod2Node<F> {
                 .iter()
                 .map(|(&id, vals)| RobustShare::new(vals[j], id, self.t))
                 .collect();
-            let (_, c) = RobustShare::recover_secret(&robust_shares, self.n, self.t)
-                .map_err(|_| Mod2Error::Abort)?;
+            let c = match RobustShare::recover_secret(&robust_shares, self.n, self.t) {
+                Ok((_, c)) => c,
+                // OEC needs degree+t+2 shares before it can correct even one error, so a
+                // bad share makes this fail routinely at the quorum. Drop the partial
+                // batch and retry the whole thing once the rest land.
+                Err(InterpolateError::DecodingError(_)) if robust_shares.len() < self.n => {
+                    return Ok(())
+                }
+                Err(_) => return Err(Mod2Error::Abort),
+            };
             let c0 = if c.into_bigint().is_odd() {
                 F::one()
             } else {

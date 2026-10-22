@@ -35,7 +35,7 @@ use crate::{
             pre_bitlt::PreBitLTNode, pre_mulc::PhaseState, PreMod2mError, PreMod2mMessage,
             PreMod2mPrep, PreMod2mStore,
         },
-        robust_interpolate::robust_interpolate::RobustShare,
+        robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId, WrappedMessage,
     },
 };
@@ -194,8 +194,15 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
             .map(|(&id, &val)| RobustShare::new(val, id, self.t))
             .collect();
 
-        let (_, c) = RobustShare::recover_secret(&robust_shares, self.n, self.t)
-            .map_err(|_| PreMod2mError::Abort)?;
+        let c = match RobustShare::recover_secret(&robust_shares, self.n, self.t) {
+            Ok((_, c)) => c,
+            // OEC needs degree+t+2 shares before it can correct even one error, so a
+            // bad share makes this fail routinely at the quorum. Wait for the rest.
+            Err(InterpolateError::DecodingError(_)) if robust_shares.len() < self.n => {
+                return Ok(())
+            }
+            Err(_) => return Err(PreMod2mError::Abort),
+        };
 
         // Phase 2: extract bits and prefix values from public c.
         //
