@@ -112,6 +112,46 @@ impl PreprocDemand {
         }
     }
 
+    /// What must still be sitting in the flat pools once a generation pass sized from
+    /// this demand has completed — as opposed to [`PreprocDemand::to_generate`]'s total,
+    /// which prices everything that pass must *produce*, including material consumed
+    /// immediately building derived preprocessing (PreMulC bundles, rand-inv-pairs,
+    /// RandBit outputs).
+    ///
+    /// `triples`/`random_shares`/`zero_shares` bundle in that derived-build cost by
+    /// design (see `add_premulc`/`add_rand_inv_pairs`/`add_randbit`, and
+    /// `demand_for_fpdiv`'s doc comment for a caller that folds the same cost in by
+    /// hand) — correct for sizing a from-scratch generation pass, wrong for re-checking
+    /// sufficiency afterward, since that build cost is gone from the flat pools the
+    /// moment the derived material exists and is itself checked separately (via
+    /// `premulc_len`, the `randbit`/`rand_inv_pairs` counts here). A caller that
+    /// compares a flat pool directly against this struct's raw fields double-counts
+    /// that cost as if it still had to be sitting in the pool after generation — this
+    /// is the number that doesn't.
+    pub fn steady_state_floor(&self) -> PreprocMaterialLength {
+        let premulc_triples: usize = self.premulc.iter().map(|(&pk, &c)| c * (2 * pk - 1)).sum();
+        let premulc_random: usize = self.premulc.iter().map(|(&pk, &c)| c * 2 * pk).sum();
+        let premulc_zero: usize = self.premulc.iter().map(|(&pk, &c)| c * pk).sum();
+
+        PreprocMaterialLength {
+            beaver_triples: self.triples.saturating_sub(premulc_triples),
+            random_shr: self
+                .random_shares
+                .saturating_sub(premulc_random)
+                .saturating_sub(2 * self.rand_inv_pairs)
+                .saturating_sub(self.randbit),
+            randbit: self.randbit,
+            prandint: self.prandint,
+            premulc: 0,
+            zero_shares: self
+                .zero_shares
+                .saturating_sub(premulc_zero)
+                .saturating_sub(self.rand_inv_pairs)
+                .saturating_sub(self.randbit),
+            rand_inv_pairs: self.rand_inv_pairs,
+        }
+    }
+
     /// This demand repeated `n` times (`n` executions of the same operation).
     pub fn scaled(&self, n: usize) -> PreprocDemand {
         PreprocDemand {
@@ -607,6 +647,49 @@ mod test {
         robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple,
     };
     use ark_bn254::Fr;
+
+    #[test]
+    fn steady_state_floor_excludes_premulc_build_cost() {
+        // k=64: base (triples=62, randbit=126, prandint=64) + one PreMulC bundle at
+        // pk=63, which costs 125 triples, 126 random shares, 63 zero-sharings to build.
+        // `to_generate` is right to size generation at the full 187 triples; a readiness
+        // check must see only the 62 that remain once the bundle is built.
+        let d = demand_for_ltz(64);
+        assert_eq!(d.triples, 187, "sizing total unchanged by this fix");
+
+        let floor = d.steady_state_floor();
+        assert_eq!(floor.beaver_triples, 62, "post-build remainder, not the 187 sizing total");
+        assert_eq!(floor.random_shr, 0, "fully spent building RandBit outputs + the bundle");
+        assert_eq!(floor.randbit, 126);
+        assert_eq!(floor.prandint, 64);
+    }
+
+    #[test]
+    fn steady_state_floor_is_unaffected_when_nothing_derived_needs_building() {
+        // EQZ never calls `add_premulc`, so its `triples` was never inflated — the floor
+        // must equal the raw demand for the fields with no derived-material cost folded
+        // in, confirming the fix is a no-op where the bug never existed.
+        let d = demand_for_eqz(64);
+        let floor = d.steady_state_floor();
+        assert_eq!(floor.beaver_triples, d.triples);
+        assert_eq!(floor.randbit, d.randbit);
+        assert_eq!(floor.prandint, d.prandint);
+        assert_eq!(floor.rand_inv_pairs, d.rand_inv_pairs);
+    }
+
+    #[test]
+    fn steady_state_floor_handles_a_hand_built_premulc_map() {
+        // `demand_for_fpdiv` folds its two PreMulC bundles' build cost into
+        // `triples`/`random_shares` directly rather than via `add_premulc` — the floor
+        // must still back it out correctly, since it reads the cost from the `premulc`
+        // map itself rather than from bookkeeping `add_premulc` leaves behind.
+        let d = demand_for_fpdiv(64, 16);
+        let pk = 63;
+        let premulc_triples = 2 * (2 * pk - 1);
+        let premulc_random = 2 * 2 * pk;
+        assert_eq!(d.steady_state_floor().beaver_triples, d.triples - premulc_triples);
+        assert_eq!(d.steady_state_floor().random_shr, d.random_shares.saturating_sub(premulc_random + d.randbit));
+    }
 
     #[test]
     fn to_generate_rounds_triples_and_adds_two_shares_each() {

@@ -1965,14 +1965,14 @@ where
         // Top up if the pool is short. Sizing lives in `PreprocDemand` and is
         // applied by `run_preprocessing` from the declared workload
         // (`add_fpdiv_ops`); FpDiv needs two PreMulC bundles at pk = k-1.
-        let need = demand_for_fpdiv(k, f);
+        let need = demand_for_fpdiv(k, f).steady_state_floor();
         let pk = k - 1;
         let mut rng = StdRng::from_rng(OsRng).unwrap();
         let short = {
             let store = self.preprocessing_material.lock().await;
             let len = store.length();
-            len.beaver_triples < need.triples
-                || len.random_shr < need.random_shares
+            len.beaver_triples < need.beaver_triples
+                || len.random_shr < need.random_shr
                 || len.randbit < need.randbit
                 || len.prandint < need.prandint
                 || store.premulc_len(pk) < 2
@@ -2571,11 +2571,11 @@ where
         // declared workload (`add_ltz_ops`) — nothing is computed or configured
         // here, so the online path stays a pure draw whenever the offline phase
         // was provisioned correctly.
-        let need = demand_for_ltz(k);
+        let need = demand_for_ltz(k).steady_state_floor();
         let short = {
             let store = self.preprocessing_material.lock().await;
             let len = store.length();
-            len.beaver_triples < need.triples
+            len.beaver_triples < need.beaver_triples
                 || len.randbit < need.randbit
                 || len.prandint < need.prandint
                 || store.premulc_len(pk) < 1
@@ -2622,11 +2622,11 @@ where
 
         // Top up if short — see the note in `ltz_on_share`. EQZ needs no PreMulC
         // bundle; its derived material is the ([r],[r^-1]) pairs KOrCS consumes.
-        let need = demand_for_eqz(k);
+        let need = demand_for_eqz(k).steady_state_floor();
         let short = {
             let store = self.preprocessing_material.lock().await;
             let len = store.length();
-            len.beaver_triples < need.triples
+            len.beaver_triples < need.beaver_triples
                 || len.randbit < need.randbit
                 || len.prandint < need.prandint
                 || len.rand_inv_pairs < need.rand_inv_pairs
@@ -3232,7 +3232,13 @@ where
             .await
             .take_zero_shares(total)?;
 
-        let mut premulc_sessions = Vec::with_capacity(missing);
+        // One bundle at a time: generate_preprocessing already awaits its
+        // MulPub/Multiply sub-protocols before returning, so issuing every
+        // session up front buys no overlap — it only accumulates live
+        // sessions in PreMulCOfflineNode's prep store, whose admission quota
+        // (MAX_PRE_MULC_PREP_SESSIONS / n per initiator) a large declared
+        // demand then trips. Retiring each session before opening the next
+        // keeps any requested bundle count within the cap.
         for _ in 0..missing {
             let r: Vec<_> = r_pool.drain(0..pk).collect();
             let s: Vec<_> = s_pool.drain(0..pk).collect();
@@ -3271,9 +3277,6 @@ where
                 }
             }
             gen_result?;
-            premulc_sessions.push(premulc_session);
-        }
-        for premulc_session in premulc_sessions {
             let result = self
                 .preprocess
                 .premulc_offline
