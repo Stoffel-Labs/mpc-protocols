@@ -166,6 +166,20 @@ async fn test_reconstruction_handler_nonzero_caught() {
     let nodes = make_nodes(n_parties, t);
     let mut receiver_node = nodes[receiver_id].clone();
 
+    // Seed this node's own locally-trusted batch_size/computed_r_shares, mirroring what
+    // init_zerosha_batch would already have set via this node's own share-combining phase —
+    // required now that reconstruction_handler parks messages until that local state exists
+    // (the batch_size-adoption fix under test in the regression tests below).
+    {
+        let binding = receiver_node
+            .get_or_create_store(session_id, receiver_node.id)
+            .await
+            .unwrap();
+        let mut store = binding.lock().await;
+        store.batch_size = 1;
+        store.computed_r_shares = vec![RobustShare::new(Fr::zero(), receiver_node.id, 2 * t)];
+    }
+
     for i in 0..n_parties {
         let mut bytes = Vec::new();
         shares[i].clone().serialize_compressed(&mut bytes).unwrap();
@@ -226,6 +240,18 @@ async fn test_reconstruction_handler_manipulation_caught() {
     let receiver_id = 2; // must be < 2t
     let nodes = make_nodes(n_parties, t);
     let mut receiver_node = nodes[receiver_id].clone();
+
+    // Seed this node's own locally-trusted batch_size/computed_r_shares — see the comment
+    // in test_reconstruction_handler_nonzero_caught above.
+    {
+        let binding = receiver_node
+            .get_or_create_store(session_id, receiver_node.id)
+            .await
+            .unwrap();
+        let mut store = binding.lock().await;
+        store.batch_size = 1;
+        store.computed_r_shares = vec![RobustShare::new(Fr::zero(), receiver_node.id, 2 * t)];
+    }
 
     for i in 0..n_parties {
         let mut bytes = Vec::new();
@@ -296,6 +322,19 @@ async fn test_receive_shares_wrong_degree_rejected() {
 
     let mut node: ZeroShaNode<Fr, Avid<SessionId>> = ZeroShaNode::new(5, n, t, t + 1).unwrap();
 
+    // Seed local initialization directly: receive_shares_handler now parks messages until
+    // this node's own batch_size is locally trusted (the batch_size-adoption fix), so the
+    // degree check below — which runs after that gate — needs the state set first.
+    {
+        let binding = node
+            .get_or_create_store(session_id, node.id)
+            .await
+            .unwrap();
+        let mut store = binding.lock().await;
+        store.batch_size = 1;
+        store.state = ZeroShaState::Initialized;
+    }
+
     // degree t instead of the required 2t
     let wrong_degree_share = RobustShare::new(Fr::zero(), 5, t);
     let mut bytes = Vec::new();
@@ -315,6 +354,138 @@ async fn test_receive_shares_wrong_degree_rejected() {
         matches!(err, ZeroShaError::ShareError(..)),
         "expected ShareError(DegreeMismatch), got: {err:?}"
     );
+}
+
+// ── Regression tests: batch_size trust (remote panic / session kill) ───────────
+
+/// Regression test for a remote panic: a Byzantine peer sending an oversized `SharesBatch`
+/// for a session *before* this node's own `init_batch` runs used to provisionally set
+/// `batch_size` from the attacker's message length (`store.initial_shares.is_empty()` was
+/// used as a proxy for "not yet locally initialized", but `init_batch` never touches
+/// `initial_shares`). `init_batch` would then overwrite `batch_size` back to the real value
+/// without clearing the attacker's oversized entry, so once every party had reported, the
+/// aggregation loop indexed a real-`batch_size`-sized array using the attacker's oversized
+/// entry's length — an out-of-bounds panic that crashed the node. `receive_shares_handler`
+/// must now park pre-init messages (gated on `ZeroShaState::NotInitialized`) instead of
+/// trusting them.
+#[tokio::test]
+async fn test_zero_share_early_oversized_batch_does_not_panic() {
+    let n = 5;
+    let t = 1;
+    // Keep the receiver ends alive — init_batch actually sends messages in this test
+    // (unlike the direct-rejection tests above), and a dropped receiver would make
+    // those sends fail with NetworkError::SendError.
+    let (network, _receivers, _, _) = test_setup(n, vec![]);
+    let session_id = SessionId::new(ProtocolType::ZeroSha, SessionId::pack_slot(0, 0, 0), 0);
+
+    let mut node: ZeroShaNode<Fr, Avid<SessionId>> = ZeroShaNode::new(0, n, t, t + 1).unwrap();
+
+    // Attacker (party 4) sends a much larger batch than the real session will use, before
+    // this node has locally initialized the session at all.
+    let oversized: Vec<RobustShare<Fr>> = (0..10)
+        .map(|_| RobustShare::new(Fr::from(1u8), 0, 2 * t))
+        .collect();
+    let mut payload = Vec::new();
+    oversized.serialize_compressed(&mut payload).unwrap();
+    let attacker_msg = ZeroShaMessage::new(
+        4,
+        ZeroShaMessageType::ShareMessage,
+        session_id,
+        ZeroShaPayload::SharesBatch(payload),
+    );
+    node.receive_shares_handler(attacker_msg, network[0].clone())
+        .await
+        .unwrap();
+
+    // Local node now legitimately initializes the session with the real, much smaller
+    // batch size — this must discard the attacker's oversized entry, not just overwrite
+    // `batch_size` and leave it in place.
+    let mut rng = test_rng();
+    node.init_batch(session_id, 2, &mut rng, network[0].clone())
+        .await
+        .unwrap();
+
+    // All 5 parties (including party 4 again, this time correctly sized) report their real
+    // shares. Aggregating these must not panic.
+    for sender in 0..n {
+        let shares: Vec<RobustShare<Fr>> = (0..2)
+            .map(|_| RobustShare::new(Fr::from(1u8), 0, 2 * t))
+            .collect();
+        let mut payload = Vec::new();
+        shares.serialize_compressed(&mut payload).unwrap();
+        let msg = ZeroShaMessage::new(
+            sender,
+            ZeroShaMessageType::ShareMessage,
+            session_id,
+            ZeroShaPayload::SharesBatch(payload),
+        );
+        node.receive_shares_handler(msg, network[0].clone())
+            .await
+            .unwrap();
+    }
+}
+
+/// Same remote-panic shape as above, one phase later: a Byzantine (or merely fast) verifier's
+/// oversized `ReconstructSharesBatch` arriving before this node's own `init_zerosha_batch`
+/// combine step used `store.received_r_shares.is_empty()` as the same wrong proxy, letting
+/// the attacker's length briefly become the trusted `batch_size`. `reconstruction_handler`
+/// must now park pre-combine messages (gated on `computed_r_shares.is_empty()`) instead of
+/// trusting them.
+#[tokio::test]
+async fn test_zero_share_early_oversized_reconstruction_does_not_panic() {
+    let n = 5;
+    let t = 1;
+    // Keep the receiver ends alive — init_zerosha actually sends messages in this test,
+    // and a dropped receiver would make those sends fail with NetworkError::SendError.
+    let (network, _receivers, _, _) = test_setup(n, vec![]);
+    let session_id = SessionId::new(ProtocolType::ZeroSha, SessionId::pack_slot(0, 0, 0), 0);
+
+    let mut node: ZeroShaNode<Fr, Avid<SessionId>> = ZeroShaNode::new(0, n, t, t + 1).unwrap();
+
+    // Attacker (party 4) sends an oversized reconstruction batch before this node's own
+    // init_zerosha_batch has combined its initial shares at all.
+    let oversized: Vec<RobustShare<Fr>> = (0..10)
+        .map(|_| RobustShare::new(Fr::from(1u8), 4, 2 * t))
+        .collect();
+    let mut payload = Vec::new();
+    oversized.serialize_compressed(&mut payload).unwrap();
+    let attacker_msg = ZeroShaMessage::new(
+        4,
+        ZeroShaMessageType::ReconstructMessage,
+        session_id,
+        ZeroShaPayload::ReconstructSharesBatch(payload),
+    );
+    node.reconstruction_handler(attacker_msg, network[0].clone())
+        .await
+        .unwrap();
+
+    // Local node now legitimately completes its own combine step with the real, much
+    // smaller batch size (1) — this must discard the attacker's oversized entry, not just
+    // overwrite `batch_size` and leave it in place. These are node 0's own received shares
+    // from each of the n dealers, so every one carries node 0's own id.
+    let own_shares: Vec<RobustShare<Fr>> = (0..n)
+        .map(|_| RobustShare::new(Fr::from(1u8), 0, 2 * t))
+        .collect();
+    node.init_zerosha(own_shares, session_id, network[0].clone())
+        .await
+        .unwrap();
+
+    // All 5 parties (including party 4 again, this time correctly sized) send their real
+    // reconstruction shares. Aggregating these must not panic.
+    for sender in 0..n {
+        let share = RobustShare::new(Fr::from(1u8), sender, 2 * t);
+        let mut payload = Vec::new();
+        share.serialize_compressed(&mut payload).unwrap();
+        let msg = ZeroShaMessage::new(
+            sender,
+            ZeroShaMessageType::ReconstructMessage,
+            session_id,
+            ZeroShaPayload::Reconstruct(payload),
+        );
+        node.reconstruction_handler(msg, network[0].clone())
+            .await
+            .unwrap();
+    }
 }
 
 // ── End-to-end ────────────────────────────────────────────────────────────────

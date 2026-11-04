@@ -202,7 +202,7 @@ where
         network: Arc<N>,
     ) -> Result<(), ZeroShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
         G: Rng,
     {
         self.init_batch(session_id, 1, rng, network).await
@@ -221,7 +221,7 @@ where
         network: Arc<N>,
     ) -> Result<(), ZeroShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
         G: Rng,
     {
         assert_eq!(session_id.sub_id(), 0);
@@ -267,9 +267,26 @@ where
             .get_or_create_store(session_id, self.id)
             .await
             .ok_or(ZeroShaError::LimitError)?;
-        let mut store = storage_access.lock().await;
-        store.batch_size = batch_size;
-        store.state = ZeroShaState::Initialized;
+        let pending = {
+            let mut store = storage_access.lock().await;
+            store.batch_size = batch_size;
+            store.state = ZeroShaState::Initialized;
+            std::mem::take(&mut store.pending_share_messages)
+        };
+
+        // Replay messages that arrived before local initialization. A parked message that
+        // fails validation on replay is the sender's fault, not ours — log and drop it. A
+        // blanket `?` here would let a single Byzantine peer abort our own initialization by
+        // parking one oversized batch before we started.
+        for msg in pending {
+            let sender_id = msg.sender_id;
+            if let Err(e) = self.receive_shares_handler(msg, Arc::clone(&network)).await {
+                warn!(
+                    session_id = session_id.as_u128(),
+                    "dropping invalid pre-init zero-share from party {sender_id}: {e:?}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -279,7 +296,7 @@ where
         network: Arc<N>,
     ) -> Result<(), ZeroShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
         if msg.session_id.sub_id() != 0 {
             return Err(ZeroShaError::SessionIdError(msg.session_id));
@@ -288,6 +305,50 @@ where
             return Err(ZeroShaError::InvalidPartyId);
         }
 
+        // Attributed to `msg.sender_id`: whichever party's message happens to
+        // create this entry, so no single sender can flood past its own
+        // per-peer share of the cap.
+        //
+        // Look up the store BEFORE deserialization so we can queue the raw message
+        // when local initialization hasn't run yet (msg.session_id/sender_id are Copy,
+        // so msg is not consumed here).
+        let binding = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        {
+            let mut store = binding.lock().await;
+            if store.state == ZeroShaState::NotInitialized {
+                // batch_size is not yet locally known; park the message and return.
+                // init_batch will drain and replay these once the trusted value is set.
+                //
+                // Bound the queue at one parked message per peer. The length check is not
+                // redundant with the per-sender check: `sender_id` is only validated against
+                // `n_parties` further up, so a peer forging distinct ids could otherwise grow
+                // this vector without limit before ever being rejected.
+                if store.pending_share_messages.len() >= self.n_parties
+                    || store
+                        .pending_share_messages
+                        .iter()
+                        .any(|m| m.sender_id == msg.sender_id)
+                {
+                    warn!(
+                        session_id = msg.session_id.as_u128(),
+                        "pending zero-share queue full or already holds a message from party {}; dropping",
+                        msg.sender_id
+                    );
+                    return Ok(());
+                }
+                store.pending_share_messages.push(msg);
+                return Ok(());
+            }
+        }
+
+        // msg.payload has not been consumed — proceed with deserialization.
         let shares: Vec<ShamirShare<F, 1, Robust>> = match msg.payload {
             ZeroShaPayload::Share(payload) => {
                 vec![CanonicalDeserialize::deserialize_compressed(
@@ -309,21 +370,10 @@ where
             }
         }
 
-        // Attributed to `msg.sender_id`: whichever party's message happens to
-        // create this entry, so no single sender can flood past its own
-        // per-peer share of the cap.
-        let binding = match self
-            .get_or_create_store(msg.session_id, msg.sender_id)
-            .await
-        {
-            Some(s) => s,
-            None => return Ok(()),
-        };
         let mut store = binding.lock().await;
 
-        if store.initial_shares.is_empty() {
-            store.batch_size = shares.len();
-        } else if store.batch_size != shares.len() {
+        // Always validate against the locally-set batch_size; never adopt peer-controlled length.
+        if store.batch_size != shares.len() {
             return Err(ZeroShaError::Abort);
         }
 
@@ -370,7 +420,7 @@ where
         network: Arc<N>,
     ) -> Result<(), ZeroShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
         self.init_zerosha_batch(vec![shares_deg_2t], session_id, network)
             .await
@@ -383,7 +433,7 @@ where
         network: Arc<N>,
     ) -> Result<(), ZeroShaError>
     where
-        N: Network,
+        N: Network + Send + Sync,
     {
         let hyperinvertible_matrix = make_hyperinvertible_matrix(self.n_parties)?;
         let mut r_deg_2t = Vec::with_capacity(shares_by_batch.len() * self.n_parties);
@@ -395,10 +445,12 @@ where
             Some(s) => s,
             None => return Ok(()),
         };
-        let mut store = bind_store.lock().await;
-        store.batch_size = r_deg_2t.len() / self.n_parties;
-        store.computed_r_shares = r_deg_2t.clone();
-        drop(store);
+        let pending = {
+            let mut store = bind_store.lock().await;
+            store.batch_size = r_deg_2t.len() / self.n_parties;
+            store.computed_r_shares = r_deg_2t.clone();
+            std::mem::take(&mut store.pending_recon_messages)
+        };
 
         if self.try_finalize(session_id).await? {
             return Ok(());
@@ -426,6 +478,19 @@ where
             ));
             network.send(i, &wire_format::serialize(&message)?).await?;
         }
+
+        // Replay reconstruction messages that arrived before this node's own combine step
+        // (above) set the trusted batch_size. A parked message that fails validation on
+        // replay is the sender's fault, not ours — log and drop it.
+        for msg in pending {
+            let sender_id = msg.sender_id;
+            if let Err(e) = self.reconstruction_handler(msg, Arc::clone(&network)).await {
+                warn!(
+                    session_id = session_id.as_u128(),
+                    "dropping invalid pre-init zero-share reconstruction message from party {sender_id}: {e:?}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -441,6 +506,45 @@ where
             return Err(ZeroShaError::SessionIdError(msg.session_id));
         }
 
+        // Attributed to `msg.sender_id` — see receive_shares_handler for why.
+        //
+        // Look up the store BEFORE deserialization so we can queue the raw message when
+        // this node's own init_zerosha_batch hasn't run yet (computed_r_shares not yet set).
+        let binding = match self
+            .get_or_create_store(msg.session_id, msg.sender_id)
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        {
+            let mut store = binding.lock().await;
+            if store.computed_r_shares.is_empty() {
+                // batch_size is not yet locally known; park the message and return.
+                // init_zerosha_batch will drain and replay these once the trusted value is set.
+                //
+                // Bound the queue at one parked message per peer, same reasoning as
+                // receive_shares_handler's pending-share queue.
+                if store.pending_recon_messages.len() >= self.n_parties
+                    || store
+                        .pending_recon_messages
+                        .iter()
+                        .any(|m| m.sender_id == msg.sender_id)
+                {
+                    warn!(
+                        session_id = msg.session_id.as_u128(),
+                        "pending zero-share reconstruction queue full or already holds a message from party {}; dropping",
+                        msg.sender_id
+                    );
+                    return Ok(());
+                }
+                store.pending_recon_messages.push(msg);
+                return Ok(());
+            }
+        }
+
+        // msg.payload has not been consumed — proceed with deserialization.
         let shares: Vec<ShamirShare<F, 1, Robust>> = match msg.payload {
             ZeroShaPayload::Reconstruct(payload) => {
                 vec![CanonicalDeserialize::deserialize_compressed(
@@ -462,21 +566,12 @@ where
             }
         }
 
-        // Attributed to `msg.sender_id` — see receive_shares_handler for why.
-        let binding = match self
-            .get_or_create_store(msg.session_id, msg.sender_id)
-            .await
-        {
-            Some(s) => s,
-            None => return Ok(()),
-        };
         let mut store = binding.lock().await;
         if store.state == ZeroShaState::Finished {
             return Ok(());
         }
-        if store.received_r_shares.is_empty() {
-            store.batch_size = shares.len();
-        } else if store.batch_size != shares.len() {
+        // Always validate against the locally-set batch_size; never adopt peer-controlled length.
+        if store.batch_size != shares.len() {
             return Err(ZeroShaError::Abort);
         }
         store.state = ZeroShaState::Reconstruction;

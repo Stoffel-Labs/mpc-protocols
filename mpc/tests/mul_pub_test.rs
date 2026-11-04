@@ -166,6 +166,20 @@ async fn test_reconstruction_handler_nonzero_caught() {
     let nodes = make_nodes(n_parties, t);
     let mut receiver_node = nodes[receiver_id].clone();
 
+    // Seed this node's own locally-trusted batch_size/computed_r_shares, mirroring what
+    // init_zerosha_batch would already have set via this node's own share-combining phase —
+    // required now that reconstruction_handler parks messages until that local state exists
+    // (the batch_size-adoption fix under test in the regression tests below).
+    {
+        let binding = receiver_node
+            .get_or_create_store(session_id, receiver_node.id)
+            .await
+            .unwrap();
+        let mut store = binding.lock().await;
+        store.batch_size = 1;
+        store.computed_r_shares = vec![RobustShare::new(Fr::zero(), receiver_node.id, 2 * t)];
+    }
+
     for i in 0..n_parties {
         let mut bytes = Vec::new();
         shares[i].clone().serialize_compressed(&mut bytes).unwrap();
@@ -226,6 +240,18 @@ async fn test_reconstruction_handler_manipulation_caught() {
     let receiver_id = 2; // must be < 2t
     let nodes = make_nodes(n_parties, t);
     let mut receiver_node = nodes[receiver_id].clone();
+
+    // Seed this node's own locally-trusted batch_size/computed_r_shares — see the comment
+    // in test_reconstruction_handler_nonzero_caught above.
+    {
+        let binding = receiver_node
+            .get_or_create_store(session_id, receiver_node.id)
+            .await
+            .unwrap();
+        let mut store = binding.lock().await;
+        store.batch_size = 1;
+        store.computed_r_shares = vec![RobustShare::new(Fr::zero(), receiver_node.id, 2 * t)];
+    }
 
     for i in 0..n_parties {
         let mut bytes = Vec::new();
@@ -295,6 +321,19 @@ async fn test_receive_shares_wrong_degree_rejected() {
     let (network, _, _, _) = test_setup(n, vec![]);
 
     let mut node: ZeroShaNode<Fr, Avid<SessionId>> = ZeroShaNode::new(5, n, t, t + 1).unwrap();
+
+    // Seed local initialization directly: receive_shares_handler now parks messages until
+    // this node's own batch_size is locally trusted (the batch_size-adoption fix), so the
+    // degree check below — which runs after that gate — needs the state set first.
+    {
+        let binding = node
+            .get_or_create_store(session_id, node.id)
+            .await
+            .unwrap();
+        let mut store = binding.lock().await;
+        store.batch_size = 1;
+        store.state = ZeroShaState::Initialized;
+    }
 
     // degree t instead of the required 2t
     let wrong_degree_share = RobustShare::new(Fr::zero(), 5, t);

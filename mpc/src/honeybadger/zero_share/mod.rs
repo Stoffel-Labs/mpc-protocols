@@ -66,10 +66,17 @@ pub struct ZeroShaStore<F: FftField> {
     pub protocol_output: Vec<RobustShare<F>>,
     pub output_sender: Option<Sender<Vec<RobustShare<F>>>>,
     pub output_receiver: Option<Receiver<Vec<RobustShare<F>>>>,
+    /// Share messages that arrived before local `init_batch` set `batch_size`.
+    /// Drained and replayed by `init_batch` once the trusted batch_size is set.
+    pub pending_share_messages: Vec<ZeroShaMessage>,
+    /// Reconstruction messages that arrived before `init_zerosha_batch` set
+    /// `computed_r_shares`. Drained and replayed once that trusted state is set.
+    pub pending_recon_messages: Vec<ZeroShaMessage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZeroShaState {
+    NotInitialized,
     Initialized,
     FinishedInitialSharing,
     Reconstruction,
@@ -86,10 +93,12 @@ impl<F: FftField> ZeroShaStore<F> {
             computed_r_shares: Vec::new(),
             received_ok_msg: Vec::new(),
             batch_size: 0,
-            state: ZeroShaState::Initialized,
+            state: ZeroShaState::NotInitialized,
             protocol_output: Vec::new(),
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
+            pending_share_messages: Vec::new(),
+            pending_recon_messages: Vec::new(),
         }
     }
 }
