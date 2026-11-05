@@ -658,8 +658,12 @@ where
                                 DensePolynomial::from_coefficients_slice(&reconstructed_r_t.0);
                             let poly2 =
                                 DensePolynomial::from_coefficients_slice(&reconstructed_r_2t.0);
-                            if self.threshold != poly1.degree()
-                                || 2 * self.threshold != poly2.degree()
+                            // Degree-<=, not exact-degree: exact-degree makes the OK bit depend
+                            // on honest randomness (leading coeff can land on 0), so the
+                            // simulator can't always predict it -> perfect security degrades to
+                            // statistical. BTH08's own predicate is degree-<=.
+                            if poly1.degree() > self.threshold
+                                || poly2.degree() > 2 * self.threshold
                                 || reconstructed_r_t.1 != reconstructed_r_2t.1
                             {
                                 ok = false;

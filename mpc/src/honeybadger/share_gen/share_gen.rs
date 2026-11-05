@@ -641,7 +641,11 @@ where
                                 .iter()
                                 .all(|s| poly.evaluate(&domain.element(s.id)) == s.share[0])
                         });
-                        if poly.degree() != self.threshold || !consistent {
+                        // Degree-<=, not exact-degree: exact-degree makes the OK bit depend on
+                        // honest randomness (leading coeff can land on 0), so the simulator can't
+                        // always predict it -> perfect security degrades to statistical. BTH08's
+                        // own predicate is degree-<=.
+                        if poly.degree() > self.threshold || !consistent {
                             ok = false;
                             break;
                         }
