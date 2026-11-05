@@ -111,7 +111,10 @@ pub struct PRandMPrep<F: FftField> {
 }
 impl<F: FftField> PRandMPrep<F> {
     /// Protocol 2.2 step 3: computes [r'] = Σ_{i=0}^{m-1} 2^i * [b_i].
-    /// `r_double_prime` is the PRandInt(k + κ − m) output.
+    /// `r_double_prime` is a draw off the shared PRandInt pool, sized once node-wide at
+    /// `mask_bits()` (the widest value any configured operation feeds into TruncPr, plus the
+    /// statistical margin) — not a per-call `PRandInt(k + κ − m)` draw. That's the safe
+    /// direction (every draw is at least as wide as this call needs)
     /// `r_prime_bits` must be non-empty (m >= 1), LSB first.
     pub fn from_prand_outputs(
         r_double_prime: RobustShare<F>,
