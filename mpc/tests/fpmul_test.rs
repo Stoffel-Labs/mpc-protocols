@@ -371,22 +371,24 @@ async fn prandint_via_prss_needs_no_network() {
     let mut rng = test_rng();
     let dealt = crate::utils::prss_utils::deal_keys(n, t, &mut rng);
 
-    let nodes: Vec<PRandIntNode<G, Avid<SessionId>>> = (0..n)
-        .map(|i| {
-            let mut node = PRandIntNode::new(i, n, t, t + 1).unwrap();
-            let keys =
-                stoffelcrypto::honeybadger::prss::prss::PrssKeys::<G>::new(i, n, t, &dealt[i])
-                    .unwrap();
-            node.install_prss_keys(keys);
-            node
-        })
-        .collect();
+    let mut nodes: Vec<PRandIntNode<G, Avid<SessionId>>> = Vec::with_capacity(n);
+    for i in 0..n {
+        let node = PRandIntNode::new(i, n, t, t + 1).unwrap();
+        let keys = stoffelcrypto::honeybadger::prss::prss::PrssKeys::<G>::new(i, n, t, &dealt[i])
+            .unwrap();
+        node.install_prss_keys(keys).await;
+        nodes.push(node);
+    }
 
     // No network is constructed anywhere in this test -- that is the point.
-    let per_party: Vec<Vec<RobustShare<G>>> = nodes
-        .iter()
-        .map(|node| node.generate_prss_at(instance_id, 0, count, bits).unwrap())
-        .collect();
+    let mut per_party: Vec<Vec<RobustShare<G>>> = Vec::with_capacity(n);
+    for node in &nodes {
+        per_party.push(
+            node.generate_prss_at(instance_id, 0, count, bits)
+                .await
+                .unwrap(),
+        );
+    }
 
     let n_tsets = (0..n).combinations(t).count();
     let bound = BigUint::from(n_tsets) << bits;
@@ -405,11 +407,13 @@ async fn prandint_via_prss_needs_no_network() {
     // Re-deriving the same range must be byte-identical; a different instance must differ.
     let again = nodes[0]
         .generate_prss_at(instance_id, 0, count, bits)
+        .await
         .unwrap();
     assert_eq!(again, per_party[0]);
 
     let different = nodes[0]
         .generate_prss_at(instance_id + 1, 0, count, bits)
+        .await
         .unwrap();
     assert_ne!(different, per_party[0]);
 
@@ -417,6 +421,7 @@ async fn prandint_via_prss_needs_no_network() {
     // the property `ensure_prandint_shares` relies on when a node restarts mid-fill.
     let tail = nodes[0]
         .generate_prss_at(instance_id, 2, count - 2, bits)
+        .await
         .unwrap();
     assert_eq!(tail, per_party[0][2..]);
 }
@@ -428,15 +433,18 @@ async fn prandint_prss_rejects_an_oversized_mask() {
     let t = 1;
     let mut rng = test_rng();
     let dealt = crate::utils::prss_utils::deal_keys(n, t, &mut rng);
-    let mut node = PRandIntNode::<G, Avid<SessionId>>::new(0, n, t, t + 1).unwrap();
+    let node = PRandIntNode::<G, Avid<SessionId>>::new(0, n, t, t + 1).unwrap();
     node.install_prss_keys(
         stoffelcrypto::honeybadger::prss::prss::PrssKeys::<G>::new(0, n, t, &dealt[0]).unwrap(),
-    );
+    )
+    .await;
 
     assert!(node
         .generate_prss_at(222, 0, 1, node.max_mask_bits())
+        .await
         .is_ok());
     assert!(node
         .generate_prss_at(222, 0, 1, node.max_mask_bits() + 1)
+        .await
         .is_err());
 }

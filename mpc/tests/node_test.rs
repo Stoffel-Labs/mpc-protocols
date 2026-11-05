@@ -1862,21 +1862,25 @@ async fn prss_setup_from_riss_then_local_masks() {
     }
     for (pid, handle) in handles.into_iter().enumerate() {
         nodes[pid] = handle.await.unwrap();
-        assert!(nodes[pid].prss_keys_installed(), "node {pid} has no keys");
+        assert!(
+            nodes[pid].prss_keys_installed().await,
+            "node {pid} has no keys"
+        );
     }
 
     // From here on, masks are derived with no messages at all.
     let count = 5;
     let bits = nodes[0].params.mask_bits();
-    let per_party: Vec<Vec<RobustShare<Fr>>> = nodes
-        .iter()
-        .map(|node| {
+    let mut per_party: Vec<Vec<RobustShare<Fr>>> = Vec::with_capacity(n_parties);
+    for node in &nodes {
+        per_party.push(
             node.preprocess
                 .prand_int
                 .generate_prss_at(instance_id, 0, count, bits)
-                .unwrap()
-        })
-        .collect();
+                .await
+                .unwrap(),
+        );
+    }
 
     for i in 0..count {
         let shares: Vec<RobustShare<Fr>> =
@@ -1892,8 +1896,100 @@ async fn prss_setup_from_riss_then_local_masks() {
         .preprocess
         .prand_int
         .generate_prss_at(instance_id + 1, 0, count, bits)
+        .await
         .unwrap();
     assert_ne!(other, per_party[0]);
+}
+
+/// Regression test for the RISS bootstrap gate: two concurrent clones of the same party racing
+/// `setup_prss_keys` must not each run an independent RISS session. `PRandIntNode::prss` used to
+/// be a plain (non-Arc) field, so two clones calling `setup_prss_keys` around the same time would
+/// both see "no keys yet," both run RISS, and whichever installed last would silently win —
+/// different honest parties could then end up with keys from *different* RISS runs, since RISS
+/// folds fresh randomness every time. `prss` is now `Arc<Mutex<_>>` and `setup_prss_keys` holds
+/// that lock across the whole round-trip, so the second clone blocks on the lock and, once the
+/// first finishes, observes keys already installed and never runs RISS itself.
+///
+/// Observable proxy for "only one RISS run happened": if two independent runs had occurred, the
+/// two racing clones would almost certainly install numerically different (valid but distinct)
+/// keys, so their later mask derivations would disagree. A shared gate makes them identical.
+#[tokio::test]
+async fn setup_prss_keys_concurrent_clones_do_not_race() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+    let instance_id = 444;
+
+    let (network, receivers, _, _) = test_setup(n_parties, vec![]);
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        instance_id,
+        0,
+        0,
+        unused_precision(),
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        receivers,
+        nodes.clone(),
+        network.clone(),
+        None,
+    );
+
+    // Party 0 races two clones of itself into setup_prss_keys. Parties 1..n run their own setup
+    // normally, exactly once each, so the n-party RISS exchange still has one well-formed
+    // counterpart session to complete against.
+    let mut handles = Vec::new();
+    for pid in 0..n_parties {
+        let net = network[pid].clone();
+        if pid == 0 {
+            for _ in 0..2 {
+                let mut racer = nodes[0].clone();
+                let net = net.clone();
+                handles.push(tokio::spawn(async move {
+                    racer.setup_prss_keys(net).await.expect("prss setup");
+                    racer
+                }));
+            }
+        } else {
+            let mut node = nodes[pid].clone();
+            handles.push(tokio::spawn(async move {
+                node.setup_prss_keys(net).await.expect("prss setup");
+                node
+            }));
+        }
+    }
+    let finished: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.expect("task panicked"))
+        .collect();
+
+    // finished[0] and finished[1] are party 0's two racing clones.
+    let count = 4;
+    let bits = finished[0].params.mask_bits();
+    let masks_a = finished[0]
+        .preprocess
+        .prand_int
+        .generate_prss_at(instance_id, 0, count, bits)
+        .await
+        .unwrap();
+    let masks_b = finished[1]
+        .preprocess
+        .prand_int
+        .generate_prss_at(instance_id, 0, count, bits)
+        .await
+        .unwrap();
+    assert_eq!(
+        masks_a, masks_b,
+        "racing clones installed different PRSS keys -- the bootstrap gate did not hold"
+    );
 }
 
 #[tokio::test]

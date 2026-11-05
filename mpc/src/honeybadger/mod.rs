@@ -346,11 +346,20 @@ where
     }
     /// Establishes this party's PRSS keys by running RISS **once**, then switches PRandInt to
     /// local derivation.
+    ///
+    /// Holds the PRSS setup lock across the whole RISS round-trip, not just the final install —
+    /// that's the RISS bootstrap gate: this node is cloned per concurrent task (inbound message
+    /// processing, each locally-initiated operation), and a second clone calling this
+    /// concurrently blocks on the lock instead of racing its own redundant RISS run. Once the
+    /// first finishes, every later caller's re-check under the same lock sees keys already
+    /// installed and returns immediately.
     pub async fn setup_prss_keys<N>(&mut self, network: Arc<N>) -> Result<(), HoneyBadgerError>
     where
         N: Network + Send + Sync + 'static,
     {
-        if self.preprocess.prand_int.has_prss_keys() {
+        let prss_lock = self.preprocess.prand_int.prss_lock_handle();
+        let mut guard = prss_lock.lock().await;
+        if guard.is_some() {
             info!("PRSS keys already installed");
             return Ok(());
         }
@@ -396,13 +405,13 @@ where
 
         let keys = PrssKeys::<F>::new(self.id, self.params.n_parties, self.params.threshold, &keys)
             .map_err(PRandIntError::from)?;
-        self.preprocess.prand_int.install_prss_keys(keys);
+        *guard = Some(keys);
         info!("PRSS key setup complete");
         Ok(())
     }
 
-    pub fn prss_keys_installed(&self) -> bool {
-        self.preprocess.prand_int.has_prss_keys()
+    pub async fn prss_keys_installed(&self) -> bool {
+        self.preprocess.prand_int.has_prss_keys().await
     }
 
     /// TruncPr opens `b + r` in the clear, so its privacy rests on one inequality
@@ -2346,10 +2355,11 @@ where
         // ------------------------
         // Step 0. Establish PRSS keys (once)
         // ------------------------
-        // Idempotent, and safe to run here rather than as a separate call by the application:
-        // every party reaches `run_preprocessing` together, so the setup's RISS session runs in
-        // lockstep — and RISS is loud if it does not.
-        if !self.preprocess.prand_int.has_prss_keys() {
+        // Idempotent and safe to call unconditionally -- `setup_prss_keys` re-checks under its
+        // own lock and admits exactly one RISS run across every concurrent clone of this node.
+        // The check here is just an optimization to skip the call (and the lock acquisition)
+        // in the common already-installed case.
+        if !self.preprocess.prand_int.has_prss_keys().await {
             let phase_start = Instant::now();
             self.setup_prss_keys(network.clone()).await?;
             trace_preprocessing_phase(self.id, "prss_setup", 1, phase_start);
@@ -3091,12 +3101,11 @@ where
             let store = self.preprocessing_material.lock().await;
             store.prandint_cursor()
         };
-        let output = self.preprocess.prand_int.generate_prss_at(
-            self.params.instance_id,
-            cursor,
-            missing,
-            bits,
-        )?;
+        let output = self
+            .preprocess
+            .prand_int
+            .generate_prss_at(self.params.instance_id, cursor, missing, bits)
+            .await?;
         self.preprocessing_material
             .lock()
             .await

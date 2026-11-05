@@ -43,7 +43,14 @@ pub struct PRandIntNode<G: PrimeField, R: RBC> {
     pub store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<PRandIntStore<G>>>)>>>,
     /// PRSS key material. When present, `generate_prss` derives masks locally and the whole RISS
     /// message path below goes unused. Absent until a key setup has run.
-    prss: Option<PrssKeys<G>>,
+    ///
+    /// `Arc<Mutex<_>>`, not a plain field: the node is cloned per concurrent task (one for
+    /// inbound message processing, one per locally-initiated operation), and setup must be
+    /// admitted exactly once across every clone. `HoneyBadgerMPCNode::setup_prss_keys` holds
+    /// this lock for the whole RISS round-trip, so a second clone's call blocks until the first
+    /// finishes and then observes keys already installed, instead of racing its own redundant —
+    /// and possibly divergent, since RISS folds fresh randomness each run — setup.
+    prss: Arc<Mutex<Option<PrssKeys<G>>>>,
     /// Rank of each unqualified set in `all_tsets(n, t)`, built once at construction.
     /// `Arc` because the node is cloned per message task; the map itself is immutable.
     tset_ranks: Arc<HashMap<Vec<usize>, usize>>,
@@ -83,7 +90,7 @@ where
             n,
             t,
             store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
-            prss: None,
+            prss: Arc::new(Mutex::new(None)),
             rbc,
             rbc_output: Arc::new(Mutex::new(rbc_receiver)),
             tset_ranks: Arc::new(tset_ranks),
@@ -91,12 +98,23 @@ where
     }
 
     /// Installs PRSS key material, switching mask generation from RISS to local derivation.
-    pub fn install_prss_keys(&mut self, keys: PrssKeys<G>) {
-        self.prss = Some(keys);
+    pub async fn install_prss_keys(&self, keys: PrssKeys<G>) {
+        *self.prss.lock().await = Some(keys);
     }
 
-    pub fn has_prss_keys(&self) -> bool {
-        self.prss.is_some()
+    pub async fn has_prss_keys(&self) -> bool {
+        self.prss.lock().await.is_some()
+    }
+
+    /// A clone of the PRSS setup lock, independent of this node's own borrow.
+    ///
+    /// `HoneyBadgerMPCNode::setup_prss_keys` locks this and holds the guard across the entire
+    /// RISS round-trip (not just the final install) — that's what makes setup admission atomic
+    /// across clones. Returning an owned `Arc` rather than a guard lets the caller run `&mut
+    /// self`-requiring steps (`generate_riss` and friends) on the rest of this node in between,
+    /// without a borrow conflict against the guard.
+    pub fn prss_lock_handle(&self) -> Arc<Mutex<Option<PrssKeys<G>>>> {
+        self.prss.clone()
     }
 
     /// Position of `tset` in `all_tsets(n, t)`. Rejects anything that is not a real unqualified
@@ -129,14 +147,13 @@ where
     /// entirely different secrets and no message exchange remains to notice.
     ///
     /// Parties must still agree on `bits` and on the cursor position they are filling.
-    pub fn generate_prss_at(
+    pub async fn generate_prss_at(
         &self,
         instance_id: u32,
         start: usize,
         count: usize,
         bits: usize,
     ) -> Result<Vec<RobustShare<G>>, PRandIntError> {
-        let keys = self.prss.as_ref().ok_or(PRandIntError::NoPrssKeys)?;
         if bits > self.max_mask_bits() {
             return Err(PRandIntError::SurpassedFieldCapacity);
         }
@@ -147,6 +164,8 @@ where
             instance_id,
         );
 
+        let guard = self.prss.lock().await;
+        let keys = guard.as_ref().ok_or(PRandIntError::NoPrssKeys)?;
         Ok(keys.shares_at(session_id, start, count, bits)?)
     }
 
