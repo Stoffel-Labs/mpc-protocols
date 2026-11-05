@@ -109,8 +109,12 @@ use triple_gen::triple_generation::TripleGenNode;
 /// Maximum number of bytes accepted from a single network message before deserialization.
 /// Rejects payloads that would cause multi-gigabyte allocations via a crafted length prefix.
 const MAX_MESSAGE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
-/// Minimum statistical security parameter
-pub const MIN_STATISTICAL_SECURITY: usize = 40;
+/// Minimum statistical security parameter.
+///
+/// 44, not 40: the Masked-Open Lemma's leakage budget is `Adv_PRF^(N) + N·2^-κ_eff` over
+/// N ≈ 137-233 masked opens per division, so κ=40 only delivers ~2^-31 — short of the
+/// intended <2^-32. κ=44 restores that margin.
+pub const MIN_STATISTICAL_SECURITY: usize = 44;
 
 fn preprocessing_trace_enabled() -> bool {
     std::env::var("HMPC_PREPROCESSING_TRACE")
