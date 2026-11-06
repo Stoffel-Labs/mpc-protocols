@@ -370,6 +370,7 @@ async fn prandint_via_prss_needs_no_network() {
 
     let mut rng = test_rng();
     let dealt = crate::utils::prss_utils::deal_keys(n, t, &mut rng);
+    let sid = SessionId::new(ProtocolType::PRandInt, SessionId::pack_slot(0, 0, 0), instance_id);
 
     let mut nodes: Vec<PRandIntNode<G, Avid<SessionId>>> = Vec::with_capacity(n);
     for i in 0..n {
@@ -384,7 +385,7 @@ async fn prandint_via_prss_needs_no_network() {
     let mut per_party: Vec<Vec<RobustShare<G>>> = Vec::with_capacity(n);
     for node in &nodes {
         per_party.push(
-            node.generate_prss_at(instance_id, 0, count, bits)
+            node.generate_prss_at(sid, 0, count, bits)
                 .await
                 .unwrap(),
         );
@@ -406,21 +407,24 @@ async fn prandint_via_prss_needs_no_network() {
 
     // Re-deriving the same range must be byte-identical; a different instance must differ.
     let again = nodes[0]
-        .generate_prss_at(instance_id, 0, count, bits)
+        .generate_prss_at(sid, 0, count, bits)
         .await
         .unwrap();
     assert_eq!(again, per_party[0]);
 
+    let different_sid =
+        SessionId::new(ProtocolType::PRandInt, SessionId::pack_slot(0, 0, 0), instance_id + 1);
     let different = nodes[0]
-        .generate_prss_at(instance_id + 1, 0, count, bits)
+        .generate_prss_at(different_sid, 0, count, bits)
         .await
         .unwrap();
     assert_ne!(different, per_party[0]);
 
     // Topping up from a pool depth must land on the same values as the one-shot derivation --
-    // the property `ensure_prandint_shares` relies on when a node restarts mid-fill.
+    // the property per-operation mask draws rely on when an operation's own batch is drawn
+    // in more than one piece.
     let tail = nodes[0]
-        .generate_prss_at(instance_id, 2, count - 2, bits)
+        .generate_prss_at(sid, 2, count - 2, bits)
         .await
         .unwrap();
     assert_eq!(tail, per_party[0][2..]);
@@ -438,13 +442,14 @@ async fn prandint_prss_rejects_an_oversized_mask() {
         stoffelcrypto::honeybadger::prss::prss::PrssKeys::<G>::new(0, n, t, &dealt[0]).unwrap(),
     )
     .await;
+    let sid = SessionId::new(ProtocolType::PRandInt, SessionId::pack_slot(0, 0, 0), 222);
 
     assert!(node
-        .generate_prss_at(222, 0, 1, node.max_mask_bits())
+        .generate_prss_at(sid, 0, 1, node.max_mask_bits())
         .await
         .is_ok());
     assert!(node
-        .generate_prss_at(222, 0, 1, node.max_mask_bits() + 1)
+        .generate_prss_at(sid, 0, 1, node.max_mask_bits() + 1)
         .await
         .is_err());
 }

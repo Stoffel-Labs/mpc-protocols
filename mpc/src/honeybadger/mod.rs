@@ -452,9 +452,8 @@ where
         let triples = len.beaver_triples;
         let random_shares = len.random_shr;
         let randbit = len.randbit;
-        let prandint = len.prandint;
         format!(
-            "material=(triples:{triples},random:{random_shares},randbit:{randbit},prandint:{prandint}) \
+            "material=(triples:{triples},random:{random_shares},randbit:{randbit}) \
              stores=(share_gen:{},dou_sha:{},ran_dou_sha:{},triple:{},triple_batch_recon:{},mul:{},rand_bit:{},rand_bit_mul_pub:{},zero_sha:{},prand_int:{},fpmul_mul:{},fpmul_trunc:{})",
             self.preprocess.share_gen.store_len().await,
             self.preprocess.dou_sha.store_len().await,
@@ -1845,15 +1844,22 @@ where
         }
         self.check_mask_security(HoneyBadgerMPCNodeOpts::max_masked_width(*x.precision()))?;
 
-        let (no_rand_bit, no_rand_int) = {
+        let no_rand_bit = {
             let store = self.preprocessing_material.lock().await;
-            (store.length().randbit, store.length().prandint)
+            store.length().randbit
         };
-        if no_rand_bit < x.precision().f() || no_rand_int == 0 {
+        if no_rand_bit < x.precision().f() {
             //Run preprocessing
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(net.clone(), &mut rng).await?;
         }
+
+        let session_id = SessionId::new(
+            ProtocolType::FpMul,
+            SessionId::pack_slot(self.counters.fpmul_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
         // Extract the preprocessing triple.
         let beaver_triples = self
             .preprocessing_material
@@ -1865,17 +1871,7 @@ where
             .lock()
             .await
             .take_randbit_shares(x.precision().f())?;
-        let r_int = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_prandint_shares(1)?;
-
-        let session_id = SessionId::new(
-            ProtocolType::FpMul,
-            SessionId::pack_slot(self.counters.fpmul_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
+        let r_int = self.draw_prandint_shares(session_id, 1).await?;
 
         // Call the fpmul function
         self.type_ops
@@ -1912,37 +1908,33 @@ where
         self.check_mask_security(HoneyBadgerMPCNodeOpts::max_masked_width(*x.precision()))?;
 
         // 2. Check preprocessing inventory --------------------------------
-        let (no_rand_bit, no_rand_int) = {
+        let no_rand_bit = {
             let store = self.preprocessing_material.lock().await;
-            (store.length().randbit, store.length().prandint)
+            store.length().randbit
         };
 
-        // Need f random bits and 1 random integer for truncation
-        if no_rand_bit < x.precision().f() || no_rand_int == 0 {
+        // Need f random bits for truncation
+        if no_rand_bit < x.precision().f() {
             // Run full preprocessing if insufficient
             let mut rng = StdRng::from_rng(OsRng).unwrap();
             self.run_preprocessing(net.clone(), &mut rng).await?;
         }
 
-        // 3. Pull preprocessing randomness --------------------------------
+        // 3. Prepare SessionId --------------------------------------------
+        let session_id = SessionId::new(
+            ProtocolType::FpDivConst,
+            SessionId::pack_slot(self.counters.fpdiv_const_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        // 4. Pull preprocessing randomness --------------------------------
         let r_bits = self
             .preprocessing_material
             .lock()
             .await
             .take_randbit_shares(x.precision().f())?;
 
-        let r_int = self
-            .preprocessing_material
-            .lock()
-            .await
-            .take_prandint_shares(1)?;
-
-        // 4. Prepare SessionId --------------------------------------------
-        let session_id = SessionId::new(
-            ProtocolType::FpDivConst,
-            SessionId::pack_slot(self.counters.fpdiv_const_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
+        let r_int = self.draw_prandint_shares(session_id, 1).await?;
 
         // 5. Call the division node ---------------------------------------
         self.type_ops
@@ -1987,25 +1979,27 @@ where
             len.beaver_triples < need.beaver_triples
                 || len.random_shr < need.random_shr
                 || len.randbit < need.randbit
-                || len.prandint < need.prandint
                 || store.premulc_len(pk) < 2
         };
         if short {
             self.run_preprocessing(net.clone(), &mut rng).await?;
         }
 
-        let prep = {
-            let mut store = self.preprocessing_material.lock().await;
-            let bitdec_suf_mul_inv_prep = store.take_premulc_prep(pk)?;
-            let sufor_prep = store.take_premulc_prep(pk)?;
-            store.build_fpdiv_prep(k, f, bitdec_suf_mul_inv_prep, sufor_prep)?
-        };
-
         let session_id = SessionId::new(
             ProtocolType::FpDiv,
             SessionId::pack_slot(self.counters.fpdiv_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
+
+        let mut local_prandint = self
+            .draw_prandint_shares(session_id, demand_for_fpdiv(k, f).prandint)
+            .await?;
+        let prep = {
+            let mut store = self.preprocessing_material.lock().await;
+            let bitdec_suf_mul_inv_prep = store.take_premulc_prep(pk)?;
+            let sufor_prep = store.take_premulc_prep(pk)?;
+            store.build_fpdiv_prep(&mut local_prandint, k, f, bitdec_suf_mul_inv_prep, sufor_prep)?
+        };
 
         let (c, z) = self
             .type_ops
@@ -2490,7 +2484,7 @@ where
                 self.preprocessing_material
                     .lock()
                     .await
-                    .add(Some(result?), None, None, None);
+                    .add(Some(result?), None, None);
             }
             trace_preprocessing_phase(self.id, "triples", total_triples_to_generate, phase_start);
         }
@@ -2511,14 +2505,6 @@ where
             .await?;
         trace_preprocessing_phase(self.id, "randbit", demand.randbit, phase_start);
         info!("RandBit share generation done");
-
-        // ------------------------
-        // Step 7. Generate Random Int
-        // ------------------------
-        let phase_start = Instant::now();
-        self.ensure_prandint_shares(demand.prandint).await?;
-        trace_preprocessing_phase(self.id, "prandint", demand.prandint, phase_start);
-        info!("PrandInt share generation done");
 
         // ------------------------
         // Step 8. Generate PreMulC preprocessing bundles
@@ -2591,7 +2577,6 @@ where
             let len = store.length();
             len.beaver_triples < need.beaver_triples
                 || len.randbit < need.randbit
-                || len.prandint < need.prandint
                 || store.premulc_len(pk) < 1
         };
         if short {
@@ -2599,17 +2584,20 @@ where
             self.run_preprocessing(net.clone(), &mut rng).await?;
         }
 
-        let prep = {
-            let mut store = self.preprocessing_material.lock().await;
-            let suf_mul_inv_prep = store.take_premulc_prep(pk)?;
-            store.build_premod2m_prep(m, suf_mul_inv_prep)?
-        };
-
         let session = SessionId::new(
             ProtocolType::LTZ,
             SessionId::pack_slot(self.counters.ltz_counter.get_next().await?, 0, 0),
             self.params.instance_id,
         );
+
+        let mut local_prandint = self
+            .draw_prandint_shares(session, demand_for_ltz(k).prandint)
+            .await?;
+        let prep = {
+            let mut store = self.preprocessing_material.lock().await;
+            let suf_mul_inv_prep = store.take_premulc_prep(pk)?;
+            store.build_premod2m_prep(&mut local_prandint, m, suf_mul_inv_prep)?
+        };
 
         Ok(self
             .type_ops
@@ -2642,7 +2630,6 @@ where
             let len = store.length();
             len.beaver_triples < need.beaver_triples
                 || len.randbit < need.randbit
-                || len.prandint < need.prandint
                 || len.rand_inv_pairs < need.rand_inv_pairs
         };
         if short {
@@ -2650,13 +2637,22 @@ where
             self.run_preprocessing(net.clone(), &mut rng).await?;
         }
 
+        let session = SessionId::new(
+            ProtocolType::EQZ,
+            SessionId::pack_slot(self.counters.eqz_counter.get_next().await?, 0, 0),
+            self.params.instance_id,
+        );
+
+        let mut local_prandint = self
+            .draw_prandint_shares(session, demand_for_eqz(k).prandint)
+            .await?;
         let (eqz_prandm, kor_cl_prandm, kor_cs_prep) = {
             let mut store = self.preprocessing_material.lock().await;
             let rand_inv_pairs = store.take_rand_inv_pairs(m)?;
             let triples_round1 = store.take_beaver_triples(m.saturating_sub(1))?;
             let triples_round2 = store.take_beaver_triples(m)?;
-            let eqz_prandm = store.take_prandm_prep(k)?;
-            let kor_cl_prandm = store.take_prandm_prep(m)?;
+            let eqz_prandm = store.take_prandm_prep(&mut local_prandint, k)?;
+            let kor_cl_prandm = store.take_prandm_prep(&mut local_prandint, m)?;
             (
                 eqz_prandm,
                 kor_cl_prandm,
@@ -2667,12 +2663,6 @@ where
                 },
             )
         };
-
-        let session = SessionId::new(
-            ProtocolType::EQZ,
-            SessionId::pack_slot(self.counters.eqz_counter.get_next().await?, 0, 0),
-            self.params.instance_id,
-        );
 
         let result = self
             .type_ops
@@ -2806,7 +2796,7 @@ where
             self.preprocessing_material
                 .lock()
                 .await
-                .add(None, Some(output), None, None);
+                .add(None, Some(output), None);
         }
         Ok(())
     }
@@ -3065,52 +3055,33 @@ where
             self.preprocessing_material
                 .lock()
                 .await
-                .add(None, None, Some(result?), None);
+                .add(None, None, Some(result?));
         }
 
         Ok(())
     }
 
-    /// Tops the PRandInt mask pool up to the declared target, deriving locally from PRSS keys.
+    /// Draws `n` fresh PRandInt masks for one operation instance, namespaced to its own
+    /// `session_id` — not from a shared pool.
     ///
     /// No network: the keys were established once by [`Self::setup_prss_keys`], and every mask
-    /// after that is a local PRF evaluation. Masks are addressed by `prandint_cursor` — the total
-    /// number ever generated — rather than by current pool depth: depth shrinks as shares are
-    /// consumed, and deriving from it would eventually rewind the PRF position and hand out a
-    /// mask some earlier, already-opened operation already used. The cursor only advances, so a
-    /// position is never issued twice. Nor is it a per-invocation counter reset on retry — it is
-    /// driven purely by how much has been generated so far, which every honest party computes
-    /// identically; a counter that drifted between parties would silently yield shares of
-    /// different secrets, with no message exchange left to catch it.
-    async fn ensure_prandint_shares(&mut self, target: usize) -> Result<(), HoneyBadgerError> {
-        let no_shares = {
-            let store = self.preprocessing_material.lock().await;
-            store.length().prandint
-        };
-
-        if no_shares >= target {
-            info!("There are enough PRandInt shares");
-            return Ok(());
-        }
-
-        let missing = target.saturating_sub(no_shares);
-        info!("PRandInt share generation");
-
+    /// after that is a local PRF evaluation. `session_id` must be the operation's own session id
+    /// (the one it uses to route its network messages): the KDF mixes `calling_protocol` and
+    /// `exec_id` into its context, so two different operations never share a keystream even
+    /// though both start drawing at position 0. This is what gives each operation's masks
+    /// cross-node agreement without a shared, arrival-order-dependent cursor — which operation a
+    /// node happens to service first no longer affects which secret a mask resolves to.
+    async fn draw_prandint_shares(
+        &self,
+        session_id: SessionId,
+        n: usize,
+    ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
         let bits = self.params.mask_bits();
-        let cursor = {
-            let store = self.preprocessing_material.lock().await;
-            store.prandint_cursor()
-        };
-        let output = self
+        Ok(self
             .preprocess
             .prand_int
-            .generate_prss_at(self.params.instance_id, cursor, missing, bits)
-            .await?;
-        self.preprocessing_material
-            .lock()
-            .await
-            .add(None, None, None, Some(output));
-        Ok(())
+            .generate_prss_at(session_id, 0, n, bits)
+            .await?)
     }
 
     /// Ensure the `rand_inv_pairs` pool has `target` ([r], [r^-1]) pairs ready,

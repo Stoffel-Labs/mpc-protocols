@@ -522,7 +522,7 @@ async fn mul_e2e() {
         node.preprocessing_material
             .lock()
             .await
-            .add(Some(triple[pid].clone()), None, None, None);
+            .add(Some(triple[pid].clone()), None, None);
     }
 
     // init all nodes
@@ -855,17 +855,18 @@ async fn preprocessing_e2e() {
         let n_triples = len.beaver_triples;
         let n_shares = len.random_shr;
         let n_randbit = len.randbit;
-        let n_prandint = len.prandint;
         // no_of_triples=7 is rounded up to a multiple of group_size (2t+1=3) -> 9. RandBit now
         // squares via MulPub rather than a Beaver triple, so it consumes no triples at all --
         // all 9 survive. It still draws one random share per output from the shared pool (no
         // auto top-up), leaving 4-4=0 random shares behind. Its degree-2t zero-sharings are
         // topped up by `ensure_zero_shares` and fully consumed, so that pool ends empty too.
+        // PRandInt is no longer a pre-generated pool (each operation derives its own masks
+        // on demand, keyed by its own SessionId — see mask-index agreement fix), so there is
+        // nothing left to assert about its depth here.
         assert_eq!(n_triples, 9);
         assert_eq!(n_shares, 0);
         assert_eq!(len.zero_shares, 0);
         assert_eq!(n_randbit, 4);
-        assert_eq!(n_prandint, 4);
     }
 }
 
@@ -1051,7 +1052,6 @@ async fn fpmul_e2e() {
     }
 
     let (_, triple) = construct_e2e_input_mul(n_parties, no_of_multiplication, t);
-    let r_int = RobustShare::compute_shares(Fr::from(3), n_parties, t, None, &mut rng).unwrap();
     let mut r_bits = vec![Vec::new(); n_parties];
     for j in 0..m {
         let x = RobustShare::compute_shares(Fr::from((j % 2) as u64), n_parties, t, None, &mut rng)
@@ -1062,7 +1062,7 @@ async fn fpmul_e2e() {
     }
     //----------------------------------------SETUP NODES----------------------------------------
     // create global nodes
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
@@ -1075,6 +1075,17 @@ async fn fpmul_e2e() {
         Duration::from_secs(30),
         vec![],
     );
+    // `mul_fixed` now derives its PRandInt mask directly from PRSS under its own SessionId
+    // (mask-index agreement fix) rather than drawing from a pre-loaded pool, so every node
+    // needs installed PRSS keys before it can run.
+    let dealt = crate::utils::prss_utils::deal_keys(n_parties, t, &mut rng);
+    for (pid, node) in nodes.iter_mut().enumerate() {
+        let keys = stoffelcrypto::honeybadger::prss::prss::PrssKeys::<Fr>::new(
+            pid, n_parties, t, &dealt[pid],
+        )
+        .unwrap();
+        node.preprocess.prand_int.install_prss_keys(keys).await;
+    }
 
     //----------------------------------------RECIEVE----------------------------------------
     // spawn tasks to process received messages
@@ -1093,7 +1104,6 @@ async fn fpmul_e2e() {
             Some(triple[pid].clone()),
             None,
             Some(r_bits[pid].clone()),
-            Some(vec![r_int[pid].clone()]),
         );
     }
 
@@ -1191,10 +1201,20 @@ async fn fpmul_e2e_with_preprocessing() {
         Duration::from_secs(30),
         vec![],
     );
-    for node in nodes.iter_mut() {
+    // `mul_fixed` now derives its PRandInt mask directly from PRSS under its own SessionId
+    // (mask-index agreement fix) rather than drawing from a pre-loaded pool, so every node
+    // needs installed PRSS keys before it can run. `deal_keys` is the test-only centralized
+    // dealer (see prss_utils) — real nodes run `setup_prss_keys` over the network instead.
+    let dealt = crate::utils::prss_utils::deal_keys(n_parties, t, &mut rng);
+    for (pid, node) in nodes.iter_mut().enumerate() {
         // RandBit's MulPub pipeline consumes one zero-sharing per bit; `extra_demand`
         // has no positional slot for it above, so it's set directly here.
         node.params.extra_demand.zero_shares = n_randbit;
+        let keys = stoffelcrypto::honeybadger::prss::prss::PrssKeys::<Fr>::new(
+            pid, n_parties, t, &dealt[pid],
+        )
+        .unwrap();
+        node.preprocess.prand_int.install_prss_keys(keys).await;
     }
 
     //----------------------------------------RECIEVE----------------------------------------
@@ -1665,9 +1685,6 @@ async fn fpdiv_const_e2e() {
     }
 
     // ----------------------------------------PREPROCESSING INPUTS----------------------------------------
-    // PRandInt
-    let r_int = RobustShare::compute_shares(Fr::from(3u64), n_parties, t, None, &mut rng).unwrap();
-
     // RandBits: m bits
     let mut r_bits = vec![Vec::new(); n_parties];
     for j in 0..m {
@@ -1680,7 +1697,7 @@ async fn fpdiv_const_e2e() {
     }
 
     //----------------------------------------SETUP NODES----------------------------------------
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
         n_parties,
         t,
         0,
@@ -1696,6 +1713,17 @@ async fn fpdiv_const_e2e() {
         Duration::from_secs(30),
         vec![],
     );
+    // `div_with_const_fixed` now derives its PRandInt mask directly from PRSS under its own
+    // SessionId (mask-index agreement fix) rather than drawing from a pre-loaded pool, so every
+    // node needs installed PRSS keys before it can run.
+    let dealt = crate::utils::prss_utils::deal_keys(n_parties, t, &mut rng);
+    for (pid, node) in nodes.iter_mut().enumerate() {
+        let keys = stoffelcrypto::honeybadger::prss::prss::PrssKeys::<Fr>::new(
+            pid, n_parties, t, &dealt[pid],
+        )
+        .unwrap();
+        node.preprocess.prand_int.install_prss_keys(keys).await;
+    }
 
     //----------------------------------------RECEIVE LOOP----------------------------------------
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -1711,8 +1739,7 @@ async fn fpdiv_const_e2e() {
         node.preprocessing_material.lock().await.add(
             None, // No Beaver triple needed
             None,
-            Some(r_bits[pid].clone()),      // RandBit[]
-            Some(vec![r_int[pid].clone()]), // PRandInt[]
+            Some(r_bits[pid].clone()), // RandBit[]
         );
     }
 
@@ -1871,12 +1898,13 @@ async fn prss_setup_from_riss_then_local_masks() {
     // From here on, masks are derived with no messages at all.
     let count = 5;
     let bits = nodes[0].params.mask_bits();
+    let sid = SessionId::new(ProtocolType::PRandInt, SessionId::pack_slot(0, 0, 0), instance_id);
     let mut per_party: Vec<Vec<RobustShare<Fr>>> = Vec::with_capacity(n_parties);
     for node in &nodes {
         per_party.push(
             node.preprocess
                 .prand_int
-                .generate_prss_at(instance_id, 0, count, bits)
+                .generate_prss_at(sid, 0, count, bits)
                 .await
                 .unwrap(),
         );
@@ -1892,10 +1920,12 @@ async fn prss_setup_from_riss_then_local_masks() {
     }
 
     // Two distinct sets of keys must not collide: a second instance derives different masks.
+    let other_sid =
+        SessionId::new(ProtocolType::PRandInt, SessionId::pack_slot(0, 0, 0), instance_id + 1);
     let other = nodes[0]
         .preprocess
         .prand_int
-        .generate_prss_at(instance_id + 1, 0, count, bits)
+        .generate_prss_at(other_sid, 0, count, bits)
         .await
         .unwrap();
     assert_ne!(other, per_party[0]);
@@ -1974,16 +2004,17 @@ async fn setup_prss_keys_concurrent_clones_do_not_race() {
     // finished[0] and finished[1] are party 0's two racing clones.
     let count = 4;
     let bits = finished[0].params.mask_bits();
+    let sid = SessionId::new(ProtocolType::PRandInt, SessionId::pack_slot(0, 0, 0), instance_id);
     let masks_a = finished[0]
         .preprocess
         .prand_int
-        .generate_prss_at(instance_id, 0, count, bits)
+        .generate_prss_at(sid, 0, count, bits)
         .await
         .unwrap();
     let masks_b = finished[1]
         .preprocess
         .prand_int
-        .generate_prss_at(instance_id, 0, count, bits)
+        .generate_prss_at(sid, 0, count, bits)
         .await
         .unwrap();
     assert_eq!(
@@ -2265,9 +2296,22 @@ async fn ltz_int_e2e_pool_serves_several_widths() {
     );
     // Both widths declared up front — this is what a single stored bit-length
     // could not express, and it provisions PreMulC bundles at pk=7 and pk=15.
-    for node in nodes.iter_mut() {
+    //
+    // PRSS keys are installed directly here (rather than relying on run_preprocessing's
+    // auto-bootstrap) because this test calls ltz_int three times, re-cloning `nodes[pid]`
+    // fresh each time: `prss` is a plain (non-Arc) field on PRandIntNode, so a key install
+    // that happens inside one iteration's spawned clone never propagates back to the stored
+    // `nodes[pid]` the next iteration clones from. Installing before any cloning sidesteps it.
+    let mut rng = test_rng();
+    let dealt = crate::utils::prss_utils::deal_keys(n_parties, t, &mut rng);
+    for (pid, node) in nodes.iter_mut().enumerate() {
         node.params.add_ltz_ops(8, 2);
         node.params.add_ltz_ops(16, 1);
+        let keys = stoffelcrypto::honeybadger::prss::prss::PrssKeys::<Fr>::new(
+            pid, n_parties, t, &dealt[pid],
+        )
+        .unwrap();
+        node.preprocess.prand_int.install_prss_keys(keys).await;
     }
 
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(

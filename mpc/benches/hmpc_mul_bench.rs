@@ -112,7 +112,6 @@ async fn setup_mul_with_synthetic_triples(
             Some(triples_per_node[pid].clone()),
             None,
             None,
-            None,
         );
     }
 

@@ -177,7 +177,6 @@ async fn synthetic_inputs(
             Some(triples_per_node[pid].clone()),
             None,
             None,
-            None,
         );
     }
 

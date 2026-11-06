@@ -97,7 +97,6 @@ fn run_config(n: usize, t: usize, n_muls: usize, lat: Option<(u64, u64)>) {
                     Some(triples[pid].clone()),
                     None,
                     None,
-                    None,
                 );
             }
         });

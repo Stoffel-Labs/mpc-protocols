@@ -141,7 +141,6 @@ impl PreprocDemand {
                 .saturating_sub(2 * self.rand_inv_pairs)
                 .saturating_sub(self.randbit),
             randbit: self.randbit,
-            prandint: self.prandint,
             premulc: 0,
             zero_shares: self
                 .zero_shares
@@ -295,9 +294,6 @@ pub struct HoneyBadgerMPCNodePreprocMaterial<F: FftField> {
     random_shares: Vec<RobustShare<F>>,
     /// A pool of RandBit outputs for truncation
     randbit_shares: Vec<RobustShare<F>>,
-    /// A pool of PRandInt outputs for truncation
-    prandint_shares: Vec<RobustShare<F>>,
-    prandint_cursor: usize,
     premulc_preps: BTreeMap<usize, Vec<PreMulCPrep<F>>>,
     zero_shares: Vec<RobustShare<F>>,
     rand_inv_pairs: Vec<(RobustShare<F>, RobustShare<F>)>,
@@ -308,7 +304,6 @@ pub struct PreprocMaterialLength {
     pub beaver_triples: usize,
     pub random_shr: usize,
     pub randbit: usize,
-    pub prandint: usize,
     pub premulc: usize,
     pub zero_shares: usize,
     pub rand_inv_pairs: usize,
@@ -320,7 +315,6 @@ impl PreprocMaterialLength {
             beaver_triples: 0,
             random_shr: 0,
             randbit: 0,
-            prandint: 0,
             premulc: 0,
             zero_shares: 0,
             rand_inv_pairs: 0,
@@ -338,8 +332,6 @@ where
             random_shares: Vec::new(),
             beaver_triples: Vec::new(),
             randbit_shares: Vec::new(),
-            prandint_shares: Vec::new(),
-            prandint_cursor: 0,
             premulc_preps: BTreeMap::new(),
             zero_shares: Vec::new(),
             rand_inv_pairs: Vec::new(),
@@ -435,7 +427,6 @@ where
         mut triples: Option<Vec<ShamirBeaverTriple<F>>>,
         mut random_shares: Option<Vec<RobustShare<F>>>,
         mut randbit_shares: Option<Vec<RobustShare<F>>>,
-        mut prandint_shares: Option<Vec<RobustShare<F>>>,
     ) {
         if let Some(pairs) = &mut triples {
             self.beaver_triples.append(pairs);
@@ -448,16 +439,6 @@ where
         if let Some(shares) = &mut randbit_shares {
             self.randbit_shares.append(shares);
         }
-        if let Some(shares) = &mut prandint_shares {
-            self.prandint_cursor += shares.len();
-            self.prandint_shares.append(shares);
-        }
-    }
-
-    /// Absolute PRSS position to derive the next batch of PRandInt masks at. Tracks total
-    /// generation, not remaining pool depth, so it only ever advances.
-    pub fn prandint_cursor(&self) -> usize {
-        self.prandint_cursor
     }
 
     /// Returns the number of random double share pairs, and the number of random shares
@@ -467,7 +448,6 @@ where
             beaver_triples: self.beaver_triples.len(),
             random_shr: self.random_shares.len(),
             randbit: self.randbit_shares.len(),
-            prandint: self.prandint_shares.len(),
             premulc: self.premulc_len_total(),
             zero_shares: self.zero_shares.len(),
             rand_inv_pairs: self.rand_inv_pairs.len(),
@@ -509,23 +489,35 @@ where
         Ok(self.randbit_shares.drain(0..n_randbit).collect())
     }
 
-    pub fn take_prandint_shares(
-        &mut self,
-        n_prandint: usize,
+    // ── FpDiv preprocessing assembly ──────────────────────────────────────
+    //
+    // PRandInt masks for these are NOT drawn from a shared pool. Each top-level operation
+    // derives its own flat batch directly from PRSS, keyed by its own SessionId (see
+    // `PRandIntNode::generate_prss_at`), and passes it in here as `local_prandint` — a plain
+    // front-to-back queue scoped to this one call. This is what removes the cross-node mask-
+    // index agreement gap a shared, FIFO-drained pool had: which operation a node happens to
+    // service first no longer determines which secret a mask resolves to.
+
+    /// Draws `n` masks off the front of this operation's own local batch (not the shared pool).
+    fn take_local_prandint(
+        local_prandint: &mut Vec<RobustShare<F>>,
+        n: usize,
     ) -> Result<Vec<RobustShare<F>>, HoneyBadgerError> {
-        if n_prandint > self.prandint_shares.len() {
-            error!("Error trying to take PRandInt shares: There is no enough preprocessing");
+        if n > local_prandint.len() {
+            error!("Error trying to take PRandInt shares: local batch undersized by {} — a demand_for_* formula and this assembly's draw sequence have drifted apart", n - local_prandint.len());
             return Err(HoneyBadgerError::NotEnoughPreprocessing);
         }
-        Ok(self.prandint_shares.drain(0..n_prandint).collect())
+        Ok(local_prandint.drain(0..n).collect())
     }
-
-    // ── FpDiv preprocessing assembly ──────────────────────────────────────
 
     /// A `m`-bit PRandM bundle (a PRandInt draw plus `m` randbit draws,
     /// combined via `PRandMPrep::from_prand_outputs`).
-    pub fn take_prandm_prep(&mut self, m: usize) -> Result<PRandMPrep<F>, HoneyBadgerError> {
-        let r_double_prime = self.take_prandint_shares(1)?.remove(0);
+    pub fn take_prandm_prep(
+        &mut self,
+        local_prandint: &mut Vec<RobustShare<F>>,
+        m: usize,
+    ) -> Result<PRandMPrep<F>, HoneyBadgerError> {
+        let r_double_prime = Self::take_local_prandint(local_prandint, 1)?.remove(0);
         let r_prime_bits = self.take_randbit_shares(m)?;
         Ok(PRandMPrep::from_prand_outputs(
             r_double_prime,
@@ -536,8 +528,11 @@ where
     /// Mod2's own degenerate PRandM (m=1, no bit decomposition needed —
     /// `r_prime` is used directly as the random bit, `r_prime_bits` stays
     /// empty).
-    pub fn take_mod2_prandm_prep(&mut self) -> Result<PRandMPrep<F>, HoneyBadgerError> {
-        let r_double_prime = self.take_prandint_shares(1)?.remove(0);
+    pub fn take_mod2_prandm_prep(
+        &mut self,
+        local_prandint: &mut Vec<RobustShare<F>>,
+    ) -> Result<PRandMPrep<F>, HoneyBadgerError> {
+        let r_double_prime = Self::take_local_prandint(local_prandint, 1)?.remove(0);
         let r_prime = self.take_randbit_shares(1)?.remove(0);
         Ok(PRandMPrep {
             r_double_prime,
@@ -549,17 +544,19 @@ where
     /// A `PreMod2mPrep` for `PreMod2m(k, m)`: the PRandM(k, m) reveal mask plus
     /// the inner PreBitLT material (which operates on `m`-bit inputs, so it
     /// needs `m-1` triples and `m` degenerate Mod2 PRandM bundles).
-    /// `suf_mul_inv_prep` must already be sized at pk = m.
+    /// `suf_mul_inv_prep` must already be sized at pk = m. `local_prandint` must
+    /// hold exactly this call's share of `demand_for_ltz`/`demand_for_fpdiv`'s `prandint` total.
     pub fn build_premod2m_prep(
         &mut self,
+        local_prandint: &mut Vec<RobustShare<F>>,
         m: usize,
         suf_mul_inv_prep: PreMulCPrep<F>,
     ) -> Result<PreMod2mPrep<F>, HoneyBadgerError> {
-        let prandm = self.take_prandm_prep(m)?;
+        let prandm = self.take_prandm_prep(local_prandint, m)?;
         let mul_triples = self.take_beaver_triples(m - 1)?;
         let mut mod2_preps = Vec::with_capacity(m);
         for _ in 0..m {
-            mod2_preps.push(self.take_mod2_prandm_prep()?);
+            mod2_preps.push(self.take_mod2_prandm_prep(local_prandint)?);
         }
         Ok(PreMod2mPrep {
             prandm,
@@ -573,29 +570,31 @@ where
 
     /// Packages a full `FpDivPrep(k, f)` from the pool plus the two
     /// already-generated PreMulC bundles (`bitdec_suf_mul_inv_prep`,
-    /// `sufor_prep` — both pk=k-1).
+    /// `sufor_prep` — both pk=k-1). `local_prandint` must hold exactly
+    /// `demand_for_fpdiv(k, f).prandint` shares, drawn under this call's own SessionId.
     pub fn build_fpdiv_prep(
         &mut self,
+        local_prandint: &mut Vec<RobustShare<F>>,
         k: usize,
         f: usize,
         bitdec_suf_mul_inv_prep: PreMulCPrep<F>,
         sufor_prep: PreMulCPrep<F>,
     ) -> Result<FpDivPrep<F>, HoneyBadgerError> {
-        let bitdec_prep = self.build_premod2m_prep(k - 1, bitdec_suf_mul_inv_prep)?;
+        let bitdec_prep = self.build_premod2m_prep(local_prandint, k - 1, bitdec_suf_mul_inv_prep)?;
 
         // SufOr runs on k-1 inputs (AppRec's xor_bits); PreOrC needs a Mod2
         // call for each of those but the first — see suf_or.rs.
         let sufor_mod2_count = (k - 1).saturating_sub(1);
         let mut sufor_mod2_preps = Vec::with_capacity(sufor_mod2_count);
         for _ in 0..sufor_mod2_count {
-            sufor_mod2_preps.push(self.take_mod2_prandm_prep()?);
+            sufor_mod2_preps.push(self.take_mod2_prandm_prep(local_prandint)?);
         }
         let sufor_prep = SufOrPrep {
             premulc_prep: sufor_prep,
             mod2_preps: sufor_mod2_preps,
         };
 
-        let apprec_trunc_prandm = self.take_prandm_prep(2 * (k - f - 1))?;
+        let apprec_trunc_prandm = self.take_prandm_prep(local_prandint, 2 * (k - f - 1))?;
         let app_rec_prep = AppRecPrep {
             bitdec_prep,
             sufor_prep,
@@ -606,13 +605,13 @@ where
             trunc_r_int: apprec_trunc_prandm.r_double_prime,
         };
 
-        let step3_trunc_prandm = self.take_prandm_prep(f)?;
+        let step3_trunc_prandm = self.take_prandm_prep(local_prandint, f)?;
         let num_iters = fpdiv_theta(k).saturating_sub(1);
         let mut iters = Vec::with_capacity(num_iters);
         for _ in 0..num_iters {
             let round_a_triples = self.take_beaver_triples(2)?;
-            let step6 = self.take_prandm_prep(2 * f)?;
-            let step7 = self.take_prandm_prep(2 * f)?;
+            let step6 = self.take_prandm_prep(local_prandint, 2 * f)?;
+            let step7 = self.take_prandm_prep(local_prandint, 2 * f)?;
             iters.push(FpDivIterPrep {
                 round_a_triples,
                 step6_trunc_r_bits: step6.r_prime_bits,
@@ -624,7 +623,7 @@ where
 
         // Step 8 (Round B) runs once, after the loop — not per iteration.
         let round_b_triple = self.take_beaver_triples(1)?;
-        let step8 = self.take_prandm_prep(2 * f)?;
+        let step8 = self.take_prandm_prep(local_prandint, 2 * f)?;
 
         Ok(FpDivPrep {
             app_rec_prep,
@@ -661,7 +660,7 @@ mod test {
         assert_eq!(floor.beaver_triples, 62, "post-build remainder, not the 187 sizing total");
         assert_eq!(floor.random_shr, 0, "fully spent building RandBit outputs + the bundle");
         assert_eq!(floor.randbit, 126);
-        assert_eq!(floor.prandint, 64);
+        assert_eq!(d.prandint, 64, "per-operation one-shot draw total, unaffected by this fix");
     }
 
     #[test]
@@ -673,7 +672,6 @@ mod test {
         let floor = d.steady_state_floor();
         assert_eq!(floor.beaver_triples, d.triples);
         assert_eq!(floor.randbit, d.randbit);
-        assert_eq!(floor.prandint, d.prandint);
         assert_eq!(floor.rand_inv_pairs, d.rand_inv_pairs);
     }
 
@@ -745,7 +743,6 @@ mod test {
             Some(vec![triple.clone(), triple.clone()]),
             Some(vec![share.clone()]),
             None,
-            None,
         );
 
         assert_eq!(
@@ -754,7 +751,6 @@ mod test {
                 beaver_triples: 2,
                 random_shr: 1,
                 randbit: 0,
-                prandint: 0,
                 premulc: 0,
                 zero_shares: 0,
                 rand_inv_pairs: 0
@@ -770,7 +766,6 @@ mod test {
                 beaver_triples: 1,
                 random_shr: 1,
                 randbit: 0,
-                prandint: 0,
                 premulc: 0,
                 zero_shares: 0,
                 rand_inv_pairs: 0

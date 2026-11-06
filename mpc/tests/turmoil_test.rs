@@ -584,7 +584,7 @@ fn preprocessing_e2e_turmoil(
         Duration::from_secs(300_000),
     );
 
-    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(usize, usize, usize, usize), String>>();
+    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(usize, usize, usize), String>>();
     let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
     let barrier = Arc::new(tokio::sync::Barrier::new(n_parties));
 
@@ -660,11 +660,12 @@ fn preprocessing_e2e_turmoil(
                         let len = node.preprocessing_material.lock().await.length();
                         let n_triples = len.beaver_triples;
                         let n_rbit = len.randbit;
-                        let n_pint = len.prandint;
                         // no_of_triples=7 rounds up to a multiple of group_size (2t+1=3) -> 9.
                         // RandBit squares via MulPub rather than a Beaver triple, so it draws
-                        // none of them and all 9 survive.
-                        if n_triples == 9 && n_rbit == n_randbit && n_pint == n_prandint {
+                        // none of them and all 9 survive. PRandInt is no longer a pre-generated
+                        // pool (each operation derives its own masks on demand, keyed by its own
+                        // SessionId), so there is nothing to wait on for it here.
+                        if n_triples == 9 && n_rbit == n_randbit {
                             break;
                         }
                     }
@@ -675,9 +676,8 @@ fn preprocessing_e2e_turmoil(
                 let n_triples = len.beaver_triples;
                 let n_shares = len.random_shr;
                 let n_rbit = len.randbit;
-                let n_pint = len.prandint;
 
-                let _ = tx.send(Ok((n_triples, n_shares, n_rbit, n_pint)));
+                let _ = tx.send(Ok((n_triples, n_shares, n_rbit)));
                 let _ = done_tx.send(());
                 Ok(())
             }
@@ -753,14 +753,13 @@ fn preprocessing_e2e_turmoil(
     for r in results {
         match r {
             Err(e) => panic!("node failed: {}", e),
-            Ok((n_triples, n_shares, n_rbit, n_pint)) => {
+            Ok((n_triples, n_shares, n_rbit)) => {
                 // no_of_triples=7 rounds up to group_size (2t+1=3) -> 9. RandBit squares via
                 // MulPub instead of consuming a Beaver triple, so all 9 survive. Likewise
                 // no_of_randomshares=4 are fully consumed by RandBit's own `a` input -> 0 remain.
                 assert_eq!(n_triples, 9);
                 assert_eq!(n_shares, 0);
                 assert_eq!(n_rbit, 4);
-                assert_eq!(n_pint, 4);
             }
         }
     }
@@ -809,7 +808,7 @@ fn run_preprocessing_stress_turmoil(
 
     let instance_id = 111;
     let (mut sim, inner) = turmoil_setup(n_parties, vec![], Some((1, 20)));
-    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(usize, usize, usize, usize), String>>();
+    let (tx, rx_done) = std::sync::mpsc::channel::<Result<(usize, usize, usize), String>>();
     let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
     let barrier = Arc::new(Barrier::new(n_parties));
 
@@ -891,12 +890,7 @@ fn run_preprocessing_stress_turmoil(
                 match preprocessing_handle.await {
                     Ok(Ok(())) => {
                         let len = node.preprocessing_material.lock().await.length();
-                        let counts = (
-                            len.beaver_triples,
-                            len.random_shr,
-                            len.randbit,
-                            len.prandint,
-                        );
+                        let counts = (len.beaver_triples, len.random_shr, len.randbit);
                         let _ = tx.send(Ok(counts));
                     }
                     Ok(Err(e)) => {
@@ -975,7 +969,7 @@ fn run_preprocessing_stress_turmoil(
     for result in results {
         match result {
             Err(error) => failure_reasons.push(error),
-            Ok((produced_triples, produced_random_shares, produced_rbits, produced_pints)) => {
+            Ok((produced_triples, produced_random_shares, produced_rbits)) => {
                 if produced_triples < n_triples.saturating_sub(n_randbit) {
                     failure_reasons.push(format!(
                         "produced {} triples, expected at least {}",
@@ -996,12 +990,9 @@ fn run_preprocessing_stress_turmoil(
                         produced_rbits, n_randbit
                     ));
                 }
-                if produced_pints < n_prandint {
-                    failure_reasons.push(format!(
-                        "produced {} probabilistic ints, expected at least {}",
-                        produced_pints, n_prandint
-                    ));
-                }
+                // PRandInt is no longer a pre-generated pool (each operation derives its own
+                // masks on demand from PRSS, with no capacity ceiling), so it cannot be the
+                // dimension that falls short under stress anymore.
             }
         }
     }
@@ -1029,10 +1020,9 @@ async fn preprocessing_stress_snapshot(
         let n_triples = len.beaver_triples;
         let n_random = len.random_shr;
         let n_rbits = len.randbit;
-        let n_pints = len.prandint;
         out.push_str(&format!(
-            "node {} material triples={} random={} rbits={} pints={}\n",
-            node.id, n_triples, n_random, n_rbits, n_pints
+            "node {} material triples={} random={} rbits={}\n",
+            node.id, n_triples, n_random, n_rbits
         ));
 
         let rand_bit_sessions = node.preprocess.rand_bit.storage.lock().await;
@@ -1191,7 +1181,6 @@ fn honeybadger_sequential_mul_1000_turmoil() {
         for pid in 0..n_parties {
             nodes[pid].preprocessing_material.lock().await.add(
                 Some(triple[pid].clone()),
-                None,
                 None,
                 None,
             );
@@ -2030,7 +2019,6 @@ fn mul_e2e_without_preprocessing_turmoil() {
                 Some(triple[pid].clone()),
                 None,
                 None,
-                None,
             );
         }
     });
@@ -2477,9 +2465,6 @@ fn fpdiv_const_e2e(
         denom_fix.push(denom_clear.clone());
     }
 
-    // ----------------------------------------PREPROCESSING INPUTS----------------------------------------
-    // PRandInt
-    let r_int = RobustShare::compute_shares(Fr::from(3u64), n_parties, t, None, &mut rng).unwrap();
 
     // RandBits: m bits
     let mut r_bits = vec![Vec::new(); n_parties];
@@ -2498,7 +2483,7 @@ fn fpdiv_const_e2e(
     let (tx_client, mut rx_client) = tokio::sync::broadcast::channel(n_parties);
 
     //----------------------------------------SETUP NODES----------------------------------------
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
         0,
@@ -2513,6 +2498,19 @@ fn fpdiv_const_e2e(
         Duration::from_secs(30),
         vec![],
     );
+    // `div_with_const_fixed` now derives its PRandInt mask directly from PRSS under its own
+    // SessionId (mask-index agreement fix) rather than drawing from a pre-loaded pool, so every
+    // node needs installed PRSS keys before it can run.
+    let dealt = crate::utils::prss_utils::deal_keys(n_parties, t, &mut rng);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        for (pid, node) in nodes.iter_mut().enumerate() {
+            let keys = stoffelcrypto::honeybadger::prss::prss::PrssKeys::<Fr>::new(
+                pid, n_parties, t, &dealt[pid],
+            )
+            .unwrap();
+            node.preprocess.prand_int.install_prss_keys(keys).await;
+        }
+    });
 
     //----------------------------------------LOAD PREPROCESSING----------------------------------------
 
@@ -2527,7 +2525,6 @@ fn fpdiv_const_e2e(
         let tx_out = tx_out.clone();
         let tx_client = tx_client.clone();
         let r_bits = r_bits[pid].clone();
-        let r_int = r_int[pid].clone();
         sim.host(format!("node{}", pid), move || {
             let mut node = node.clone();
             let inner = inner.clone();
@@ -2537,14 +2534,12 @@ fn fpdiv_const_e2e(
             let tx_out = tx_out.clone();
             let tx_client = tx_client.clone();
             let r_bits = r_bits.clone();
-            let r_int = r_int.clone();
 
             async move {
                 node.preprocessing_material.lock().await.add(
                     None, // No Beaver triple needed
                     None,
-                    Some(r_bits),      // RandBit[]
-                    Some(vec![r_int]), // PRandInt[]
+                    Some(r_bits), // RandBit[]
                 );
                 let (network, mut rx) = TurmoilNetwork::new(SenderId::Node(pid), inner).await;
                 let net_arc = Arc::new(network);

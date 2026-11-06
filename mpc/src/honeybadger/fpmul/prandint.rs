@@ -135,21 +135,23 @@ where
         (G::MODULUS_BIT_SIZE as usize).saturating_sub(headroom)
     }
 
-    /// Derives the mask shares at absolute positions `start .. start + count`. No network, no
-    /// session state.
+    /// Derives the mask shares at positions `start .. start + count` of the keystream namespaced
+    /// to `session_id`. No network, no pool, no shared cursor.
     ///
-    /// `start` must be the total count of masks ever generated so far (a monotonic cursor), *not*
-    /// current pool depth — depth shrinks as masks are consumed, and deriving from it would
-    /// eventually rewind the PRF position and reissue a mask some earlier, already-opened
-    /// operation already used. Masks are addressed by position rather than by a per-invocation
-    /// counter precisely so that restarts and retries cannot silently repoint the derivation:
-    /// with a local counter in the PRF input, two parties out of step by one produce shares of
-    /// entirely different secrets and no message exchange remains to notice.
+    /// `session_id` must be the *consuming operation's own* session id (the same one it uses to
+    /// route its network messages) — not a shared placeholder. The KDF mixes `calling_protocol`
+    /// and `exec_id` into its context (see `prss::context_bytes`), so two different operations
+    /// never share a keystream even though each starts addressing its own at `start = 0`. This is
+    /// what removes the cross-node ordering dependency a shared global cursor used to carry: which
+    /// operation a given node happens to service first no longer affects which secret a mask
+    /// resolves to, because the operation's own identity — not arrival order — selects the stream.
     ///
-    /// Parties must still agree on `bits` and on the cursor position they are filling.
+    /// Parties performing the *same* logical operation must still agree on `session_id`, `start`,
+    /// `count` and `bits` — a mismatch on any of them yields shares of a different secret with no
+    /// message exchange left to catch it.
     pub async fn generate_prss_at(
         &self,
-        instance_id: u32,
+        session_id: SessionId,
         start: usize,
         count: usize,
         bits: usize,
@@ -157,12 +159,6 @@ where
         if bits > self.max_mask_bits() {
             return Err(PRandIntError::SurpassedFieldCapacity);
         }
-
-        let session_id = SessionId::new(
-            ProtocolType::PRandInt,
-            SessionId::pack_slot(0, 0, 0),
-            instance_id,
-        );
 
         let guard = self.prss.lock().await;
         let keys = guard.as_ref().ok_or(PRandIntError::NoPrssKeys)?;
