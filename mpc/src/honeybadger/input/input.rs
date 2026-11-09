@@ -1,3 +1,4 @@
+use crate::common::rbc::RbcError;
 use crate::common::wire_format;
 use crate::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use crate::honeybadger::input::InputError;
@@ -157,6 +158,8 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
 
             let output = match self.rbc.get_store(id).await {
                 Ok(output) => output,
+                // Stale completion for a session already drained and retired — not an error.
+                Err(RbcError::Internal(m)) if m.contains("does not exist") => continue,
                 Err(e) => {
                     self.rbc.clear_session(id).await;
                     return Err(e.into());

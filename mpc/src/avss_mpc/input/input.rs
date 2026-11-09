@@ -1,6 +1,7 @@
 use crate::avss_mpc::input::{AvssInputError, AvssInputMessage};
 use crate::avss_mpc::{deser_bounded_feldman_vec, AvssSessionId, AvssWrappedMessage, ProtocolType};
 use crate::common::share::{avss::verify_feldman, feldman::FeldmanShamirShare};
+use crate::common::rbc::RbcError;
 use crate::common::wire_format;
 use crate::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use ark_ec::CurveGroup;
@@ -138,7 +139,16 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
                 }
             };
 
-            let output = self.rbc.get_store(id).await?;
+            let output = match self.rbc.get_store(id).await {
+                Ok(o) => o,
+                // Stale completion for a session already drained and retired — not an error.
+                Err(RbcError::Internal(m)) if m.contains("does not exist") => continue,
+                Err(e) => return Err(e.into()),
+            };
+            // `output` is an owned copy and this drain is the session's only consumer: retire the
+            // completed RBC session now, freeing its store (and AVID shards) instead of letting
+            // it linger until the TTL after the client's input has been consumed.
+            self.rbc.clear_session(id).await;
             match self.input_handler(id.sub_id().into(), output).await {
                 Ok(()) => {}
                 Err(e) => {

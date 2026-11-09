@@ -685,7 +685,16 @@ where
                 }
             };
 
-            let output = self.rbc.get_store(id).await?;
+            let output = match self.rbc.get_store(id).await {
+                Ok(o) => o,
+                // Stale completion for a session already drained and retired — not an error.
+                Err(RbcError::Internal(m)) if m.contains("does not exist") => continue,
+                Err(e) => return Err(e.into()),
+            };
+            // `output` is an owned copy and this drain is the session's only consumer: retire the
+            // completed RBC session now, so a dealing for an exec_id this node never drives (and
+            // therefore never reaches via `clear_store`) can't squat in the RBC store until the TTL.
+            self.rbc.clear_session(id).await;
             let msg: AvssMessage<Id> = wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE)?;
 
             if msg.session_id != id {

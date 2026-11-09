@@ -94,6 +94,10 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>> Mu
                 }
                 Err(e) => return Err(e.into()),
             };
+            // `output` is an owned copy and this drain is the session's only consumer: retire the
+            // completed RBC session now, instead of letting it squat in the RBC store until the
+            // TTL while the (much smaller) business cap below exerts no backpressure on it.
+            self.rbc.clear_session(id).await;
             let msg: MultMessage = wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE)?;
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender != authenticated_sender {

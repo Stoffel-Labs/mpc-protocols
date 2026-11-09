@@ -1,6 +1,7 @@
 use crate::common::wire_format;
 use crate::{
     common::{
+        rbc::RbcError,
         session_store::{Admission, SessionStore},
         share::ShareError,
         ProtocolSessionId, RBC,
@@ -226,7 +227,16 @@ where
                 }
             };
 
-            let output = self.rbc.get_store(id).await?;
+            let output = match self.rbc.get_store(id).await {
+                Ok(o) => o,
+                // Stale completion for a session already drained and retired — not an error.
+                Err(RbcError::Internal(m)) if m.contains("does not exist") => continue,
+                Err(e) => return Err(e.into()),
+            };
+            // `output` is an owned copy and this drain is the session's only consumer (the parked
+            // RISS replay below re-processes buffered direct messages, never the RBC store): retire
+            // the completed RBC session now instead of letting it squat until the TTL.
+            self.rbc.clear_session(id).await;
             let msg: PRandIntCommitMessage =
                 wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE)?;
 

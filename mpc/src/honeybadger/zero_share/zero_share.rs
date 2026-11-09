@@ -12,6 +12,7 @@ use tracing::warn;
 use crate::honeybadger::MAX_MESSAGE_SIZE;
 use crate::{
     common::{
+        rbc::RbcError,
         session_store::{Admission, SessionStore},
         share::{apply_vandermonde, make_hyperinvertible_matrix, ShareError},
         utils::deser_bounded_vec,
@@ -86,7 +87,16 @@ where
                     }
                 }
             };
-            let output = self.rbc.get_store(id).await?;
+            let output = match self.rbc.get_store(id).await {
+                Ok(o) => o,
+                // Stale completion for a session already drained and retired — not an error.
+                Err(RbcError::Internal(m)) if m.contains("does not exist") => continue,
+                Err(e) => return Err(e.into()),
+            };
+            // `output` is an owned copy and this drain is the session's only consumer: retire the
+            // completed RBC session now, instead of letting it squat in the RBC store until the
+            // TTL while the (much smaller) business cap below exerts no backpressure on it.
+            self.rbc.clear_session(id).await;
             let mut msg: ZeroShaMessage =
                 wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE)?;
             let authenticated_sender = id.sub_id() as usize;
