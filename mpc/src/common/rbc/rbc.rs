@@ -8,7 +8,11 @@ use crate::common::{
     ProtocolSessionId, RbcWrapFn, RBC,
 };
 use async_trait::async_trait;
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex as StdMutex},
+    time::Instant,
+};
 use stoffelnet::network_utils::Network;
 use threshold_crypto::{
     serde_impl::SerdeSecret, PublicKeySet, SecretKeySet, SecretKeyShare, SignatureShare,
@@ -23,6 +27,15 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 const MAX_RBC_SESSIONS: usize = 4096;
+
+/// Global ceiling on AVID shard bytes retained across all live sessions, charged to the
+/// authenticated sender of each ECHO/READY (never the forgeable session dealer field). The count
+/// cap alone cannot bound memory — one sender can hold `MAX_RBC_SESSIONS / n` sessions, each
+/// retaining a shard up to `MAX_PAYLOAD_SIZE / k` (multi-MiB), i.e. gigabytes. Honest rounds retain
+/// tens of MiB, so 256 MiB leaves wide headroom while capping the attack far below OOM. The
+/// per-sender cap is this divided by `n`, so `<= t` malicious peers can never starve the honest
+/// `n - t`. Tunable here alone.
+const MAX_RBC_SHARD_BYTES_GLOBAL: usize = 256 * 1024 * 1024;
 
 ///--------------------------Bracha RBC--------------------------
 ///
@@ -205,7 +218,7 @@ where
 
         // Lock the session store to update the session state.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
+            .get_or_create_store(msg.session_id, msg.sender_id)
             .await
         {
             Some(s) => s,
@@ -260,7 +273,7 @@ where
         let mut broadcast_echo: Option<Msg<Id>> = None;
         // Lock the session store to update the session state.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
+            .get_or_create_store(msg.session_id, msg.sender_id)
             .await
         {
             Some(s) => s,
@@ -359,7 +372,7 @@ where
 
         // Lock the session store to update the session state.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
+            .get_or_create_store(msg.session_id, msg.sender_id)
             .await
         {
             Some(s) => s,
@@ -588,6 +601,9 @@ pub struct Avid<Id: ProtocolSessionId> {
     pub store: Arc<Mutex<SessionStore<Id, (usize, Instant, Arc<Mutex<AvidStore>>)>>>, // Sessionid => store
     pub output_sender: Sender<Id>,
     pub wrapper: RbcWrapFn<Id>,
+    /// Process-local ledger bounding retained shard bytes per authenticated sender (see
+    /// [`MAX_RBC_SHARD_BYTES_GLOBAL`]). Shared by every session this instance admits.
+    pub byte_ledger: Arc<StdMutex<ByteLedger>>,
 }
 #[async_trait]
 impl<Id: ProtocolSessionId> RBC for Avid<Id> {
@@ -620,6 +636,7 @@ impl<Id: ProtocolSessionId> RBC for Avid<Id> {
             store: Arc::new(Mutex::new(SessionStore::with_default_cap())),
             output_sender,
             wrapper,
+            byte_ledger: Arc::new(StdMutex::new(ByteLedger::default())),
         })
     }
     fn id(&self) -> usize {
@@ -797,7 +814,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         }
         // Safe to allocate session state now that the proof is valid.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
+            .get_or_create_store(msg.session_id, msg.sender_id)
             .await
         {
             Some(s) => s,
@@ -892,7 +909,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         }
         // Safe to allocate session state now that the proof is valid.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
+            .get_or_create_store(msg.session_id, msg.sender_id)
             .await
         {
             Some(s) => s,
@@ -909,7 +926,24 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         if store.ended || store.has_echo(msg.sender_id) {
             return Ok(());
         }
-        store.insert_shard(root.clone(), msg.sender_id, msg.payload.clone(), self.k)?;
+        let per_sender_bytes = MAX_RBC_SHARD_BYTES_GLOBAL / self.n;
+        if store.insert_shard(
+            root.clone(),
+            msg.sender_id,
+            msg.payload.clone(),
+            self.k,
+            MAX_RBC_SHARD_BYTES_GLOBAL,
+            per_sender_bytes,
+        )? == ShardInsert::OverBudget
+        {
+            warn!(
+                id = self.id,
+                session_id = msg.session_id.as_u128(),
+                sender = msg.sender_id,
+                "AVID shard byte budget exceeded for sender; dropping ECHO"
+            );
+            return Ok(());
+        }
         store.insert_fingerprint(root.clone(), msg.sender_id, proof_bytes);
         store.increment_echo(&root);
         store.set_echo_sent(msg.sender_id);
@@ -990,7 +1024,7 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         }
         // Safe to allocate session state now that the proof is valid.
         let session_store = match self
-            .get_or_create_store(msg.session_id, msg.session_id.dealer_id() as usize)
+            .get_or_create_store(msg.session_id, msg.sender_id)
             .await
         {
             Some(s) => s,
@@ -1011,7 +1045,24 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         let mut send_shards_map: Option<HashMap<usize, Vec<u8>>> = None;
         let mut send_output: Option<Vec<u8>> = None;
 
-        store.insert_shard(root.clone(), msg.sender_id, msg.payload.clone(), self.k)?;
+        let per_sender_bytes = MAX_RBC_SHARD_BYTES_GLOBAL / self.n;
+        if store.insert_shard(
+            root.clone(),
+            msg.sender_id,
+            msg.payload.clone(),
+            self.k,
+            MAX_RBC_SHARD_BYTES_GLOBAL,
+            per_sender_bytes,
+        )? == ShardInsert::OverBudget
+        {
+            warn!(
+                id = self.id,
+                session_id = msg.session_id.as_u128(),
+                sender = msg.sender_id,
+                "AVID shard byte budget exceeded for sender; dropping READY"
+            );
+            return Ok(());
+        }
         store.insert_fingerprint(root.clone(), msg.sender_id, proof_bytes);
         store.increment_ready(&root);
         store.set_ready_sent(msg.sender_id);
@@ -1163,13 +1214,14 @@ impl<Id: ProtocolSessionId> Avid<Id> {
         sender_id: usize,
     ) -> Option<Arc<Mutex<AvidStore>>> {
         let store_lock = {
+            let ledger = self.byte_ledger.clone();
             let mut store = self.store.lock().await;
             let admitted = store.get_or_admit(
                 session_id,
                 sender_id,
                 MAX_RBC_SESSIONS,
                 MAX_RBC_SESSIONS / self.n,
-                || Arc::new(Mutex::new(AvidStore::default())),
+                || Arc::new(Mutex::new(AvidStore::with_ledger(ledger))),
             );
             match admitted {
                 Admission::Got(arc) => arc,
@@ -2375,14 +2427,20 @@ mod tests {
         assert!(avid.is_ok(), "Expected valid parameters for Avid");
     }
 
-    /// Regression test: an ECHO is not a dealer message, so it isn't checked against
-    /// `session_id.sub_id()` at the dispatch layer — a relay forwarding an honest dealer's
-    /// broadcast can be the first message this node ever sees for a session. Session quota must
-    /// still be attributed to the dealer encoded in the session ID, not to whichever peer
-    /// happened to relay that first message, or a Byzantine dealer can burn an innocent relay's
-    /// per-peer quota by only reaching this node indirectly through relays.
+    /// Session quota is attributed to the authenticated SENDER of each message, never to the
+    /// session's dealer field (`sub_id`).
+    ///
+    /// This deliberately overturns the earlier VERIA-204 behaviour, which charged the dealer field
+    /// so a Byzantine dealer reaching a node only via honest relays could not burn a relay's quota.
+    /// The dealer field is forgeable for exactly the messages that create sessions here — ECHO and
+    /// READY are not dealer messages, so the dispatch layer never binds their `sub_id` to the sender
+    /// — which let an attacker forge `sub_id = victim` and charge an innocent victim's per-peer
+    /// quota. The authenticated sender is the only non-forgeable per-peer identity, so it is the
+    /// sound anchor. VERIA-204's relay-burn concern is instead made benign by the per-sender AVID
+    /// byte ledger (see `ByteLedger` / `MAX_RBC_SHARD_BYTES_GLOBAL`): a slot a relay is charged for
+    /// is byte-bounded and TTL-reclaimed, so it can no longer cause OOM.
     #[tokio::test]
-    async fn test_bracha_echo_first_attributes_quota_to_dealer_not_relay() {
+    async fn test_bracha_echo_attributes_quota_to_authenticated_sender() {
         let (s, _) = mpsc::channel(256);
         let bracha = Bracha::new(0, 4, 1, 2, s, Arc::new(default_hb_rbc_wrap)).unwrap();
 
@@ -2394,9 +2452,8 @@ mod tests {
             0,
         );
 
-        // A single ECHO from an honest relay — not enough to cross the re-broadcast threshold,
-        // so no network I/O actually happens; this is the first message this node has seen for
-        // the session at all.
+        // A single ECHO from a relay whose authenticated sender id (2) differs from the session's
+        // dealer field (3) — the first message this node has seen for the session.
         let msg = Msg::new(
             relay_id,
             session_id,
@@ -2412,8 +2469,8 @@ mod tests {
         let store = bracha.store.lock().await;
         let (_, (attributed_to, _, _)) = store.iter().next().expect("session should exist");
         assert_eq!(
-            *attributed_to, dealer_id as usize,
-            "quota must be attributed to the dealer (session_id.sub_id()), not the relay that delivered the first message"
+            *attributed_to, relay_id,
+            "quota must be attributed to the authenticated sender, not the forgeable dealer field"
         );
     }
 }

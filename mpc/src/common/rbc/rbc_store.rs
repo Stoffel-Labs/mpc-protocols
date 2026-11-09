@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Notify;
 
 use super::{ShardError, MAX_PAYLOAD_SIZE};
@@ -198,6 +198,71 @@ impl BrachaStore {
     }
 }
 
+/// Shared, process-local ledger bounding the total AVID shard bytes a node retains, keyed by the
+/// **authenticated sender** that transmitted each shard — never the session's dealer field, which is
+/// attacker-forgeable on ECHO/READY. Count caps alone cannot bound memory: one sender can hold
+/// `MAX_RBC_SESSIONS / n` sessions, each retaining a shard up to `MAX_PAYLOAD_SIZE / k` (multi-MiB),
+/// so a single authenticated peer could pin gigabytes under the count cap. The per-sender cap keeps
+/// one peer's footprint bounded; sizing the global cap as `n * per_sender` guarantees the `<= t`
+/// malicious peers can never consume the share the `n - t` honest peers need.
+#[derive(Default, Debug)]
+pub struct ByteLedger {
+    global: usize,
+    per_sender: HashMap<usize, usize>,
+}
+
+impl ByteLedger {
+    /// Charges `bytes` to `sender` iff it fits both the global and per-sender caps. Returns false
+    /// (charging nothing) when it would exceed either — the caller then drops the shard.
+    pub fn try_charge(
+        &mut self,
+        sender: usize,
+        bytes: usize,
+        global_cap: usize,
+        per_sender_cap: usize,
+    ) -> bool {
+        let used = self.per_sender.get(&sender).copied().unwrap_or(0);
+        if self.global.saturating_add(bytes) > global_cap
+            || used.saturating_add(bytes) > per_sender_cap
+        {
+            return false;
+        }
+        self.global += bytes;
+        *self.per_sender.entry(sender).or_insert(0) += bytes;
+        true
+    }
+
+    /// Returns bytes previously charged to `sender` back to the pool.
+    pub fn release(&mut self, sender: usize, bytes: usize) {
+        self.global = self.global.saturating_sub(bytes);
+        if let Some(v) = self.per_sender.get_mut(&sender) {
+            *v = v.saturating_sub(bytes);
+            if *v == 0 {
+                self.per_sender.remove(&sender);
+            }
+        }
+    }
+
+    /// Current global bytes charged. Test/metrics helper.
+    pub fn global_bytes(&self) -> usize {
+        self.global
+    }
+
+    /// Current bytes charged to `sender`. Test/metrics helper.
+    pub fn sender_bytes(&self, sender: usize) -> usize {
+        self.per_sender.get(&sender).copied().unwrap_or(0)
+    }
+}
+
+/// Outcome of a byte-accounted shard insert.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ShardInsert {
+    /// The shard was stored (and any new bytes charged to the sender).
+    Inserted,
+    /// The shard's bytes would exceed the global or per-sender cap: nothing stored, drop the message.
+    OverBudget,
+}
+
 ///--------------------------AVID RBC--------------------------
 /// Enum to interpret message types in AVID's protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,9 +303,16 @@ pub struct AvidStore {
     pub ended: bool,                        // True if consensus is reached and protocol ended
     pub echo: bool,                         // True if this party already sent an ECHO
     pub output: Vec<u8>,                    // Agreed value after consensus
+    /// Shared byte ledger this session charges shard bytes to (`None` = accounting disabled, e.g.
+    /// isolated unit tests). Injected at creation so every session shares one process-local pool.
+    byte_ledger: Option<Arc<StdMutex<ByteLedger>>>,
+    /// Exactly what this session has charged to `byte_ledger`, per sender. Kept in lockstep with the
+    /// ledger so every teardown path — retire, TTL-evict, `clear_all`, or a bare drop — releases
+    /// precisely via [`Drop`], with no leak and no double-release.
+    charged_by_sender: HashMap<usize, usize>,
 }
 impl AvidStore {
-    /// Initializes an empty session store.
+    /// Initializes an empty session store with no byte accounting.
     pub fn new() -> Self {
         AvidStore {
             shards: HashMap::new(),
@@ -253,7 +325,16 @@ impl AvidStore {
             ended: false,
             echo: false,
             output: Vec::new(),
+            byte_ledger: None,
+            charged_by_sender: HashMap::new(),
         }
+    }
+
+    /// Initializes an empty session store that charges shard bytes to the shared `ledger`.
+    pub fn with_ledger(ledger: Arc<StdMutex<ByteLedger>>) -> Self {
+        let mut store = AvidStore::new();
+        store.byte_ledger = Some(ledger);
+        store
     }
     /// Returns true if the given sender_id has sent an echo (i.e., is set to true in echo_senders).
     pub fn has_echo(&self, sender_id: usize) -> bool {
@@ -300,14 +381,23 @@ impl AvidStore {
         self.output = value;
     }
 
-    /// Inserts a shard for a given root and sender ID
+    /// Inserts a shard for a given root and sender ID, charging its bytes to `sender_id` in the
+    /// shared [`ByteLedger`] (when one is attached). Returns [`ShardInsert::OverBudget`] — storing
+    /// nothing — when the charge would exceed `global_cap` or `per_sender_cap`, so the caller drops
+    /// the message without retaining memory. Callers that do not enforce a budget (tests, or paths
+    /// with no ledger attached) pass `usize::MAX` for both caps.
+    ///
+    /// Only the *delta* over any shard already held for this `(root, sender_id)` is charged, so a
+    /// sender's ECHO followed by its READY (same leaf, same value) is not double-counted.
     pub fn insert_shard(
         &mut self,
         root: Vec<u8>,
         sender_id: usize,
         shard: Vec<u8>,
         data_shards: usize,
-    ) -> Result<(), ShardError> {
+        global_cap: usize,
+        per_sender_cap: usize,
+    ) -> Result<ShardInsert, ShardError> {
         if let Some(accepted) = &self.accepted_root {
             if accepted != &root {
                 return Err(ShardError::Config(
@@ -324,11 +414,58 @@ impl AvidStore {
                 shard.len()
             )));
         }
+
+        // Charge only the increase over whatever this (root, sender) already holds.
+        let old_len = self
+            .shards
+            .get(&root)
+            .and_then(|m| m.get(&sender_id))
+            .map(|s| s.len())
+            .unwrap_or(0);
+        let delta = shard.len().saturating_sub(old_len);
+        if delta > 0 {
+            if let Some(ledger) = &self.byte_ledger {
+                let charged =
+                    ledger
+                        .lock()
+                        .unwrap()
+                        .try_charge(sender_id, delta, global_cap, per_sender_cap);
+                if !charged {
+                    return Ok(ShardInsert::OverBudget);
+                }
+                *self.charged_by_sender.entry(sender_id).or_insert(0) += delta;
+            }
+        }
+
         self.shards
             .entry(root)
             .or_default()
             .insert(sender_id, shard);
-        Ok(())
+        Ok(ShardInsert::Inserted)
+    }
+
+    /// Releases ledger charges for every shard whose root satisfies `drop_root`, keeping
+    /// `charged_by_sender` in lockstep. Does not remove the shards themselves — the caller does.
+    fn release_shards<P: Fn(&[u8]) -> bool>(&mut self, drop_root: P) {
+        let ledger = match &self.byte_ledger {
+            Some(l) => l.clone(),
+            None => return,
+        };
+        let mut releases: Vec<(usize, usize)> = Vec::new();
+        for (r, by_sender) in self.shards.iter() {
+            if drop_root(r) {
+                for (sender, shard) in by_sender.iter() {
+                    releases.push((*sender, shard.len()));
+                }
+            }
+        }
+        let mut lg = ledger.lock().unwrap();
+        for (sender, bytes) in releases {
+            lg.release(sender, bytes);
+            if let Some(v) = self.charged_by_sender.get_mut(&sender) {
+                *v = v.saturating_sub(bytes);
+            }
+        }
     }
 
     /// Inserts fingerprint/merkle proof  for a given root and sender ID
@@ -366,11 +503,30 @@ impl AvidStore {
         }
 
         self.accepted_root = Some(root.to_vec());
+        // Release byte charges for every losing root before its shards are dropped below.
+        let committed = root.to_vec();
+        self.release_shards(|r| r != committed.as_slice());
         self.shards.retain(|r, _| r == root);
         self.fingerprint.retain(|r, _| r == root);
         self.echo_count.retain(|r, _| r == root);
         self.ready_count.retain(|r, _| r == root);
         true
+    }
+}
+
+impl Drop for AvidStore {
+    /// Releases this session's remaining shard-byte charges on every teardown path (retire,
+    /// TTL-evict, `clear_all`, or a bare drop), so the ledger can never leak capacity.
+    fn drop(&mut self) {
+        if self.charged_by_sender.is_empty() {
+            return;
+        }
+        if let Some(ledger) = &self.byte_ledger {
+            let mut lg = ledger.lock().unwrap();
+            for (sender, bytes) in self.charged_by_sender.iter() {
+                lg.release(*sender, *bytes);
+            }
+        }
     }
 }
 
@@ -696,10 +852,10 @@ mod tests {
         let mut store = AvidStore::new();
         let root = vec![1u8; 32];
         store
-            .insert_shard(root.clone(), 0, vec![0u8; 10], 2)
+            .insert_shard(root.clone(), 0, vec![0u8; 10], 2, usize::MAX, usize::MAX)
             .unwrap();
         store
-            .insert_shard(root.clone(), 1, vec![0u8; 10], 2)
+            .insert_shard(root.clone(), 1, vec![0u8; 10], 2, usize::MAX, usize::MAX)
             .unwrap();
         assert_eq!(store.shards.get(&root).unwrap().len(), 2);
     }
@@ -714,13 +870,13 @@ mod tests {
         // Two senders back root_a, which commits the session at t = 1.
         for sender in 0..2 {
             store
-                .insert_shard(root_a.clone(), sender, vec![0u8; 10], 2)
+                .insert_shard(root_a.clone(), sender, vec![0u8; 10], 2, usize::MAX, usize::MAX)
                 .unwrap();
             store.increment_echo(&root_a);
         }
         assert!(store.try_commit_root(&root_a, 2), "root_a must commit");
 
-        let result = store.insert_shard(root_b.clone(), 2, vec![0u8; 10], 2);
+        let result = store.insert_shard(root_b.clone(), 2, vec![0u8; 10], 2, usize::MAX, usize::MAX);
         assert!(result.is_err(), "mismatched root must be rejected");
         assert!(
             !store.shards.contains_key(&root_b),
@@ -744,7 +900,7 @@ mod tests {
         let honest = vec![1u8; 32];
 
         store
-            .insert_shard(forged.clone(), 3, vec![0u8; 10], 2)
+            .insert_shard(forged.clone(), 3, vec![0u8; 10], 2, usize::MAX, usize::MAX)
             .unwrap();
         store.increment_echo(&forged);
         assert!(
@@ -755,7 +911,7 @@ mod tests {
         // The honest root still gets in, and wins once corroborated.
         for sender in 0..2 {
             store
-                .insert_shard(honest.clone(), sender, vec![0u8; 10], 2)
+                .insert_shard(honest.clone(), sender, vec![0u8; 10], 2, usize::MAX, usize::MAX)
                 .unwrap();
             store.increment_echo(&honest);
         }
@@ -778,7 +934,7 @@ mod tests {
         let forged = vec![9u8; 32];
 
         store
-            .insert_shard(forged.clone(), 3, vec![0u8; 10], 2)
+            .insert_shard(forged.clone(), 3, vec![0u8; 10], 2, usize::MAX, usize::MAX)
             .unwrap();
         store.increment_echo(&forged);
         store.increment_ready(&forged);
@@ -800,15 +956,106 @@ mod tests {
         // Worst case: every sender backs a distinct root via ECHO, and another via READY.
         for sender in 0..n {
             store
-                .insert_shard(vec![sender as u8; 32], sender, vec![0u8; 10], 2)
+                .insert_shard(vec![sender as u8; 32], sender, vec![0u8; 10], 2, usize::MAX, usize::MAX)
                 .unwrap();
             store
-                .insert_shard(vec![(100 + sender) as u8; 32], sender, vec![0u8; 10], 2)
+                .insert_shard(vec![(100 + sender) as u8; 32], sender, vec![0u8; 10], 2, usize::MAX, usize::MAX)
                 .unwrap();
         }
 
         let total: usize = store.shards.values().map(|m| m.len()).sum();
         assert_eq!(total, 2 * n, "retention must be exactly 2n shards");
         assert!(store.accepted_root.is_none(), "no root reached t + 1");
+    }
+
+    /// The per-sender byte cap bounds one sender's retained shard bytes regardless of how many
+    /// distinct sessions it floods: over-budget inserts are rejected and store nothing.
+    #[test]
+    fn byte_ledger_caps_a_single_sender() {
+        let ledger = Arc::new(StdMutex::new(ByteLedger::default()));
+        let global_cap = 1000;
+        let per_sender_cap = 100;
+
+        // One sender floods distinct sessions, each with a 40-byte shard. The third would exceed the
+        // 100-byte per-sender cap and must be refused.
+        let mut stores = Vec::new();
+        let mut inserted = 0usize;
+        for i in 0..5u8 {
+            let mut store = AvidStore::with_ledger(ledger.clone());
+            let outcome = store
+                .insert_shard(vec![i; 32], 7, vec![0u8; 40], 2, global_cap, per_sender_cap)
+                .unwrap();
+            if outcome == ShardInsert::Inserted {
+                inserted += 1;
+            }
+            stores.push(store); // keep alive so Drop doesn't release mid-loop
+        }
+        assert_eq!(inserted, 2, "only two 40-byte shards fit under a 100-byte cap");
+        assert_eq!(ledger.lock().unwrap().sender_bytes(7), 80);
+        assert!(ledger.lock().unwrap().global_bytes() <= global_cap);
+    }
+
+    /// Dropping a session (any teardown path) releases its charges back to the ledger, so a flood of
+    /// abandoned sessions cannot permanently exhaust the pool.
+    #[test]
+    fn dropping_a_session_releases_its_bytes() {
+        let ledger = Arc::new(StdMutex::new(ByteLedger::default()));
+        {
+            let mut store = AvidStore::with_ledger(ledger.clone());
+            store
+                .insert_shard(vec![1u8; 32], 2, vec![0u8; 50], 2, 1000, 1000)
+                .unwrap();
+            assert_eq!(ledger.lock().unwrap().sender_bytes(2), 50);
+        }
+        assert_eq!(
+            ledger.lock().unwrap().global_bytes(),
+            0,
+            "drop must release every charge"
+        );
+        assert_eq!(ledger.lock().unwrap().sender_bytes(2), 0);
+    }
+
+    /// Committing a root releases the byte charges for every losing (equivocated) root's shards.
+    #[test]
+    fn commit_releases_losing_root_bytes() {
+        let ledger = Arc::new(StdMutex::new(ByteLedger::default()));
+        let mut store = AvidStore::with_ledger(ledger.clone());
+        let winner = vec![1u8; 32];
+        let loser = vec![2u8; 32];
+
+        // Two senders back the winner; one sender also backs a competing (losing) root.
+        for sender in 0..2 {
+            store
+                .insert_shard(winner.clone(), sender, vec![0u8; 30], 2, 10_000, 10_000)
+                .unwrap();
+            store.increment_echo(&winner);
+        }
+        store
+            .insert_shard(loser.clone(), 3, vec![0u8; 30], 2, 10_000, 10_000)
+            .unwrap();
+        assert_eq!(ledger.lock().unwrap().global_bytes(), 90, "3 shards charged");
+
+        assert!(store.try_commit_root(&winner, 2));
+        assert_eq!(
+            ledger.lock().unwrap().global_bytes(),
+            60,
+            "the losing root's 30 bytes must be released on commit"
+        );
+        assert_eq!(ledger.lock().unwrap().sender_bytes(3), 0);
+    }
+
+    /// A sender's ECHO then READY for the same (root, leaf) is charged once, not twice.
+    #[test]
+    fn re_inserting_same_shard_is_not_double_charged() {
+        let ledger = Arc::new(StdMutex::new(ByteLedger::default()));
+        let mut store = AvidStore::with_ledger(ledger.clone());
+        let root = vec![1u8; 32];
+        store
+            .insert_shard(root.clone(), 2, vec![0u8; 40], 2, 1000, 1000)
+            .unwrap();
+        store
+            .insert_shard(root.clone(), 2, vec![0u8; 40], 2, 1000, 1000)
+            .unwrap();
+        assert_eq!(ledger.lock().unwrap().sender_bytes(2), 40, "charged once");
     }
 }
