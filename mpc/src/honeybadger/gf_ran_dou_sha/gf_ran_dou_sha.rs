@@ -17,7 +17,7 @@ use crate::{
         gf2k::{
             field::BinaryField,
             share::GfShare,
-            vandermonde::{apply_vandermonde, make_vandermonde},
+            vandermonde::{apply_vandermonde, make_hyper_invertible},
             Poly,
         },
         share::ShareError,
@@ -326,7 +326,7 @@ where
             return Err(GfRanDouShaError::ShareError(ShareError::DegreeMismatch));
         }
 
-        let vandermonde_matrix = make_vandermonde::<K>(self.n_parties, self.n_parties - 1)?;
+        let vandermonde_matrix = make_hyper_invertible::<K>(self.n_parties)?;
         let mut r_deg_t = Vec::with_capacity(shares_deg_t_by_batch.len() * self.n_parties);
         for shares_deg_t in shares_deg_t_by_batch {
             r_deg_t.extend(apply_vandermonde(&vandermonde_matrix, &shares_deg_t)?);

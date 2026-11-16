@@ -44,6 +44,66 @@ pub fn make_vandermonde<F: FftField>(n: usize, t: usize) -> Result<Vec<Vec<F>>, 
     Ok(matrix)
 }
 
+/// The `n x n` hyper-invertible matrix of Beerliova-Trubiniova and Hirt (TCC 2008):
+/// `M[i][j] = prod_{k != j} (beta_i - alpha_k) / (alpha_j - alpha_k)` for `2n` distinct field
+/// elements `alpha_0..alpha_{n-1}`, `beta_0..beta_{n-1}`. It maps the values of a polynomial of
+/// degree below `n` at the `alpha`s to its values at the `beta`s, which is why **every square
+/// submatrix is invertible**.
+///
+/// This is the matrix randomness extraction needs, and a Vandermonde matrix is not a substitute.
+/// The random-sharing protocols apply it to the `n` dealt sharings, keep some outputs and open
+/// the others to be checked. Soundness needs the honest checkers' rows to have full rank on the
+/// corrupt dealers' columns, and privacy needs the kept and corrupt-checked rows to have full
+/// rank on the honest dealers' columns — arbitrary submatrices, chosen by the adversary. With
+/// `alpha_j^k` over a radix-2 domain of size 16 the dealers `{0, 4, 8, 12}` can make their errors
+/// cancel in every honest check (`sum_m i^(j m) = 0` unless `4 | j`); see
+/// `tests/randousha_extraction_test.rs` and `formal/extraction`.
+///
+/// The points are `alpha_k = k + 1` and `beta_i = n + i + 1`. They have nothing to do with the
+/// parties' evaluation points: the matrix acts on the vector of dealings, not on shares.
+pub fn make_hyper_invertible<F: FftField>(n: usize) -> Result<Vec<Vec<F>>, ShareError> {
+    let alpha: Vec<F> = (0..n).map(|k| F::from((k + 1) as u64)).collect();
+    let beta: Vec<F> = (0..n).map(|i| F::from((n + i + 1) as u64)).collect();
+    // Distinctness of all 2n points, i.e. the characteristic exceeds 2n. Checked rather than
+    // assumed: over a small field the matrix would silently stop being hyper-invertible.
+    for (index, a) in alpha.iter().chain(beta.iter()).enumerate() {
+        if alpha
+            .iter()
+            .chain(beta.iter())
+            .skip(index + 1)
+            .any(|b| a == b)
+        {
+            return Err(ShareError::NoSuitableDomain(2 * n));
+        }
+    }
+
+    // denominator[j] = prod_{k != j} (alpha_j - alpha_k)
+    let mut inverse_denominator = Vec::with_capacity(n);
+    for j in 0..n {
+        let mut d = F::one();
+        for k in 0..n {
+            if k != j {
+                d *= alpha[j] - alpha[k];
+            }
+        }
+        inverse_denominator.push(d.inverse().ok_or(ShareError::InvalidInput)?);
+    }
+
+    let mut matrix = vec![vec![F::zero(); n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut numerator = F::one();
+            for k in 0..n {
+                if k != j {
+                    numerator *= beta[i] - alpha[k];
+                }
+            }
+            matrix[i][j] = numerator * inverse_denominator[j];
+        }
+    }
+    Ok(matrix)
+}
+
 /// Computes the matrix-vector product: `V * shares`.
 /// This effectively evaluates a polynomial (defined by `shares` as coefficients)
 /// at the domain elements corresponding to the Vandermonde matrix rows.

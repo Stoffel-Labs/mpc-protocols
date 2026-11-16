@@ -24,6 +24,45 @@ pub fn make_vandermonde<K: BinaryField>(n: usize, t: usize) -> Result<Vec<Vec<K>
     Ok(matrix)
 }
 
+/// The `n x n` hyper-invertible matrix of Beerliova-Trubiniova and Hirt over `K`:
+/// `M[i][j] = prod_{k != j} (beta_i - alpha_k) / (alpha_j - alpha_k)`, with the `alpha`s the first
+/// `n` and the `beta`s the next `n` elements of the size-`2n` domain. Every square submatrix is
+/// invertible, which is what randomness extraction needs and what a Vandermonde matrix does not
+/// give; see `common::share::make_hyper_invertible` for the full account.
+///
+/// It needs `2n` distinct elements, so `n` is limited to half of [`BinaryField::MAX_DOMAIN_SIZE`].
+pub fn make_hyper_invertible<K: BinaryField>(n: usize) -> Result<Vec<Vec<K>>, Gf2kError> {
+    let domain = get_or_create_gf2k_domain::<K>(2 * n)?;
+    let alpha: Vec<K> = (0..n).map(|k| domain.element(k)).collect();
+    let beta: Vec<K> = (0..n).map(|i| domain.element(n + i)).collect();
+
+    // Characteristic 2: subtraction is addition.
+    let mut inverse_denominator = Vec::with_capacity(n);
+    for j in 0..n {
+        let mut d = K::one();
+        for k in 0..n {
+            if k != j {
+                d = d * (alpha[j] + alpha[k]);
+            }
+        }
+        inverse_denominator.push(d.inverse().ok_or(Gf2kError::NoSuitableDomain(2 * n))?);
+    }
+
+    let mut matrix = vec![vec![K::zero(); n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut numerator = K::one();
+            for k in 0..n {
+                if k != j {
+                    numerator = numerator * (beta[i] + alpha[k]);
+                }
+            }
+            matrix[i][j] = numerator * inverse_denominator[j];
+        }
+    }
+    Ok(matrix)
+}
+
 /// Computes the matrix-vector product `V * shares`: evaluates the polynomial defined by `shares`
 /// (as coefficients) at each domain point corresponding to a Vandermonde matrix row.
 pub fn apply_vandermonde<K: BinaryField>(

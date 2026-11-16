@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use crate::honeybadger::MAX_MESSAGE_SIZE;
 use crate::{
     common::{
-        share::{apply_vandermonde, make_vandermonde, ShareError},
+        share::{apply_vandermonde, make_hyper_invertible, ShareError},
         utils::deser_bounded_vec,
         ProtocolSessionId, SecretSharingScheme, ShamirShare, RBC,
     },
@@ -476,7 +476,7 @@ where
             self.id
         );
 
-        let vandermonde_matrix = make_vandermonde(self.n_parties, self.n_parties - 1)?;
+        let vandermonde_matrix = make_hyper_invertible(self.n_parties)?;
         let mut r_deg_t = Vec::with_capacity(shares_by_batch.len() * self.n_parties);
         for shares_deg_t in shares_by_batch {
             r_deg_t.extend(apply_vandermonde(&vandermonde_matrix, &shares_deg_t)?);

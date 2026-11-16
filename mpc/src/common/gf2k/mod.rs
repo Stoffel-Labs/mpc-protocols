@@ -14,7 +14,7 @@ pub use field::{BinaryField, Gf256, Gf2kDomain};
 pub use generic_field::{verify_field_and_generator, Gf2k, Gf2p16, Gf2p4, Gf2p8};
 pub use poly::Poly;
 pub use share::GfShare;
-pub use vandermonde::{apply_vandermonde, make_vandermonde};
+pub use vandermonde::{apply_vandermonde, make_hyper_invertible, make_vandermonde};
 
 use crate::common::share::ShareError;
 use std::any::{Any, TypeId};

@@ -4,7 +4,7 @@ use crate::common::session_store::{Admission, SessionStore};
 use crate::{
     common::{
         rbc::RbcError,
-        share::{apply_vandermonde, make_vandermonde, shamir::NonRobustShare, ShareError},
+        share::{apply_vandermonde, make_hyper_invertible, shamir::NonRobustShare, ShareError},
         ProtocolSessionId, SecretSharingScheme, RBC,
     },
     honeybadger::{
@@ -400,7 +400,7 @@ where
             return Err(RanDouShaError::ShareError(ShareError::DegreeMismatch));
         }
 
-        let vandermonde_matrix = make_vandermonde(self.n_parties, self.n_parties - 1)?;
+        let vandermonde_matrix = make_hyper_invertible(self.n_parties)?;
         // Implementation of Step 1.
         let mut r_deg_t = Vec::with_capacity(shares_deg_t_by_batch.len() * self.n_parties);
         for shares_deg_t in shares_deg_t_by_batch {
