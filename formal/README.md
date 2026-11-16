@@ -9,7 +9,6 @@ B2A.
 | [`netlists/`](netlists/README.md) | Z3 | The adder and comparison circuits the Rust code builds compute the right function | the adder design for every mask and input, and about 900 folded plans per field, each for every input; BLS12-381 and BN254 scalar fields |
 | [`extraction/`](extraction/README.md) | exact linear algebra | The randomness-extraction matrix is sound and private against every corrupt set | `n = 4..16`; BLS12-381, BN254 and `GF(2^8)` |
 | [`easycrypt/`](easycrypt/README.md) | EasyCrypt | daBit and B2A: perfect real/ideal indistinguishability with a simulator, against an active rushing adversary | `n = 4`, `t = 1` |
-| [`kani/`](kani/README.md) | Kani | The bit packing the echo relies on, and that `Gf256` is a field of characteristic 2, checked on the production source | batches of 1–16 bits; all field elements |
 
 All of them are unconditional: nothing here assumes a bound on the adversary's computation.
 
