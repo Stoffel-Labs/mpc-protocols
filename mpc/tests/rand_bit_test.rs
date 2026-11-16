@@ -1,8 +1,7 @@
 use crate::utils::rand_bit_utils::{create_rand_bit_input, spawn_receiver_tasks};
 use crate::utils::test_utils::{setup_tracing, test_setup};
-use ark_ff::{AdditiveGroup, Field};
+use ark_ff::{AdditiveGroup, Field, Fp64, MontBackend, MontConfig};
 use std::time::Duration;
-use stoffelcrypto::common::math::goldilocks::GoldilocksField;
 use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelcrypto::honeybadger::fpmul::rand_bit::RandBit;
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -10,6 +9,15 @@ use stoffelcrypto::honeybadger::{ProtocolType, SessionId};
 use tokio::task::JoinSet;
 
 mod utils;
+
+/// A small FFT-friendly prime field for this test only: `2^31 - 2^27 + 1`. `RandBit` opens a
+/// square and drops the candidates that open to zero, which on a small field happens often
+/// enough to exercise that branch; the crate itself ships no small field.
+#[derive(MontConfig)]
+#[modulus = "2013265921"]
+#[generator = "31"]
+pub struct SmallFieldConfig;
+type SmallField = Fp64<MontBackend<SmallFieldConfig, 1>>;
 
 #[tokio::test]
 async fn rand_bit_with_small_field_e2e() {
@@ -26,13 +34,13 @@ async fn rand_bit_with_small_field_e2e() {
     let (network, receivers, _, _) = test_setup(num_parties, vec![]);
 
     // === Create RandBit nodes ===
-    let nodes: Vec<RandBit<GoldilocksField>> = (0..num_parties)
+    let nodes: Vec<RandBit<SmallField>> = (0..num_parties)
         .map(|i| RandBit::new(i, num_parties, threshold).unwrap())
         .collect();
 
     // === Create protocol inputs ===
     let (a_shares, zero_shares) =
-        create_rand_bit_input::<GoldilocksField>(num_parties, threshold, batch_size);
+        create_rand_bit_input::<SmallField>(num_parties, threshold, batch_size);
 
     // === Spawn receiver tasks ===
     let _receiver_tasks_set =
@@ -92,7 +100,7 @@ async fn rand_bit_with_small_field_e2e() {
         }
         let (_, bit) = RobustShare::recover_secret(&shares, num_parties, threshold).unwrap();
         assert!(
-            bit == GoldilocksField::ZERO || bit == GoldilocksField::ONE,
+            bit == SmallField::ZERO || bit == SmallField::ONE,
             "Invalid RandBit output: {:?}",
             bit
         );

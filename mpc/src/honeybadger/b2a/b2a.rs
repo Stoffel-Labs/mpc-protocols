@@ -14,7 +14,7 @@ use tokio::sync::{mpsc::Receiver, oneshot, Mutex};
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 
-use crate::common::convert::{binary_to_bit, field_bit_width};
+use crate::common::convert::{field_bit_width, gf_to_bit};
 use crate::common::session_store::{Admission, SessionStore};
 use crate::common::ProtocolSessionId;
 use crate::{
@@ -40,14 +40,6 @@ use crate::{
 /// plus a list of child ids.
 pub const MAX_B2A_SESSIONS: usize = 256;
 
-/// The width bound on **Goldilocks**: `2^63 - 1 < p <= 2^64 - 1`, so at width 64 the
-/// recomposition `sum 2^i x_i` wraps mod `p` for the `2^32 - 1` payloads in `[p, 2^64)`.
-///
-/// The bound actually enforced is [`max_width`], which derives the same figure from `F` itself;
-/// this constant is the quotable value for the field this crate ships, and a unit test pins the
-/// two together.
-pub const MAX_B2A_BITS: usize = 63;
-
 /// Child `GfBatchRecon` session ids are `parent_exec * B2A_CHILD_STRIDE + wave`, which gives every
 /// parent session a disjoint block.
 ///
@@ -72,8 +64,7 @@ const MAX_PARKED_OPEN_PAYLOADS: usize = 64;
 /// input, i.e. `field_bit_width::<F>() - 1`.
 ///
 /// `field_bit_width` is `F::MODULUS_BIT_SIZE`, so `2^(w) <= p` by definition of the bit size and
-/// `2^w - 1 < p` holds for every prime field, not just Goldilocks. On Goldilocks it is
-/// [`MAX_B2A_BITS`].
+/// `2^w - 1 < p` holds for every prime field: 254 on BLS12-381's scalar field, 253 on BN254's.
 pub fn max_width<F: PrimeField>() -> usize {
     field_bit_width::<F>().saturating_sub(1)
 }
@@ -354,7 +345,8 @@ where
     ///
     /// # Width
     ///
-    /// Every `bits[v].len()` must be at most [`max_width::<F>()`](max_width) — 63 on Goldilocks.
+    /// Every `bits[v].len()` must be at most [`max_width::<F>()`](max_width) — one below the
+    /// field's bit width.
     /// Above it the recomposition wraps modulo `p` and returns the wrong value for an
     /// adversarially chosen payload; see [`B2AError::WidthTooLarge`].
     ///
@@ -436,15 +428,15 @@ where
         .await
     }
 
-    /// [`B2ANode::b2a`] at the **full** `field_bit_width::<F>()` — 64 on Goldilocks.
+    /// [`B2ANode::b2a`] at the **full** `field_bit_width::<F>()`.
     ///
     /// # Safety of the arithmetic, which is the caller's to establish
     ///
     /// At full width the recomposition `sum_i 2^i x_i` is faithful only if that integer is less
     /// than `p`; otherwise this silently returns a sharing of `x mod p`. Nothing here can check
     /// it — the bits are secret — so the precondition is the caller's, and the explicit name is
-    /// the only thing standing between a caller and a silent wrong answer for the `2^32 - 1`
-    /// payloads in `[p, 2^64)`.
+    /// the only thing standing between a caller and a silent wrong answer for the payloads in
+    /// `[p, 2^w)`.
     ///
     /// The one caller that can discharge it is an A2B round trip: A2B emits the bits of the
     /// canonical representative in `[0, p)`, so
@@ -673,7 +665,7 @@ where
                 // can only mean the caller supplied a non-bit share — a typed error, never a
                 // panic and never an adversary-attributable abort.
                 let gamma =
-                    binary_to_bit::<K>(opened[index]).map_err(|_| B2AError::NonBooleanInput {
+                    gf_to_bit::<K>(opened[index]).map_err(|_| B2AError::NonBooleanInput {
                         value,
                         index: offset,
                     })?;
@@ -851,16 +843,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::convert::{bit_to_binary, bit_to_field};
+    use crate::common::convert::{bit_to_field, bit_to_gf};
     use crate::common::gf2k::field::Gf256;
-    use crate::common::math::goldilocks::GoldilocksField;
     use crate::common::SecretSharingScheme;
     use crate::honeybadger::WrappedMessage;
+    use ark_bls12_381::Fr as CurveField;
+    #[allow(unused_imports)]
+    use ark_ff::{AdditiveGroup, Field, One, UniformRand, Zero};
     use ark_std::rand::rngs::StdRng;
     use ark_std::rand::{Rng, SeedableRng};
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
 
-    type F = GoldilocksField;
+    type F = CurveField;
     type K = Gf256;
     type Node = B2ANode<F, K>;
 
@@ -895,7 +889,7 @@ mod tests {
     fn dabit(bit: bool, id: usize, degree: usize) -> DaBit<F, K> {
         DaBit::new(
             RobustShare::new(bit_to_field::<F>(bit), id, degree),
-            GfShare::new(bit_to_binary::<K>(bit), id, degree),
+            GfShare::new(bit_to_gf::<K>(bit), id, degree),
             degree,
         )
         .unwrap()
@@ -906,17 +900,18 @@ mod tests {
     // -----------------------------------------------------------------------------------------
 
     #[test]
-    fn the_width_bound_on_goldilocks_is_63() {
-        // `2^63 - 1 < p <= 2^64 - 1`. At 64 the recomposition wraps mod `p` for the `2^32 - 1`
-        // payloads in `[p, 2^64)`, and the payload is the adversary's to choose.
-        assert_eq!(max_width::<F>(), MAX_B2A_BITS);
-        assert_eq!(field_bit_width::<F>(), 64);
-        // The bound is derived from `F`, so it stays correct for any prime field: `2^w - 1 < p`
-        // where `w = MODULUS_BIT_SIZE - 1`.
+    fn the_width_bound_is_one_below_the_field_width() {
+        // `2^(w-1) <= p < 2^w` for `w` the modulus's bit length, so every `(w-1)`-bit value is
+        // below `p`, while at `w` bits the recomposition wraps mod `p` for the payloads in
+        // `[p, 2^w)` — and the payload is the adversary's to choose.
+        assert_eq!(field_bit_width::<F>(), 255);
+        assert_eq!(max_width::<F>(), 254);
+        assert_eq!(max_width::<ark_bn254::Fr>(), 253);
         let p: num_bigint::BigUint = F::MODULUS.into();
         let largest =
             (num_bigint::BigUint::from(1u8) << max_width::<F>()) - num_bigint::BigUint::from(1u8);
         assert!(largest < p);
+        assert!((num_bigint::BigUint::from(1u8) << field_bit_width::<F>()) > p);
     }
 
     #[test]
@@ -971,19 +966,16 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_width_above_the_bound_rather_than_wrapping() {
         let mut node = node(0, 4, 1);
-        let bits = vec![vec![bin(1, 0, 1); MAX_B2A_BITS + 1]];
-        let dabits = vec![dabit(false, 0, 1); MAX_B2A_BITS + 1];
+        let bound = max_width::<F>();
+        let bits = vec![vec![bin(1, 0, 1); bound + 1]];
+        let dabits = vec![dabit(false, 0, 1); bound + 1];
         let err = node
             .b2a(parent(0), bits, dabits, Duration::from_millis(50), net(4))
             .await
             .unwrap_err();
         assert!(matches!(
             err,
-            B2AError::WidthTooLarge {
-                value: 0,
-                width: 64,
-                max: 63
-            }
+            B2AError::WidthTooLarge { value: 0, width, max } if width == bound + 1 && max == bound
         ));
         // Nothing was admitted: the width check runs before any state exists.
         assert_eq!(node.store_len().await, 0);
@@ -992,9 +984,10 @@ mod tests {
     #[tokio::test]
     async fn full_width_is_reachable_only_through_the_explicitly_named_entry_point() {
         let mut node = node(0, 4, 1);
-        let bits = vec![vec![bin(0, 0, 1); 64]];
-        let dabits = vec![dabit(false, 0, 1); 64];
-        // Same inputs, different door: `b2a` refuses 64 bits outright...
+        let full = field_bit_width::<F>();
+        let bits = vec![vec![bin(0, 0, 1); full]];
+        let dabits = vec![dabit(false, 0, 1); full];
+        // Same inputs, different door: `b2a` refuses the full width outright...
         assert!(matches!(
             node.b2a(
                 parent(0),
@@ -1233,7 +1226,7 @@ mod tests {
         for _ in 0..total {
             let b: bool = rng.gen();
             let arith = RobustShare::compute_shares(bit_to_field::<F>(b), n, t, None, rng).unwrap();
-            let binr = GfShare::compute_shares(bit_to_binary::<K>(b), n, t, rng).unwrap();
+            let binr = GfShare::compute_shares(bit_to_gf::<K>(b), n, t, rng).unwrap();
             for party in 0..n {
                 out[party].push(DaBit::new(arith[party].clone(), binr[party].clone(), t).unwrap());
             }
@@ -1259,7 +1252,7 @@ mod tests {
             for (i, bit) in value.iter().enumerate() {
                 let secret = match tamper {
                     Some((tv, ti, k)) if tv == v && ti == i => k,
-                    _ => bit_to_binary::<K>(*bit),
+                    _ => bit_to_gf::<K>(*bit),
                 };
                 let shares = GfShare::compute_shares(secret, n, t, rng).unwrap();
                 for (party, share) in shares.into_iter().enumerate() {
@@ -1466,31 +1459,33 @@ mod tests {
         RobustShare::recover_secret(&shares, n, t).unwrap().1
     }
 
-    fn as_integer(value: &[bool]) -> u128 {
+    /// `sum_i 2^i value[i]` as a field element, reduced — which for a value below `p` is the
+    /// integer itself.
+    fn as_field(value: &[bool]) -> F {
         value
             .iter()
-            .enumerate()
-            .filter(|(_, b)| **b)
-            .map(|(i, _)| 1u128 << i)
-            .sum()
+            .rev()
+            .fold(F::zero(), |acc, bit| acc.double() + F::from(*bit as u64))
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn b2a_reconstructs_the_integer_the_bits_encode() {
         let (n, t) = (4usize, 1usize);
-        // Widths 1, 8, 32 and the maximum 63, plus the all-ones pattern at each width, which is
+        // Widths 1, 8, 32 and the maximum, plus the all-ones pattern at each width, which is
         // where an off-by-one in the weighting or the bound would show up.
         let values = vec![
             vec![true],
             vec![false],
             (0..8).map(|i| i % 3 == 0).collect::<Vec<_>>(),
             vec![true; 32],
-            vec![true; MAX_B2A_BITS],
-            (0..MAX_B2A_BITS).map(|i| i % 2 == 1).collect::<Vec<_>>(),
+            vec![true; max_width::<F>()],
+            (0..max_width::<F>())
+                .map(|i| i % 2 == 1)
+                .collect::<Vec<_>>(),
         ];
         let results = b2a_e2e(n, t, &values, Variant::Unchecked, None, 0).await;
         for (v, value) in values.iter().enumerate() {
-            let expected = F::from(as_integer(value));
+            let expected = as_field(value);
             assert_eq!(recover(&results, v, n, t), expected, "value {v}");
         }
         // Every party's share is its own, at the right degree — the output is directly usable as
@@ -1506,18 +1501,20 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn b2a_full_width_unchecked_is_exact_when_the_value_is_below_the_modulus() {
         let (n, t) = (4usize, 1usize);
-        // `2^63`, `2^32` and `p - 1 = 0xFFFF_FFFF_0000_0000` — the last being exactly what an A2B
+        // The top bit alone, `2^32`, and the bits of `p - 1` — the last being exactly what an A2B
         // of `-1` emits, i.e. the round trip this entry point exists for.
-        let mut two_pow_63 = vec![false; 64];
-        two_pow_63[63] = true;
-        let mut two_pow_32 = vec![false; 64];
+        let full = field_bit_width::<F>();
+        let mut top_bit = vec![false; full];
+        top_bit[full - 1] = true;
+        let mut two_pow_32 = vec![false; full];
         two_pow_32[32] = true;
-        let p_minus_one: Vec<bool> = (0..64).map(|i| i >= 32).collect();
-        let values = vec![two_pow_63, two_pow_32, p_minus_one];
+        let p_minus_one = crate::common::convert::canonical_bits::<F>(-F::one(), full).unwrap();
+        let values = vec![top_bit, two_pow_32, p_minus_one];
         let results = b2a_e2e(n, t, &values, Variant::FullWidth, None, 0).await;
-        assert_eq!(recover(&results, 0, n, t), F::from(1u128 << 63));
-        assert_eq!(recover(&results, 1, n, t), F::from(1u128 << 32));
-        assert_eq!(recover(&results, 2, n, t), F::from(0u64) - F::from(1u64));
+        let two = F::from(2u64);
+        assert_eq!(recover(&results, 0, n, t), two.pow([full as u64 - 1]));
+        assert_eq!(recover(&results, 1, n, t), two.pow([32]));
+        assert_eq!(recover(&results, 2, n, t), -F::one());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1526,7 +1523,7 @@ mod tests {
         let values = vec![vec![true, false, true, true], vec![false, true]];
         let checked = b2a_e2e(n, t, &values, Variant::Checked, None, 0).await;
         for (v, value) in values.iter().enumerate() {
-            assert_eq!(recover(&checked, v, n, t), F::from(as_integer(value)));
+            assert_eq!(recover(&checked, v, n, t), as_field(value));
         }
     }
 
@@ -1577,6 +1574,6 @@ mod tests {
         let values = vec![vec![true, false, true, true, false]];
         let results = b2a_e2e(n, t, &values, Variant::Unchecked, None, t).await;
         assert_eq!(results.len(), n - t);
-        assert_eq!(recover(&results, 0, n, t), F::from(as_integer(&values[0])));
+        assert_eq!(recover(&results, 0, n, t), as_field(&values[0]));
     }
 }

@@ -10,10 +10,9 @@
 //! as a hang.
 //!
 //! Conversion preprocessing is dealt honestly by [`utils::a2b_utils`] rather than generated, for
-//! the reason given in that file's header, and the pools are filled before each call so that
-//! `HoneyBadgerMPCNode::a2b`'s "top up if short" branch never fires. A short pool here would drag
-//! in a full preprocessing run — a `PrssDaBitNode` batch plus the `RandBit`s it consumes and the
-//! GF triples the `r < p` filter needs — which is a preprocessing-scale exercise rather than a
+//! the reason given in that file's header, and the pools are filled before each call: a
+//! conversion never preprocesses on demand, so a short pool is an error. Generating the material
+//! for real is `conv_scale_test`'s job; this file is a
 //! test of the conversion.
 
 pub mod utils;
@@ -26,7 +25,7 @@ mod conv_width_utils;
 
 use crate::a2b_utils::{
     boundary_values, deal_bits, deal_dabits, deal_edabits, deal_field, deal_gf_triples,
-    expected_bits, random_values, recompose_u128, recover_bit, recover_field, F, K,
+    expected_bits, pow2, random_values, recompose, recover_bit, recover_field, F, K,
 };
 use crate::conv_width_utils::{
     as_integer, fixed_point_corpus, fixed_point_width, shift_to_unsigned,
@@ -72,8 +71,7 @@ fn nodes_for(instance_id: u32) -> Vec<Node> {
 /// Everything one node-level conversion needs, dealt and installed in the nodes' own pools.
 ///
 /// `create_global_nodes` hard-codes `n_gf_triples = 0` and leaves `n_dabits`/`n_edabits` at zero,
-/// which is what keeps the "top up if short" branches of `a2b`/`b2a` from starting a real
-/// preprocessing run; the pools are filled here instead.
+/// and a conversion never preprocesses on demand; the pools are filled here instead.
 async fn install_material(nodes: &mut [Node], conversions: usize, dabits: usize, rng: &mut StdRng) {
     let per_conversion = A2BNode::<F, K>::gf_triples_per_conversion().unwrap();
     let edabits = deal_edabits(N_PARTIES, T, conversions, rng);
@@ -217,7 +215,7 @@ fn assert_bits_match(label: &str, values: &[F], results: &[Vec<Vec<GfShare<K>>>]
 /// The full-range corpus through the node dispatcher.
 ///
 /// Same values as `a2b_test.rs`'s standalone run: `0`, `1`, the `2^32` neighbourhood that the
-/// `2^64 - p = 2^32 - 1` identity turns into a carry boundary, the `2^63` neighbourhood that
+/// `2^w - p` identity turns into a carry boundary, the `2^(w-1)` neighbourhood that
 /// straddles B2A's width bound, the `p - 2^32` neighbourhood that drives the `c1 = 1` branch, and
 /// `-1`.
 #[tokio::test]
@@ -272,11 +270,11 @@ async fn a2b_random_batch_through_node_dispatch() {
     assert_drained(&nodes, 0, 0).await;
 }
 
-/// `b2a(a2b([x])) == [x]` through the node, for every `x` below `2^63`.
+/// `b2a(a2b([x])) == [x]` through the node, for every `x` below `2^(w-1)`.
 ///
-/// `HoneyBadgerMPCNode::b2a` is the *checked-width* entry point — 63 bits, not 64 — so the round
+/// `HoneyBadgerMPCNode::b2a` is the *checked-width* entry point — one bit short of the field width — so the round
 /// trip at node level is the one a mixed circuit actually performs: A2B's top bit is dropped,
-/// which is exact precisely because a value below `2^63` cannot set it. The full-width variant is
+/// which is exact precisely because a value below `2^(w-1)` cannot set it. The full-width variant is
 /// only reachable on `B2ANode` directly and is covered in `a2b_test.rs`.
 #[tokio::test]
 async fn a2b_then_b2a_round_trips_through_node_dispatch() {
@@ -288,7 +286,8 @@ async fn a2b_then_b2a_round_trips_through_node_dispatch() {
         F::from(1u64),
         F::from(0xFFFF_FFFFu64),
         F::from(1u64 << 32),
-        F::from((1u64 << 63) - 1),
+        // The largest value below the top bit: every bit of the width B2A carries.
+        pow2(bound) - F::from(1u64),
     ];
 
     let (network, receivers, _, _) = test_setup(N_PARTIES, vec![]);
@@ -308,8 +307,8 @@ async fn a2b_then_b2a_round_trips_through_node_dispatch() {
     let bits = run_a2b(&nodes, &network, inputs).await;
     assert_bits_match("node-roundtrip-forward", &values, &bits);
 
-    // Every one of these values is below `2^63`, so A2B left bit 63 clear and dropping it is
-    // exact. A value at or above `2^63` could not be carried back through the checked entry point
+    // Every one of these values is below `2^(w-1)`, so A2B left the top bit clear and dropping it is
+    // exact. A value at or above `2^(w-1)` could not be carried back through the checked entry point
     // at all, which is the width bound doing its job rather than a limitation of the round trip.
     for index in 0..values.len() {
         let top: Vec<GfShare<K>> = bits.iter().map(|r| r[index][bound].clone()).collect();
@@ -354,7 +353,7 @@ async fn b2a_then_a2b_round_trips_through_node_dispatch() {
 
     install_material(&mut nodes, values, ell * values, &mut rng).await;
 
-    // One all-ones vector, so the largest value B2A can carry (`2^63 - 1`) is in the batch.
+    // One all-ones vector, so the largest value B2A can carry (`2^(w-1) - 1`) is in the batch.
     let clear: Vec<Vec<bool>> = (0..values)
         .map(|index| {
             (0..ell)
@@ -384,7 +383,7 @@ async fn b2a_then_a2b_round_trips_through_node_dispatch() {
             let value = recover_field(&column, N_PARTIES, T);
             assert_eq!(
                 value,
-                F::from(recompose_u128(&clear[index]) as u64),
+                F::from(recompose(&clear[index])),
                 "B2A recomposed value {index} wrongly"
             );
             value
@@ -526,7 +525,7 @@ async fn a2b_then_b2a_round_trips_at_the_fixed_point_width_through_node_dispatch
 ///
 /// The same negative result `a2b_test.rs` pins standalone, repeated here because it is the one a
 /// caller gets wrong: the repo encodes `-v` as `p - v`, so `-1` reaches A2B as
-/// `0xFFFF_FFFF_0000_0000`, whose low 33 bits are **all zero**. Narrowing it to the fixed-point
+/// `p - 1`, whose low 33 bits are **all zero**. Narrowing it to the fixed-point
 /// width reads `-1` as `0`, silently and with no error anywhere. The free shift `truncpr` already
 /// applies is what makes narrowing legitimate, and the two conversions are run side by side in one
 /// batch so the difference is visible in a single output.

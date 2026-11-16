@@ -1,5 +1,5 @@
-//! Value-level helpers that bridge the prime-field domain (`F: PrimeField`, e.g.
-//! [`GoldilocksField`]) and the binary domain (`K: BinaryField`, e.g. `Gf256`).
+//! Value-level helpers that bridge the prime-field domain (`F: PrimeField`, e.g. the scalar field
+//! of BLS12-381) and the binary domain (`K: BinaryField`, e.g. `Gf256`).
 //!
 //! This module is the **only** place where the two domains are allowed to touch, and it touches
 //! them at the level of *clear values* — a `bool`, a field element, a little-endian bit vector.
@@ -24,11 +24,8 @@
 //!
 //! [`canonical_bits`] decomposes the representative of `x` in `[0, p)`. The fixed-point encoding in
 //! [`crate::common::types::fixed`] represents a negative value `-|v|` as `p - |v|`, so `-1` comes
-//! back from here as the bits of `p - 1 = 0xFFFF_FFFF_0000_0000` on Goldilocks, **not** as the
-//! two's-complement `0xFFFF_FFFF_FFFF_FFFF`. A caller that wants a sign bit must shift the value by
+//! back from here as the bits of `p - 1`, **not** as the two's-complement all-ones pattern. A caller that wants a sign bit must shift the value by
 //! `2^(k-1)` first, which is the same convention `truncpr.rs` already uses.
-//!
-//! [`GoldilocksField`]: crate::common::math::goldilocks::GoldilocksField
 
 use crate::common::gf2k::field::BinaryField;
 use ark_ff::{BigInteger, PrimeField};
@@ -72,7 +69,7 @@ pub enum ConvertError {
 ///
 /// `K::zero()` / `K::one()` are the only two elements `x` of `K` with `x^2 = x`, which is precisely
 /// what [`BinaryField::is_bit`] tests.
-pub fn bit_to_binary<K: BinaryField>(b: bool) -> K {
+pub fn bit_to_gf<K: BinaryField>(b: bool) -> K {
     if b {
         K::one()
     } else {
@@ -85,7 +82,7 @@ pub fn bit_to_binary<K: BinaryField>(b: bool) -> K {
 /// The comparison is against the two subfield elements directly, never against `x * x == x` plus a
 /// sign convention: in `GF(2^k)` the Frobenius map `x -> x^2` is a **bijection**, so squaring
 /// determines `x` exactly and carries no information that distinguishes `0` from `1` more cheaply.
-pub fn binary_to_bit<K: BinaryField>(x: K) -> Result<bool, ConvertError> {
+pub fn gf_to_bit<K: BinaryField>(x: K) -> Result<bool, ConvertError> {
     if x.is_zero() {
         Ok(false)
     } else if x == K::one() {
@@ -120,7 +117,7 @@ pub fn field_to_bit<F: PrimeField>(x: F) -> Result<bool, ConvertError> {
 
 /// `ceil(log2 p)` — the number of bits a canonical representative in `[0, p)` can occupy.
 ///
-/// This is 64 for Goldilocks (`p = 2^64 - 2^32 + 1`). It equals `F::MODULUS_BIT_SIZE`, the bit
+/// This is 255 for BLS12-381's scalar field and 254 for BN254's. It equals `F::MODULUS_BIT_SIZE`, the bit
 /// length of `p`: for any odd prime `p` is not a power of two, so `ceil(log2 p)` and
 /// `floor(log2 p) + 1` coincide.
 pub fn field_bit_width<F: PrimeField>() -> usize {
@@ -161,8 +158,7 @@ pub fn canonical_bits<F: PrimeField>(x: F, width: usize) -> Result<Vec<bool>, Co
 
 /// `p` as exactly `field_bit_width::<F>()` little-endian bits.
 ///
-/// Used by the edaBit `r < p` filter and by the A2B conditional reduction. For Goldilocks this has
-/// exactly 33 set bits: bit 0, then bits 32..64.
+/// Used by the edaBit `r < p` filter and by the A2B conditional reduction.
 pub fn modulus_bits<F: PrimeField>() -> Vec<bool> {
     let width = field_bit_width::<F>();
     let mut bits = F::MODULUS.to_bits_le();
@@ -174,8 +170,8 @@ pub fn modulus_bits<F: PrimeField>() -> Vec<bool> {
 
 /// `2^w - p` as exactly `w` little-endian bits, where `w = field_bit_width::<F>()`.
 ///
-/// For Goldilocks this is `2^64 - p = 2^32 - 1` (bits 0..32 set), the constant A2B's second 64-bit
-/// addition adds in order to test-and-perform the single conditional subtraction of `p`.
+/// This is the constant A2B's second addition adds in order to test-and-perform the single
+/// conditional subtraction of `p`.
 pub fn two_pow_w_minus_modulus_bits<F: PrimeField>() -> Vec<bool> {
     // `2^w - p == (!p) + 1` over `w` bits (two's complement). The carry can only escape bit `w-1`
     // when `p == 0`, which no prime modulus is, so the result is exact in `w` bits. Also
@@ -195,190 +191,219 @@ pub fn two_pow_w_minus_modulus_bits<F: PrimeField>() -> Vec<bool> {
 mod tests {
     use super::*;
     use crate::common::gf2k::field::Gf256;
-    use crate::common::math::goldilocks::GoldilocksField;
-    use ark_ff::UniformRand;
     use ark_std::test_rng;
+    use num_bigint::BigUint;
 
-    /// `p = 2^64 - 2^32 + 1`.
-    const P: u64 = 0xFFFF_FFFF_0000_0001;
+    /// The scalar field of BLS12-381: 255 bits.
+    type Bls = ark_bls12_381::Fr;
+    /// The scalar field of BN254: 254 bits.
+    type Bn = ark_bn254::Fr;
 
-    /// Recomposes a little-endian bit vector of at most 64 bits into a `u64`.
-    fn bits_to_u64(bits: &[bool]) -> u64 {
-        assert!(bits.len() <= 64, "test helper only handles up to 64 bits");
-        let mut acc = 0u64;
+    fn modulus<F: PrimeField>() -> BigUint {
+        F::MODULUS.into()
+    }
+
+    fn canonical<F: PrimeField>(x: F) -> BigUint {
+        x.into_bigint().into()
+    }
+
+    /// Recomposes a little-endian bit vector.
+    fn from_bits(bits: &[bool]) -> BigUint {
+        let mut acc = BigUint::from(0u8);
         for (i, b) in bits.iter().enumerate() {
-            if *b {
-                acc |= 1u64 << i;
-            }
+            acc.set_bit(i as u64, *b);
         }
         acc
     }
 
-    /// The canonical representative of `x` in `[0, p)`, as a `u64`.
-    fn canonical_u64(x: GoldilocksField) -> u64 {
-        x.into_bigint().0[0]
+    fn pow2(exponent: usize) -> BigUint {
+        BigUint::from(1u8) << exponent
     }
 
     #[test]
-    fn test_field_bit_width_goldilocks() {
-        assert_eq!(field_bit_width::<GoldilocksField>(), 64);
+    fn test_field_bit_width_of_the_curve_fields() {
+        assert_eq!(field_bit_width::<Bls>(), 255);
+        assert_eq!(field_bit_width::<Bn>(), 254);
     }
 
     #[test]
-    fn test_bit_to_binary_and_back() {
+    fn test_bit_to_gf_and_back() {
         for b in [false, true] {
-            let k: Gf256 = bit_to_binary(b);
+            let k: Gf256 = bit_to_gf(b);
             assert!(k.is_bit(), "embedded bit must satisfy x^2 = x");
-            assert_eq!(binary_to_bit(k).expect("subfield element"), b);
+            assert_eq!(gf_to_bit(k).expect("subfield element"), b);
         }
-        assert_eq!(bit_to_binary::<Gf256>(false), Gf256::zero());
-        assert_eq!(bit_to_binary::<Gf256>(true), Gf256::one());
+        assert_eq!(bit_to_gf::<Gf256>(false), Gf256::zero());
+        assert_eq!(bit_to_gf::<Gf256>(true), Gf256::one());
     }
 
     #[test]
-    fn test_binary_to_bit_rejects_non_subfield_exhaustively() {
+    fn test_gf_to_bit_rejects_non_subfield_exhaustively() {
         // Only Gf256(0) and Gf256(1) are in the canonical GF(2) subfield. In particular Gf256(2)
         // and Gf256(3) — the values an adversarial dealer would reach for — must be rejected.
         for v in 0u8..=255 {
             let x = Gf256(v);
             let expected = v == 0 || v == 1;
             assert_eq!(
-                binary_to_bit(x).is_ok(),
+                gf_to_bit(x).is_ok(),
                 expected,
-                "binary_to_bit mismatch for {x:?}"
+                "gf_to_bit mismatch for {x:?}"
             );
-            assert_eq!(
-                binary_to_bit(x).is_ok(),
-                x.is_bit(),
-                "disagrees with is_bit"
-            );
+            assert_eq!(gf_to_bit(x).is_ok(), x.is_bit(), "disagrees with is_bit");
         }
         assert!(matches!(
-            binary_to_bit(Gf256(2)),
+            gf_to_bit(Gf256(2)),
             Err(ConvertError::NotABinaryBit)
         ));
     }
 
     #[test]
     fn test_bit_to_field_and_back() {
-        for b in [false, true] {
-            let f: GoldilocksField = bit_to_field(b);
-            assert_eq!(field_to_bit(f).expect("0 or 1"), b);
+        fn check<F: PrimeField>() {
+            for b in [false, true] {
+                let f: F = bit_to_field(b);
+                assert_eq!(field_to_bit(f).expect("0 or 1"), b);
+            }
+            assert_eq!(bit_to_field::<F>(false), F::zero());
+            assert_eq!(bit_to_field::<F>(true), F::one());
         }
-        assert_eq!(
-            bit_to_field::<GoldilocksField>(false),
-            GoldilocksField::from(0u64)
-        );
-        assert_eq!(
-            bit_to_field::<GoldilocksField>(true),
-            GoldilocksField::from(1u64)
-        );
+        check::<Bls>();
+        check::<Bn>();
     }
 
     #[test]
     fn test_field_to_bit_rejects_non_bits() {
-        assert!(matches!(
-            field_to_bit(GoldilocksField::from(2u64)),
-            Err(ConvertError::NotAFieldBit)
-        ));
-        // -1 is p - 1, not a bit: the canonical-representative convention, not two's complement.
-        let minus_one = GoldilocksField::from(0u64) - GoldilocksField::from(1u64);
-        assert!(matches!(
-            field_to_bit(minus_one),
-            Err(ConvertError::NotAFieldBit)
-        ));
+        fn check<F: PrimeField>() {
+            assert!(matches!(
+                field_to_bit(F::from(2u64)),
+                Err(ConvertError::NotAFieldBit)
+            ));
+            // -1 is p - 1, not a bit: the canonical-representative convention, not two's
+            // complement.
+            assert!(matches!(
+                field_to_bit(-F::one()),
+                Err(ConvertError::NotAFieldBit)
+            ));
+        }
+        check::<Bls>();
+        check::<Bn>();
     }
 
     #[test]
     fn test_canonical_bits_is_little_endian() {
-        let one = canonical_bits(GoldilocksField::from(1u64), 64).expect("1 fits");
-        assert_eq!(one.len(), 64);
-        assert!(one[0], "bit 0 of 1 must be set");
-        assert!(one[1..].iter().all(|b| !*b), "no other bit of 1 may be set");
+        fn check<F: PrimeField>() {
+            let w = field_bit_width::<F>();
+            let one = canonical_bits(F::one(), w).expect("1 fits");
+            assert_eq!(one.len(), w);
+            assert!(one[0], "bit 0 of 1 must be set");
+            assert!(one[1..].iter().all(|b| !*b), "no other bit of 1 may be set");
 
-        let two = canonical_bits(GoldilocksField::from(2u64), 64).expect("2 fits");
-        assert!(!two[0] && two[1]);
+            let two = canonical_bits(F::from(2u64), w).expect("2 fits");
+            assert!(!two[0] && two[1]);
 
-        let pow32 = canonical_bits(GoldilocksField::from(1u64 << 32), 64).expect("2^32 fits");
-        assert!(pow32[32]);
-        assert_eq!(pow32.iter().filter(|b| **b).count(), 1);
-
-        let pow63 = canonical_bits(GoldilocksField::from(1u64 << 63), 64).expect("2^63 fits");
-        assert!(pow63[63]);
-        assert_eq!(pow63.iter().filter(|b| **b).count(), 1);
+            // A single bit at every position that is a field element on its own.
+            for position in [32usize, 63, 64, 128, w - 2] {
+                let bits = canonical_bits(F::from(pow2(position)), w).expect("fits");
+                assert!(bits[position]);
+                assert_eq!(bits.iter().filter(|b| **b).count(), 1);
+            }
+        }
+        check::<Bls>();
+        check::<Bn>();
     }
 
     #[test]
     fn test_canonical_bits_boundary_values() {
-        // 0, 1, 2^32 - 1, 2^32, 2^63, p - 2^32, p - 1: the values A2B's two carry branches and the
-        // edaBit `r < p` filter hinge on.
-        let cases: [u64; 9] = [
-            0,
-            1,
-            2,
-            0xFFFF_FFFF,
-            1u64 << 32,
-            1u64 << 63,
-            P - (1u64 << 32),
-            P - 2,
-            P - 1,
-        ];
-        for v in cases {
-            let x = GoldilocksField::from(v);
-            assert_eq!(canonical_u64(x), v, "test vector {v:#x} must be canonical");
-            let bits = canonical_bits(x, 64).expect("every value below p fits in 64 bits");
-            assert_eq!(bits.len(), 64);
-            assert_eq!(bits_to_u64(&bits), v, "round-trip failed for {v:#x}");
+        // Both ends of the range, the offset `2^w - p` A2B folds into its adder, and the top bit:
+        // the values A2B's carry branches and the edaBit `r < p` filter hinge on.
+        fn check<F: PrimeField>() {
+            let p = modulus::<F>();
+            let w = field_bit_width::<F>();
+            let one = BigUint::from(1u8);
+            let d = pow2(w) - &p;
+            let cases = [
+                BigUint::from(0u8),
+                one.clone(),
+                BigUint::from(2u8),
+                &d - &one,
+                d.clone(),
+                pow2(w - 1) - &one,
+                pow2(w - 1),
+                &p - BigUint::from(2u8),
+                &p - &one,
+            ];
+            for v in cases.iter().filter(|v| **v < p) {
+                let x = F::from(v.clone());
+                assert_eq!(&canonical(x), v, "test vector {v} must be canonical");
+                let bits = canonical_bits(x, w).expect("every value below p fits in w bits");
+                assert_eq!(bits.len(), w);
+                assert_eq!(&from_bits(&bits), v, "round-trip failed for {v}");
+            }
         }
+        check::<Bls>();
+        check::<Bn>();
     }
 
     #[test]
     fn test_canonical_bits_of_minus_one_is_not_twos_complement() {
-        // Pins the signed-value convention: -1 decomposes as p - 1 = 0xFFFF_FFFF_0000_0000, NOT as
-        // 0xFFFF_FFFF_FFFF_FFFF. A caller wanting a sign bit must shift by 2^(k-1) first.
-        let minus_one = GoldilocksField::from(0u64) - GoldilocksField::from(1u64);
-        let bits = canonical_bits(minus_one, 64).expect("p - 1 fits");
-        assert_eq!(bits_to_u64(&bits), 0xFFFF_FFFF_0000_0000);
-        assert_ne!(bits_to_u64(&bits), u64::MAX);
-        // Low 32 bits clear, high 32 bits set.
-        assert!(bits[..32].iter().all(|b| !*b));
-        assert!(bits[32..].iter().all(|b| *b));
+        // Pins the signed-value convention: -1 decomposes as p - 1, NOT as all ones. A caller
+        // wanting a sign bit must shift by 2^(k-1) first.
+        fn check<F: PrimeField>() {
+            let w = field_bit_width::<F>();
+            let bits = canonical_bits(-F::one(), w).expect("p - 1 fits");
+            assert_eq!(from_bits(&bits), modulus::<F>() - BigUint::from(1u8));
+            assert!(bits.iter().any(|b| !*b), "p - 1 is not all ones");
+        }
+        check::<Bls>();
+        check::<Bn>();
     }
 
     #[test]
     fn test_canonical_bits_reduces_before_decomposing() {
-        // u64::MAX is not a canonical representative: it reduces to u64::MAX - p = 2^32 - 2.
-        let x = GoldilocksField::from(u64::MAX);
-        let expected = u64::MAX - P;
-        assert_eq!(expected, (1u64 << 32) - 2);
-        assert_eq!(canonical_u64(x), expected);
-        let bits = canonical_bits(x, 64).expect("canonical representative fits");
-        assert_eq!(bits_to_u64(&bits), expected);
+        // `2^w - 1` is not a canonical representative: it reduces modulo `p` first.
+        fn check<F: PrimeField>() {
+            let p = modulus::<F>();
+            let w = field_bit_width::<F>();
+            let all_ones = pow2(w) - BigUint::from(1u8);
+            let expected = &all_ones % &p;
+            assert_ne!(expected, all_ones);
+            let x = F::from(all_ones);
+            assert_eq!(canonical(x), expected);
+            assert_eq!(from_bits(&canonical_bits(x, w).expect("fits")), expected);
+        }
+        check::<Bls>();
+        check::<Bn>();
     }
 
     #[test]
     fn test_canonical_bits_random_round_trip() {
-        let mut rng = test_rng();
-        for _ in 0..10_000 {
-            let x = GoldilocksField::rand(&mut rng);
-            let bits = canonical_bits(x, 64).expect("a canonical representative always fits");
-            assert_eq!(bits.len(), 64);
-            let recomposed = bits_to_u64(&bits);
-            assert_eq!(recomposed, canonical_u64(x));
-            assert!(recomposed < P, "canonical representative must be < p");
-            assert_eq!(GoldilocksField::from(recomposed), x);
+        fn check<F: PrimeField>() {
+            let p = modulus::<F>();
+            let w = field_bit_width::<F>();
+            let mut rng = test_rng();
+            for _ in 0..2_000 {
+                let x = F::rand(&mut rng);
+                let bits = canonical_bits(x, w).expect("a canonical representative always fits");
+                assert_eq!(bits.len(), w);
+                let recomposed = from_bits(&bits);
+                assert_eq!(recomposed, canonical(x));
+                assert!(recomposed < p, "canonical representative must be < p");
+                assert_eq!(F::from(recomposed), x);
+            }
         }
+        check::<Bls>();
+        check::<Bn>();
     }
 
     #[test]
     fn test_canonical_bits_narrow_widths() {
         // A value that fits in the requested width is decomposed exactly.
-        let bits = canonical_bits(GoldilocksField::from(0xABu64), 8).expect("0xAB fits in 8 bits");
+        let bits = canonical_bits(Bls::from(0xABu64), 8).expect("0xAB fits in 8 bits");
         assert_eq!(bits.len(), 8);
-        assert_eq!(bits_to_u64(&bits), 0xAB);
+        assert_eq!(from_bits(&bits), BigUint::from(0xABu64));
 
         // Exactly-fitting boundary: 2^32 - 1 needs 32 bits.
-        let bits = canonical_bits(GoldilocksField::from(0xFFFF_FFFFu64), 32).expect("fits");
+        let bits = canonical_bits(Bls::from(0xFFFF_FFFFu64), 32).expect("fits");
         assert_eq!(bits.len(), 32);
         assert!(bits.iter().all(|b| *b));
     }
@@ -387,7 +412,7 @@ mod tests {
     fn test_canonical_bits_rejects_bad_widths() {
         // Truncation is never silent.
         assert!(matches!(
-            canonical_bits(GoldilocksField::from(256u64), 8),
+            canonical_bits(Bls::from(256u64), 8),
             Err(ConvertError::ValueTooWide {
                 value_bits: 9,
                 width: 8
@@ -395,7 +420,7 @@ mod tests {
         ));
         // 2^32 needs 33 bits.
         assert!(matches!(
-            canonical_bits(GoldilocksField::from(1u64 << 32), 32),
+            canonical_bits(Bls::from(1u64 << 32), 32),
             Err(ConvertError::ValueTooWide {
                 value_bits: 33,
                 width: 32
@@ -403,60 +428,58 @@ mod tests {
         ));
         // More bits than a representative can ever occupy.
         assert!(matches!(
-            canonical_bits(GoldilocksField::from(1u64), 65),
+            canonical_bits(Bls::from(1u64), 256),
             Err(ConvertError::WidthTooLarge {
-                width: 65,
-                capacity: 64
+                width: 256,
+                capacity: 255
+            })
+        ));
+        assert!(matches!(
+            canonical_bits(Bn::from(1u64), 255),
+            Err(ConvertError::WidthTooLarge {
+                width: 255,
+                capacity: 254
             })
         ));
         // A vacuous empty decomposition.
         assert!(matches!(
-            canonical_bits(GoldilocksField::from(0u64), 0),
+            canonical_bits(Bls::from(0u64), 0),
             Err(ConvertError::ZeroWidth)
         ));
     }
 
     #[test]
-    fn test_modulus_bits_goldilocks() {
-        let bits = modulus_bits::<GoldilocksField>();
-        assert_eq!(bits.len(), 64);
-        assert_eq!(bits_to_u64(&bits), P);
-
-        // Exactly 33 set bits: bit 0, then bits 32..64. This sparsity is what makes the edaBit
-        // `r < p` filter an AND tree over the high half plus an OR tree over the low half.
-        assert_eq!(bits.iter().filter(|b| **b).count(), 33);
-        assert!(bits[0], "bit 0 of p must be set");
-        assert!(
-            bits[1..32].iter().all(|b| !*b),
-            "bits 1..32 of p must be clear"
-        );
-        assert!(
-            bits[32..].iter().all(|b| *b),
-            "bits 32..64 of p must be set"
-        );
-    }
-
-    #[test]
-    fn test_two_pow_w_minus_modulus_bits_goldilocks() {
-        let bits = two_pow_w_minus_modulus_bits::<GoldilocksField>();
-        assert_eq!(bits.len(), 64);
-        assert_eq!(bits_to_u64(&bits), 0xFFFF_FFFF);
-
-        // 2^64 - p = 2^32 - 1: bits 0..32 set, bits 32..64 clear.
-        assert!(bits[..32].iter().all(|b| *b));
-        assert!(bits[32..].iter().all(|b| !*b));
+    fn test_modulus_bits_are_the_modulus() {
+        fn check<F: PrimeField>() {
+            let bits = modulus_bits::<F>();
+            assert_eq!(bits.len(), field_bit_width::<F>());
+            assert_eq!(from_bits(&bits), modulus::<F>());
+            assert!(bits[0], "an odd prime has bit 0 set");
+            assert!(
+                *bits.last().unwrap(),
+                "the width is the modulus's own bit length"
+            );
+        }
+        check::<Bls>();
+        check::<Bn>();
     }
 
     #[test]
     fn test_modulus_and_complement_sum_to_two_pow_w() {
-        // p + (2^w - p) == 2^w, which wraps to 0 in 64-bit arithmetic. Pins the two's-complement
-        // derivation in `two_pow_w_minus_modulus_bits` against the modulus itself rather than
-        // against a hard-coded constant.
-        let p = bits_to_u64(&modulus_bits::<GoldilocksField>());
-        let c = bits_to_u64(&two_pow_w_minus_modulus_bits::<GoldilocksField>());
-        assert_eq!(p.wrapping_add(c), 0);
-        assert_ne!(c, 0, "2^w - p must be non-zero");
-        assert!(c <= 1u64 << 63, "2^w - p must be at most 2^(w-1)");
+        // p + (2^w - p) == 2^w. Pins the two's-complement derivation in
+        // `two_pow_w_minus_modulus_bits` against the modulus itself rather than against a
+        // hard-coded constant.
+        fn check<F: PrimeField>() {
+            let w = field_bit_width::<F>();
+            let bits = two_pow_w_minus_modulus_bits::<F>();
+            assert_eq!(bits.len(), w);
+            let c = from_bits(&bits);
+            assert_eq!(modulus::<F>() + &c, pow2(w));
+            assert_ne!(c, BigUint::from(0u8), "2^w - p must be non-zero");
+            assert!(c < pow2(w - 1), "2^w - p must be below 2^(w-1)");
+        }
+        check::<Bls>();
+        check::<Bn>();
     }
 
     #[test]
@@ -465,12 +488,9 @@ mod tests {
         // into F and into K, and comes back unchanged from either. No share, id, or evaluation
         // point is involved.
         for b in [false, true] {
-            let f: GoldilocksField = bit_to_field(b);
-            let k: Gf256 = bit_to_binary(b);
-            assert_eq!(
-                field_to_bit(f).expect("bit"),
-                binary_to_bit(k).expect("bit")
-            );
+            let f: Bls = bit_to_field(b);
+            let k: Gf256 = bit_to_gf(b);
+            assert_eq!(field_to_bit(f).expect("bit"), gf_to_bit(k).expect("bit"));
         }
     }
 }

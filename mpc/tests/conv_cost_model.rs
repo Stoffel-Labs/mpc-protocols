@@ -47,10 +47,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use stoffelcrypto::{
     common::{
-        convert::{bit_to_binary, canonical_bits, field_bit_width},
+        convert::{bit_to_gf, canonical_bits, field_bit_width},
         gf2k::field::{BinaryField, Gf256},
         gf2k::share::{GfShare, GfShareWire},
-        math::goldilocks::GoldilocksField,
         ProtocolSessionId, SecretSharingScheme,
     },
     honeybadger::{
@@ -71,7 +70,7 @@ use stoffelmpc_network::fake_network::{
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId, VerifiedOrdering};
 use tokio::{sync::mpsc::Receiver, task::JoinSet};
 
-type F = GoldilocksField;
+type F = ark_bls12_381::Fr;
 type K = Gf256;
 
 // ── the tally ────────────────────────────────────────────────────────────────
@@ -692,7 +691,7 @@ fn share_encoding_itemised() {
     );
     assert_eq!(vlen, 8 + 100 * 17);
 
-    // `F`: ark's CanonicalSerialize, so a Goldilocks element plus the same two `usize`s.
+    // `F`: ark's CanonicalSerialize, so a field element plus the same two `usize`s.
     let mut one = Vec::new();
     ark_serialize::CanonicalSerialize::serialize_compressed(&F::from(1u64), &mut one).unwrap();
     let mut sh = Vec::new();
@@ -706,11 +705,11 @@ fn share_encoding_itemised() {
         one.len(),
         sh.len() - one.len()
     );
-    assert_eq!(one.len(), 8, "Goldilocks is 8 bytes compressed");
+    assert_eq!(one.len(), 32, "a BLS12-381 scalar is 32 bytes compressed");
     assert_eq!(
         sh.len(),
-        24,
-        "8 element + 8 id + 8 degree; PhantomData is free"
+        48,
+        "32 element + 8 id + 8 degree; PhantomData is free"
     );
 
     // What the batch-recon path ships instead: bare elements, no envelope per value.
@@ -727,7 +726,7 @@ fn share_encoding_itemised() {
         .len();
     println!(
         "MODEL cfg=share_encoding_verdict gf_struct_per_secret={} gf_wire_per_secret={} \
-         gf_batched_per_secret={} f_share=24 f_bare=8",
+         gf_batched_per_secret={} f_share=48 f_bare=32",
         share,
         (wired - 8) / 100,
         (bare - 8) / 100
@@ -768,7 +767,7 @@ fn deal_edabits(
         for bit in bits {
             let arith =
                 RobustShare::compute_shares(F::from(bit as u64), n_parties, t, None, rng).unwrap();
-            let bin = GfShare::compute_shares(bit_to_binary::<K>(bit), n_parties, t, rng).unwrap();
+            let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n_parties, t, rng).unwrap();
             for party in 0..n_parties {
                 per_party_dabits[party]
                     .push(DaBit::new(arith[party].clone(), bin[party].clone(), t).unwrap());

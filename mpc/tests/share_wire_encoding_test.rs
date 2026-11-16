@@ -16,19 +16,18 @@
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use stoffelcrypto::common::gf2k::field::Gf256;
 use stoffelcrypto::common::gf2k::share::{GfShare, GfShareWire};
-use stoffelcrypto::common::math::goldilocks::GoldilocksField;
 use stoffelcrypto::common::share::ShareError;
 use stoffelcrypto::common::{ShamirShare, ShamirShareWire};
 use stoffelcrypto::honeybadger::gf_mul::GfMultReconstructionMessage;
 use stoffelcrypto::honeybadger::mul::ReconstructionMessage;
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 
-type F = GoldilocksField;
+type F = ark_bls12_381::Fr;
 
-/// `Gf256` is one byte; `GoldilocksField` is eight. Both share types add `id: usize` +
+/// `Gf256` is one byte; a BLS12-381 scalar is thirty-two. Both share types add `id: usize` +
 /// `degree: usize` = 16 bytes under bincode fixint / `ark` `CanonicalSerialize`.
 const GF_ELEM: usize = 1;
-const F_ELEM: usize = 8;
+const F_ELEM: usize = 32;
 const REDUNDANT_PER_SHARE: usize = 16;
 /// Every `Vec`/`ShamirShareWire` body carries one `u64` count.
 const COUNT_PREFIX: usize = 8;

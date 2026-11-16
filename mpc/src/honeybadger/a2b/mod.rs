@@ -25,103 +25,29 @@
 //! `r` is uniform on `[0, p)` and independent of `x`, so `y = (x - r) mod p` is *exactly* uniform
 //! on `Z_p`: the masking is perfect rather than statistical, there is no `kappa` anywhere on this
 //! path, and `HoneyBadgerMPCNodeOpts::max_masked_width` / `check_mask_security` are deliberately
-//! not involved (C14). The bounded/statistical variant — which would cap the input at 22 bits at
-//! `kappa = 40` on Goldilocks, below what the repo's own default `FixedPointPrecision(32, 16)`
-//! already needs — is deliberately not built.
+//! not involved (C14). The bounded/statistical variant, which trades input
+//! range for a statistical parameter, is deliberately not built.
 //!
 //! # Cost
 //!
-//! One degree-`t` arithmetic opening plus `<= 7` AND layers, independent of how many values are
-//! converted together. `<= 695` `GF(2^k)` Beaver triples (642 on average over a uniform mask) and
-//! **zero** `F` multiplications per value at `w = 64`; see
-//! [`binary_circuits`](crate::honeybadger::binary_circuits) for the gate-by-gate breakdown.
+//! One degree-`t` arithmetic opening plus the adder's AND layers, independent of how many values
+//! are converted together, and **zero** `F` multiplications. The counts depend on the field's bit
+//! width `w`, because the prefix adder grows as `w log w`:
 //!
-//! ## Bytes — measured, and in the only unit that means anything
-//!
-//! One 64-bit A2B, **bytes actually put on the wire by one party**, preprocessing plus online,
-//! excluding the one-off PRSS key setup, broadcast charged to all `n` recipients
-//! (`conv_cost_measurement::measured_cost_n*`):
-//!
-//! ```text
-//!                                    n=4      n=7     n=10     n=13
-//!   conversion preprocessing      7 112   13 118   18 664   25 926   B/party
-//!     of which the edaBit filter  2 888    4 942    7 000    9 022   (93-97% frame)
-//!   GF triple pool (695)          2 240    2 618    2 960    3 276
-//!   online (mask open + 7 layers) 6 352   11 390   16 758   22 642
-//!   TOTAL                         15.34    26.49    37.48    50.63   KiB/party
-//! ```
-//!
-//! Roughly half of that is per-message framing, not payload — a `GfBatchRecon` message costs
-//! `48 + elements` bytes and a direct `GfMult` `52 + 2 * mults`, and an element-counting model
-//! has no term for the constants. Any figure quoted in "field elements on the wire" (`O1`, `O2`,
-//! `M1`, and every table in `scratchpad/a2b-b2a-protocol-performance.md`) is a **payload** figure
-//! and is roughly half the truth here; see [`crate::honeybadger::dn07`] for the units rule and
-//! the measured model.
-//!
-//! Message rounds are `2 + layers * rounds_per_layer`. The leading `2` is the mask opening's own
-//! `BatchReconNode` round trip — evaluations out, reveals back — and it is two rounds whatever the
-//! AND layers do, because [`OpeningPolicy`](crate::honeybadger::gf_mul::OpeningPolicy) governs the
-//! multiplier alone and never the mask opening:
-//!
-//! | | AND layers | rounds/layer | message rounds |
+//! | Field | `w` | GF(2^k) triples (bound / mean) | AND layers |
 //! |---|---|---|---|
-//! | blueprint, serial adder + batched openings | 13 | 2 | 28 |
-//! | parallel offset adder + batched openings | 7 | 2 | **16** |
-//! | parallel offset adder + direct openings (what `Auto` picks below the crossover) | 7 | 1 | **9** |
+//! | BLS12-381 scalar | 255 | 3798 / ~3590 | 9 |
+//! | BN254 scalar | 254 | 3771 / ~3560 | 9 |
 //!
-//! The blueprint's **8** for the last row drops the mask opening's second round; this node does
-//! not route that opening directly, so one round of the saving is unclaimed. The same off-by-one
-//! is why B2A is 2 rounds and not 1.
-//! [`A2BNode::message_rounds`](a2b::A2BNode::message_rounds) computes the figure from the node's
-//! own policy and circuit depth rather than restating it.
+//! See [`binary_circuits`](crate::honeybadger::binary_circuits) for the gate-by-gate breakdown,
+//! and `PrefixTopology::BrentKung` for the other end of the trade: at `w = 255` it needs 1722
+//! triples instead of 3798, over 15 layers instead of 9.
 //!
-//! **Measured, a real 64-bit conversion takes 9 rounds at every `n`** — 9.01 at `n = 4/7/10/13`
-//! on turmoil's simulated clock at a fixed 100 ms one-way latency
-//! (`conv_cost_measurement::measured_rounds_a2b_n*`). `message_rounds()` reports 16 at `n >= 7`
-//! because it is deliberately an **upper bound**: it maximises over every wave width the node
-//! could issue up to its cap, and the widest of those does cross
-//! [`OpeningPolicy`](crate::honeybadger::gf_mul::OpeningPolicy)'s crossover, while the 89-118-wide
-//! waves an actual 64-bit conversion issues do not. Quote 9 for a latency budget and 16 only as
-//! the worst case.
+//! Preprocessing dominates the total: each conversion spends one edaBit (`w` daBits and one run
+//! of the `r < p` filter, which rejects about 9% of candidates on BLS12-381 and 24% on BN254)
+//! and the triples above, all made by the dealt, information-theoretic protocols. Wire bytes are
+//! measured by `tests/conv_cost_measurement.rs`.
 //!
-//! The triple count and the round count move in opposite directions and are both worth having:
-//! the +11% on the sizing bound buys −46% depth, and on an asynchronous BFT network latency, not
-//! bandwidth, is what a conversion waits on.
-//!
-//! # Preconditions
-//!
-//! * Every edaBit must be **full width** (`width == field_bit_width::<F>()`) and must have passed
-//!   the `r < p` filter — that is what [`EdaBit::compose_full_width`](crate::honeybadger::dabit::EdaBit::compose_full_width)
-//!   enforces by refusing to build without the opened overflow bit. With `r >= p` the adder's
-//!   "at most one subtraction of `p`" argument fails and the output is simply wrong.
-//! * Every edaBit is **single-use**. Reusing one turns two openings into `y XOR y' = x XOR x'`.
-//!
-//! # Output convention — canonical representative, not two's complement
-//!
-//! `mpc/src/common/types` encodes a negative fixed-point value `-|v|` as `p - |v|`, so `-1` comes
-//! back from A2B as `0xFFFF_FFFF_0000_0000` and **not** as `0xFFFF_FFFF_FFFF_FFFF`. A caller that
-//! wants a sign bit must shift by `2^(k-1)` first, exactly as `truncpr.rs` already does.
-//!
-//! # This node owns no wire messages (C4, C17)
-//!
-//! A2B sends nothing of its own. Its traffic is entirely its child protocols':
-//! [`BatchReconNode`](crate::honeybadger::batch_recon::batch_recon::BatchReconNode) under
-//! [`ProtocolType::A2B`](crate::honeybadger::ProtocolType::A2B) for the mask opening, and
-//! [`GfMultiply`](crate::honeybadger::gf_mul::gf_multiplication::GfMultiply) under
-//! [`ProtocolType::A2BGfMul`](crate::honeybadger::ProtocolType::A2BGfMul) for the AND layers —
-//! demuxed by `calling_protocol()` alone, exactly as `FpMul` already is. The two tags are
-//! distinct because `GfMultiply::init` mints its batch-reconstruction children with the *parent's*
-//! tag: a node owning both a `GfMultiply<K>` and its own `GfBatchReconNode<K>` under one tag would
-//! be unroutable.
-//!
-//! Consequently this node introduces **no local-only round**: every value it consumes is either a
-//! robust reconstruction it performed itself or a product returned by a multiplication whose share
-//! ids and degrees [`BinaryCircuit::absorb_layer`](crate::honeybadger::binary_circuits::BinaryCircuit::absorb_layer)
-//! re-checks before it touches a wire.
-//!
-//! # Robustness
-//!
-//! **Phase: ONLINE — asynchronous, robust, guaranteed output delivery, no abort.**
 //!
 //! Every opening here is degree-`t`, where this repo's robust reconstruction genuinely corrects
 //! `t` errors; nothing on this path opens at degree `2t`, waits on a timeout, broadcasts outside
@@ -135,10 +61,8 @@
 //! A2B is therefore robust and async-live *given* well-formed preprocessing. Its
 //! guaranteed-output claim is still transitively capped by its **preprocessing**, which is a
 //! different phase and is synchronous and abort-permitting: the degree-`2t` openings inside GF
-//! triple generation and inside the `RandBit`s that
-//! [`PrssDaBitNode`](crate::honeybadger::dabit::prss_dabit::PrssDaBitNode) consumes. Those are
-//! detect-and-abort with soundness error 0 and are pre-existing; see
-//! [`dabit`](crate::honeybadger::dabit). The daBit itself no longer waits on any dealer — there
+//! triple generation, inside the daBit generator's XOR fold and inside the edaBit filter. Those
+//! are detect-and-abort with soundness error 0; see [`dabit`](crate::honeybadger::dabit).
 //! is no dealing left on this path at all.
 
 pub mod a2b;

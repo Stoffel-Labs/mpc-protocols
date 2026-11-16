@@ -56,6 +56,10 @@ turmoil = { workspace = true }
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
 
+# `cfg(kani)` gates the model-checking harnesses in `dabit/packing.rs`; see `formal/kani`.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [lints.clippy]
 assign_op_pattern = "allow"
 bind_instead_of_map = "allow"

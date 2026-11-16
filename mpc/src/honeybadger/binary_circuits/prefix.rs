@@ -236,13 +236,46 @@ pub fn add_public_constant_on(
         });
     }
 
-    // Generate / propagate — both free, because one operand is public.
+    // The public operand as wires. `Builder` folds every gate that touches a constant, so the
+    // generate / propagate seeding below is free: `and(1, x) = x`, `and(0, x) = 0`,
+    // `xor(0, x) = x`, `xor(1, x) = NOT x`.
     let zero = builder.constant(false);
+    let operand: Vec<usize> = constant
+        .iter()
+        .map(|bit| if *bit { builder.constant(true) } else { zero })
+        .collect();
+    add_wires_on(builder, topology, &operand, x)
+}
+
+/// `a + x` for two operands given as wires, on the chosen prefix network.
+///
+/// This is the one adder in the crate. [`add_public_constant_on`] calls it with constant wires
+/// for `a`, and the builder's constant folding then removes every gate a public bit decides —
+/// which is the whole saving of a `public + secret` addition. Called with secret wires for `a`
+/// it is an ordinary two-operand adder; `FieldA2BCircuit::generic_plan_on` does that so that the
+/// construction can be checked for every mask at once.
+pub fn add_wires_on(
+    builder: &mut Builder,
+    topology: PrefixTopology,
+    a: &[usize],
+    x: &[usize],
+) -> Result<(Vec<usize>, usize), CircuitError> {
+    let width = x.len();
+    if width == 0 {
+        return Err(CircuitError::EmptyInput);
+    }
+    if a.len() != width {
+        return Err(CircuitError::InputLengthMismatch {
+            expected: width,
+            got: a.len(),
+        });
+    }
+
     let mut generate: Vec<usize> = Vec::with_capacity(width);
     let mut propagate_seed: Vec<usize> = Vec::with_capacity(width);
     for i in 0..width {
-        generate.push(if constant[i] { x[i] } else { zero });
-        propagate_seed.push(builder.xor_const(x[i], constant[i]));
+        generate.push(builder.and(a[i], x[i]));
+        propagate_seed.push(builder.xor(a[i], x[i]));
     }
     let mut propagate = propagate_seed.clone();
 
@@ -587,7 +620,7 @@ mod tests {
         }
     }
 
-    /// 64-bit vectors, including every boundary the Goldilocks reduction turns on.
+    /// 64-bit vectors, including the boundaries of a `2^64 - 2^32 + 1` reduction.
     #[test]
     fn test_adder_64bit_vectors() {
         const P: u64 = 0xFFFF_FFFF_0000_0001; // 2^64 - 2^32 + 1
@@ -648,7 +681,7 @@ mod tests {
 
     const P_MINUS_ONE: u64 = 0xFFFF_FFFF_0000_0000;
 
-    /// The Goldilocks reduction constant `2^32 - 1` is sparse in exactly the way the folding
+    /// A reduction constant such as `2^32 - 1` is sparse in exactly the way the folding
     /// exploits: the top half generates nothing, so its half of the prefix collapses to a
     /// propagate-only chain.
     #[test]

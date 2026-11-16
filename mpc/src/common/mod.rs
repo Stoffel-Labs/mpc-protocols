@@ -19,7 +19,6 @@ pub mod convert;
 /// Implementation of the hbACSS protocol from https://eprint.iacr.org/2021/159.
 pub mod acss;
 
-pub mod math;
 pub mod types;
 pub mod utils;
 
@@ -115,7 +114,7 @@ pub struct ShamirShare<F: FftField, const N: usize, P> {
 /// rationale, which applies verbatim here.
 ///
 /// `ShamirShare<F, 1, P>` serialises under `ark`'s `CanonicalSerialize` to `|F| + 8 + 8` bytes
-/// (24 for a 64-bit field) to carry `|F|` bytes of secret — `PhantomData` is free, `id` and
+/// (48 for a 255-bit field) to carry `|F|` bytes of secret — `PhantomData` is free, `id` and
 /// `degree` are not. Both are derivable by the receiver (the authenticated transport sender, and
 /// a session-fixed constant) and both are dealer-written metadata that proves nothing, so both
 /// are absent from this type and cannot be stated by a peer.
@@ -594,21 +593,27 @@ where
 {
     type Error: std::fmt::Debug;
 
-    /// `[x]_F -> ([x_0]_K, .., [x_{w-1}]_K)`, LSB first, `w = ceil(log2 p)` (64 on Goldilocks).
+    /// `[x]_F -> ([x_0]_K, .., [x_{w-1}]_K)`, LSB first, `w = ceil(log2 p)` (255 on BLS12-381's scalar field).
     ///
     /// The bits are those of the **canonical representative of `x` in `[0, p)`**, not a
-    /// two's-complement encoding: `-1` comes back as `p - 1 = 0xFFFF_FFFF_0000_0000`, not as
+    /// two's-complement encoding: `-1` comes back as the bits of `p - 1`, not as
     /// `u64::MAX`. A caller wanting a sign bit shifts by `2^(k-1)` first, the same convention
     /// `truncpr` already uses.
+    ///
+    /// Never preprocesses on demand: the edaBit and GF-triple pools must already hold what the
+    /// batch needs, or this returns an error without spending anything.
     async fn a2b(&mut self, x: Vec<SA>, network: Arc<N>) -> Result<Vec<Vec<SB>>, Self::Error>
     where
         N: 'async_trait;
 
     /// `([x_0]_K, .., [x_{l-1}]_K) -> [sum 2^i x_i]_F`, LSB first.
     ///
-    /// `l <= ceil(log2 p) - 1` (63 on Goldilocks) is a hard bound, not a heuristic: at full width
+    /// `l <= ceil(log2 p) - 1` (254 on BLS12-381's scalar field) is a hard bound, not a heuristic: at full width
     /// the recomposition would silently return `x mod p` for the payloads in `[p, 2^w)`, and the
     /// adversary picks the payload. Widths may differ between values; each is bounded on its own.
+    ///
+    /// Never preprocesses on demand: the daBit pool must already hold one daBit per bit, or this
+    /// returns an error without spending anything.
     async fn b2a(&mut self, bits: Vec<Vec<SB>>, network: Arc<N>) -> Result<Vec<SA>, Self::Error>
     where
         N: 'async_trait;

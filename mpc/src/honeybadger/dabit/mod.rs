@@ -7,49 +7,38 @@
 //!
 //! # Construction
 //!
-//! [`prss_dabit::PrssDaBitNode`] generates them from CDI05 pseudorandom secret sharing plus one
-//! Catrina–Saxena `Mod2` opening:
+//! [`replicated::ReplicatedDaBitNode`] generates them **information-theoretically**, from
+//! replicated one-time bits:
 //!
-//! 1. **One PRSS derivation, two conversions.** The same `C(n,t)` pseudorandom bits `β_T` convert
-//!    to `[S]_F = Σ_T β_T` (an *integer* sum, because that map is `F`-linear) and to
-//!    `[b]_K = ⊕_T β_T` (an XOR, because in characteristic 2 addition *is* XOR). Both are **zero
-//!    rounds and zero bytes**, and the two agree modulo 2 by arithmetic rather than by protocol.
-//! 2. **One `Mod2` opening** lifts `S mod 2` into `F`: a single degree-`t` batched opening and
-//!    **zero multiplications**. See [`crate::honeybadger::mod2`].
+//! 1. **Deal and echo.** For each of the `C(n,t)` maximal unqualified sets `T`, one party outside
+//!    `T` samples a fresh uniform bit `β_T` and sends it to the other parties outside `T`, who
+//!    echo it to each other and abort on any mismatch.
+//! 2. **Two local conversions of the same bits.** `[b]_K = Σ_T β_T · f^K_T` is the XOR of the set
+//!    bits, because in characteristic 2 addition *is* XOR. Over `F` each `β_T · f_T` is a
+//!    degree-`t` sharing of one set bit.
+//! 3. **An XOR fold over `F`.** `C(n,t) - 1` degree-reduction multiplications, masked by dealt
+//!    `RanDouSha` double sharings, fold the per-set sharings into `[b]_F`.
 //!
-//! There is **no dealing anywhere**, and therefore no masked dealing, no XOR fold, no bit-ness
-//! check, no coin, no permutation and no bucketing. The cross-domain soundness error is **0**, not
-//! `M^-(B-1)`, and the share-type obligations T1 (domain), T2 (form) and T3 (value) all hold by
-//! construction at zero certification cost — see the [`prss_dabit`] module docs for the table and
-//! for the two costs this buys them with (computational rather than perfect privacy of the
-//! preprocessing randomness, and a quantified lifetime daBit budget).
+//! Nothing here is pseudorandom: there is no PRF, no hash and no commitment, and privacy of the
+//! daBit is perfect. The two halves agree by arithmetic — they are functions of the same `β_T` —
+//! so there is no cross-domain check, and bit-ness is structural because the wire carries bits.
+//! See the [`replicated`] module docs for the security argument and the cost.
 //!
 //! edaBits are **composed from daBits locally** ([`EdaBit::compose`]); there is no native edaBit
 //! generation, because `[r]_F = sum 2^i [b_i]_F` is free while a native candidate costs an
 //! `(n-1)`-deep tree of binary adders. Full-range composition additionally needs the `r < p`
-//! filter, which is [`edabit::EdaBitFilterNode`] — the only interactive certification left in this
-//! stack.
+//! filter, which is [`edabit::EdaBitFilterNode`].
 //!
 //! # Phase
 //!
-//! **PREPROCESSING** throughout. Every opening in this module tree is nevertheless at degree `t`
-//! and is robust: the only abort trigger in the whole construction is the degree-`2t` `MulPub`
-//! opening inside the `RandBit`s the daBit generator *consumes*, which is a pre-existing
-//! preprocessing primitive rather than anything introduced here.
-//!
-//! # Liveness (documented, not fixed)
-//!
-//! daBit generation inherits the liveness posture of the preprocessing it consumes: `RandBit`
-//! rides `MulPub`, whose degree-`2t` opening needs every honest share, so a crashed party stalls
-//! it exactly as it already stalls RanSha and RanDouSha. Closing that gap needs agreement on a
-//! core set of `>= 2t + 1` contributors (ACS); doing it for daBits alone while RanSha keeps the
-//! same gap would be incoherent. It is deliberately out of scope, and it is not a regression.
-//!
-//! The generation step itself no longer waits for anyone: PRSS is local, and the `Mod2` opening is
-//! degree-`t` robust, so it completes on `2t+1` honest shares with no timeout.
+//! **PREPROCESSING** throughout: synchronous, abort permitted. The XOR fold and the edaBit
+//! filter both open at degree `2t`, which needs every honest share and detects any wrong one, so
+//! a crashed or cheating party stalls or aborts a batch exactly as it already does for RanSha
+//! and RanDouSha. Nothing in this module tree is reachable from the online phase.
 
 pub mod edabit;
-pub mod prss_dabit;
+mod packing;
+pub mod replicated;
 
 use ark_ff::PrimeField;
 use bincode::ErrorKind;
@@ -167,7 +156,7 @@ impl<F: PrimeField, K: BinaryField> EdaBit<F, K> {
     /// daBits (the opened bit correlates with them).
     ///
     /// Skipping the filter is a correctness break, not a privacy one, and its rejection rate on
-    /// Goldilocks is `(2^32 - 1) / 2^64 ≈ 2^-32` — far above any budget this crate tolerates.
+    /// BLS12-381's scalar field is about 9% — far above any budget this crate tolerates.
     pub fn compose_full_width(dabits: &[DaBit<F, K>], overflow: bool) -> Result<Self, DaBitError> {
         if overflow {
             return Err(DaBitError::ModulusOverflow);
@@ -232,49 +221,42 @@ pub(crate) fn max_values_per_open(threshold: usize) -> usize {
     crate::honeybadger::max_mul_pairs_per_session(threshold)
 }
 
-/// Payload of a [`DaBitMessage`].
+/// Payload of a [`DaBitMessage`]: the two steps of replicated one-time-bit dealing.
 ///
-/// # UNREACHABLE — retained for wire-format stability only
+/// `count` is the batch size the sender is running. It travels on the wire so that two parties
+/// whose views of the batch differ fail loudly instead of comparing equal-length packings of
+/// different batches.
 ///
-/// This payload belonged to the dealt daBit protocol, which PRSS daBits replaced: the generator is
-/// now purely local plus one `Mod2` opening, and puts **nothing** of its own on the wire. The type
-/// survives because `WrappedMessage` is an unversioned `bincode` enum in which variant *order* is
-/// the wire format — deleting `WrappedMessage::DaBit` would silently renumber every variant after
-/// it. The node dispatcher rejects the variant rather than routing it.
-///
-/// Both halves ride as separately-encoded **opaque blobs**: `ShamirShare` derives the `ark`
-/// `Canonical(De)Serialize` traits while `GfShare` derives `serde`, so a single `serde` struct
-/// holding both does not exist. This is the same split `MultMessage` / `GfMultMessage` already
-/// uses. Every blob is deserialized with an explicit, locally-known length bound — never with a
-/// peer-supplied length.
-#[derive(Clone, Serialize, Deserialize, Debug)]
+/// Each entry is `(rank, bits)`: the rank of a maximal unqualified set in
+/// lexicographic order over the `t`-subsets of the parties, and one bit per daBit in the
+/// batch, packed LSB-first with the last byte's unused high bits zero.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum DaBitPayload {
-    /// Step 1a: this party's shares of dealer `j`'s masks, sent point-to-point to `j` only.
-    ///
-    /// `arith` is an `ark`-compressed `Vec<RobustShare<F>>`, `bin` a `bincode` `Vec<GfShare<K>>`.
-    MaskShares { arith: Vec<u8>, bin: Vec<u8> },
-    /// Step 1b, RBC'd by dealer `j`: the public affine shifts that turn the verified random masks
-    /// into sharings of the dealer's candidate bits.
-    ///
-    /// `arith` is an `ark`-compressed `Vec<F>`, `bin` a `bincode` `Vec<K>`.
-    Deltas { arith: Vec<u8>, bin: Vec<u8> },
+    /// The dealer of each listed set sends that set's bits to another party outside the set.
+    Deal {
+        count: u32,
+        sets: Vec<(u32, Vec<u8>)>,
+    },
+    /// A party outside each listed set repeats the bits it holds to another party outside the
+    /// set. The two must agree exactly.
+    Echo {
+        count: u32,
+        sets: Vec<(u32, Vec<u8>)>,
+    },
 }
 
 impl DaBitPayload {
-    /// Wire size of the two blobs, for the pending-queue byte budget (C9).
+    /// Bytes of packed bits carried, for the per-message bound.
     pub fn byte_len(&self) -> usize {
         match self {
-            DaBitPayload::MaskShares { arith, bin } | DaBitPayload::Deltas { arith, bin } => {
-                arith.len().saturating_add(bin.len())
-            }
+            DaBitPayload::Deal { sets, .. } | DaBitPayload::Echo { sets, .. } => sets
+                .iter()
+                .fold(0usize, |acc, (_, bits)| acc.saturating_add(bits.len() + 4)),
         }
     }
 }
 
-/// Message of the retired dealt daBit protocol.
-///
-/// **UNREACHABLE.** See [`DaBitPayload`] for why the type still exists. No code sends one, and the
-/// node dispatcher rejects any that arrives.
+/// A daBit dealing message, point-to-point between two parties outside the same set.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct DaBitMessage {
     /// ID of the sender of the message.
@@ -375,104 +357,30 @@ pub enum DaBitError {
     #[error("statistical security parameter {requested} is below the minimum of {minimum}")]
     InsufficientStatisticalSecurity { requested: usize, minimum: usize },
 
-    // ---- PRSS daBit generation -----------------------------------------------------------
-    #[error("Mod2 error: {0:?}")]
-    Mod2Error(#[from] crate::honeybadger::mod2::Mod2Error),
-    #[error("PRSS error: {0:?}")]
-    PrssError(#[from] crate::honeybadger::prss::PrssError),
-    #[error("GF(2^k) PRSS error: {0:?}")]
-    GfPrssError(#[from] crate::honeybadger::gf_prss::GfPrssError),
-    /// `setup_prss_keys` has not run. A PRSS daBit has no dealt fallback by design — falling back
-    /// would reintroduce every certification obligation the construction exists to delete — so
-    /// this is an error rather than a slower path.
-    #[error(
-        "no PRSS key family installed: run setup_prss_keys before generating daBits. There is \
-         deliberately no dealt fallback."
-    )]
-    PrssKeysMissing,
-    #[error(
-        "threshold t must be at least 1: at t = 0 every unqualified set is empty, C(n,0) = 1, and \
-         the single PRSS seed is known to everyone"
-    )]
+    // ---- Replicated one-time-bit dealing ----------------------------------------------------
+    #[error("threshold t must be at least 1: at t = 0 the single set bit is known to everyone")]
     DegenerateThreshold,
-    #[error("threshold t={t} must be smaller than n={n}")]
+    #[error("n={n} parties cannot tolerate t={t}: need n >= 3t + 1")]
     ThresholdOutOfRange { n: usize, t: usize },
     #[error("C({n},{t}) exceeds the {max} unqualified sets this implementation will enumerate")]
     TooManyUnqualifiedSets { n: usize, t: usize, max: u128 },
-    /// The field is too narrow to carry a Mod2 mask at this party count. Hard error, never a
-    /// `warn!`: a zero-width mask makes the opened `c` reveal `S` outright.
-    #[error(
-        "a {modulus_bits}-bit modulus cannot carry a Mod2 mask alongside {set_bits} bits of \
-         C(n,t) multiplicity"
-    )]
-    MaskWidthUnavailable {
-        modulus_bits: usize,
-        set_bits: usize,
-    },
-    /// `k` and `lambda` are one budget: both follow from the single no-wrap inequality, so
-    /// changing either without re-checking the other silently breaks correctness.
-    #[error("RandBit top-up k={requested} exceeds the maximum of ceil(log2 C(n,t)) - 1 = {max}")]
-    TopUpTooLarge { requested: usize, max: usize },
-    /// The derived `(lambda, k)` lets `S + 2r'' + r'_0` wrap `p`. `p` is odd, so a wrap flips the
-    /// extracted bit — this is a correctness break, not a tightness preference, and it is checked
-    /// numerically against the actual modulus rather than assumed from the formula.
-    #[error(
-        "mask width lambda={mask_bits} with top-up k={topup_bits} at {set_bits} bits of C(n,t) \
-         multiplicity does not satisfy the Mod2 no-wrap inequality"
-    )]
-    NoWrapViolated {
-        mask_bits: usize,
-        topup_bits: usize,
-        set_bits: usize,
-    },
-    #[error(
-        "per-daBit leak 2^-{leak_exponent} is not below the statistical budget \
-         2^-{statistical_security}: no positive number of daBits fits"
-    )]
-    LeakBudgetUnreachable {
-        leak_exponent: usize,
-        statistical_security: usize,
-    },
-    /// The **lifetime** daBit budget `Q = 2^(lambda+k+1-kappa)` is spent. Never a silent wrap:
-    /// past `Q` the union bound on the per-daBit statistical leak exceeds the configured `kappa`,
-    /// and the fix is a re-keyed node or a larger `k`, not another batch.
-    #[error(
-        "daBit leak budget exhausted: {produced} produced, {requested} more requested, lifetime \
-         budget {budget}"
-    )]
-    LeakBudgetExhausted {
-        produced: u64,
-        requested: usize,
-        budget: u64,
-    },
-    #[error(
-        "key stores disagree: {what} says {left}, but the other says {right}. A daBit assembled \
-         from mismatched stores is a pair of two unrelated bits."
-    )]
-    KeyStoreMismatch {
-        what: &'static str,
-        left: usize,
-        right: usize,
-    },
-    /// A [`PrssExecSlot`](crate::honeybadger::prss::PrssExecSlot) or
-    /// [`PrssWindow`](crate::honeybadger::prss::PrssWindow) burned on the wrong keystream's
-    /// cursor. The edaBit filter and the daBit generator must draw their parent exec ids from one
-    /// cursor, or their `exec * 2^20 + wave` child blocks can overlap.
-    #[error("PRSS claim names stream {got}, expected {expected}")]
-    WrongPrssStream {
-        expected: &'static str,
-        got: &'static str,
-    },
+    /// A peer sent a dealing message that no honest party would send. The batch aborts.
+    #[error("invalid daBit dealing: {0}")]
+    InvalidDealing(String),
+    /// Two holders of the same set disagree on its bits, so the set's dealer (or the echoing
+    /// party) cheated. The batch aborts; nothing is output.
+    #[error("daBit dealing echo from party {with} does not match the bits held locally")]
+    DealingMismatch { with: usize },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::gf2k::field::Gf256;
-    use crate::common::math::goldilocks::GoldilocksField;
+    use ark_bls12_381::Fr as CurveField;
 
-    fn arith(value: u64, id: usize, degree: usize) -> RobustShare<GoldilocksField> {
-        RobustShare::new(GoldilocksField::from(value), id, degree)
+    fn arith(value: u64, id: usize, degree: usize) -> RobustShare<CurveField> {
+        RobustShare::new(CurveField::from(value), id, degree)
     }
 
     fn bin(value: u8, id: usize, degree: usize) -> GfShare<Gf256> {
@@ -481,24 +389,21 @@ mod tests {
 
     #[test]
     fn dabit_new_rejects_index_mismatch() {
-        let err =
-            DaBit::<GoldilocksField, Gf256>::new(arith(1, 2, 3), bin(1, 5, 3), 3).unwrap_err();
+        let err = DaBit::<CurveField, Gf256>::new(arith(1, 2, 3), bin(1, 5, 3), 3).unwrap_err();
         assert!(matches!(err, DaBitError::IdMismatch));
     }
 
     #[test]
     fn dabit_new_rejects_degree_mismatch() {
-        let err =
-            DaBit::<GoldilocksField, Gf256>::new(arith(1, 2, 4), bin(1, 2, 3), 3).unwrap_err();
+        let err = DaBit::<CurveField, Gf256>::new(arith(1, 2, 4), bin(1, 2, 3), 3).unwrap_err();
         assert!(matches!(err, DaBitError::DegreeMismatch));
-        let err =
-            DaBit::<GoldilocksField, Gf256>::new(arith(1, 2, 3), bin(1, 2, 4), 3).unwrap_err();
+        let err = DaBit::<CurveField, Gf256>::new(arith(1, 2, 3), bin(1, 2, 4), 3).unwrap_err();
         assert!(matches!(err, DaBitError::DegreeMismatch));
     }
 
     #[test]
     fn dabit_new_accepts_matching_pair() {
-        let dabit = DaBit::<GoldilocksField, Gf256>::new(arith(1, 2, 3), bin(1, 2, 3), 3).unwrap();
+        let dabit = DaBit::<CurveField, Gf256>::new(arith(1, 2, 3), bin(1, 2, 3), 3).unwrap();
         assert_eq!(dabit.id(), 2);
     }
 
@@ -510,34 +415,34 @@ mod tests {
         let dabits: Vec<_> = bits
             .iter()
             .map(|&b| {
-                DaBit::<GoldilocksField, Gf256>::new(arith(b as u64, 0, 1), bin(b as u8, 0, 1), 1)
+                DaBit::<CurveField, Gf256>::new(arith(b as u64, 0, 1), bin(b as u8, 0, 1), 1)
                     .unwrap()
             })
             .collect();
         let edabit = EdaBit::compose(&dabits, 4).unwrap();
-        assert_eq!(edabit.value.share[0], GoldilocksField::from(13u64));
+        assert_eq!(edabit.value.share[0], CurveField::from(13u64));
         assert_eq!(edabit.width, 4);
         assert_eq!(edabit.bits.len(), 4);
     }
 
     #[test]
     fn edabit_compose_rejects_full_width_and_zero_width() {
-        let dabit = DaBit::<GoldilocksField, Gf256>::new(arith(0, 0, 1), bin(0, 0, 1), 1).unwrap();
-        let capacity = crate::common::convert::field_bit_width::<GoldilocksField>();
+        let dabit = DaBit::<CurveField, Gf256>::new(arith(0, 0, 1), bin(0, 0, 1), 1).unwrap();
+        let capacity = crate::common::convert::field_bit_width::<CurveField>();
         let full = vec![dabit.clone(); capacity];
         assert!(matches!(
             EdaBit::compose(&full, capacity),
             Err(DaBitError::WidthTooLarge { .. })
         ));
         assert!(matches!(
-            EdaBit::<GoldilocksField, Gf256>::compose(&[], 0),
+            EdaBit::<CurveField, Gf256>::compose(&[], 0),
             Err(DaBitError::ZeroWidth)
         ));
     }
 
     #[test]
     fn edabit_compose_rejects_wrong_count() {
-        let dabit = DaBit::<GoldilocksField, Gf256>::new(arith(0, 0, 1), bin(0, 0, 1), 1).unwrap();
+        let dabit = DaBit::<CurveField, Gf256>::new(arith(0, 0, 1), bin(0, 0, 1), 1).unwrap();
         let err = EdaBit::compose(&vec![dabit; 3], 4).unwrap_err();
         assert!(matches!(
             err,
@@ -551,8 +456,8 @@ mod tests {
 
     #[test]
     fn edabit_full_width_requires_the_overflow_filter_to_have_passed() {
-        let capacity = crate::common::convert::field_bit_width::<GoldilocksField>();
-        let dabit = DaBit::<GoldilocksField, Gf256>::new(arith(1, 0, 1), bin(1, 0, 1), 1).unwrap();
+        let capacity = crate::common::convert::field_bit_width::<CurveField>();
+        let dabit = DaBit::<CurveField, Gf256>::new(arith(1, 0, 1), bin(1, 0, 1), 1).unwrap();
         let dabits = vec![dabit; capacity];
         assert!(matches!(
             EdaBit::compose_full_width(&dabits, true),
@@ -563,12 +468,12 @@ mod tests {
     }
 
     #[test]
-    fn payload_byte_len_counts_both_blobs() {
-        let payload = DaBitPayload::MaskShares {
-            arith: vec![0u8; 7],
-            bin: vec![0u8; 5],
+    fn payload_byte_len_counts_every_set_entry() {
+        let payload = DaBitPayload::Deal {
+            count: 12,
+            sets: vec![(0, vec![0u8; 7]), (3, vec![0u8; 5])],
         };
-        assert_eq!(payload.byte_len(), 12);
+        assert_eq!(payload.byte_len(), 7 + 4 + 5 + 4);
     }
 
     /// Both conversion drivers size their pipelines against this, and both must get the same

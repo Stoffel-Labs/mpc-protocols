@@ -1,46 +1,29 @@
-//! Fixtures for the daBit **contract** tests in `dabit_test.rs`.
+//! Fixtures for the daBit tests in `dabit_test.rs`.
 //!
-//! # Division of labour with `prss_dabit_test.rs`
+//! Drives [`ReplicatedDaBitNode`] — the information-theoretic generator — over a real
+//! `FakeNetwork`: the dealing, the echo, and the `F`-side XOR fold's degree-`2t` openings all
+//! travel as messages. Only the double sharings the fold consumes are dealt by the test, because
+//! `RanDouSha` is its own protocol with its own tests.
 //!
-//! `prss_dabit_test.rs` is the *generator's* end-to-end file: that the protocol runs over a real
-//! network at `n = 4 / 7 / 10`, that a corrupt opener can neither change nor stall it, and that
-//! the `beta` and `psi` keystreams are separated. This file is about the *object* the generator
-//! emits — the contract every consumer (A2B, B2A, the edaBit composition) relies on — at the two
-//! party counts a production deployment is sized for, plus the lifetime leak budget that caps how
-//! many daBits one key family may ever produce.
+//! Two checks here are deliberately strong:
 //!
-//! Three checks here are deliberately stronger than the generator file's equivalents:
-//!
-//! * **T2 is checked as *form*, never as metadata.** `RobustShare::degree` and `GfShare::degree`
-//!   are dealer-written `usize` fields, so comparing them proves only that nobody overwrote a
-//!   struct field. [`assert_degree_t_form`] interpolates each half at `0` from several different
-//!   `t+1`-subsets of the `n` shares and requires every subset to agree with the robust
-//!   reconstruction from all `n` — which is false for a sharing of any degree above `t`.
+//! * **Degree is checked as *form*, never as metadata.** `RobustShare::degree` and
+//!   `GfShare::degree` are caller-written `usize` fields. [`assert_degree_t_form`] interpolates
+//!   each half at `0` from several different `t+1`-subsets of the `n` shares and requires every
+//!   subset to agree with the robust reconstruction from all `n`.
 //! * **Uniformity is a two-sided band**, not "the batch was not constant".
-//! * **Independence across batches is checked.** Two batches drawn at different `exec_id`s must
-//!   not repeat their bits: that is the observable consequence of PRSS cursor monotonicity, and
-//!   a rewound cursor is one of the three errors the plan flags as otherwise silent.
 //!
 //! # Phase: PREPROCESSING
 //!
-//! Everything here drives [`PrssDaBitNode`], which is a preprocessing-phase protocol. Its one
-//! opening is nevertheless degree-`t` and robust, so nothing in this file exercises — or could
-//! reach — a degree-`2t` opening, a timeout-driven abort, or a broadcast.
-//!
-//! # What is dealt, and what is not
-//!
-//! The PRSS key family and the `RandBit`s are dealt, exactly as in `prss_dabit_test.rs` and for
-//! the same reason: `setup_prss_keys` is `PRandIntNode`'s protocol and `RandBit` rides `MulPub`,
-//! and both have their own tests. Everything the daBit protocol itself does — both PRSS
-//! conversions, the mask assembly, the `Mod2` opening over a real `FakeNetwork`, and the
-//! public-affine step — is real.
+//! Synchronous, abort permitted. The adversarial tests rely on exactly that: a tampered dealing
+//! must end in an error at every party it reaches, never in a daBit.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use ark_ff::Field;
+use ark_ff::{Field, UniformRand};
 use ark_poly::EvaluationDomain;
-use ark_std::rand::{rngs::StdRng, Rng, SeedableRng};
+use ark_std::rand::{rngs::StdRng, SeedableRng};
 use stoffelcrypto::{
     common::{
         get_or_create_evaluation_domain,
@@ -48,18 +31,15 @@ use stoffelcrypto::{
             field::{BinaryField, Gf256, Gf2kDomain},
             share::GfShare,
         },
-        math::goldilocks::GoldilocksField,
+        share::shamir::NonRobustShare,
         ProtocolSessionId, SecretSharingScheme,
     },
     honeybadger::{
-        dabit::{
-            prss_dabit::{PrssDaBitKeys, PrssDaBitNode},
-            DaBit, DaBitError,
-        },
-        gf_prss::gf_prss::GfPrssKeys,
-        prss::{prss::PrssKeys, PrssAllocator},
+        batch_recon::BatchReconMsg,
+        dabit::{replicated::ReplicatedDaBitNode, DaBit, DaBitError, DaBitMessage},
+        double_share::DoubleShamirShare,
         robust_interpolate::robust_interpolate::RobustShare,
-        ProtocolType, WrappedMessage,
+        ProtocolType, SessionId, WrappedMessage,
     },
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
@@ -67,168 +47,121 @@ use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
 use tracing::warn;
 
-use crate::utils::prss_utils::deal_keys;
 use crate::utils::test_utils::{fan_in_inboxes, test_setup};
 
-pub type F = GoldilocksField;
+pub type F = ark_bls12_381::Fr;
 pub type K = Gf256;
-pub type Node = PrssDaBitNode<F, K>;
+pub type Node = ReplicatedDaBitNode<F, K>;
 
-/// Generous: an in-process network in a debug build. Nothing in these tests is supposed to reach
-/// it, so a run that takes this long has already failed.
+/// Generous: an honest run finishes in milliseconds, and the adversarial tests pass their own.
 pub const PROTOCOL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Instance id for this file's sessions. Distinct from `prss_dabit_test.rs`'s so that a stray
-/// cross-file session id is visible in a log rather than plausible.
 pub const INSTANCE: u32 = 0x0D_AB_C7;
 
-// -------------------------------------------------------------------------------------------
-// Dealt material
-// -------------------------------------------------------------------------------------------
+/// Rewrites a dealing message on its way into `recipient`. Models a corrupt sender: the message
+/// is authenticated as coming from `msg.sender_id`, and says whatever the hook makes it say.
+pub type Tamper = Arc<dyn Fn(usize, &mut DaBitMessage) + Send + Sync>;
 
-/// `count` degree-`t` sharings of genuine random bits, transposed so that `out[party][i]` is
-/// party `party`'s share of bit `i`.
-///
-/// These stand in for `RandBit`'s output. Their *bit-ness* is what the daBit's `F` half inherits
-/// (T3 by provenance), so they are dealt as real `0`/`1` sharings and never as arbitrary values.
-pub fn deal_rand_bits(
+/// Rewrites an XOR-fold opening message on its way into `recipient`: a corrupt party lying about
+/// its share of a degree-`2t` opening.
+pub type OpenTamper = Arc<dyn Fn(usize, &mut BatchReconMsg) + Send + Sync>;
+
+/// Deals `count` double sharings `([r]_t, [r]_2t)` of independent uniform `r`, one list per
+/// party.
+pub fn deal_doubles(
     count: usize,
     n: usize,
     t: usize,
     rng: &mut StdRng,
-) -> Vec<Vec<RobustShare<F>>> {
-    let mut per_party: Vec<Vec<RobustShare<F>>> = vec![Vec::with_capacity(count); n];
+) -> Vec<Vec<DoubleShamirShare<F>>> {
+    let mut per_party: Vec<Vec<DoubleShamirShare<F>>> = vec![Vec::with_capacity(count); n];
     for _ in 0..count {
-        let b: u64 = rng.gen::<bool>() as u64;
-        let shares = RobustShare::compute_shares(F::from(b), n, t, None, rng)
-            .expect("dealing a RandBit sharing failed");
-        for (party, share) in shares.into_iter().enumerate() {
-            per_party[party].push(share);
+        let r = F::rand(rng);
+        let low = NonRobustShare::compute_shares(r, n, t, None, rng).expect("degree-t sharing");
+        let high =
+            NonRobustShare::compute_shares(r, n, 2 * t, None, rng).expect("degree-2t sharing");
+        for (party, (l, h)) in low.into_iter().zip(high).enumerate() {
+            per_party[party].push(DoubleShamirShare::new(l, h));
         }
     }
     per_party
 }
 
-// -------------------------------------------------------------------------------------------
-// The harness
-// -------------------------------------------------------------------------------------------
-
-/// `n` daBit nodes over one `FakeNetwork`, with the `Mod2` message pump already running.
-///
-/// The pump is spawned once and kept for the lifetime of the harness so that several batches can
-/// be run back to back against the *same* nodes — which is what makes the cross-batch
-/// independence and lifetime-budget tests meaningful: `PrssDaBitNode::produced` is `Arc`-shared
-/// across clones, so a cloned handle spends the same budget as the original.
+/// `n` daBit nodes on one `FakeNetwork`, with a pump task per party.
 pub struct DaBitHarness {
     pub n: usize,
     pub t: usize,
     nodes: Vec<Node>,
-    /// One allocator per party, stamped with that party's own key-family fingerprint.
-    ///
-    /// This is the fixture's stand-in for the single allocator `setup_prss_keys` builds. Every
-    /// party's starts at zero and every party claims in the same order, so the `exec_id` a batch
-    /// lands on agrees across parties without anything being sent — which is exactly the property
-    /// production relies on, and why the harness no longer lets a caller name the exec.
-    allocs: Vec<PrssAllocator>,
     network: Vec<Arc<FakeNetwork>>,
     rng: StdRng,
-    /// Aborted on drop, which is what `JoinSet` does anyway; named to make that deliberate.
+    next_exec: u64,
     _pump: JoinSet<()>,
 }
 
 impl DaBitHarness {
-    /// Builds `n` nodes at threshold `t`, deals them a PRSS key family, and starts the pump.
-    ///
-    /// `topup` is the `k` knob (`None` = the production default `ceil(log2 C(n,t)) - 3`);
-    /// `statistical_security` is `kappa`. Both feed `DaBitLeakBudget`, and raising `kappa` is the
-    /// only way to reach the lifetime cap inside a test: at the minimum `kappa = 40` the smallest
-    /// budget any supported party count admits is `2^13` daBits.
-    pub fn new(
+    pub fn new(n: usize, t: usize, seed: u64) -> Self {
+        Self::with_tamper(n, t, seed, None)
+    }
+
+    pub fn with_tamper(n: usize, t: usize, seed: u64, tamper: Option<Tamper>) -> Self {
+        Self::with_tampers(n, t, seed, tamper, None)
+    }
+
+    pub fn with_tampers(
         n: usize,
         t: usize,
-        topup: Option<usize>,
-        statistical_security: usize,
         seed: u64,
+        tamper: Option<Tamper>,
+        open_tamper: Option<OpenTamper>,
     ) -> Self {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let dealt = deal_keys(n, t, &mut rng);
-        let mut allocs = Vec::with_capacity(n);
         let nodes: Vec<Node> = (0..n)
-            .map(|id| {
-                let mut node = Node::new(id, n, t, statistical_security, topup)
-                    .expect("daBit node construction");
-                let prss = PrssKeys::<F>::new(id, n, t, &dealt[id]).expect("F PRSS store");
-                let gf_prss = GfPrssKeys::<K>::new(id, n, t, &dealt[id]).expect("K PRSS store");
-                // Stamped with the key family it will be counted against, exactly as
-                // `setup_prss_keys` does — a window from an allocator over other keys is refused.
-                allocs.push(PrssAllocator::new(INSTANCE, prss.key_family_id()));
-                node.install_keys(
-                    PrssDaBitKeys::new(id, t, prss, gf_prss).expect("paired key stores"),
-                );
-                node
-            })
+            .map(|id| Node::new(id, n, t).expect("daBit node construction"))
             .collect();
-
         let (network, receivers, _, _) = test_setup(n, vec![]);
-        let pump = spawn_receivers(receivers, &nodes, &network);
-
+        let pump = spawn_receivers(receivers, &nodes, &network, tamper, open_tamper);
         Self {
             n,
             t,
             nodes,
-            allocs,
             network,
-            rng,
+            rng: StdRng::seed_from_u64(seed),
+            next_exec: 0,
             _pump: pump,
         }
     }
 
-    /// Read-only access to a node, for budget accounting.
     pub fn node(&self, id: usize) -> &Node {
         &self.nodes[id]
     }
 
-    /// daBits party `0` has produced over its lifetime. The counter is per key family and shared
-    /// across clones, so every party's is the same in an honest run.
-    pub async fn produced(&self) -> u64 {
-        self.nodes[0].produced().await
-    }
-
-    /// Runs one batch of `count` daBits, dealing the `count * (1 + k)` `RandBit`s it bills for.
-    ///
-    /// There is no `exec_id` parameter: the exec is minted by each party's `PrssAllocator` on the
-    /// `DaBitSeed` cursor, one per call, in call order. A caller that could name the exec could
-    /// name it twice, which is the reuse this whole discipline exists to make unrepresentable.
-    ///
-    /// Returns one result per party rather than panicking, so that a test can assert on the
-    /// *error* — the lifetime budget's whole point is that exhaustion is a clean typed error.
+    /// One batch of `count` daBits at every party, on a fresh session.
     pub async fn generate(&mut self, count: usize) -> Vec<Result<Vec<DaBit<F, K>>, DaBitError>> {
-        let per_dabit = self.nodes[0].rand_bits_per_dabit();
-        let bits = deal_rand_bits(count * per_dabit, self.n, self.t, &mut self.rng);
-        self.generate_with(count, bits).await
+        self.generate_within(count, PROTOCOL_TIMEOUT).await
     }
 
-    /// As [`Self::generate`], but with a caller-supplied `RandBit` bill — for the tests that check
-    /// what happens when it does not match `count * (1 + k)`.
-    ///
-    /// Note that a rejected batch still **burns** its claimed range on every party: the claim
-    /// precedes the length check, exactly as it does in production.
-    pub async fn generate_with(
+    pub async fn generate_within(
         &mut self,
         count: usize,
-        rand_bits: Vec<Vec<RobustShare<F>>>,
+        duration: Duration,
     ) -> Vec<Result<Vec<DaBit<F, K>>, DaBitError>> {
+        let per_dabit = self.nodes[0].doubles_per_dabit();
+        let doubles = deal_doubles(count * per_dabit, self.n, self.t, &mut self.rng);
+        let session_id = SessionId::new(
+            ProtocolType::DaBit,
+            SessionId::pack_slot(self.next_exec, 0, 0),
+            INSTANCE,
+        );
+        self.next_exec += 1;
+
         let mut set: JoinSet<(usize, Result<Vec<DaBit<F, K>>, DaBitError>)> = JoinSet::new();
         for (party, node) in self.nodes.iter().enumerate() {
             let mut node = node.clone();
             let net = Arc::clone(&self.network[party]);
-            let bits = rand_bits[party].clone();
-            let windows = self.allocs[party]
-                .claim_dabit_batch(count, node.mask_bits())
-                .await
-                .expect("claiming a daBit batch");
+            let doubles = doubles[party].clone();
             set.spawn(async move {
-                let out = node.generate(windows, bits, PROTOCOL_TIMEOUT, net).await;
+                let out = node
+                    .generate(session_id, count, doubles, duration, net)
+                    .await;
                 (party, out)
             });
         }
@@ -247,23 +180,20 @@ impl DaBitHarness {
     }
 }
 
-/// One receiver task per party, demultiplexing exactly the arm the node dispatcher routes to the
-/// daBit generator: `BatchRecon` under [`ProtocolType::DaBitOpen`], each `process` immediately
-/// followed by its drain.
-///
-/// Errors are logged rather than unwrapped. A late arrival for a session the peer has already
-/// finished and retired is normal asynchronously, and an honest party must not be abortable by
-/// one.
 fn spawn_receivers(
     receivers: Vec<Vec<Receiver<Vec<u8>>>>,
     nodes: &[Node],
     network: &[Arc<FakeNetwork>],
+    tamper: Option<Tamper>,
+    open_tamper: Option<OpenTamper>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
 
     for (party, inboxes) in receivers.into_iter().enumerate() {
         let mut node = nodes[party].clone();
         let net = Arc::clone(&network[party]);
+        let tamper = tamper.clone();
+        let open_tamper = open_tamper.clone();
         let inbox: Vec<(SenderId, Receiver<Vec<u8>>)> = inboxes
             .into_iter()
             .enumerate()
@@ -273,7 +203,7 @@ fn spawn_receivers(
 
         set.spawn(async move {
             while let Some((envelope, bytes)) = merged.recv().await {
-                let SenderId::Node(_) = envelope else {
+                let SenderId::Node(sender) = envelope else {
                     warn!("party {party} received a client message in a node-only test");
                     continue;
                 };
@@ -285,17 +215,42 @@ fn spawn_receivers(
                     }
                 };
                 match wrapped {
-                    WrappedMessage::BatchRecon(msg) => match msg.session_id.calling_protocol() {
-                        Some(ProtocolType::DaBitOpen) => {
-                            if let Err(e) = node.mod2.open.process(msg, Arc::clone(&net)).await {
-                                warn!("party {party} Mod2 open error: {e:?}");
+                    WrappedMessage::DaBit(mut msg) => {
+                        if msg.sender_id != sender {
+                            warn!("party {party} dropped a daBit message with a forged sender");
+                            continue;
+                        }
+                        if let Some(hook) = tamper.as_ref() {
+                            hook(party, &mut msg);
+                        }
+                        if let Err(e) = node.process(msg, Arc::clone(&net)).await {
+                            warn!("party {party} daBit dealing error: {e:?}");
+                        }
+                    }
+                    WrappedMessage::BatchRecon(mut msg) => {
+                        match msg.session_id.calling_protocol() {
+                            Some(ProtocolType::DaBitMul) => {
+                                if msg.sender_id != sender {
+                                    warn!("party {party} dropped an opening with a forged sender");
+                                    continue;
+                                }
+                                if let Some(hook) = open_tamper.as_ref() {
+                                    hook(party, &mut msg);
+                                }
+                                if let Err(e) =
+                                    node.dn07.batch_recon.process(msg, Arc::clone(&net)).await
+                                {
+                                    warn!("party {party} XOR-fold opening error: {e:?}");
+                                }
+                                if let Err(e) = node.drain_mul_output().await {
+                                    warn!("party {party} XOR-fold drain error: {e:?}");
+                                }
                             }
-                            if let Err(e) = node.drain_open_output().await {
-                                warn!("party {party} Mod2 drain error: {e:?}");
+                            other => {
+                                warn!("party {party} saw a BatchRecon message tagged {other:?}")
                             }
                         }
-                        other => warn!("party {party} saw a BatchRecon message tagged {other:?}"),
-                    },
+                    }
                     other => warn!("party {party} saw an unexpected message: {other:?}"),
                 }
             }
@@ -304,10 +259,6 @@ fn spawn_receivers(
 
     set
 }
-
-// -------------------------------------------------------------------------------------------
-// Result plumbing
-// -------------------------------------------------------------------------------------------
 
 /// Unwraps every party's batch, reporting *which* party failed and how.
 pub fn expect_all_ok(results: Vec<Result<Vec<DaBit<F, K>>, DaBitError>>) -> Vec<Vec<DaBit<F, K>>> {

@@ -25,30 +25,22 @@
 //! blueprint's "1 round" conflated an opening with a round, and it is the same off-by-one that
 //! made A2B read 8 where it is 9.
 //!
-//! **Bytes, with the units named.** `2n/(t+1)` bytes per bit is the *payload*: `4.00 / 4.67 /
-//! 5.00 / 5.20` B/bit at `n = 4/7/10/13`. The wire cost is that plus the 48-byte frame each of
-//! the session's `2n` messages carries, and at `ell = 63` the frame is the larger half:
+//! **Bytes.** `2n/(t+1)` bytes per bit is the *payload*: `4.00 / 4.67 / 5.00 / 5.20` B/bit at
+//! `n = 4/7/10/13`. The wire cost is that plus the 48-byte frame each of the session's `2n`
+//! messages carries:
 //!
 //! ```text
 //!   online bytes/party = 2n * (48 + ceil(ell/(t+1)))
-//!   ell = 63, MEASURED (conv_cost_measurement::measured_cost_n*, `online` row):
-//!                       n=4      n=7     n=10     n=13
-//!     total              640      966     1280     1586      B/party
-//!     of which frame     384      672      960     1248      = 2n * 48, i.e. 60-79%
-//!     per bit          10.16    15.33    20.32    25.17      B, against the payload 4.00-5.20
 //! ```
 //!
-//! Add the daBits it spends and one whole 63-bit B2A is **4.69 / 8.71 / 12.31 / 17.26 KiB/party**
-//! measured, against a payload-only derivation of 3.53 / 6.72 / 9.80 / 14.25 — a gap that is
-//! entirely framing (measured / (derived + `2n * 48`) = 0.98x at every `n`). See
-//! [`crate::honeybadger::dn07`] for the units rule this crate now follows everywhere.
+//! The daBits it spends dominate the total; `tests/conv_cost_measurement.rs` measures both. See
+//! [`crate::honeybadger::dn07`] for the units rule this crate follows everywhere.
 //!
 //! A one-round B2A does exist: open every `c_i` directly all-to-all instead — the same trade
 //! [`OpeningPolicy`](crate::honeybadger::gf_mul::OpeningPolicy) makes for A2B's AND layers, and
 //! under the measured model there (a 52-byte direct frame against a 48-byte batched one, both at
-//! one byte per value) it is *cheaper* here as well as shorter: `n * (52 + 63)` = 460 / 805 /
-//! 1150 / 1495 B/party against the 640 / 966 / 1280 / 1586 measured above, in one wave of `n`
-//! messages rather than two rounds of `2n`. It is
+//! one byte per value) it is shorter and, at small widths, cheaper too: `n * (52 + ell)` bytes
+//! per party in one wave of `n` messages rather than two rounds of `2n`. It is
 //! **not** built here, and deliberately: A2B's layers reach the direct path through `GfMultiply`,
 //! which already owns a direct-open message type, whereas B2A opens through `GfBatchReconNode`
 //! and a direct variant would need a new wire variant of its own. Since `WrappedMessage` is an
@@ -76,15 +68,15 @@
 //! # `ell <= field_bit_width::<F>() - 1` is a correctness bound, not a heuristic
 //!
 //! Step 4 is an integer recomposition performed in `F`. It is faithful only while
-//! `sum_i 2^i x_i < p`, which is guaranteed for every input exactly when `2^ell - 1 < p`. On
-//! Goldilocks that is `ell <= 63`: at `ell = 64` the `2^32 - 1` payloads in `[p, 2^64)` would come
-//! back silently reduced mod `p`, and the payload is the adversary's to choose. So width is a
+//! `sum_i 2^i x_i < p`, which is guaranteed for every input exactly when `2^ell - 1 < p`. That
+//! is `ell <= w - 1` for a `w`-bit modulus — 254 on BLS12-381's scalar field: at `ell = w` the
+//! payloads in `[p, 2^w)` would come back silently reduced mod `p`, and the payload is the adversary's to choose. So width is a
 //! hard [`B2AError::WidthTooLarge`], never an assertion and never a `warn!`.
 //!
 //! Fixing it with a conditional subtraction would reintroduce a comparison circuit and destroy the
 //! one-round property, which is the whole point of this protocol. A caller who *knows*
 //! `sum 2^i x_i < p` — because the bits came out of A2B, which emits the canonical representative
-//! in `[0, p)` — gets the exact 64-bit round trip from
+//! in `[0, p)` — gets the exact full-width round trip from
 //! [`b2a::B2ANode::b2a_full_width_unchecked`](b2a::B2ANode::b2a_full_width_unchecked).
 //!
 //! # Owns no wire messages
@@ -225,7 +217,7 @@ pub enum B2AError {
     #[error("result already received: {0:?}")]
     ResultAlreadyReceived(SessionId),
     /// `2^width - 1` must be less than `p` or the recomposition `sum 2^i x_i` wraps and the
-    /// conversion silently returns `x mod p`. On Goldilocks the bound is 63.
+    /// conversion silently returns `x mod p`. The bound is one below the modulus's bit length.
     #[error("value {value} has width {width}, which exceeds the maximum of {max}")]
     WidthTooLarge {
         value: usize,
@@ -259,11 +251,11 @@ pub enum B2AError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::math::goldilocks::GoldilocksField;
+    use ark_bls12_381::Fr as CurveField;
 
     #[test]
     fn store_starts_uninitialized_with_a_live_result_channel() {
-        let mut store = B2AStore::<GoldilocksField>::empty();
+        let mut store = B2AStore::<CurveField>::empty();
         assert_eq!(store.state, B2AState::NotInitialized);
         assert!(store.child_sessions.is_empty());
         assert!(store.output_receiver.take().is_some());

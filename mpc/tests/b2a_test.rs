@@ -37,6 +37,8 @@ mod tests {
         fixed_point_corpus, fixed_point_precision, fixed_point_width, shift_to_unsigned,
     };
     use crate::utils::test_utils::{fan_in_inboxes, setup_tracing};
+    use ark_ff::PrimeField;
+    use num_bigint::BigUint;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -44,17 +46,16 @@ mod tests {
     use ark_std::rand::{Rng, SeedableRng};
     use stoffelcrypto::{
         common::{
-            convert::{bit_to_binary, bit_to_field, canonical_bits, field_bit_width},
+            convert::{bit_to_field, bit_to_gf, canonical_bits, field_bit_width},
             gf2k::{
                 field::{BinaryField, Gf256},
                 share::GfShare,
             },
-            math::goldilocks::GoldilocksField,
             ProtocolSessionId, SecretSharingScheme,
         },
         honeybadger::{
             b2a::{
-                b2a::{max_width, B2ANode, MAX_B2A_BITS},
+                b2a::{max_width, B2ANode},
                 B2AError,
             },
             dabit::DaBit,
@@ -70,12 +71,19 @@ mod tests {
     use tokio::task::JoinSet;
     use tracing::warn;
 
-    type F = GoldilocksField;
+    type F = ark_bls12_381::Fr;
     type K = Gf256;
     type Node = B2ANode<F, K>;
 
-    /// `p = 2^64 - 2^32 + 1`, the Goldilocks modulus.
-    const P: u128 = 0xFFFF_FFFF_0000_0001;
+    /// The modulus of [`F`].
+    fn modulus() -> BigUint {
+        F::MODULUS.into()
+    }
+
+    /// `2^exponent`.
+    fn pow2(exponent: usize) -> BigUint {
+        BigUint::from(1u8) << exponent
+    }
 
     const TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -91,16 +99,27 @@ mod tests {
 
     /// Little-endian bits of `value` at `width`.
     fn bits_of(value: u128, width: usize) -> Vec<bool> {
-        (0..width).map(|i| (value >> i) & 1 == 1).collect()
+        (0..width)
+            .map(|i| i < 128 && (value >> i) & 1 == 1)
+            .collect()
     }
 
-    /// The integer a little-endian bit vector encodes.
-    fn as_integer(bits: &[bool]) -> u128 {
-        bits.iter()
-            .enumerate()
-            .filter(|(_, b)| **b)
-            .map(|(i, _)| 1u128 << i)
-            .sum()
+    /// Little-endian bits of a value of any size.
+    fn big_bits(value: &BigUint, width: usize) -> Vec<bool> {
+        (0..width).map(|i| value.bit(i as u64)).collect()
+    }
+
+    /// The integer a little-endian bit vector encodes, as a field element.
+    fn as_field(bits: &[bool]) -> F {
+        let mut acc = BigUint::from(0u8);
+        for (i, b) in bits.iter().enumerate() {
+            acc.set_bit(i as u64, *b);
+        }
+        assert!(
+            acc < modulus(),
+            "the bit vector does not encode a value below p"
+        );
+        F::from(acc)
     }
 
     /// Trusted-dealer stand-in for the daBit pool: `count` daBits on uniformly random bits, each
@@ -111,7 +130,7 @@ mod tests {
             let bit: bool = rng.gen();
             let arith =
                 RobustShare::compute_shares(bit_to_field::<F>(bit), n, t, None, rng).unwrap();
-            let bin = GfShare::compute_shares(bit_to_binary::<K>(bit), n, t, rng).unwrap();
+            let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n, t, rng).unwrap();
             for party in 0..n {
                 per_party[party]
                     .push(DaBit::new(arith[party].clone(), bin[party].clone(), t).unwrap());
@@ -140,7 +159,7 @@ mod tests {
             for (i, bit) in value.iter().enumerate() {
                 let secret = match tamper {
                     Some((tv, ti, k)) if tv == v && ti == i => k,
-                    _ => bit_to_binary::<K>(*bit),
+                    _ => bit_to_gf::<K>(*bit),
                 };
                 let shares = GfShare::compute_shares(secret, n, t, rng).unwrap();
                 for (party, share) in shares.into_iter().enumerate() {
@@ -371,7 +390,7 @@ mod tests {
     async fn b2a_round_trips_random_values_at_n10_t3() {
         let (n, t) = (10usize, 3usize);
         let mut rng = StdRng::seed_from_u64(0xB2A0);
-        let values: Vec<Vec<bool>> = [1usize, 8, 32, 63, 63, 17]
+        let values: Vec<Vec<bool>> = [1usize, 8, 32, max_width::<F>(), max_width::<F>(), 17]
             .iter()
             .map(|width| (0..*width).map(|_| rng.gen()).collect())
             .collect();
@@ -381,7 +400,7 @@ mod tests {
         for (v, value) in values.iter().enumerate() {
             assert_eq!(
                 recover(&results, v, n, t),
-                F::from(as_integer(value)),
+                as_field(value),
                 "value {v} (width {})",
                 value.len()
             );
@@ -394,7 +413,7 @@ mod tests {
     async fn b2a_round_trips_random_values_at_n13_t4() {
         let (n, t) = (13usize, 4usize);
         let mut rng = StdRng::seed_from_u64(0xB2A1);
-        let values: Vec<Vec<bool>> = [1usize, 32, 63]
+        let values: Vec<Vec<bool>> = [1usize, 32, max_width::<F>()]
             .iter()
             .map(|width| (0..*width).map(|_| rng.gen()).collect())
             .collect();
@@ -404,7 +423,7 @@ mod tests {
         for (v, value) in values.iter().enumerate() {
             assert_eq!(
                 recover(&results, v, n, t),
-                F::from(as_integer(value)),
+                as_field(value),
                 "value {v} (width {})",
                 value.len()
             );
@@ -414,59 +433,68 @@ mod tests {
     /// Boundary values at and below the width bound.
     ///
     /// `0` and `1` catch a weighting that starts at the wrong power; `2^62` and `2^62 + 1` catch
-    /// a truncated accumulator; `2^63 - 1` is the largest value `ell = 63` can carry and is the
+    /// a truncated accumulator; `2^(w-1) - 1` is the largest value the bound can carry and is the
     /// one an off-by-one in the bound would get wrong.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn b2a_converts_the_boundary_values_of_the_width_bound() {
         let (n, t) = (10usize, 3usize);
-        let w = MAX_B2A_BITS;
-        let payloads: Vec<u128> = vec![
-            0,
-            1,
-            1 << 62,
-            (1u128 << 62) + 1,
-            (1u128 << 63) - 1,
-            0x5555_5555_5555_5555,
+        let w = max_width::<F>();
+        let payloads: Vec<BigUint> = vec![
+            BigUint::from(0u8),
+            BigUint::from(1u8),
+            pow2(w - 1),
+            pow2(w - 1) + 1u8,
+            pow2(w) - 1u8,
+            pow2(w) / 3u8, // 0101..01
         ];
-        let values: Vec<Vec<bool>> = payloads.iter().map(|v| bits_of(*v, w)).collect();
+        let values: Vec<Vec<bool>> = payloads.iter().map(|v| big_bits(v, w)).collect();
 
         let results = b2a_e2e(n, t, &values, Variant::Unchecked, None, 3).await;
         assert_share_shape(&results, values.len(), t);
         for (v, payload) in payloads.iter().enumerate() {
-            // Every payload here is below `2^63 - 1 < p`, so the recomposition is an *integer*
+            // Every payload here is at most `2^w - 1 < p`, so the recomposition is an *integer*
             // identity and not merely a congruence: `F::from` of the integer is the answer.
-            assert!(*payload < P, "payload {v} is not below the modulus");
-            assert_eq!(recover(&results, v, n, t), F::from(*payload), "payload {v}");
+            assert!(*payload < modulus(), "payload {v} is not below the modulus");
+            assert_eq!(
+                recover(&results, v, n, t),
+                F::from(payload.clone()),
+                "payload {v}"
+            );
         }
     }
 
     /// The full-width entry point on the values that only it can carry.
     ///
-    /// `p - 1 = 0xFFFF_FFFF_0000_0000` is exactly what A2B emits for `-1`, so this is the half of
-    /// the A2B round trip that lives on this side of the boundary; `p - (2^32 - 1)` is the other
-    /// side of the `2^64 - p` identity the conversion's reduction turns on.
+    /// `p - 1` is exactly what A2B emits for `-1`, so this is the half of
+    /// the A2B round trip that lives on this side of the boundary; `p - (d)` is the other
+    /// side of the `2^w - p` identity the conversion's reduction turns on.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn b2a_full_width_unchecked_is_exact_up_to_the_modulus() {
         let (n, t) = (10usize, 3usize);
         let w = field_bit_width::<F>();
-        let payloads: Vec<u128> = vec![
-            0,
-            1u128 << 63,
-            P - 1,                 // 0xFFFF_FFFF_0000_0000, what A2B emits for -1
-            P - (1u128 << 32) + 1, // p - (2^32 - 1)
-            P - 2,
+        let p = modulus();
+        let payloads: Vec<BigUint> = vec![
+            BigUint::from(0u8),
+            pow2(w - 1), // the top bit alone, which the checked entry point cannot carry
+            &p - 1u8,    // what A2B emits for -1
+            &p - pow2(32) + 1u8,
+            &p - 2u8,
         ];
-        let values: Vec<Vec<bool>> = payloads.iter().map(|v| bits_of(*v, w)).collect();
+        let values: Vec<Vec<bool>> = payloads.iter().map(|v| big_bits(v, w)).collect();
 
         let results = b2a_e2e(n, t, &values, Variant::FullWidth, None, 4).await;
         assert_share_shape(&results, values.len(), t);
         for (v, payload) in payloads.iter().enumerate() {
-            assert!(*payload < P, "payload {v} is not below the modulus");
-            assert_eq!(recover(&results, v, n, t), F::from(*payload), "payload {v}");
+            assert!(*payload < p, "payload {v} is not below the modulus");
+            assert_eq!(
+                recover(&results, v, n, t),
+                F::from(payload.clone()),
+                "payload {v}"
+            );
             // And the canonical decomposition of the answer is the bit vector we fed in — the
             // property an A2B round trip relies on.
             assert_eq!(
-                canonical_bits::<F>(F::from(*payload), w).unwrap(),
+                canonical_bits::<F>(F::from(payload.clone()), w).unwrap(),
                 values[v],
                 "payload {v} is not its own canonical decomposition"
             );
@@ -479,31 +507,31 @@ mod tests {
 
     /// Width 64 on the default entry point is a hard error, not a silent `x mod p`.
     ///
-    /// `2^64 - 1 > p`, so at width 64 the `2^32 - 1` payloads in `[p, 2^64)` would come back
+    /// `2^w - 1 > p`, so at width 64 the `d` payloads in `[p, 2^w)` would come back
     /// reduced — and the payload is the adversary's to choose. The rejection must also be
     /// unanimous: it is a function of the local shape alone, so every party reaches it
     /// identically without a round of communication.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn b2a_rejects_a_width_above_the_bound_rather_than_wrapping() {
         let (n, t) = (10usize, 3usize);
-        assert_eq!(max_width::<F>(), MAX_B2A_BITS);
-        assert_eq!(field_bit_width::<F>(), MAX_B2A_BITS + 1);
+        let bound = max_width::<F>();
+        assert_eq!(field_bit_width::<F>(), bound + 1);
 
-        // `p - 1` needs all 64 bits and is the value that would *appear* to work: it is below the
+        // `p - 1` needs all `w` bits and is the value that would *appear* to work: it is below the
         // modulus, so a silent acceptance would return the right answer here and the wrong one
         // for `p` itself.
-        let values = vec![bits_of(P - 1, field_bit_width::<F>())];
+        let values = vec![big_bits(&(modulus() - 1u8), field_bit_width::<F>())];
         let results = b2a_e2e(n, t, &values, Variant::Unchecked, None, 5).await;
         for (party, result) in results.iter().enumerate() {
             match result {
                 Err(B2AError::WidthTooLarge { value, width, max }) => {
                     assert_eq!(
                         (*value, *width, *max),
-                        (0, 64, MAX_B2A_BITS),
+                        (0, bound + 1, bound),
                         "party {party}"
                     );
                 }
-                other => panic!("party {party} accepted a 64-bit value: {other:?}"),
+                other => panic!("party {party} accepted a full-width value: {other:?}"),
             }
         }
     }
@@ -512,19 +540,21 @@ mod tests {
     /// entry point moves the line by exactly one — the bound is a property of the entry point,
     /// not a global constant.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_width_bound_sits_exactly_between_63_and_64() {
+    async fn the_width_bound_sits_exactly_one_below_the_field_width() {
         let (n, t) = (10usize, 3usize);
 
-        let at_bound = vec![bits_of((1u128 << 63) - 1, MAX_B2A_BITS)];
+        let bound = max_width::<F>();
+        let largest = pow2(bound) - 1u8;
+        let at_bound = vec![big_bits(&largest, bound)];
         let accepted = b2a_e2e(n, t, &at_bound, Variant::Unchecked, None, 6).await;
         assert_eq!(
             recover(&accepted, 0, n, t),
-            F::from((1u128 << 63) - 1),
+            F::from(largest.clone()),
             "the largest value the bound admits must convert"
         );
 
         // One bit wider on the same entry point: refused.
-        let over = vec![bits_of((1u128 << 63) - 1, MAX_B2A_BITS + 1)];
+        let over = vec![big_bits(&largest, bound + 1)];
         let refused = b2a_e2e(n, t, &over, Variant::Unchecked, None, 7).await;
         for result in &refused {
             assert!(matches!(result, Err(B2AError::WidthTooLarge { .. })));
@@ -533,17 +563,21 @@ mod tests {
         // The *same* over-wide input on the explicitly named full-width entry point: accepted,
         // because the caller has taken on the `sum 2^i x_i < p` precondition by naming it.
         let full = b2a_e2e(n, t, &over, Variant::FullWidth, None, 8).await;
-        assert_eq!(recover(&full, 0, n, t), F::from((1u128 << 63) - 1));
+        assert_eq!(recover(&full, 0, n, t), F::from(largest));
 
-        // And one bit past *that* is refused everywhere: there is no entry point above 64.
+        // And one bit past *that* is refused everywhere: there is no entry point above the field
+        // width.
         let beyond = vec![bits_of(1, field_bit_width::<F>() + 1)];
         let refused = b2a_e2e(n, t, &beyond, Variant::FullWidth, None, 9).await;
         for result in &refused {
             match result {
                 Err(B2AError::WidthTooLarge { width, max, .. }) => {
-                    assert_eq!((*width, *max), (65, field_bit_width::<F>()));
+                    assert_eq!(
+                        (*width, *max),
+                        (field_bit_width::<F>() + 1, field_bit_width::<F>())
+                    );
                 }
-                other => panic!("a 65-bit value was not refused: {other:?}"),
+                other => panic!("an over-wide value was not refused: {other:?}"),
             }
         }
     }
@@ -587,7 +621,7 @@ mod tests {
     async fn b2a_checked_agrees_with_the_unchecked_path() {
         let (n, t) = (10usize, 3usize);
         let mut rng = StdRng::seed_from_u64(0xB2A2);
-        let values: Vec<Vec<bool>> = [1usize, 16, 63]
+        let values: Vec<Vec<bool>> = [1usize, 16, max_width::<F>()]
             .iter()
             .map(|width| (0..*width).map(|_| rng.gen()).collect())
             .collect();
@@ -596,7 +630,7 @@ mod tests {
         let unchecked = b2a_e2e(n, t, &values, Variant::Unchecked, None, 12).await;
         assert_share_shape(&checked, values.len(), t);
         for (v, value) in values.iter().enumerate() {
-            let expected = F::from(as_integer(value));
+            let expected = as_field(value);
             assert_eq!(recover(&checked, v, n, t), expected, "checked, value {v}");
             assert_eq!(
                 recover(&unchecked, v, n, t),
@@ -726,7 +760,6 @@ mod tests {
         assert_share_shape(&results, values.len(), t);
         for (v, (label, payload)) in corpus.iter().enumerate() {
             // Every payload is below `2^33 < p`, so this is an integer identity, not a congruence.
-            assert!((*payload as u128) < P);
             assert_eq!(
                 recover(&results, v, n, t),
                 F::from(*payload as u128),
@@ -774,7 +807,7 @@ mod tests {
     /// A2B's does not, and that asymmetry is the standing negative result: A2B's mask has to be
     /// uniform on `[0, p)` whatever the payload width, so its edaBit stays 64 daBits wide. B2A has
     /// no such constraint — it masks each input bit independently — so two 33-bit values need 66
-    /// daBits where two 63-bit values need 126.
+    /// daBits where two (w-1)-bit values need 126.
     ///
     /// Pinned through the exact-length check rather than by counting a successful run, because
     /// `==` (not `>=`) is itself the property: a surplus daBit is one the caller believes is still
@@ -835,8 +868,8 @@ mod tests {
         // Linearity, stated as the ratio the two bills above establish.
         assert_eq!(
             max_width::<F>() * 2 - ell * 2,
-            60,
-            "60 daBits per pair is what narrowing from 63 bits to 33 saves"
+            (max_width::<F>() - ell) * 2,
+            "narrowing saves two daBits per dropped bit, per pair"
         );
     }
 }

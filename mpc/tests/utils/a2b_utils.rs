@@ -19,63 +19,64 @@
 //! The dealing here is honest by construction, so nothing in these files says anything about
 //! daBit *generation*; they pin the conversion's arithmetic and its wiring.
 
+use ark_ff::{Field, One, PrimeField, UniformRand, Zero};
 use ark_std::rand::rngs::StdRng;
 use ark_std::rand::Rng;
-use stoffelcrypto::common::convert::{bit_to_binary, canonical_bits, field_bit_width};
+use num_bigint::BigUint;
+use stoffelcrypto::common::convert::{bit_to_gf, canonical_bits, field_bit_width};
 use stoffelcrypto::common::gf2k::field::{BinaryField, Gf256};
 use stoffelcrypto::common::gf2k::share::GfShare;
-use stoffelcrypto::common::math::goldilocks::GoldilocksField;
 use stoffelcrypto::common::SecretSharingScheme;
 use stoffelcrypto::honeybadger::dabit::{DaBit, EdaBit};
 use stoffelcrypto::honeybadger::gf_triple_gen::GfBeaverTriple;
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 
-pub type F = GoldilocksField;
+/// The scalar field of BLS12-381: 255 bits, and the field the rest of the crate's tests run on.
+pub type F = ark_bls12_381::Fr;
 pub type K = Gf256;
 
-/// `p = 2^64 - 2^32 + 1`, the Goldilocks modulus.
-pub const P: u64 = 0xFFFF_FFFF_0000_0001;
+/// The modulus `p` of [`F`].
+pub fn modulus() -> BigUint {
+    F::MODULUS.into()
+}
+
+/// `2^exponent` as a field element.
+pub fn pow2(exponent: usize) -> F {
+    F::from(2u64).pow([exponent as u64])
+}
 
 /// The values a full-range A2B has to get right, and the reason each one is here.
 ///
-/// The exact conversion is `x = (y + r) - p * [y + r >= p]` evaluated as two 64-bit additions and
-/// a MUX, so the interesting inputs are the ones that sit on a carry boundary of either addition
-/// or on the boundary of the conditional reduction. `2^64 - p = 2^32 - 1` is what makes the second
-/// addition the reduction, which is why the `2^32` neighbourhood appears three times.
+/// The exact conversion is `x = (y + r) - p * [y + r >= p]` evaluated as two `w`-bit additions
+/// and a MUX, so the interesting inputs are the ones that sit on a carry boundary of either
+/// addition or on the boundary of the conditional reduction.
 pub fn boundary_values() -> Vec<(&'static str, F)> {
+    let w = field_bit_width::<F>();
+    // `2^w mod p`: congruent to the offset `2^w - p` the second addition folds in.
+    let d = pow2(w);
     vec![
-        ("zero", F::from(0u64)),
-        ("one", F::from(1u64)),
-        // The low half of `p` is zero above bit 0, so `2^32 - 1` is the largest value whose bits
-        // are entirely inside that half: the widest input for which no reduction can be due.
-        ("2^32 - 1", F::from(0xFFFF_FFFFu64)),
-        ("2^32", F::from(1u64 << 32)),
-        ("2^32 + 1", F::from((1u64 << 32) + 1)),
-        // Straddles the 63-bit width bound B2A enforces, from both sides.
-        ("2^63 - 1", F::from((1u64 << 63) - 1)),
-        ("2^63", F::from(1u64 << 63)),
-        ("2^63 + 1", F::from((1u64 << 63) + 1)),
-        // `p - 2^32` and its neighbours drive the `c1 = 1` branch of the adder: `y + r` exceeds
-        // `2^64` and exactly one subtraction of `p` is due.
-        ("p - 1 - 2^32", F::from(P - 1 - (1u64 << 32))),
-        ("p - 2^32", F::from(P - (1u64 << 32))),
-        ("p - 2", F::from(P - 2)),
-        // `-1`. The canonical representative is `p - 1 = 0xFFFF_FFFF_0000_0000`, NOT `u64::MAX`.
-        ("p - 1 (= -1)", F::from(0u64) - F::from(1u64)),
+        ("zero", F::zero()),
+        ("one", F::one()),
+        ("2^32", pow2(32)),
+        ("2^64 - 1", pow2(64) - F::one()),
+        ("2^w mod p - 1", d - F::one()),
+        ("2^w mod p", d),
+        ("2^w mod p + 1", d + F::one()),
+        // Straddles the width bound B2A enforces, from both sides.
+        ("2^(w-1) - 1", pow2(w - 1) - F::one()),
+        ("2^(w-1)", pow2(w - 1)),
+        ("2^(w-1) + 1", pow2(w - 1) + F::one()),
+        ("-(2^w) - 1", -d - F::one()),
+        ("-(2^w)", -d),
+        ("p - 2", -F::from(2u64)),
+        // `-1`. The canonical representative is `p - 1`, NOT all ones.
+        ("p - 1 (= -1)", -F::one()),
     ]
 }
 
 /// Uniform field elements, for the batch that is not made of special cases.
 pub fn random_values(count: usize, rng: &mut StdRng) -> Vec<F> {
-    (0..count)
-        .map(|_| {
-            let mut candidate: u64 = rng.gen();
-            while candidate >= P {
-                candidate = rng.gen();
-            }
-            F::from(candidate)
-        })
-        .collect()
+    (0..count).map(|_| F::rand(rng)).collect()
 }
 
 /// Transposes a dealer's per-value share vectors into per-party columns.
@@ -112,7 +113,7 @@ pub fn deal_bits(
 ) -> Vec<Vec<GfShare<K>>> {
     let rows = bits
         .iter()
-        .map(|bit| GfShare::compute_shares(bit_to_binary::<K>(*bit), n_parties, t, rng).unwrap())
+        .map(|bit| GfShare::compute_shares(bit_to_gf::<K>(*bit), n_parties, t, rng).unwrap())
         .collect();
     transpose(rows, n_parties)
 }
@@ -133,7 +134,7 @@ pub fn deal_dabits(
         let bit: bool = rng.gen();
         let arith =
             RobustShare::compute_shares(F::from(bit as u64), n_parties, t, None, rng).unwrap();
-        let bin = GfShare::compute_shares(bit_to_binary::<K>(bit), n_parties, t, rng).unwrap();
+        let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n_parties, t, rng).unwrap();
         for party in 0..n_parties {
             per_party[party].push(DaBit::new(arith[party].clone(), bin[party].clone(), t).unwrap());
         }
@@ -143,8 +144,8 @@ pub fn deal_dabits(
 
 /// Full-range edaBits, indexed `[party][index]`.
 ///
-/// `r` is rejection-sampled below `p`, which is precisely the post-condition the modulus-overflow
-/// filter establishes: at full width `sum 2^i b_i` equals the integer `r` only when `r < p`, and
+/// `r` is uniform below `p`, which is precisely the post-condition the modulus-overflow filter
+/// establishes: at full width `sum 2^i b_i` equals the integer `r` only when `r < p`, and
 /// with `r >= p` the adder's "at most one subtraction of `p`" argument fails outright.
 pub fn deal_edabits(
     n_parties: usize,
@@ -155,18 +156,12 @@ pub fn deal_edabits(
     let width = field_bit_width::<F>();
     let mut per_party: Vec<Vec<EdaBit<F, K>>> = vec![Vec::new(); n_parties];
     for _ in 0..count {
-        let r = loop {
-            let candidate: u64 = rng.gen();
-            if candidate < P {
-                break candidate;
-            }
-        };
-        let bits = canonical_bits::<F>(F::from(r), width).unwrap();
+        let bits = canonical_bits::<F>(F::rand(rng), width).unwrap();
         let mut per_party_dabits: Vec<Vec<DaBit<F, K>>> = vec![Vec::new(); n_parties];
         for bit in bits {
             let arith =
                 RobustShare::compute_shares(F::from(bit as u64), n_parties, t, None, rng).unwrap();
-            let bin = GfShare::compute_shares(bit_to_binary::<K>(bit), n_parties, t, rng).unwrap();
+            let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n_parties, t, rng).unwrap();
             for party in 0..n_parties {
                 per_party_dabits[party]
                     .push(DaBit::new(arith[party].clone(), bin[party].clone(), t).unwrap());
@@ -233,13 +228,18 @@ pub fn expected_bits(value: F) -> Vec<bool> {
     canonical_bits::<F>(value, field_bit_width::<F>()).unwrap()
 }
 
-/// `sum_i 2^i bits[i]` as a `u128`, so an overshoot past `2^64` is visible rather than wrapped.
-pub fn recompose_u128(bits: &[bool]) -> u128 {
-    bits.iter()
-        .enumerate()
-        .filter(|(_, set)| **set)
-        .map(|(i, _)| 1u128 << i)
-        .sum()
+/// `sum_i 2^i bits[i]` as an integer, so an overshoot past `p` is visible rather than reduced.
+pub fn recompose(bits: &[bool]) -> BigUint {
+    let mut acc = BigUint::from(0u8);
+    for (i, set) in bits.iter().enumerate() {
+        acc.set_bit(i as u64, *set);
+    }
+    acc
+}
+
+/// The canonical representative of `value` as an integer.
+pub fn to_integer(value: F) -> BigUint {
+    value.into_bigint().into()
 }
 
 /// Full-range edaBits for **chosen** masks, indexed `[party][index]`.
@@ -247,27 +247,26 @@ pub fn recompose_u128(bits: &[bool]) -> u128 {
 /// [`deal_edabits`] samples `r` the way the generator does, which exercises whichever branch of
 /// the conditional reduction the sample happens to land on. This one lets a test pin a branch:
 /// with `y = (x - r) mod p` and `s = y + r` over the integers, `x >= r` gives `s = x` and no
-/// reduction, while `x < r` gives `s = x + p`, whose carry out of bit 63 is set exactly when
-/// `x >= 2^64 - p = 2^32 - 1`.
+/// reduction, while `x < r` gives `s = x + p`, whose carry out of the top bit is set exactly
+/// when `x >= 2^w - p`.
 ///
-/// Panics if any `r >= p`, which is the post-condition the modulus-overflow filter establishes and
-/// which a caller of this helper is standing in for.
+/// The masks are field elements, so each is below `p` by construction — the post-condition the
+/// modulus-overflow filter establishes and which a caller of this helper is standing in for.
 pub fn deal_edabits_from(
     n_parties: usize,
     t: usize,
-    masks: &[u64],
+    masks: &[F],
     rng: &mut StdRng,
 ) -> Vec<Vec<EdaBit<F, K>>> {
     let width = field_bit_width::<F>();
     let mut per_party: Vec<Vec<EdaBit<F, K>>> = vec![Vec::new(); n_parties];
     for r in masks {
-        assert!(*r < P, "an edabit mask must be below p");
-        let bits = canonical_bits::<F>(F::from(*r), width).unwrap();
+        let bits = canonical_bits::<F>(*r, width).unwrap();
         let mut per_party_dabits: Vec<Vec<DaBit<F, K>>> = vec![Vec::new(); n_parties];
         for bit in bits {
             let arith =
                 RobustShare::compute_shares(F::from(bit as u64), n_parties, t, None, rng).unwrap();
-            let bin = GfShare::compute_shares(bit_to_binary::<K>(bit), n_parties, t, rng).unwrap();
+            let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n_parties, t, rng).unwrap();
             for party in 0..n_parties {
                 per_party_dabits[party]
                     .push(DaBit::new(arith[party].clone(), bin[party].clone(), t).unwrap());

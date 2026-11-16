@@ -219,8 +219,7 @@ impl<F: FftField> Dn07MulNode<F> {
     ///
     /// `x` and `y` are consumed by value only through `share_mul`, so their own degree labels are
     /// irrelevant to correctness here — what matters is that they really are degree-`t` sharings,
-    /// which is the caller's obligation and which PRSS-sourced material discharges by
-    /// construction. If either is degree `> t` the product exceeds degree `2t` and the opening
+    /// which is the caller's obligation. If either is degree `> t` the product exceeds degree `2t` and the opening
     /// fails to decode, which is a detected abort rather than a wrong value, **except** when the
     /// input was *dealt*: see the warning below.
     ///
@@ -237,9 +236,10 @@ impl<F: FftField> Dn07MulNode<F> {
     /// **Therefore: never feed this node an input that was dealt without a degree-validity
     /// mechanism** — masked dealing, or a batch random-linear-combination degree test (one robust
     /// degree-`t` opening of `sum chi_nu [u_nu] + [mask]` per dealer per batch, assert `deg = t`;
-    /// soundness `1/p`). PRSS-sourced and protocol-derived shares are immune because nothing is
-    /// dealt: a PRSS share is a deterministic function of keys held by `n − t >= 2t+1` parties and
-    /// a corrupt party's only freedom is to lie at an opening, which the code distance catches.
+    /// soundness `1/p`). Shares each honest party computes locally from values it has cross-checked
+    /// with the other holders — the replicated daBit leaves — and outputs of earlier reductions
+    /// are immune: no party chose the polynomial, so a corrupt party's only freedom is to lie at
+    /// an opening, which the code distance catches. `RanSha` outputs are verified at dealing.
     ///
     /// # Errors
     /// - [`Dn07Error::LengthMismatch`], [`Dn07Error::EmptyInput`], [`Dn07Error::BatchTooLarge`]
@@ -302,7 +302,7 @@ impl<F: FftField> Dn07MulNode<F> {
     /// The mask is the supplied double sharing's own difference `[r]_2t − [r]_t`, which is a
     /// uniform element of `{h : deg h <= 2t, h(0) = 0}` — the exact space the opening must be
     /// randomised over, and zero at the origin so it does not disturb the value being checked. See
-    /// the [module docs](super) for why this is one object rather than a second PRZS draw.
+    /// the [module docs](super) for why this is one object rather than a second draw.
     ///
     /// Typical uses: `v_i = u_i − 1` certifies `u_i ∈ {0,1}` over `F`. Over `Gf2k` the twin uses
     /// `v_i = u_i + 1`; never `u_i · u_i`, because squaring is a bijection in characteristic 2 and

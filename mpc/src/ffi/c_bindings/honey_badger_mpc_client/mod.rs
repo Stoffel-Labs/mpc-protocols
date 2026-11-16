@@ -68,7 +68,6 @@ pub enum HoneyBadgerErrorCode {
     HoneyBadgerCircuitError,
     HoneyBadgerConvPreprocessingError,
     HoneyBadgerConvertError,
-    HoneyBadgerDaBitGenerationStalled,
     /// Appended, never inserted: this is a `#[repr(C)]` enum whose discriminants are the ABI, so
     /// a new code goes at the end and every existing one keeps its value.
     HoneyBadgerDn07Error,
@@ -125,9 +124,6 @@ impl From<HoneyBadgerError> for HoneyBadgerErrorCode {
             HoneyBadgerError::CircuitError(_) => Self::HoneyBadgerCircuitError,
             HoneyBadgerError::ConvPreprocessingError(_) => Self::HoneyBadgerConvPreprocessingError,
             HoneyBadgerError::ConvertError(_) => Self::HoneyBadgerConvertError,
-            HoneyBadgerError::DaBitGenerationStalled { .. } => {
-                Self::HoneyBadgerDaBitGenerationStalled
-            }
             HoneyBadgerError::Dn07Error(_) => Self::HoneyBadgerDn07Error,
         }
     }

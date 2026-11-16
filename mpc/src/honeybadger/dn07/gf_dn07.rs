@@ -19,22 +19,6 @@
 //!   difference `[r]_2t − [r]_t` to keep the port line-for-line with the `F` side; in this field
 //!   that is the same element as the sum.
 //!
-//! # Why this file is item 6's payoff
-//!
-//! A `Gf256` Beaver triple from `gf_triple_gen` fed by dealt `GfRanDouSha` double sharings costs
-//! `2·P1_K + P3_K + O2 = 18.857` bytes of **payload** per party at `n = 10`. The same triple with
-//! its double sharing from
-//! [`GfPrssDoubleShareSource`](super::double_share::GfPrssDoubleShareSource) costs `O2 = 2.857`,
-//! because PRSS and PRZS put nothing at all on the wire — a **6.6x** payload cut. Nothing about
-//! the opening changes; only where the randomness came from.
-//!
-//! Two corrections to that headline, both from measurement, both spelled out in
-//! [`the dn07 module docs`](super): the 6.6x is against a *fully dealt* baseline this tree had
-//! already left (what the change actually replaced is `2·P1_K + O2`, i.e. **3.25x / 3.62x /
-//! 3.80x / 3.91x** at `n = 4/7/10/13`) and which does not complete above `n = 4` at all; and
-//! `2.857` is a **marginal** cost — the measured wire bill for a batch is
-//! `2n * 48 + O2 * triples`, the fixed part being the per-message frame the element-counting
-//! model has no term for.
 
 use std::sync::Arc;
 use std::time::Instant;

@@ -63,144 +63,34 @@
 //! What none of that can stop is a caller minting a *preprocessing*-tagged session for work that
 //! is really online. That residue is why this section exists in prose as well as in types.
 //!
-//! # Cost — and a correction to the blueprint's tables
+//! # Cost
 //!
-//! ## Units first: `O1`/`O2`/`M1`/`P1` are PAYLOAD figures, and payload is not the wire
-//!
-//! Every `O`/`M`/`P` figure in this section, everywhere else in this crate, and throughout
-//! `scratchpad/a2b-b2a-protocol-performance.md` counts **field elements one party places in a
-//! message body**, amortised, with a broadcast charged to all `n` recipients. It is *not* what
-//! that party puts on the wire. Measured — by serialising the real message types, in
-//! `mpc/tests/conv_cost_model.rs` — one party's actual byte cost is:
-//!
-//! ```text
-//!   GF batch-recon session over m secrets : 2n * (48 + 1 * ceil(m/(t+1)))   2n msgs, 2 rounds
-//!   F  batch-recon session over m secrets : 2n * (48 + 8 * ceil(m/(t+1)))   2n msgs, 2 rounds
-//!   GF direct open of r multiplications   :  n * (52 + 2 * r)                n msgs, 1 round
-//! ```
-//!
-//! The `48`- and `52`-byte frames are the term the element-counting model has no place for, and
-//! they are not a rounding error: framing is **52–54% of a 64-bit A2B's whole traffic at
-//! `n >= 7`**, 93–97% of the edaBit filter's DN07 phase, and it is the *entire* gap between the
-//! derived and the measured B2A figures (measured / (derived + `2n * 48`) = 0.98x at all four
-//! `n`). Two consequences for every per-secret figure quoted below:
-//!
-//! * a per-secret payload figure is a **marginal** cost. It is honest only with the fixed
-//!   `2n * 48` per batch-reconstruction session quoted beside it, and only for a session wide
-//!   enough that the fixed part amortises. At the narrow widths the edaBit filter actually runs,
-//!   the fixed part *is* the cost.
-//! * a **ratio** of two payload figures is not a ratio of wire costs, and is usually much larger.
-//!   Where the two differ the wire ratio is given as well.
-//!
-//! Rounds are counted the same way and were undercounted for the same reason: a batch
-//! reconstruction is a **two-round session** (Eval then Reveal), so any protocol whose bill
-//! includes a mask opening costs one round more than an opening-count would suggest. A 64-bit A2B
-//! is 9 rounds at the direct end and 16 at the batched one — not 8 and not 15 — and B2A is 2, not
-//! 1.
-//!
-//! ## The payload table
-//!
-//! Payload field elements per party per secret, amortised, at `n = 3t+1`, with
-//! `O1 = 2n/(t+1)` (degree-`t` batched opening, robust) and `O2 = 2n/(2t+1)` (degree-`2t` batched
-//! opening, detect-and-abort). No framing term — add the model above for a wire cost:
-//!
-//! ```text
-//!                                                    n=4      n=7     n=10     n=13
-//!   O1  degree-t batched opening, per secret        4.000    4.667    5.000    5.200
-//!   O2  degree-2t batched opening, per secret       2.667    2.800    2.857    2.889
-//!
-//!   Beaver preprocessing multiplication             12.00    14.00   12.857   13.089
-//!     = triple (O2, via this node) + M1 (4n/(t+1))
-//!   DN07 preprocessing multiplication (this node)   2.667    2.800    2.857    2.889
-//!                              payload ratio         4.00x    4.33x    4.50x    4.60x
-//!
-//!   Beaver exact-zero check                        16.00    18.67   17.857   18.289
-//!     = triple + M1 + one degree-t opening (O1)
-//!   DN07 exact-zero check (this node)              2.667    2.800    2.857    2.889
-//!                              payload ratio         6.00x    6.67x    6.25x    6.33x
-//! ```
-//!
-//! The blueprint's own cost tables (`scratchpad/a2b-b2a-blueprint.md` §6.2/§6.3, and the numbers
-//! `dabit/dabit_gen.rs` quoted from them in its sizing comments before that file was deleted)
-//! **undercount**: they price a Beaver multiplication at the *triple alone* and omit the
-//! `M1 = 4n/(t+1)` opening that spends it. The rows above are the corrected figures. At `n = 10`
-//! the honest blueprint daBit baseline is 1803.3 F elements, not 1263.3, and one 64-bit A2B is
-//! 945 KiB/party, not 687 KB. Both of those, and every ratio taken against them, are **payload**
-//! (see the units note above); the blueprint's own construction was never built here and so its
-//! wire cost cannot be measured. Framing would raise it by more than it raises this one — the
-//! blueprint dealt, broadcast and bucketed, so it carried far more *messages* per secret — but by
-//! how much is an estimate and is marked as one wherever it is quoted.
-//!
-//! Two further corrections to the same tables, recorded here because this is where the crate
-//! keeps its cost arithmetic and the code that quoted the old figures is gone:
-//!
-//! * **The A2B circuit.** The blueprint's serial `ADD64 -> ADD64 -> MUX` chain is 626 ANDs at
-//!   depth 13. `FieldA2BCircuit` now applies the mod-`p` offset to the *public* operand so the
-//!   two additions run in parallel: 695 ANDs at depth 7, averaging 642 over a uniform mask.
-//!   +11% on the sizing bound and +7% on the average, for −46% depth.
-//! * **Online rounds per AND layer.** The blueprint prices every opening at the batched
-//!   `O1 = 2n/(t+1)` and two rounds, in elements. Counted in *bytes*, framing included, a direct
-//!   all-to-all degree-`t` opening of a `w`-wide layer costs `n * (52 + 2w)` in one round against
-//!   the batched `4n * (48 + ceil(w/(t+1)))` in two, and which is cheaper is a question about `w`
-//!   — not, as the blueprint had it, about `t`. See
-//!   [`OpeningPolicy`](crate::honeybadger::gf_mul::OpeningPolicy), whose `Auto` decides it per
-//!   wave. A 64-bit A2B is 16 message rounds where the blueprint said 28, and 9 wherever its
-//!   layers sit below the crossover — 9 and not the plan's 8, because `OpeningPolicy` governs
-//!   only the AND layers and A2B's mask opening stays a two-round `BatchReconNode` session.
-//!
-//! The GF side is the same arithmetic in bytes: a `Gf256` triple from `gf_triple_gen` fed by dealt
-//! `GfRanDouSha` double sharings costs `2·P1_K + P3_K + O2 = 18.857` B of payload at `n = 10`;
-//! fed by [`double_share::GfPrssDoubleShareSource`] it costs `O2 = 2.857` B, a **6.6x** cut,
-//! because PRSS and PRZS put *nothing* on the wire.
-//!
-//! **Read that 6.6x with two qualifications, both measured.** It is stated against the *fully
-//! dealt* baseline, and (a) this tree had already left that baseline — the double sharings were
-//! on PRSS before the GF `[a]`/`[b]` were, so what the last change actually replaced was
-//! `2·P1_K + O2` = `8.667 / 10.133 / 10.857 / 11.289` B at `n = 4/7/10/13`, an improvement of
-//! **3.25x / 3.62x / 3.80x / 3.91x**, which is the figure to quote for this branch; and (b) the
-//! fully dealt baseline **cannot be run** above `n = 4` (dealt `GfRanSha` does not complete —
-//! `conv_cost_measurement::dealt_gf_random_share_generation_stalls_above_a_batch_size`), so 6.6x
-//! is a payload ratio against a path that does not execute, not a measured saving.
-//!
-//! What *is* measured, end to end and to the byte: the PRSS triple's **marginal** cost is exactly
-//! `O2` — `2.667 / 2.800 / 2.857 / 2.889` B/party at `n = 4/7/10/13`, payload and wire marginal
-//! alike, since a batched GF element is one byte — on top of a **fixed `2 * n * 48` B/party per
-//! batch** of frames, also exact at all four `n`. A 695-triple A2B pool therefore costs
-//! `2n*48 + 2.857 * 695` and not `2.857 * 695`; at `n = 13` the frame is a third of it.
+//! One multiplication is one double sharing plus one degree-`2t` batched opening, which packs
+//! `2t+1` secrets per group against a degree-`t` group's `t+1`. A Beaver multiplication spends a
+//! triple (itself one double sharing and one degree-`2t` opening, plus two random sharings) and
+//! then two degree-`t` openings. On the wire each batch-reconstruction session also pays a fixed
+//! per-message frame, so per-secret figures are marginal costs and only meaningful for sessions
+//! wide enough to amortise it.
 //!
 //! # Who calls this
 //!
 //! Both nodes have production callers, and both are preprocessing:
 //!
-//! * **`Dn07MulNode`** — `F` Beaver triple generation, when PRSS keys are installed
-//!   (`HoneyBadgerMPCNode::generate_triples_via_dn07`). `[a]`, `[b]` and the double sharing all
-//!   come from [`double_share::PrssDoubleShareSource::triple_material`], so a triple's entire
-//!   wire cost is the one degree-`2t` opening. Without PRSS keys the node falls back to
-//!   `TripleGenNode` over dealt `RanSha` + `RanDouSha`, which computes the identical algebra
-//!   inline.
+//! * **`Dn07MulNode`** — the `F`-side XOR fold of daBit generation
+//!   (`dabit::replicated::ReplicatedDaBitNode`), under the `DaBitMul` tag.
 //! * **`GfDn07MulNode`** — every AND layer of the edaBit modulus-overflow filter
-//!   (`dabit::edabit::EdaBitFilterNode`), under the `DaBitGfMul` tag, in place of a `GfMultiply`
-//!   spending one `Gf2k` Beaver triple per AND.
+//!   (`dabit::edabit::EdaBitFilterNode`), under the `DaBitGfMul` tag.
 //!
-//! **[`Dn07MulNode::init_zero_check`](dn07::Dn07MulNode::init_zero_check) and its `Gf` twin have
-//! no production caller.** They are not dead by oversight: the bit-ness obligations they were
-//! written for belonged to the dealt daBit protocol, and PRSS daBits discharge those by
-//! provenance — there is no dealt value left in the stack to certify. They stay because the
-//! moment any dealt share re-enters preprocessing, this is the check it needs, and the cost
-//! (`6.25x` cheaper than the Beaver form at `n = 10`) is the reason to reach for it rather than
-//! rebuild one — `6.25x` being a payload ratio, where the wire ratio is the message count: one
-//! `2n`-message degree-`2t` session against a Beaver check's `4n` plus a share of triple
-//! generation.
+//! [`Dn07MulNode::init_zero_check`](dn07::Dn07MulNode::init_zero_check) and its `Gf` twin have no
+//! production caller. They stay because an exact-zero check is what any dealt share entering
+//! preprocessing would need.
 //!
 //! # Where the double sharing comes from
 //!
-//! Anywhere, as long as it is a genuine `([r]_t, [r]_2t)` on one uniform `r`. Two sources exist:
-//!
-//! * **`ran_dou_sha` / `gf_ran_dou_sha`** — dealt, interactive, perfect privacy, and it is what
-//!   `triple_gen` already consumes.
-//! * **[`double_share::PrssDoubleShareSource`] / [`double_share::GfPrssDoubleShareSource`]** —
-//!   PRSS for `[r]_t` plus PRZS for the degree-`2t` lift, **zero rounds and zero bytes**, at the
-//!   price of computational rather than perfect privacy of preprocessing randomness.
+//! `ran_dou_sha` / `gf_ran_dou_sha`: dealt, interactive, verified at dealing, perfectly private.
+//! That is the only source. The operands must likewise never be unverified dealt sharings — a
+//! degree-`2t` opening imposes no codeword constraint on an operand of too high a degree — and
+//! both callers above multiply only locally derived or previously reduced sharings.
 //!
 //! # One object, two consumptions — why the zero-check mask is not a second draw
 //!
@@ -210,11 +100,9 @@
 //! uniform degree-`t` polynomial through `r` is uniform over that space.
 //!
 //! So the zero check consumes **a double sharing**, not a separately-drawn zero sharing. That is a
-//! deliberate API choice, not a saving: two separate PRZS draws is one more place for two PRF
-//! streams to be derived at the same `(session, position)` and silently coincide — the same hazard
-//! class as the daBit's `β`/`ψ` collision, which reveals the bit with probability ~3/4. With one
-//! object there is no second position to get wrong, and "do not spend a preprocessing item twice"
-//! is a rule this repo already has everywhere.
+//! deliberate API choice: with one object there is no second preprocessing item to pair up
+//! wrongly, and "do not spend a preprocessing item twice" is a rule this repo already has
+//! everywhere.
 //!
 //! # Share-type discipline
 //!
@@ -237,13 +125,11 @@ use thiserror::Error;
 use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 use crate::common::share::ShareError;
-use crate::common::ProtocolSessionId;
 use crate::honeybadger::batch_recon::BatchReconError;
 use crate::honeybadger::gf_batch_recon::GfBatchReconError;
 use crate::honeybadger::{ProtocolType, SessionId};
 
 pub mod dn07;
-pub mod double_share;
 pub mod gf_dn07;
 
 /// Largest number of concurrent DN07 sessions one node admits, across all peers.
@@ -328,55 +214,67 @@ pub const fn phase_of(tag: ProtocolType) -> ProtocolPhase {
     }
 }
 
-/// A [`SessionId`] that has been checked to belong to the preprocessing phase.
-///
-/// The only way to obtain one is [`PreprocessingSessionId::new`], which classifies the session's
-/// calling protocol through [`phase_of`]. `Dn07MulNode::init_mul`, `init_zero_check` and their
-/// `Gf` twins accept nothing else, so "this degree-`2t` opening is on a preprocessing session" is
-/// a property of the type rather than a review obligation.
-///
-/// It is a cheap `Copy` wrapper; [`PreprocessingSessionId::get`] unwraps it for the batch-recon
-/// child, which is phase-agnostic because it is told its degree at construction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PreprocessingSessionId(SessionId);
+mod barrier {
+    use super::{phase_of, Dn07Error, ProtocolPhase};
+    use crate::common::ProtocolSessionId;
+    use crate::honeybadger::SessionId;
 
-impl PreprocessingSessionId {
-    /// Checks that `session_id` names a preprocessing protocol, and that it is shaped the way
-    /// every batch-reconstruction caller in this repo shapes a root session.
+    /// A [`SessionId`] that has been checked to belong to the preprocessing phase.
     ///
-    /// # Errors
-    /// - [`Dn07Error::OnlinePhaseForbidden`] if the calling protocol is an online one. This is the
-    ///   error that exists to stop the plan's headline mistake.
-    /// - [`Dn07Error::MissingCallingProtocol`] if the session carries no calling protocol, or a
-    ///   transport tag that never names one.
-    /// - [`Dn07Error::MalformedSessionId`] if `sub_id` or `round_id` is non-zero. A DN07 session is
-    ///   a root session whose only child is its batch reconstruction; the sub/round bytes are the
-    ///   child-minting space and must be free, exactly as `mul_pub::init` requires.
-    pub fn new(session_id: SessionId) -> Result<Self, Dn07Error> {
-        let Some(tag) = session_id.calling_protocol() else {
-            return Err(Dn07Error::MissingCallingProtocol(session_id));
-        };
-        match phase_of(tag) {
-            ProtocolPhase::Preprocessing => {}
-            ProtocolPhase::Online => {
-                return Err(Dn07Error::OnlinePhaseForbidden {
-                    session_id,
-                    tag: tag as u8,
-                })
-            }
-            ProtocolPhase::Transport => return Err(Dn07Error::MissingCallingProtocol(session_id)),
-        }
-        if session_id.sub_id() != 0 || session_id.round_id() != 0 {
-            return Err(Dn07Error::MalformedSessionId(session_id));
-        }
-        Ok(Self(session_id))
-    }
+    /// The only way to obtain one is [`PreprocessingSessionId::new`], which classifies the session's
+    /// calling protocol through [`phase_of`]. `Dn07MulNode::init_mul`, `init_zero_check` and their
+    /// `Gf` twins accept nothing else, so "this degree-`2t` opening is on a preprocessing session" is
+    /// a property of the type rather than a review obligation.
+    ///
+    /// The wrapped id is private to a module of its own, so not even this module's siblings
+    /// (`dn07.rs`, `gf_dn07.rs`) can build one without going through the phase check.
+    ///
+    /// It is a cheap `Copy` wrapper; [`PreprocessingSessionId::get`] unwraps it for the batch-recon
+    /// child, which is phase-agnostic because it is told its degree at construction.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct PreprocessingSessionId(SessionId);
 
-    /// The wrapped session id, for handing to the batch-reconstruction child and the store.
-    pub fn get(self) -> SessionId {
-        self.0
+    impl PreprocessingSessionId {
+        /// Checks that `session_id` names a preprocessing protocol, and that it is shaped the way
+        /// every batch-reconstruction caller in this repo shapes a root session.
+        ///
+        /// # Errors
+        /// - [`Dn07Error::OnlinePhaseForbidden`] if the calling protocol is an online one. This is the
+        ///   error that exists to stop the plan's headline mistake.
+        /// - [`Dn07Error::MissingCallingProtocol`] if the session carries no calling protocol, or a
+        ///   transport tag that never names one.
+        /// - [`Dn07Error::MalformedSessionId`] if `sub_id` or `round_id` is non-zero. A DN07 session is
+        ///   a root session whose only child is its batch reconstruction; the sub/round bytes are the
+        ///   child-minting space and must be free, exactly as `mul_pub::init` requires.
+        pub fn new(session_id: SessionId) -> Result<Self, Dn07Error> {
+            let Some(tag) = session_id.calling_protocol() else {
+                return Err(Dn07Error::MissingCallingProtocol(session_id));
+            };
+            match phase_of(tag) {
+                ProtocolPhase::Preprocessing => {}
+                ProtocolPhase::Online => {
+                    return Err(Dn07Error::OnlinePhaseForbidden {
+                        session_id,
+                        tag: tag as u8,
+                    })
+                }
+                ProtocolPhase::Transport => {
+                    return Err(Dn07Error::MissingCallingProtocol(session_id))
+                }
+            }
+            if session_id.sub_id() != 0 || session_id.round_id() != 0 {
+                return Err(Dn07Error::MalformedSessionId(session_id));
+            }
+            Ok(Self(session_id))
+        }
+
+        /// The wrapped session id, for handing to the batch-reconstruction child and the store.
+        pub fn get(self) -> SessionId {
+            self.0
+        }
     }
 }
+pub use barrier::PreprocessingSessionId;
 
 #[derive(Debug, Error)]
 pub enum Dn07Error {
@@ -417,26 +315,6 @@ pub enum Dn07Error {
     },
     #[error("empty input")]
     EmptyInput,
-    /// A [`PrssWindow`](crate::honeybadger::prss::PrssWindow) claimed on one keystream was
-    /// offered to a consumer that derives from another. Unreachable through the node's own
-    /// wiring; it exists so that the window type's guarantee survives a future caller that
-    /// wires the two RandBit windows the wrong way round, where the symptom would otherwise be
-    /// a silent width/stride collision rather than an error.
-    #[error("PRSS window is on stream {got}, but this derivation reads stream {expected}")]
-    WrongPrssStream {
-        expected: &'static str,
-        got: &'static str,
-    },
-    /// A window issued by an allocator bound to different key material. See
-    /// [`PrssKeys::key_family_id`](crate::honeybadger::prss::prss::PrssKeys::key_family_id): the
-    /// monotone position count is only meaningful against the key family it was counted for, so
-    /// spending a window on another family would restart every position at zero under keys that
-    /// have already used them.
-    #[error(
-        "PRSS window was claimed against a different key family than this source holds: its \
-         position count says nothing about what these keys have already derived"
-    )]
-    KeyFamilyMismatch,
     #[error("batch of {requested} exceeds the per-session maximum of {max}")]
     BatchTooLarge { requested: usize, max: usize },
     #[error(
@@ -473,19 +351,6 @@ pub enum Dn07Error {
     Abort,
     #[error("payload deserialization: {0}")]
     Deserialization(String),
-    #[error("prss: {0}")]
-    Prss(String),
-    #[error("przs: {0}")]
-    Przs(String),
-    #[error(
-        "key stores disagree: {what} says {left}, but the other says {right}. A double sharing \
-         assembled from mismatched stores is a sharing of two different secrets."
-    )]
-    KeyStoreMismatch {
-        what: &'static str,
-        left: usize,
-        right: usize,
-    },
 }
 
 /// Lifecycle of one DN07 session. Deliberately two-valued: there is exactly one network round.

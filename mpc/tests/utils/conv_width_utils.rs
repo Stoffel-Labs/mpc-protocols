@@ -7,7 +7,7 @@
 //!
 //! * the `ell = 33` fixed-point width and the corpus that exercises it, and
 //! * clear-text models of the **depth-13 serial chain** the A2B circuit used to be and the
-//!   **depth-7 parallel offset adder** that replaced it, so that "the new circuit computes the
+//!   **parallel offset adder** that replaced it, so that "the new circuit computes the
 //!   same function" is a checkable statement and not a claim in a commit message.
 //!
 //! Everything here is pure: no network, no shares, no async. The only protocol object it touches
@@ -15,31 +15,40 @@
 //! the clear is crate-private, so output equivalence is pinned against the `u64` models below and
 //! against the real protocol's output, not against a re-evaluated netlist.
 
-use stoffelcrypto::common::math::goldilocks::GoldilocksField;
+use ark_ff::PrimeField;
+use num_bigint::BigUint;
+use stoffelcrypto::common::convert::field_bit_width;
 use stoffelcrypto::common::types::fixed::FixedPointPrecision;
 use stoffelcrypto::honeybadger::binary_circuits::prefix::{add_public_constant, mux};
 use stoffelcrypto::honeybadger::binary_circuits::{Builder, Netlist};
 
-pub type F = GoldilocksField;
+/// The scalar field of BLS12-381.
+pub type F = ark_bls12_381::Fr;
 
-/// `p = 2^64 - 2^32 + 1`, the Goldilocks modulus.
-pub const P: u64 = 0xFFFF_FFFF_0000_0001;
+/// The modulus `p`.
+pub fn modulus() -> BigUint {
+    F::MODULUS.into()
+}
 
-/// `d = 2^64 - p = 2^32 - 1`. The offset both circuits are built around: `A >= p` iff `A + d`
-/// carries out of bit 63, which is what turns the second addition into the conditional reduction.
-pub const DELTA: u64 = P.wrapping_neg();
+/// `2^w`, one past the largest `w`-bit value, for `w` the field's bit width.
+pub fn two_pow_w() -> BigUint {
+    BigUint::from(1u8) << field_bit_width::<F>()
+}
 
-/// The bound the A2B preprocessing is sized at, and the depth it runs at, after the plan's §1.5
-/// change. Quoted here so the two files that assert them agree on one pair of numbers.
-pub const PARALLEL_AND_BOUND: usize = 695;
-pub const PARALLEL_DEPTH: usize = 7;
+/// `d = 2^w - p`. The offset both circuits are built around: `A >= p` iff `A + d` carries out of
+/// the top bit, which is what turns the second addition into the conditional reduction.
+pub fn delta() -> BigUint {
+    two_pow_w() - modulus()
+}
 
-/// The same two figures for the serial `ADD64 -> ADD64 -> MUX` chain this replaced: `321` for the
-/// first adder under an all-ones `y` (its carry out is live there, and feeds the `c1 XOR c2`),
-/// `241` for the second, whose public operand is the sparse constant `d = 2^32 - 1`, and `64` for
-/// the multiplexer.
-pub const SERIAL_AND_BOUND: usize = 626;
-pub const SERIAL_DEPTH: usize = 13;
+/// The bound the A2B preprocessing is sized at, and the depth it runs at, on [`F`]. Quoted here so
+/// the files that assert them agree on one pair of numbers.
+pub const PARALLEL_AND_BOUND: usize = 3798;
+pub const PARALLEL_DEPTH: usize = 9;
+
+/// The depth of the serial `ADD -> ADD -> MUX` chain this replaced, on [`F`]: the second adder
+/// cannot start until the first has finished.
+pub const SERIAL_DEPTH: usize = 17;
 
 // -------------------------------------------------------------------------------------------
 // The fixed-point width
@@ -108,20 +117,21 @@ pub fn fixed_point_corpus() -> Vec<(&'static str, u64)> {
 // Clear-text models of the two circuits
 // -------------------------------------------------------------------------------------------
 
-/// The **depth-13 serial chain**: `ADD64(y, r) -> ADD64(d, t1) -> MUX(c1 XOR c2)`.
+/// The **serial chain**: `ADD(y, r) -> ADD(d, t1) -> MUX(c1 XOR c2)`, over the integers.
 ///
-/// This is the circuit `FieldA2BCircuit` used to build, transcribed as `u64` arithmetic. Its
-/// reduction test is `c1 XOR c2`, where `c1` is the carry out of `y + r` and `c2` the carry out
-/// of adding `d` to the truncated sum — so it needs the `(c1, c2) = (1, 1)`-unreachability lemma
-/// to be sound, and it cannot start the second addition until the first has finished.
+/// This is the circuit `FieldA2BCircuit` used to build. Its reduction test is `c1 XOR c2`, where
+/// `c1` is the carry out of `y + r` and `c2` the carry out of adding `d` to the truncated sum —
+/// so it needs the `(c1, c2) = (1, 1)`-unreachability lemma to be sound, and it cannot start the
+/// second addition until the first has finished.
 ///
-/// # Panics
-///
-/// Never; every operation is explicitly wrapping. The *result* is only the A2B of `y + r` when
-/// `y < p` and `r < p`, which is the circuit's precondition and the caller's obligation.
-pub fn serial_offset_adder(y: u64, r: u64) -> u64 {
-    let (t1, c1) = y.overflowing_add(r);
-    let (t2, c2) = t1.overflowing_add(DELTA);
+/// The *result* is only the A2B of `y + r` when `y < p` and `r < p`, which is the circuit's
+/// precondition and the caller's obligation.
+pub fn serial_offset_adder(y: &BigUint, r: &BigUint) -> BigUint {
+    let top = two_pow_w();
+    let sum1 = y + r;
+    let (t1, c1) = (&sum1 % &top, sum1 >= top);
+    let sum2 = &t1 + delta();
+    let (t2, c2) = (&sum2 % &top, sum2 >= top);
     if c1 ^ c2 {
         t2
     } else {
@@ -129,23 +139,24 @@ pub fn serial_offset_adder(y: u64, r: u64) -> u64 {
     }
 }
 
-/// The **depth-7 parallel offset adder** (plan §1.5): the offset moves onto the *public* operand,
-/// so the two additions read only `r` and run concurrently, and `c2` alone decides the reduction.
+/// The **parallel offset adder**: the offset moves onto the *public* operand, so the two
+/// additions read only `r` and run concurrently, and `c2` alone decides the reduction.
 ///
 /// `c1` is never formed, which is what makes the unreachability lemma unnecessary rather than
 /// merely free, and what lets `Builder::finish` delete the first adder's whole carry-out cone.
 ///
 /// # Panics
 ///
-/// Debug-asserts `y < p`. `Y = y + d` must not wrap, and that holds exactly when `y` is the
-/// canonical representative of an opened field element — which `FieldA2BCircuit::new` enforces by
-/// returning `MaskNotCanonical`.
-pub fn parallel_offset_adder(y: u64, r: u64) -> u64 {
-    debug_assert!(y < P, "the public operand must be canonical");
-    let (t1, _c1) = y.overflowing_add(r);
-    let (t2, c2) = y.wrapping_add(DELTA).overflowing_add(r);
-    if c2 {
-        t2
+/// If `y >= p`. `Y = y + d` must not wrap, and that holds exactly when `y` is the canonical
+/// representative of an opened field element — which `FieldA2BCircuit::new` enforces by returning
+/// `MaskNotCanonical`.
+pub fn parallel_offset_adder(y: &BigUint, r: &BigUint) -> BigUint {
+    assert!(*y < modulus(), "the public operand must be canonical");
+    let top = two_pow_w();
+    let t1 = (y + r) % &top;
+    let sum2 = y + delta() + r;
+    if sum2 >= top {
+        sum2 % &top
     } else {
         t1
     }
@@ -154,16 +165,34 @@ pub fn parallel_offset_adder(y: u64, r: u64) -> u64 {
 /// Little-endian bits of `value` at `width`, so a model's output can be compared against what a
 /// conversion returns without going through `F`.
 pub fn bits_le(value: u64, width: usize) -> Vec<bool> {
-    (0..width).map(|i| (value >> i) & 1 == 1).collect()
+    (0..width)
+        .map(|i| i < 64 && (value >> i) & 1 == 1)
+        .collect()
 }
 
-/// `sum_i 2^i bits[i]` as a `u128`, so an overshoot past `2^64` shows up rather than wrapping.
+/// The same for a value of any size.
+pub fn big_bits_le(value: &BigUint, width: usize) -> Vec<bool> {
+    (0..width).map(|i| value.bit(i as u64)).collect()
+}
+
+/// `sum_i 2^i bits[i]` as a `u128`, for the narrow widths. Panics past 128 bits rather than
+/// wrapping.
 pub fn as_integer(bits: &[bool]) -> u128 {
+    assert!(bits.len() <= 128, "use `as_big` for a wide bit vector");
     bits.iter()
         .enumerate()
         .filter(|(_, set)| **set)
         .map(|(i, _)| 1u128 << i)
         .sum()
+}
+
+/// `sum_i 2^i bits[i]` at any width.
+pub fn as_big(bits: &[bool]) -> BigUint {
+    let mut acc = BigUint::from(0u8);
+    for (i, set) in bits.iter().enumerate() {
+        acc.set_bit(i as u64, *set);
+    }
+    acc
 }
 
 // -------------------------------------------------------------------------------------------
@@ -185,7 +214,7 @@ pub fn serial_a2b_netlist(width: usize) -> Netlist {
     let mut builder = Builder::new();
     let r = builder.inputs(width);
     let ones = vec![true; width];
-    let delta = bits_le(DELTA, width);
+    let delta = big_bits_le(&delta(), width);
 
     // `t1 = y + r`, carry out live: the serial chain's reduction test is `c1 XOR c2`.
     let (t1, c1) = add_public_constant(&mut builder, &ones, &r).expect("first adder");

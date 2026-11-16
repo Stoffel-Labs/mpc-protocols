@@ -1,56 +1,36 @@
-//! The daBit **contract**, end to end, at the two party counts a deployment is sized for.
+//! daBit generation, end to end: the object every consumer relies on, and what a cheating party
+//! can and cannot do to it.
 //!
-//! A daBit is the only object in this crate that ties the prime field and `GF(2^k)` together, and
-//! it ties them *by value*. Everything downstream — A2B's mask, B2A's per-bit affine step, the
-//! edaBit composition — is correct only if four things hold of every output:
+//! The generator is [`ReplicatedDaBitNode`](stoffelcrypto::honeybadger::dabit::replicated) —
+//! information-theoretic, built from per-set one-time bits that are dealt, echoed, and folded.
+//! These tests run it over a real `FakeNetwork`.
 //!
-//! | | property | where it is checked |
-//! |---|---|---|
-//! | the tie | both halves reconstruct to **the same bit** | [`assert_same_bit_in_both_domains`] |
-//! | T1 domain | both halves carry the holder's own party index, and nothing but that index crosses | same |
-//! | T2 form | each half really is a polynomial of degree `<= t` | [`assert_degree_t_form`] |
-//! | T3 value | the secret is a bit in `F` (`0`/`1`) and in `K` (`b^2 = b`) | [`assert_same_bit_in_both_domains`] |
+//! # What is asserted
 //!
-//! plus two properties of a *batch* rather than of one daBit: the bits are **uniform**, and two
-//! batches drawn at different `exec_id`s are **independent**.
-//!
-//! The plan's §5 argues all of T1, T2 and T3 hold *by construction* and at zero certification
-//! cost, precisely because no value is ever dealt. That argument is the reason there is no
-//! bit-ness check, no bucketing and no cross-domain consistency protocol left to test — so these
-//! tests are what stands in their place, and a deviation that reintroduced a dealt value would
-//! show up here as a broken invariant rather than as a missing sub-protocol.
+//! * **One bit, two domains.** Both halves reconstruct to the same value, and that value is 0 or
+//!   1 in each field.
+//! * **Degree `t` as form.** Every `t+1`-subset of shares interpolates to the same secret.
+//! * **Uniformity and independence**, as two-sided statistical bands.
+//! * **Abort, never a wrong output.** A dealer that equivocates, a holder that echoes something
+//!   else, and a malformed dealing all end in an error at every party — no party is left holding
+//!   a daBit from a tampered batch.
 //!
 //! # Phase: PREPROCESSING
 //!
-//! `PrssDaBitNode` is preprocessing. Its single opening is nevertheless degree-`t` and robust, so
-//! no test in this file can reach a degree-`2t` opening, a timeout-driven abort or a broadcast.
-//!
-//! # Relationship to `prss_dabit_test.rs`
-//!
-//! That file exercises the *generator*: the honest run at `n = 4 / 7 / 10`, a corrupt opener, and
-//! the `beta`/`psi` keystream separation. This file exercises the *object* and the *budget*, and
-//! adds the `n = 13, t = 4` party count, the `t+1`-subset form check, the uniformity band, the
-//! cross-batch independence check and the lifetime leak budget. The two overlap only in the
-//! honest `n = 10` run, which both need as a base.
-//!
-//! # What is dealt
-//!
-//! The PRSS key family and the `RandBit`s, for the reasons given in
-//! [`crate::utils::dabit_utils`]. Everything the daBit protocol itself does is real.
+//! Synchronous, abort permitted. The adversarial tests use a short timeout because a party that
+//! did not itself detect the cheating learns of it by the batch stalling.
 
 mod utils;
 
-use stoffelcrypto::honeybadger::{
-    dabit::{
-        prss_dabit::{DaBitLeakBudget, PrssDaBitNode},
-        DaBit, DaBitError, EdaBit,
-    },
-    MIN_STATISTICAL_SECURITY,
-};
+use std::sync::Arc;
+use std::time::Duration;
+
+use stoffelcrypto::honeybadger::batch_recon::{BatchReconMsg, BatchReconMsgType};
+use stoffelcrypto::honeybadger::dabit::{DaBit, DaBitError, DaBitPayload, EdaBit};
 
 use crate::utils::dabit_utils::{
     assert_bits_look_uniform, assert_degree_t_form, assert_same_bit_in_both_domains, deal_dabits,
-    deal_rand_bits, expect_all_err, expect_all_ok, hamming, DaBitHarness, F, K,
+    expect_all_err, expect_all_ok, hamming, DaBitHarness, OpenTamper, Tamper, F, K,
 };
 use crate::utils::test_utils::{catch_expected_panic, setup_tracing};
 
@@ -60,100 +40,93 @@ use num_bigint::BigUint;
 use stoffelcrypto::common::{gf2k::share::GfShare, SecretSharingScheme};
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 
-// -------------------------------------------------------------------------------------------
-// The contract, end to end
-// -------------------------------------------------------------------------------------------
+/// Long enough for an honest run many times over, short enough that a stalled batch fails fast.
+const ABORT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// `n = 10, t = 3`: `C(10,3) = 120`, `ceil = 7`, so the production default is `k = 4` and each
-/// daBit bills five `RandBit`s.
+async fn one_bit_in_two_domains(n: usize, t: usize, count: usize, seed: u64) {
+    let mut harness = DaBitHarness::new(n, t, seed);
+    let batch = expect_all_ok(harness.generate(count).await);
+    let bits = assert_same_bit_in_both_domains(&batch, n, t);
+    assert_degree_t_form(&batch, n, t);
+    assert_bits_look_uniform(&bits, &format!("n={n} t={t}"));
+    // Nothing stays resident: the dealing session and every XOR-fold child are retired.
+    for party in 0..n {
+        assert_eq!(harness.node(party).store_len().await, 0, "party {party}");
+        assert_eq!(
+            harness.node(party).dn07.store_len().await,
+            0,
+            "party {party}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dabits_are_one_bit_in_two_domains_n4_t1() {
+    setup_tracing();
+    one_bit_in_two_domains(4, 1, 128, 0x0DAB_0004).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dabits_are_one_bit_in_two_domains_n7_t2() {
+    setup_tracing();
+    one_bit_in_two_domains(7, 2, 64, 0x0DAB_0007).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dabits_are_one_bit_in_two_domains_n10_t3() {
     setup_tracing();
-    let mut harness = DaBitHarness::new(10, 3, None, MIN_STATISTICAL_SECURITY, 0x0DAB_0010);
-    assert_eq!(harness.node(0).rand_bits_per_dabit(), 5);
-
-    let batch = expect_all_ok(harness.generate(64).await);
-    let bits = assert_same_bit_in_both_domains(&batch, 10, 3);
-    assert_degree_t_form(&batch, 10, 3);
-    assert_bits_look_uniform(&bits, "n=10 t=3");
+    one_bit_in_two_domains(10, 3, 32, 0x0DAB_0010).await;
 }
 
-/// `n = 13, t = 4`: `C(13,4) = 715`, `ceil = 10`, default `k = 7`, eight `RandBit`s per daBit —
-/// and `C(12,4) = 495` PRF streams per party per call, which is the largest PRSS load this
-/// construction supports in practice.
+/// A batch of one is as sound as a batch of many: there is no statistical check to amortise.
 #[tokio::test(flavor = "multi_thread")]
-async fn dabits_are_one_bit_in_two_domains_n13_t4() {
+async fn a_single_dabit_batch_is_well_formed() {
     setup_tracing();
-    let mut harness = DaBitHarness::new(13, 4, None, MIN_STATISTICAL_SECURITY, 0x0DAB_0013);
-    assert_eq!(harness.node(0).rand_bits_per_dabit(), 8);
-
-    let batch = expect_all_ok(harness.generate(48).await);
-    let bits = assert_same_bit_in_both_domains(&batch, 13, 4);
-    assert_degree_t_form(&batch, 13, 4);
-    assert_bits_look_uniform(&bits, "n=13 t=4");
+    let mut harness = DaBitHarness::new(4, 1, 0x0DAB_0001);
+    let batch = expect_all_ok(harness.generate(1).await);
+    assert_same_bit_in_both_domains(&batch, 4, 1);
+    assert_degree_t_form(&batch, 4, 1);
 }
 
-/// Two batches from the same nodes at **different `exec_id`s** must be independent.
-///
-/// The `exec_id` is the high half of the PRSS position. If it failed to reach the derivation — a
-/// rewound cursor, or a session id assembled without it — the two batches would be bit-identical
-/// while every other test in this file still passed, and the adversary, who knows every `beta_T`
-/// but its own, would learn `x XOR x'` for every pair of values the two batches masked. That is
-/// the VERIA-222 class and it is one of the three errors the plan flags as otherwise silent.
-///
-/// The band is generous on purpose: what is being caught is `0` (identical) or `count`
-/// (complementary), not a subtle bias.
+/// Every batch draws fresh randomness: two batches must not repeat their bits.
 #[tokio::test(flavor = "multi_thread")]
-async fn two_batches_at_different_exec_ids_are_independent() {
+async fn two_batches_are_independent() {
     setup_tracing();
-    let mut harness = DaBitHarness::new(10, 3, None, MIN_STATISTICAL_SECURITY, 0x0DAB_0020);
+    let mut harness = DaBitHarness::new(4, 1, 0x0DAB_0020);
 
     let first = expect_all_ok(harness.generate(64).await);
     let second = expect_all_ok(harness.generate(64).await);
 
-    let a = assert_same_bit_in_both_domains(&first, 10, 3);
-    let b = assert_same_bit_in_both_domains(&second, 10, 3);
+    let a = assert_same_bit_in_both_domains(&first, 4, 1);
+    let b = assert_same_bit_in_both_domains(&second, 4, 1);
     assert_bits_look_uniform(&a, "batch 1");
     assert_bits_look_uniform(&b, "batch 2");
 
     let distance = hamming(&a, &b);
     assert!(
-        distance > 0,
-        "two batches at different exec ids produced identical bits: the exec id is not reaching \
-         the PRSS position"
-    );
-    // 5 sigma of Binomial(64, 1/2): sigma = 4, so [12, 52].
-    assert!(
         (12..=52).contains(&distance),
         "two independent 64-bit batches differed in {distance} positions, which is outside a \
          five-sigma band around 32"
     );
-    assert_eq!(harness.produced().await, 128, "lifetime counter");
 }
 
-/// The composed edaBit — the object A2B actually consumes — inherits the daBits' tie.
-///
-/// `EdaBit::compose` is purely local: `[r]_F = sum 2^i [b_i]_F`, with the binary halves carried
-/// through unchanged. What has to hold afterwards is that the arithmetic share is the *integer*
-/// `sum 2^i b_i`, which is only true if every `[b_i]_F` really was the same bit as `[b_i]_K` and
-/// carried the right weight. A daBit whose two halves had drifted apart would still compose
-/// without error and would still reconstruct to *some* field element — it would just not be the
-/// integer the bits spell out.
+/// `[r]_F = Σ 2^i [b_i]_F` over a batch's arithmetic halves is the integer the binary halves
+/// spell — the property edaBit composition, and through it A2B, rests on.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_edabit_composed_from_dabits_is_the_integer_its_bits_spell() {
     setup_tracing();
     const WIDTH: usize = 32;
-    let mut harness = DaBitHarness::new(10, 3, None, MIN_STATISTICAL_SECURITY, 0x0DAB_0030);
+    let (n, t) = (7, 2);
+    let mut harness = DaBitHarness::new(n, t, 0x0DAB_0030);
 
     let batch = expect_all_ok(harness.generate(WIDTH).await);
-    let bits = assert_same_bit_in_both_domains(&batch, 10, 3);
+    let bits = assert_same_bit_in_both_domains(&batch, n, t);
 
     let composed: Vec<EdaBit<F, K>> = batch
         .iter()
         .map(|dabits| EdaBit::compose(dabits, WIDTH).expect("edaBit composition"))
         .collect();
 
-    // The binary halves ride through untouched — the composition is arithmetic-side only.
     for (party, edabit) in composed.iter().enumerate() {
         assert_eq!(edabit.width, WIDTH);
         assert_eq!(edabit.bits.len(), WIDTH);
@@ -166,7 +139,7 @@ async fn an_edabit_composed_from_dabits_is_the_integer_its_bits_spell() {
     }
 
     let value_shares: Vec<RobustShare<F>> = composed.iter().map(|e| e.value.clone()).collect();
-    let (_, value) = RobustShare::recover_secret(&value_shares, 10, 3).expect("value");
+    let (_, value) = RobustShare::recover_secret(&value_shares, n, t).expect("value");
 
     let expected: u64 = bits
         .iter()
@@ -178,253 +151,220 @@ async fn an_edabit_composed_from_dabits_is_the_integer_its_bits_spell() {
         F::from(expected),
         "the composed edaBit is not the integer its {WIDTH} bits spell out"
     );
-    // `width < 64` is the branch that needs no `r < p` filter: the sum cannot reach the modulus.
     let modulus: BigUint = F::MODULUS.into();
     assert!(BigUint::from(expected) < modulus);
 }
 
-// -------------------------------------------------------------------------------------------
-// The `k` knob and the lifetime leak budget
-// -------------------------------------------------------------------------------------------
-
-/// `k` prices three things at once, and they must move together: the `RandBit` bill `1 + k`, the
-/// per-daBit leak `2^-(lambda+k+1)`, and the lifetime cap `Q = 2^(lambda+k+1-kappa)`.
-///
-/// `lambda` and `k` are one budget — both follow from the single no-wrap inequality — so a `k`
-/// raised without re-deriving `lambda` would let `S + 2r'' + r'_0` wrap `p`, and `p` is odd, so a
-/// wrap flips the extracted bit. The implementation evaluates that inequality rather than assuming
-/// it; this checks the knob's *observable* consequences at the two party counts of this file,
-/// including that the one value above the admissible range is refused rather than clamped.
-#[test]
-fn the_k_knob_prices_the_randbit_bill_and_the_lifetime_budget() {
-    setup_tracing();
-    type Node = PrssDaBitNode<F, K>;
-
-    // (n, t, lambda, ceil(log2 C(n,t)), default k)
-    for (n, t, lambda, ceil, default_k) in [
-        (10usize, 3usize, 55usize, 7usize, 4usize),
-        (13, 4, 52, 10, 7),
-    ] {
-        let mut previous_budget = 0u64;
-        for k in 0..=ceil - 1 {
-            let node = Node::new(0, n, t, MIN_STATISTICAL_SECURITY, Some(k))
-                .unwrap_or_else(|e| panic!("n={n} k={k}: {e:?}"));
-            let budget = node.budget;
-
-            assert_eq!(budget.mask_bits, lambda, "lambda at n={n}");
-            assert_eq!(budget.set_bits, ceil, "ceil(log2 C) at n={n}");
-            assert_eq!(budget.topup_bits, k);
-            assert_eq!(
-                budget.leak_exponent(),
-                lambda + k + 1,
-                "leak at n={n} k={k}"
-            );
-            assert_eq!(node.rand_bits_per_dabit(), 1 + k, "bill at n={n} k={k}");
-            assert_eq!(
-                budget.max_dabits,
-                1u64 << (lambda + k + 1 - MIN_STATISTICAL_SECURITY),
-                "Q at n={n} k={k}"
-            );
-            assert!(
-                budget.max_dabits > previous_budget,
-                "Q did not grow from k={} to k={k} at n={n}",
-                k.saturating_sub(1)
-            );
-            previous_budget = budget.max_dabits;
+fn flip_first_bit(sets: &mut [(u32, Vec<u8>)]) {
+    if let Some((_, bits)) = sets.first_mut() {
+        if let Some(byte) = bits.first_mut() {
+            *byte ^= 1;
         }
-
-        // The default is `ceil - 3`, which is what buys `Q >= 2^20` at every supported n.
-        let node = Node::new(0, n, t, MIN_STATISTICAL_SECURITY, None).expect("default k");
-        assert_eq!(node.budget.topup_bits, default_k, "default k at n={n}");
-        assert!(
-            node.budget.max_dabits >= 1 << 20,
-            "default k at n={n} buys only {} daBits",
-            node.budget.max_dabits
-        );
-
-        // One past the admissible range is a hard error, never a clamp.
-        let err = Node::new(0, n, t, MIN_STATISTICAL_SECURITY, Some(ceil))
-            .expect_err("k = ceil must be refused");
-        assert!(
-            matches!(&err, DaBitError::TopUpTooLarge { requested, max } if *requested == ceil && *max == ceil - 1),
-            "n={n}: expected TopUpTooLarge, got {err:?}"
-        );
     }
 }
 
-/// `kappa` above `lambda + k + 1` admits no positive number of daBits, and that is a construction
-/// error rather than a node that silently produces none.
-#[test]
-fn a_budget_that_admits_no_dabits_is_refused_at_construction() {
+/// **The dealer equivocates.** Party 0 deals one set's bits to party 2 with a bit flipped, and
+/// the true bits to that set's other holders. The echo exposes it: every holder of the set
+/// aborts with a mismatch, the party outside the set stalls, and nobody outputs a daBit.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_equivocating_dealer_aborts_the_batch() {
     setup_tracing();
-    // n = 10: lambda = 55, k = 0, so the leak exponent is 56.
-    let err = DaBitLeakBudget::new::<F>(10, 3, 56, Some(0)).expect_err("kappa = 56 at n=10");
-    assert!(
-        matches!(
-            err,
-            DaBitError::LeakBudgetUnreachable {
-                leak_exponent: 56,
-                statistical_security: 56
+    let tamper: Tamper = Arc::new(|recipient, msg| {
+        if recipient == 2 && msg.sender_id == 0 {
+            if let DaBitPayload::Deal { sets, .. } = &mut msg.payload {
+                flip_first_bit(sets);
             }
-        ),
-        "expected LeakBudgetUnreachable, got {err:?}"
-    );
-    // One below is the smallest reachable budget, `Q = 2`.
-    let budget = DaBitLeakBudget::new::<F>(10, 3, 55, Some(0)).expect("kappa = 55 at n=10");
-    assert_eq!(budget.max_dabits, 2);
-}
-
-/// The lifetime budget is **enforced**, and running past it is a clean typed error rather than a
-/// wrap.
-///
-/// The cap is not hygiene: past `Q` the union bound `Q * 2^-(lambda+k+1)` on the per-daBit Mod2
-/// leak exceeds the configured `kappa`, so the node has spent its whole privacy argument and the
-/// fix is a re-key or a larger `k`, not another batch. A counter that wrapped, saturated, or was
-/// rolled back on failure would keep producing daBits that are no longer covered by any bound —
-/// and nothing downstream would notice, because the daBits themselves stay perfectly correct.
-///
-/// `kappa = 55` at `n = 10, k = 0` gives `Q = 2`, which is the only way to reach the cap inside a
-/// test: at the minimum `kappa = 40` the smallest budget any supported party count admits is
-/// `2^13`.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_lifetime_budget_is_enforced_and_exhaustion_is_a_clean_error() {
-    setup_tracing();
-    let mut harness = DaBitHarness::new(10, 3, Some(0), 55, 0x0DAB_0040);
-    assert_eq!(harness.node(0).budget.max_dabits, 2);
-    assert_eq!(harness.node(0).remaining_budget().await, 2);
-
-    // Spend the budget exactly.
-    let first = expect_all_ok(harness.generate(1).await);
-    assert_same_bit_in_both_domains(&first, 10, 3);
-    assert_eq!(harness.produced().await, 1);
-    assert_eq!(harness.node(0).remaining_budget().await, 1);
-
-    let second = expect_all_ok(harness.generate(1).await);
-    assert_same_bit_in_both_domains(&second, 10, 3);
-    assert_eq!(harness.produced().await, 2);
-    assert_eq!(harness.node(0).remaining_budget().await, 0);
-
-    // Past it: a typed error from every party, not a wrap, not a panic, not a short batch.
-    for attempt in 3..=4u64 {
-        let errors = expect_all_err(harness.generate(1).await);
-        for (party, err) in errors.iter().enumerate() {
-            assert!(
-                matches!(
-                    err,
-                    DaBitError::LeakBudgetExhausted {
-                        produced: 2,
-                        requested: 1,
-                        budget: 2
-                    }
-                ),
-                "party {party} attempt {attempt}: expected LeakBudgetExhausted, got {err:?}"
-            );
         }
-        // The counter is pinned, not advanced and not wrapped, by a refused call.
-        assert_eq!(
-            harness.produced().await,
-            2,
-            "after refused attempt {attempt}"
-        );
-        assert_eq!(harness.node(0).remaining_budget().await, 0);
-    }
+    });
+    let mut harness = DaBitHarness::with_tamper(4, 1, 0x0DAB_0040, Some(tamper));
+    let errors = expect_all_err(harness.generate_within(16, ABORT_TIMEOUT).await);
 
-    // No session was left resident by either the spent batches or the refusals.
-    for party in 0..10 {
-        assert_eq!(
-            harness.node(party).store_len().await,
-            0,
-            "party {party} left a Mod2 session behind"
-        );
-    }
+    assert!(
+        matches!(errors[2], DaBitError::DealingMismatch { .. }),
+        "the party that was dealt the wrong bits must see the mismatch, got {:?}",
+        errors[2]
+    );
+    let detected = errors
+        .iter()
+        .filter(|e| matches!(e, DaBitError::DealingMismatch { .. }))
+        .count();
+    assert!(
+        detected >= 2,
+        "an equivocation is seen by both sides of at least one echo, got {errors:?}"
+    );
 }
 
-/// A batch larger than what is left of the budget is refused **whole**, and the refusal costs
-/// nothing.
-///
-/// Half a batch would be worse than none: the caller would have to know which daBits it got, and
-/// the ones it did get would already be outside the bound. And a refusal that still charged the
-/// budget would let an over-large request burn a node's remaining capacity without producing
-/// anything — a free denial of service against every later caller.
+/// **A holder echoes something it was not dealt.** The party it lies to aborts.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_over_budget_batch_is_refused_whole_and_costs_nothing() {
+async fn a_lying_echo_aborts_the_batch() {
     setup_tracing();
-    let mut harness = DaBitHarness::new(10, 3, Some(0), 55, 0x0DAB_0050);
-    assert_eq!(harness.node(0).budget.max_dabits, 2);
+    let tamper: Tamper = Arc::new(|recipient, msg| {
+        if recipient == 0 && msg.sender_id == 1 {
+            if let DaBitPayload::Echo { sets, .. } = &mut msg.payload {
+                flip_first_bit(sets);
+            }
+        }
+    });
+    let mut harness = DaBitHarness::with_tamper(4, 1, 0x0DAB_0041, Some(tamper));
+    let errors = expect_all_err(harness.generate_within(16, ABORT_TIMEOUT).await);
+    assert!(
+        matches!(errors[0], DaBitError::DealingMismatch { with: 1 }),
+        "got {:?}",
+        errors[0]
+    );
+}
 
-    let errors = expect_all_err(harness.generate(3).await);
-    for (party, err) in errors.iter().enumerate() {
-        assert!(
-            matches!(
-                err,
-                DaBitError::LeakBudgetExhausted {
-                    produced: 0,
-                    requested: 3,
-                    budget: 2
+/// **A dealing no honest party would send** — here, bits for a set the sender does not deal —
+/// fails the batch at the recipient instead of being absorbed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dealing_for_a_set_the_sender_does_not_deal_aborts_the_batch() {
+    setup_tracing();
+    // Party 3 deals no set at n = 4 except the one excluding the three parties below it, so any
+    // entry it sends party 0 under another rank is one it has no right to deal.
+    let tamper: Tamper = Arc::new(|recipient, msg| {
+        if recipient == 1 && msg.sender_id == 0 {
+            if let DaBitPayload::Deal { sets, .. } = &mut msg.payload {
+                // Rank 0 is the set {0}: party 0 is inside it and cannot be its dealer.
+                if let Some((rank, _)) = sets.first_mut() {
+                    *rank = 0;
                 }
-            ),
-            "party {party}: expected LeakBudgetExhausted, got {err:?}"
-        );
-    }
-    assert_eq!(
-        harness.produced().await,
-        0,
-        "a refused batch charged the budget"
+            }
+        }
+    });
+    let mut harness = DaBitHarness::with_tamper(4, 1, 0x0DAB_0042, Some(tamper));
+    let errors = expect_all_err(harness.generate_within(16, ABORT_TIMEOUT).await);
+    assert!(
+        matches!(errors[1], DaBitError::InvalidDealing(_)),
+        "got {:?}",
+        errors[1]
     );
-
-    // The budget really is intact: the whole of it is still spendable afterwards.
-    let batch = expect_all_ok(harness.generate(2).await);
-    let bits = assert_same_bit_in_both_domains(&batch, 10, 3);
-    assert_eq!(bits.len(), 2);
-    assert_eq!(harness.produced().await, 2);
 }
 
-/// The `RandBit` bill is checked for **exact** length, in both directions, before the budget is
-/// touched.
-///
-/// A short bill is a caller bug; a long one is worse, because the surplus `RandBit`s are silently
-/// dropped here while the caller still believes they are unused — and the next thing that hands
-/// them out reuses a one-time pad. Neither may charge the leak budget, since neither derives
-/// anything.
+/// Unused high bits of the last byte must be zero: the echo compares bytes, so padding a dealer
+/// could vary would let it make honest holders disagree without changing a single bit.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_wrong_length_randbit_bill_is_refused_without_charging_the_budget() {
+async fn dirty_padding_in_a_dealing_aborts_the_batch() {
     setup_tracing();
-    const COUNT: usize = 4;
-    let mut harness = DaBitHarness::new(10, 3, Some(0), MIN_STATISTICAL_SECURITY, 0x0DAB_0060);
-    // `k = 0`, so the bill is exactly one RandBit per daBit.
-    assert_eq!(harness.node(0).rand_bits_per_dabit(), 1);
-
-    let mut rng = StdRng::seed_from_u64(0x0DAB_0061);
-    // A fresh `exec_id` per attempt even though a refused call derives nothing: the PRSS position
-    // is burned by the attempt, not by the success, and a test that modelled it the other way
-    // would be documenting the cursor rewind the implementation forbids.
-    for supplied in [COUNT - 1, COUNT + 1] {
-        let bits = deal_rand_bits(supplied, 10, 3, &mut rng);
-        let errors = expect_all_err(harness.generate_with(COUNT, bits).await);
-        for (party, err) in errors.iter().enumerate() {
-            assert!(
-                matches!(
-                    err,
-                    DaBitError::MaterialLengthMismatch {
-                        what: "dabit rand bits",
-                        expected: COUNT,
-                        got
-                    } if *got == supplied
-                ),
-                "party {party} with {supplied} RandBits: expected MaterialLengthMismatch, got {err:?}"
-            );
+    let tamper: Tamper = Arc::new(|recipient, msg| {
+        if recipient == 1 && msg.sender_id == 0 {
+            if let DaBitPayload::Deal { sets, .. } = &mut msg.payload {
+                if let Some((_, bits)) = sets.first_mut() {
+                    if let Some(last) = bits.last_mut() {
+                        *last |= 0x80;
+                    }
+                }
+            }
         }
+    });
+    let mut harness = DaBitHarness::with_tamper(4, 1, 0x0DAB_0043, Some(tamper));
+    // 13 bits: the last byte has three unused high bits.
+    let errors = expect_all_err(harness.generate_within(13, ABORT_TIMEOUT).await);
+    assert!(
+        matches!(errors[1], DaBitError::InvalidDealing(_)),
+        "got {:?}",
+        errors[1]
+    );
+}
+
+/// Adds one to every field element an opening message carries, whichever shape it has.
+fn corrupt_opening(msg: &mut BatchReconMsg) {
+    use ark_ff::One;
+    use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+    let mut out = Vec::new();
+    match msg.msg_type {
+        BatchReconMsgType::Eval | BatchReconMsgType::Reveal => {
+            let value = F::deserialize_compressed(msg.payload.as_slice()).expect("element");
+            (value + F::one()).serialize_compressed(&mut out).unwrap();
+        }
+        BatchReconMsgType::EvalBatch | BatchReconMsgType::RevealBatch => {
+            let values = Vec::<F>::deserialize_compressed(msg.payload.as_slice()).expect("batch");
+            let values: Vec<F> = values.into_iter().map(|v| v + F::one()).collect();
+            values.serialize_compressed(&mut out).unwrap();
+        }
+    }
+    msg.payload = out;
+}
+
+/// **A party lies inside the XOR fold.** The fold's products are opened at degree `2t`, where a
+/// shifted share would shift the product — and with it the arithmetic half, leaving a daBit that
+/// is one bit in `K` and something else in `F`. At `n = 3t + 1` that opening has no slack: every
+/// share must lie on one polynomial, so the lie is a detected abort, never an accepted value.
+///
+/// The assertion is deliberately two-sided: either a party errors, or what it output is still a
+/// correct daBit. What must never happen is a party holding an inconsistent one.
+async fn a_lie_in_the_xor_fold_never_yields_a_wrong_dabit(n: usize, t: usize, liar: usize) {
+    let open_tamper: OpenTamper = Arc::new(move |_recipient, msg| {
+        if msg.sender_id == liar {
+            corrupt_opening(msg);
+        }
+    });
+    let mut harness = DaBitHarness::with_tampers(n, t, 0x0DAB_0060, None, Some(open_tamper));
+    let results = harness.generate_within(16, ABORT_TIMEOUT).await;
+
+    let honest: Vec<usize> = (0..n).filter(|p| *p != liar).collect();
+    let finished: Vec<usize> = honest
+        .iter()
+        .copied()
+        .filter(|p| results[*p].is_ok())
+        .collect();
+    assert!(
+        finished.is_empty(),
+        "at n = 3t + 1 a degree-2t opening with one wrong share must not complete, but parties \
+         {finished:?} accepted it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lie_in_the_xor_fold_aborts_n4_t1() {
+    setup_tracing();
+    a_lie_in_the_xor_fold_never_yields_a_wrong_dabit(4, 1, 3).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lie_in_the_xor_fold_aborts_n7_t2() {
+    setup_tracing();
+    a_lie_in_the_xor_fold_never_yields_a_wrong_dabit(7, 2, 0).await;
+}
+
+/// A failed batch leaves nothing resident, so the next one is not starved of session slots.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aborted_batch_retires_its_sessions_and_the_next_batch_succeeds() {
+    setup_tracing();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flag = Arc::clone(&armed);
+    let tamper: Tamper = Arc::new(move |recipient, msg| {
+        if flag.load(std::sync::atomic::Ordering::SeqCst) && recipient == 2 && msg.sender_id == 0 {
+            if let DaBitPayload::Deal { sets, .. } = &mut msg.payload {
+                flip_first_bit(sets);
+            }
+        }
+    });
+    let mut harness = DaBitHarness::with_tamper(4, 1, 0x0DAB_0044, Some(tamper));
+    expect_all_err(harness.generate_within(8, ABORT_TIMEOUT).await);
+    for party in 0..4 {
+        assert_eq!(harness.node(party).store_len().await, 0, "party {party}");
         assert_eq!(
-            harness.produced().await,
+            harness.node(party).dn07.store_len().await,
             0,
-            "a refused bill of {supplied} RandBits charged the leak budget"
+            "party {party}"
         );
     }
 
-    // The exact bill still works afterwards.
-    let bits = deal_rand_bits(COUNT, 10, 3, &mut rng);
-    let batch = expect_all_ok(harness.generate_with(COUNT, bits).await);
-    assert_eq!(assert_same_bit_in_both_domains(&batch, 10, 3).len(), COUNT);
+    armed.store(false, std::sync::atomic::Ordering::SeqCst);
+    let batch = expect_all_ok(harness.generate(32).await);
+    assert_same_bit_in_both_domains(&batch, 4, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_requests_are_refused_before_anything_is_sent() {
+    setup_tracing();
+    let mut harness = DaBitHarness::new(4, 1, 0x0DAB_0050);
+    let errors = expect_all_err(harness.generate(0).await);
+    assert!(matches!(errors[0], DaBitError::NotEnoughMaterial(_)));
+
+    let too_many = harness.node(0).max_batch_size() + 1;
+    let errors = expect_all_err(harness.generate(too_many).await);
+    assert!(matches!(errors[0], DaBitError::BatchTooLarge { .. }));
 }
 
 /// `DaBit::new` is the only constructor, and it refuses the two pairings that would silently

@@ -17,18 +17,17 @@ pub mod utils;
 use crate::utils::test_utils::{
     create_global_nodes, receive, setup_tracing, test_setup, unused_precision,
 };
-use ark_ff::{BigInteger, PrimeField};
+use ark_ff::{Field, One, UniformRand};
 use ark_std::rand::rngs::StdRng;
 use ark_std::rand::SeedableRng;
 use std::time::Duration;
 use stoffelcrypto::{
     common::{
-        convert::{bit_to_binary, canonical_bits, field_bit_width},
+        convert::{bit_to_gf, canonical_bits, field_bit_width},
         gf2k::field::{BinaryField, Gf256},
         gf2k::share::GfShare,
-        math::goldilocks::GoldilocksField,
         rbc::rbc::Avid,
-        SecretSharingScheme, ShareConversionProtocol,
+        ConversionPreprocessingProtocol, SecretSharingScheme, ShareConversionProtocol,
     },
     honeybadger::{
         a2b::a2b::A2BNode,
@@ -40,11 +39,8 @@ use stoffelcrypto::{
 };
 use stoffelmpc_network::fake_network::FakeNetwork;
 
-type F = GoldilocksField;
+type F = ark_bls12_381::Fr;
 type K = Gf256;
-
-/// `p = 2^64 - 2^32 + 1`.
-const P: u64 = 0xFFFF_FFFF_0000_0001;
 
 /// Trusted-dealer daBits: one Shamir sharing of the same bit in each domain, at degree `t`.
 fn deal_dabits(
@@ -58,7 +54,7 @@ fn deal_dabits(
         let bit = index % 2 == 0;
         let arith =
             RobustShare::compute_shares(F::from(bit as u64), n_parties, t, None, rng).unwrap();
-        let bin = GfShare::compute_shares(bit_to_binary::<K>(bit), n_parties, t, rng).unwrap();
+        let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n_parties, t, rng).unwrap();
         for party in 0..n_parties {
             per_party[party].push(DaBit::new(arith[party].clone(), bin[party].clone(), t).unwrap());
         }
@@ -77,18 +73,12 @@ fn deal_edabits(
     let width = field_bit_width::<F>();
     let mut per_party: Vec<Vec<EdaBit<F, K>>> = vec![Vec::new(); n_parties];
     for _ in 0..count {
-        let r = loop {
-            let candidate: u64 = ark_std::rand::Rng::gen(rng);
-            if candidate < P {
-                break candidate;
-            }
-        };
-        let bits = canonical_bits::<F>(F::from(r), width).unwrap();
+        let bits = canonical_bits::<F>(F::rand(rng), width).unwrap();
         let mut per_party_dabits: Vec<Vec<DaBit<F, K>>> = vec![Vec::new(); n_parties];
         for bit in bits {
             let arith =
                 RobustShare::compute_shares(F::from(bit as u64), n_parties, t, None, rng).unwrap();
-            let bin = GfShare::compute_shares(bit_to_binary::<K>(bit), n_parties, t, rng).unwrap();
+            let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n_parties, t, rng).unwrap();
             for party in 0..n_parties {
                 per_party_dabits[party]
                     .push(DaBit::new(arith[party].clone(), bin[party].clone(), t).unwrap());
@@ -193,12 +183,7 @@ async fn b2a_e2e_through_node_dispatch() {
     let mut expected = Vec::new();
     let mut per_party_bits: Vec<Vec<Vec<GfShare<K>>>> = vec![Vec::new(); n_parties];
     for width in widths {
-        let value: u64 = if width == 64 {
-            u64::MAX
-        } else {
-            (1u64 << width) - 1
-        };
-        expected.push(F::from(value));
+        expected.push(F::from(2u64).pow([width as u64]) - F::one());
         let mut columns: Vec<Vec<GfShare<K>>> = vec![Vec::new(); n_parties];
         for _ in 0..width {
             let shares = GfShare::compute_shares(K::one(), n_parties, t, &mut rng).unwrap();
@@ -303,6 +288,129 @@ async fn b2a_rejects_an_overwide_value_without_consuming_dabits() {
     );
 }
 
+/// A conversion never preprocesses on demand.
+///
+/// Conversion preprocessing is synchronous and may abort, and each party would decide for itself
+/// whether its pool was short; running it from inside `a2b`/`b2a` would make those calls
+/// abortable. So a short pool is an error, raised before anything is drained and before a single
+/// message is sent — no receive loop is running here, so a call that tried to preprocess would
+/// hang until its timeout instead of returning.
+#[tokio::test]
+async fn a_short_pool_is_refused_rather_than_topped_up() {
+    setup_tracing();
+
+    let n_parties = 4;
+    let t = 1;
+    let (network, _receivers, _, _) = test_setup(n_parties, vec![]);
+    let mut nodes = nodes_for(n_parties, t, 123);
+    for node in &mut nodes {
+        // Demand is configured, so the old behaviour would have had something to generate.
+        node.params.n_edabits = 1;
+        node.params.n_dabits = 8;
+    }
+
+    let mut rng = StdRng::seed_from_u64(13);
+    let x = deal_field(n_parties, t, &[F::from(7u64)], &mut rng);
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        nodes[0].a2b(vec![x[0][0].clone()], network[0].clone()),
+    )
+    .await
+    .expect("a2b with an empty pool must return at once, not start preprocessing")
+    .expect_err("a2b with an empty edaBit pool must be refused");
+    assert!(
+        format!("{err:?}").contains("NotEnoughPreprocessing"),
+        "unexpected error: {err:?}"
+    );
+
+    let bits: Vec<GfShare<K>> = (0..8).map(|_| GfShare::new(K::zero(), 0, t)).collect();
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        nodes[0].b2a(vec![bits], network[0].clone()),
+    )
+    .await
+    .expect("b2a with an empty pool must return at once, not start preprocessing")
+    .expect_err("b2a with an empty daBit pool must be refused");
+    assert!(
+        format!("{err:?}").contains("NotEnoughPreprocessing"),
+        "unexpected error: {err:?}"
+    );
+
+    let produced = nodes[0].conv_preprocessing_material.lock().await;
+    assert_eq!(
+        produced.dabits_produced(),
+        0,
+        "no daBit may have been generated"
+    );
+    assert_eq!(
+        produced.edabits_produced(),
+        0,
+        "no edaBit may have been generated"
+    );
+}
+
+/// An aborted preprocessing batch seals this party's pools.
+///
+/// Abort is not unanimous: another party may have completed the batch this one aborted, so a
+/// retry would leave the positional pools out of step. Once sealed, the party refuses to convert
+/// and refuses to preprocess until the pools are reset everywhere — a stall, never a wrong value.
+#[tokio::test]
+async fn an_aborted_batch_seals_conversion_until_reset() {
+    setup_tracing();
+
+    let n_parties = 4;
+    let t = 1;
+    let width = 8;
+    let (network, _receivers, _, _) = test_setup(n_parties, vec![]);
+    let mut nodes = nodes_for(n_parties, t, 124);
+
+    let mut rng = StdRng::seed_from_u64(14);
+    let dabits = deal_dabits(n_parties, t, width, &mut rng);
+    {
+        let mut store = nodes[0].conv_preprocessing_material.lock().await;
+        store.add(Some(dabits[0].clone()), None);
+        assert_eq!(store.length().dabits, width);
+        store.mark_aborted();
+    }
+
+    // Material that was in the pool before the abort is not handed out afterwards.
+    let bits: Vec<GfShare<K>> = (0..width).map(|_| GfShare::new(K::zero(), 0, t)).collect();
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        nodes[0].b2a(vec![bits.clone()], network[0].clone()),
+    )
+    .await
+    .expect("a sealed b2a must return at once")
+    .expect_err("a sealed pool must refuse to convert");
+    assert!(
+        format!("{err:?}").contains("Aborted"),
+        "unexpected error: {err:?}"
+    );
+
+    // Nor may the party quietly start another batch.
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        nodes[0].run_conversion_preprocessing(network[0].clone(), &mut rng),
+    )
+    .await
+    .expect("sealed preprocessing must return at once")
+    .expect_err("a sealed party must refuse to preprocess");
+    assert!(
+        format!("{err:?}").contains("Aborted"),
+        "unexpected error: {err:?}"
+    );
+
+    // An explicit reset clears the seal and the stale material with it.
+    let mut store = nodes[0].conv_preprocessing_material.lock().await;
+    store.reset();
+    assert!(!store.is_aborted());
+    assert_eq!(
+        store.length().dabits,
+        0,
+        "a reset must not keep misaligned material"
+    );
+}
+
 /// `[x]_F -> ([x_0]_K, .., [x_63]_K)` through `HoneyBadgerMPCNode::a2b`.
 ///
 /// Exercises the `BatchRecon` / `Some(A2B)` arm, the `GfBatchRecon` and `GfMult` /
@@ -373,18 +481,16 @@ async fn a2b_e2e_through_node_dispatch() {
             let (_, got) = GfShare::recover_secret(&shares[0..=2 * t], n_parties, t).unwrap();
             assert_eq!(
                 got,
-                bit_to_binary::<K>(want[bit]),
+                bit_to_gf::<K>(want[bit]),
                 "value {index} bit {bit} mismatch"
             );
         }
     }
 
-    // `-1` is `p - 1 = 0xFFFF_FFFF_0000_0000` as a canonical representative, and emphatically not
-    // `u64::MAX`. A caller wanting a sign bit shifts by `2^(k-1)` first.
-    let minus_one = (F::from(0u64) - F::from(1u64)).into_bigint().to_bytes_le();
-    let mut repr = [0u8; 8];
-    repr.copy_from_slice(&minus_one[0..8]);
-    assert_eq!(u64::from_le_bytes(repr), 0xFFFF_FFFF_0000_0000);
+    // `-1` is `p - 1` as a canonical representative, and emphatically not all ones. A caller
+    // wanting a sign bit shifts by `2^(k-1)` first.
+    let minus_one = canonical_bits::<F>(-F::one(), width).unwrap();
+    assert!(minus_one.iter().any(|bit| !*bit));
 
     for node in &nodes {
         assert_eq!(node.conv.a2b.store_len().await, 0);
@@ -404,7 +510,7 @@ async fn a2b_e2e_through_node_dispatch() {
 
 /// `a2b` then `b2a_full_width_unchecked`'s node-level equivalent is not exported, so this pins the
 /// half of the round trip that is: the bits `a2b` emits feed straight back into `b2a` for any
-/// value below `2^63`, with no re-encoding in between.
+/// value below `2^(w-1)`, with no re-encoding in between.
 #[tokio::test]
 async fn a2b_then_b2a_round_trips_below_the_width_bound() {
     setup_tracing();
@@ -449,8 +555,8 @@ async fn a2b_then_b2a_round_trips_below_the_width_bound() {
         let x = inputs[pid].clone();
         handles.push(tokio::spawn(async move {
             let bits = node.a2b(x, net.clone()).await?;
-            // Truncate to the B2A width bound: the top bit of a 64-bit decomposition cannot be
-            // carried back, and for a value below `2^63` it is zero anyway.
+            // Truncate to the B2A width bound: the top bit of a full-width decomposition cannot be
+            // carried back, and for a value below `2^(w-1)` it is zero anyway.
             let narrowed: Vec<Vec<GfShare<K>>> =
                 bits.into_iter().map(|b| b[0..bound].to_vec()).collect();
             node.b2a(narrowed, net).await

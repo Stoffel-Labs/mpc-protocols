@@ -2,55 +2,32 @@
 //!
 //! `[r]_F = Σ 2^i [b_i]_F` is local and free ([`EdaBit::compose`]), but it equals the *integer*
 //! `r` only while `r < p`, and `p` is not a power of two. This node computes `r >= p` in the
-//! binary domain — where the Solinas shape of `p = 2^64 − 2^32 + 1` makes it 63 ANDs over 6 layers
-//! instead of a full comparator — and opens the one-bit verdict at degree `t`.
+//! binary domain — the carry out of a `w`-bit prefix adder, 402 ANDs over 8 layers on BLS12-381's
+//! scalar field — and opens the one-bit verdict at degree `t`.
 //!
 //! Skipping the filter is **both** a correctness and a privacy break, at a rate of
-//! `(2^32 − 1)/2^64 ≈ 2^-32`: `r mod p` for `r` uniform on `[0, 2^64)` is `2^-32` away from
-//! uniform, which is over any budget this crate tolerates, and the composed `[r]_F` would share
+//! `(2^w − p)/2^w` — about 9% on BLS12-381's scalar field and 24% on BN254's: `r mod p` for `r`
+//! uniform on `[0, 2^w)` is that far from uniform, and the composed `[r]_F` would share
 //! `r mod p` while the bits still spell `r`.
 //!
-//! # Phase: PREPROCESSING — and now load-bearingly so
+//! # Phase: PREPROCESSING
 //!
-//! The filter is the **only** interactive certification left in the daBit stack, and it is a
-//! *range* obligation on the composed edaBit rather than a share-type obligation on any daBit.
+//! The filter is a *range* obligation on the composed edaBit rather than a share-type obligation
+//! on any daBit.
 //!
-//! Its 6 AND waves are **DN07 degree reductions**, which open at degree `2t` and may abort. That
-//! is legal here and only here: preprocessing is synchronous, a silent party is timed out — this
-//! node already had its own `duration` bound long before the AND layers changed — and abort is
-//! licensed. It would not be legal one layer up. See [`crate::honeybadger::dn07`] for the whole
-//! argument, and note the structural barrier: `GfDn07MulNode::init_mul` accepts only a
-//! `PreprocessingSessionId`, whose constructor classifies this node's `DaBitGfMul` tag through
-//! `dn07::phase_of`'s exhaustive match.
+//! Its AND waves are **DN07 degree reductions**, which open at degree `2t` and may abort. That
+//! is legal here and only here: preprocessing is synchronous, a silent party is timed out, and
+//! abort is licensed. See [`crate::honeybadger::dn07`] for the whole argument, and note the
+//! structural barrier: `GfDn07MulNode::init_mul` accepts only a `PreprocessingSessionId`, whose
+//! constructor classifies this node's `DaBitGfMul` tag through `dn07::phase_of`'s exhaustive
+//! match.
 //!
-//! The verdict opening at the end is still degree-`t` and still robust, which is what keeps "no
-//! agreement round is needed" true.
+//! Each AND consumes one dealt `GfRanDouSha` double sharing, so the filter is
+//! information-theoretic end to end: its operands are daBit halves (locally derived, degree `t`
+//! by construction) and earlier layers' outputs, and its masks are verified at dealing.
 //!
-//! ## What that bought
-//!
-//! One AND used to be a `Gf2k` Beaver multiplication: one triple plus `M1 = 4n/(t+1)` bytes of
-//! degree-`t` openings to spend it. It is now one `O2 = 2n/(2t+1)` degree-`2t` opening and no
-//! triple at all. At `n = 10`: `12.857 -> 2.857` **payload** bytes per party per AND, **4.5x**,
-//! over `63 x candidates` ANDs. The GF triple pool is untouched by this node now; A2B still
-//! consumes it online.
-//!
-//! **On the wire that 4.5x is worth almost nothing, and the real saving is elsewhere.** This
-//! filter's layers are narrow — measured, a whole conversion's filter is 7 degree-`2t` sessions
-//! carrying **14 elements of payload in total** — so its traffic is 93–97% per-message frame:
-//! 2 888 / 4 942 / 7 000 / 9 022 B/party at `n = 4/7/10/13`, of which 2 688 / 4 704 / 6 720 /
-//! 8 736 is the 48-byte envelope (`conv_cost_measurement::measured_cost_n*`, `pre_conv`
-//! `GfBatchRecon` row). The payload the 4.5x acts on is ~1% of the phase. What DN07 actually
-//! saves here is **messages**: `2n` per AND layer instead of a Beaver layer's `4n` plus a share
-//! of triple generation — about **2.1x** in bytes at these widths, not 4.5x. See
-//! [`crate::honeybadger::dn07`] for the units rule this follows.
-//!
-//! # Where this code came from
-//!
-//! Lifted verbatim from `dabit_gen.rs`'s `compose_edabits` / `run_edabit_filter` when the dealt
-//! daBit protocol around it was deleted, minus the two `F`-side children (the XOR fold and the
-//! bit-ness products) that PRSS daBits made unnecessary. The plan keeps §2.6 — edaBit composition
-//! and the `r < p` filter — verbatim; the daBits feeding it changed first, and the AND layers'
-//! multiplication engine second.
+//! The verdict opening at the end is degree-`t` and robust, which is what keeps "no agreement
+//! round is needed" true.
 //!
 //! # The verdict needs no agreement round
 //!
@@ -78,7 +55,7 @@ use crate::common::session_store::{Admission, SessionStore};
 use crate::common::ProtocolSessionId;
 use crate::{
     common::{
-        convert::{binary_to_bit, field_bit_width},
+        convert::{field_bit_width, gf_to_bit},
         gf2k::{field::BinaryField, share::GfShare},
     },
     honeybadger::{
@@ -87,9 +64,7 @@ use crate::{
         dn07::{gf_dn07::GfDn07MulNode, PreprocessingSessionId, MAX_DN07_SESSIONS},
         gf_batch_recon::gf_batch_recon::GfBatchReconNode,
         gf_double_share::GfDoubleShamirShare,
-        max_mul_pairs_per_session,
-        prss::{PrssExecSlot, PrssStream},
-        ProtocolType, SessionId,
+        max_mul_pairs_per_session, ProtocolType, SessionId,
     },
 };
 
@@ -148,19 +123,16 @@ struct ChildIds {
 }
 
 impl ChildIds {
-    /// Built from a [`PrssExecSlot`] rather than from a `SessionId`, deliberately.
-    ///
-    /// The slot is a *burned exec id with no right to derive anything*: it carries no session, so
-    /// there is nothing here that a positional PRSS primitive would accept. The filter needs the
-    /// exec's child-id block and nothing else, and this is the type that says exactly that.
-    fn new(slot: &PrssExecSlot) -> Result<Self, DaBitError> {
-        let base = slot
-            .exec_id()
+    /// `exec_id` is the parent session's exec id, minted by the node's daBit counter — the same
+    /// monotone counter daBit generation draws its parents from, so the two drivers' parent
+    /// sessions under [`ProtocolType::DaBit`] never collide.
+    fn new(exec_id: u64, instance_id: u32) -> Result<Self, DaBitError> {
+        let base = exec_id
             .checked_mul(EDABIT_CHILD_STRIDE)
             .ok_or(DaBitError::LimitError)?;
         Ok(Self {
             base,
-            instance_id: slot.instance_id(),
+            instance_id,
             waves: [0; 2],
         })
     }
@@ -255,13 +227,7 @@ pub struct EdaBitFilterNode<F: PrimeField, K: BinaryField> {
     /// `dn07::phase_of`. See [`crate::honeybadger::dn07`] for why `n >= 4t+1` would be needed to
     /// put this opening on the online path, and therefore why it never goes there.
     ///
-    /// It replaces a `GfMultiply` spending one GF(2^k) Beaver triple per AND. One AND was
-    /// `triple + M1 = 12.857` bytes of payload per party at `n = 10` (`2.857` for the triple's own
-    /// degree-`2t` opening once PRSS feeds it, plus `4n/(t+1)` for the two Beaver openings that
-    /// spend it); it is now the `O2 = 2.857`-byte opening alone, a **4.5x** payload cut, and the
-    /// triples disappear from the filter's bill entirely. In wire bytes the saving is the message
-    /// count rather than the payload — these layers are narrow enough that framing is 93–97% of
-    /// the phase — which makes it roughly **2.1x**; see the module docs.
+    /// Each AND spends one dealt `GfRanDouSha` double sharing and one degree-`2t` opening.
     pub gf_dn07: GfDn07MulNode<K>,
     /// Degree-`t` `K`-side opening of the overflow verdict. Tag: [`ProtocolType::DaBitGfOpen`].
     pub gf_open: GfBatchReconNode<K>,
@@ -297,12 +263,10 @@ impl<F: PrimeField, K: BinaryField> EdaBitFilterNode<F, K> {
     }
 
     /// `([r]_t, [r]_2t)` double sharings one edaBit candidate's modulus-overflow filter consumes
-    /// — one per AND, in place of the GF(2^k) Beaver triple each AND used to spend.
+    /// — one per AND.
     ///
-    /// 63 on Goldilocks, over 6 AND layers. Read off the circuit rather than written down beside
-    /// it, so the two cannot drift. The count is unchanged from the triple era; what changed is
-    /// what one unit costs to make (nothing at all, from PRSS + PRZS) and what spending it costs
-    /// on the wire (one degree-`2t` opening rather than two degree-`t` ones).
+    /// 402 on BLS12-381's scalar field, over 8 AND layers. Read off the circuit rather than written down beside
+    /// it, so the two cannot drift.
     pub fn gf_doubles_per_edabit() -> Result<usize, DaBitError> {
         Ok(ModulusOverflowCircuit::<F>::new()?.and_count())
     }
@@ -406,21 +370,13 @@ impl<F: PrimeField, K: BinaryField> EdaBitFilterNode<F, K> {
     /// This is a **driver**: it awaits its own child sessions, so it must not be polled on the
     /// task that pumps the network.
     ///
-    /// # Exec ids
+    /// # Session id
     ///
-    /// `slot` is one [`PrssAllocator::claim_exec`] burn on
-    /// [`PrssStream::DaBitSeed`](crate::honeybadger::prss::PrssStream::DaBitSeed) — the **same**
-    /// cursor that mints daBit-generation parent sessions. Both drivers mint children as
-    /// `parent_exec * 2^20 + wave`, so drawing from one cursor is exactly what keeps their child
-    /// blocks disjoint; a second minter would hand this filter an exec a daBit batch already owns.
-    ///
-    /// This filter derives **no PRSS position at all** — it spends only the exec's child-id block
-    /// — which is why it takes a [`PrssExecSlot`] and not a window: the slot proves the exec is
-    /// burned and gives no way to name a byte. The exec is burned on every exit path below,
-    /// including the early length and degree checks.
+    /// `session_id` is a root [`ProtocolType::DaBit`] session whose exec id comes from the node's
+    /// daBit counter. Children are minted as `exec * 2^20 + wave` under the filter's own tags.
     pub async fn compose_edabits<N>(
         &mut self,
-        slot: PrssExecSlot,
+        session_id: SessionId,
         dabits: Vec<DaBit<F, K>>,
         doubles: Vec<GfDoubleShamirShare<K>>,
         duration: Duration,
@@ -429,22 +385,12 @@ impl<F: PrimeField, K: BinaryField> EdaBitFilterNode<F, K> {
     where
         N: Network + Send + Sync + 'static,
     {
-        // Replaces the old `calling_protocol()/sub_id()/round_id()` check on a caller-supplied
-        // `SessionId`: a slot carries no session to mis-shape, so the only thing left to assert is
-        // that it came off the cursor this filter shares with the daBit generator.
-        if slot.stream() != PrssStream::DaBitSeed {
-            return Err(DaBitError::WrongPrssStream {
-                expected: PrssStream::DaBitSeed.name(),
-                got: slot.stream().name(),
-            });
+        if session_id.calling_protocol() != Some(ProtocolType::DaBit)
+            || session_id.sub_id() != 0
+            || session_id.round_id() != 0
+        {
+            return Err(DaBitError::SessionIdError(session_id));
         }
-        // This filter's own store is keyed on a session of its own tag, minted from the burned
-        // exec. Nothing derives PRSS at this context.
-        let session_id = SessionId::new(
-            ProtocolType::DaBit,
-            SessionId::pack_slot(slot.exec_id(), 0, 0),
-            slot.instance_id(),
-        );
 
         let width = field_bit_width::<F>();
         if width == 0 {
@@ -506,7 +452,7 @@ impl<F: PrimeField, K: BinaryField> EdaBitFilterNode<F, K> {
             // Our own session: a silent `Ok` would hand the caller an empty pool instead.
             Admission::Retired | Admission::Rejected => return Err(DaBitError::LimitError),
         };
-        let mut ids = ChildIds::new(&slot)?;
+        let mut ids = ChildIds::new(session_id.exec_id(), session_id.instance_id())?;
 
         let result = self
             .run_edabit_filter(
@@ -638,7 +584,7 @@ impl<F: PrimeField, K: BinaryField> EdaBitFilterNode<F, K> {
         let mut edabits = Vec::with_capacity(candidates);
         let mut rejected = 0usize;
         for (index, value) in opened.into_iter().enumerate() {
-            let overflow = binary_to_bit(value)?;
+            let overflow = gf_to_bit(value)?;
             match EdaBit::compose_full_width(&dabits[index * width..(index + 1) * width], overflow)
             {
                 Ok(edabit) => edabits.push(edabit),
@@ -752,16 +698,16 @@ impl<F: PrimeField, K: BinaryField> EdaBitFilterNode<F, K> {
     /// [`GfDn07MulNode::init_mul`] carries a warning that has teeth: a degree-`2t` opening at
     /// `n = 3t+1` imposes **no** codeword constraint on the honest sub-word, so an operand *dealt*
     /// at degree `t+1` is recoverable from the opening with no abort raised. Nothing on this path
-    /// is dealt. `lhs`/`rhs` are either a PRSS daBit's binary half — a deterministic function of
-    /// keys held by `n - t` parties — or the output of an earlier layer of this same reduction,
-    /// which is `[r]_t + d` on a derived `[r]_t`. A corrupt party's only freedom is to lie at the
+    /// is a dealt Shamir sharing. `lhs`/`rhs` are either a daBit's binary half — computed locally
+    /// by each party from set bits it has cross-checked with every other holder — or the output
+    /// of an earlier layer of this same reduction, which is `[r]_t + d` on a `RanDouSha`-verified
+    /// `[r]_t`. A corrupt party's only freedom is to lie at the
     /// opening, and the `[3t+1, 2t+1]` code's distance `t+1 > t` makes any such lie a non-codeword
     /// that `recover_secret` rejects: detection with probability 1, no sacrifice and no MAC.
     ///
     /// # Abort
     ///
-    /// This is where the filter acquired an abort posture it did not have as a Beaver protocol.
-    /// It is licensed: the whole node is preprocessing, it already aborts on `duration` expiry,
+    /// A wrong share aborts the batch. That is licensed: the whole node is preprocessing, it already aborts on `duration` expiry,
     /// and preprocessing may abort. It must not be moved: `a2b` reaches this code through
     /// `ensure_edabits`' lazy top-up, but it reaches it as *preprocessing that runs first*, never
     /// as a step of `A2BNode`, which holds no handle to any DN07 node.
@@ -873,30 +819,26 @@ impl<F: PrimeField, K: BinaryField> EdaBitFilterNode<F, K> {
 mod tests {
     use super::*;
     use crate::common::gf2k::field::Gf256;
-    use crate::common::math::goldilocks::GoldilocksField;
-    use crate::honeybadger::prss::PrssAllocator;
+    use ark_bls12_381::Fr as CurveField;
 
-    type F = GoldilocksField;
+    type F = CurveField;
     type K = Gf256;
     type Node = EdaBitFilterNode<F, K>;
 
-    /// One allocator, and every exec in this module's tests burned off it — the same discipline
-    /// production runs under. `PrssExecSlot` has no constructor outside `prss::window`, which is
-    /// the point: a test cannot mint an exec the allocator has not burned any more than a caller
-    /// can.
-    fn alloc() -> PrssAllocator {
-        PrssAllocator::new(7, [0xE0; 32])
-    }
-
-    async fn slot(alloc: &PrssAllocator) -> PrssExecSlot {
-        alloc.claim_exec(PrssStream::DaBitSeed).await.unwrap()
+    fn sid(exec: u64) -> SessionId {
+        SessionId::new(ProtocolType::DaBit, SessionId::pack_slot(exec, 0, 0), 7)
     }
 
     /// Read off the circuit, never written down beside it.
     #[test]
-    fn the_filter_costs_63_ands_over_6_layers_on_goldilocks() {
-        assert_eq!(Node::gf_doubles_per_edabit().unwrap(), 63);
-        assert_eq!(Node::edabit_filter_layers().unwrap(), 6);
+    fn the_filter_cost_is_the_overflow_circuit_s() {
+        let circuit = ModulusOverflowCircuit::<F>::new().unwrap();
+        assert_eq!(Node::gf_doubles_per_edabit().unwrap(), circuit.and_count());
+        assert_eq!(Node::edabit_filter_layers().unwrap(), circuit.layers());
+        // BLS12-381's scalar field has a general modulus, so the comparison is the carry out of a
+        // 255-bit prefix adder.
+        assert!(!circuit.is_specialised());
+        assert_eq!(Node::gf_doubles_per_edabit().unwrap(), 402);
     }
 
     #[test]
@@ -923,10 +865,8 @@ mod tests {
     /// with each other.
     #[tokio::test]
     async fn child_session_ids_are_disjoint_across_parents_and_kinds() {
-        let alloc = alloc();
-        let (sa, sb) = (slot(&alloc).await, slot(&alloc).await);
-        let mut a = ChildIds::new(&sa).unwrap();
-        let mut b = ChildIds::new(&sb).unwrap();
+        let mut a = ChildIds::new(0, 7).unwrap();
+        let mut b = ChildIds::new(1, 7).unwrap();
         let a0 = a.next(ChildKind::GfMul).unwrap();
         let a1 = a.next(ChildKind::GfMul).unwrap();
         let a_open = a.next(ChildKind::GfOpen).unwrap();
@@ -952,12 +892,8 @@ mod tests {
         let network = Arc::new(FakeNetwork::new(0, inner));
         let mut node = Node::new(0, 10, 3).unwrap();
 
-        let alloc = alloc();
-
-        // An exec burned off another stream's cursor. The old shape of this check was a
-        // malformed `SessionId`; a slot cannot be malformed, so what is left to reject is a slot
-        // from a cursor this filter does not share with the daBit generator.
-        let wrong = alloc.claim_exec(PrssStream::RandBitA).await.unwrap();
+        // Not a root daBit session.
+        let wrong = SessionId::new(ProtocolType::DaBit, SessionId::pack_slot(0, 1, 0), 7);
         assert!(matches!(
             node.compose_edabits(
                 wrong,
@@ -967,13 +903,13 @@ mod tests {
                 network.clone()
             )
             .await,
-            Err(DaBitError::WrongPrssStream { .. })
+            Err(DaBitError::SessionIdError(_))
         ));
 
         // Empty batch: refused rather than silently vacuous.
         assert!(matches!(
             node.compose_edabits(
-                slot(&alloc).await,
+                sid(1),
                 vec![],
                 vec![],
                 Duration::from_millis(5),
@@ -997,7 +933,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             node.compose_edabits(
-                slot(&alloc).await,
+                sid(2),
                 vec![dabit.clone(); width - 1],
                 vec![],
                 Duration::from_millis(5),
@@ -1013,7 +949,7 @@ mod tests {
         // Right daBit count, wrong double-sharing count.
         assert!(matches!(
             node.compose_edabits(
-                slot(&alloc).await,
+                sid(3),
                 vec![dabit; width],
                 vec![],
                 Duration::from_millis(5),
@@ -1022,7 +958,7 @@ mod tests {
             .await,
             Err(DaBitError::MaterialLengthMismatch {
                 what: "edabit filter GF(2^k) double sharings",
-                expected: 63,
+                expected: 402,
                 got: 0
             })
         ));

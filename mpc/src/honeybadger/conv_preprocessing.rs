@@ -6,10 +6,24 @@
 //! `GfHoneyBadgerMPCNodePreprocMaterial<K>` is not generic in `F`, and making either generic in
 //! the other churns every call site for no gain.
 //!
+//! # Abort is sticky
+//!
+//! Preprocessing is non-robust: a cheating party can make a batch abort, and it can make it abort
+//! at *one* honest party while the others complete it. The pools are positional — every party
+//! must hand out the same daBit at the same position — so a party that aborted a batch the others
+//! kept is, from then on, out of step with them, and an out-of-step share fed to an online
+//! opening is exactly the kind of error robust decoding is not sized for.
+//!
+//! So an abort **seals** this store ([`ConvPreprocMaterial::mark_aborted`]): nothing more can be
+//! taken from it or added to it until [`ConvPreprocMaterial::reset`] empties it. A sealed party
+//! contributes nothing to later conversions, which turns "may open a wrong value" into "stalls
+//! until the operators re-run preprocessing" — the failure preprocessing is allowed to have.
+//! `reset` must be called at every party together; the protocol cannot agree on that by itself.
+//!
 //! # INVARIANT (C15): drain, never index
 //!
-//! Both pools are **FIFO `drain(0..n)` only**. There is no PRF stream and no cursor, so the
-//! rewind hazard that the deleted `prandint_cursor` had cannot arise here. That matters more than it looks: a
+//! Both pools are **FIFO `drain(0..n)` only**. There is no cursor, so the rewind hazard a
+//! positional cursor has cannot arise here. That matters more than it looks: a
 //! daBit handed out twice is one-time-pad reuse, and two B2A openings under the same daBit reveal
 //! `c XOR c' = x XOR x'`. [`ConvPreprocMaterial::dabits_produced`] counts total-ever-generated for
 //! sizing and observability and is **never** an index into anything.
@@ -26,6 +40,13 @@ use crate::honeybadger::dabit::{DaBit, EdaBit};
 pub enum ConvPreprocessingError {
     #[error("there is not enough conversion preprocessing to complete the protocol")]
     NotEnoughPreprocessing,
+    /// A conversion preprocessing batch aborted at this party. Its pools may no longer line up
+    /// with the other parties', so they are sealed until [`ConvPreprocMaterial::reset`].
+    #[error(
+        "conversion preprocessing aborted at this party; the daBit and edaBit pools are sealed \
+         until every party resets them and preprocesses again"
+    )]
+    Aborted,
 }
 
 /// Current depth of each pool.
@@ -57,6 +78,8 @@ pub struct ConvPreprocMaterial<F: PrimeField, K: BinaryField> {
     /// Total ever produced. Observability and sizing only — never an index (see the module docs).
     dabits_produced: usize,
     edabits_produced: usize,
+    /// Set when a batch aborted at this party. See the module docs.
+    aborted: bool,
 }
 
 impl<F: PrimeField, K: BinaryField> ConvPreprocMaterial<F, K> {
@@ -67,11 +90,35 @@ impl<F: PrimeField, K: BinaryField> ConvPreprocMaterial<F, K> {
             edabits: Vec::new(),
             dabits_produced: 0,
             edabits_produced: 0,
+            aborted: false,
         }
     }
 
-    /// Adds the provided new preprocessing material to the current pools.
+    /// Seals the store after an aborted batch. Idempotent.
+    pub fn mark_aborted(&mut self) {
+        self.aborted = true;
+    }
+
+    /// Whether an aborted batch has sealed this store.
+    pub fn is_aborted(&self) -> bool {
+        self.aborted
+    }
+
+    /// Discards both pools and unseals the store. Every party must do this together, and then
+    /// preprocess again, before any of them converts.
+    pub fn reset(&mut self) {
+        self.dabits.clear();
+        self.edabits.clear();
+        self.aborted = false;
+    }
+
+    /// Adds the provided new preprocessing material to the current pools. A sealed store drops
+    /// it: material produced after an abort has no agreed position.
     pub fn add(&mut self, dabits: Option<Vec<DaBit<F, K>>>, edabits: Option<Vec<EdaBit<F, K>>>) {
+        if self.aborted {
+            error!("dropping conversion preprocessing offered to a sealed store");
+            return;
+        }
         if let Some(mut new) = dabits {
             self.dabits_produced = self.dabits_produced.saturating_add(new.len());
             self.dabits.append(&mut new);
@@ -105,6 +152,9 @@ impl<F: PrimeField, K: BinaryField> ConvPreprocMaterial<F, K> {
     /// `drain`, not index: the returned daBits are gone from the pool, so a second call can never
     /// return one of them again. That is the whole of the single-use guarantee.
     pub fn take_dabits(&mut self, n: usize) -> Result<Vec<DaBit<F, K>>, ConvPreprocessingError> {
+        if self.aborted {
+            return Err(ConvPreprocessingError::Aborted);
+        }
         if n > self.dabits.len() {
             error!("Error trying to take daBits: there is not enough conversion preprocessing");
             return Err(ConvPreprocessingError::NotEnoughPreprocessing);
@@ -114,6 +164,9 @@ impl<F: PrimeField, K: BinaryField> ConvPreprocMaterial<F, K> {
 
     /// Takes `n` edaBits out of the pool. Same drain-only discipline as [`Self::take_dabits`].
     pub fn take_edabits(&mut self, n: usize) -> Result<Vec<EdaBit<F, K>>, ConvPreprocessingError> {
+        if self.aborted {
+            return Err(ConvPreprocessingError::Aborted);
+        }
         if n > self.edabits.len() {
             error!("Error trying to take edaBits: there is not enough conversion preprocessing");
             return Err(ConvPreprocessingError::NotEnoughPreprocessing);
@@ -127,10 +180,10 @@ mod tests {
     use super::*;
     use crate::common::gf2k::field::Gf256;
     use crate::common::gf2k::share::GfShare;
-    use crate::common::math::goldilocks::GoldilocksField;
     use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+    use ark_bls12_381::Fr as CurveField;
 
-    type F = GoldilocksField;
+    type F = CurveField;
     type K = Gf256;
 
     fn dabit(value: u64) -> DaBit<F, K> {
@@ -216,5 +269,24 @@ mod tests {
         assert_eq!(pool.edabits_produced(), 1);
         pool.add(Some(vec![dabit(0)]), None);
         assert_eq!(pool.dabits_produced(), 3);
+    }
+
+    #[test]
+    fn an_abort_seals_both_pools_until_reset() {
+        let mut store = ConvPreprocMaterial::<ark_bls12_381::Fr, Gf256>::empty();
+        store.mark_aborted();
+        assert!(store.is_aborted());
+        assert!(matches!(
+            store.take_dabits(0),
+            Err(ConvPreprocessingError::Aborted)
+        ));
+        assert!(matches!(
+            store.take_edabits(0),
+            Err(ConvPreprocessingError::Aborted)
+        ));
+        store.add(Some(Vec::new()), Some(Vec::new()));
+        store.reset();
+        assert!(!store.is_aborted());
+        assert!(store.take_dabits(0).is_ok());
     }
 }

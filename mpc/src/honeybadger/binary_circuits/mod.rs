@@ -33,45 +33,45 @@
 //! empty. Both passes are driven **only by public data**, so every honest party builds a
 //! bit-identical plan and consumes exactly the same number of triples in exactly the same order.
 //!
-//! # Gate counts and depth on Goldilocks (`p = 2^64 - 2^32 + 1`, `w = 64`)
+//! # Gate counts and depth
 //!
 //! A2B is a **parallel offset adder**: the mod-`p` offset `d = 2^w - p` is folded into the
 //! *public* operand, so the two additions both read only the secret `r` and the ASAP scheduler
 //! runs them in the same layers. See [`FieldA2BCircuit`] for the construction and its proof.
 //!
+//! The counts depend on the field's bit width `w`. On the scalar field of BLS12-381 (`w = 255`;
+//! BN254's, at `w = 254`, is within one percent):
+//!
 //! | Stage | ANDs | AND layers |
 //! |---|---|---|
-//! | `ADD_w(public y, secret r)` — Sklansky prefix, carry-out cone dead | <= 310 | 6 |
-//! | `ADD_w(public y + d, secret r)` — concurrent with the above | <= 321 | 6 |
-//! | MUX `x_i = t1_i + c2 (t1_i + t2_i)` | 64 | 1 |
-//! | **[`FieldA2BCircuit`] total** | **<= 695** | **7** |
-//! | [`ModulusOverflowCircuit`] (`r >= p`, edaBit filter) | 63 | 6 |
+//! | `ADD_w(public y, secret r)` — Sklansky prefix, carry-out cone dead | <= 1765 | 8 |
+//! | `ADD_w(public y + d, secret r)` — concurrent with the above | <= 1778 | 8 |
+//! | MUX `x_i = t1_i + c2 (t1_i + t2_i)` | 255 | 1 |
+//! | **[`FieldA2BCircuit`] total** | **<= 3798** | **9** |
+//! | [`ModulusOverflowCircuit`] (`r >= p`, edaBit filter) | 402 | 8 |
 //!
 //! The `<=` is because the generate/propagate seeding of a `public + secret` adder is free, and a
 //! cleared bit of the public operand makes a whole sub-tree of the carry prefix statically zero.
-//! 695 is an *analytic* bound rather than a realisable plan — see
+//! 3798 is an *analytic* bound rather than a realisable plan — see
 //! [`FieldA2BCircuit::max_and_count_on`] — and it is what the preprocessing sizer is handed. The
-//! exact figure for the `y` actually opened is [`HasNetlist::and_count`]: measured 642 on average
-//! over a uniform `y`, and 693 at the dearest admissible mask found by hill-climbing over `y`
-//! (`0xDDD5_D776_7D77_F7D7`), two short of the bound. It is the same at every honest party,
-//! because `y` was robustly opened. The depth is exactly 7 for every `y` that can carry at all,
-//! and never more than 7.
+//! exact figure for the `y` actually opened is [`HasNetlist::and_count`]: about 3590 on average
+//! over a uniform `y`. It is the same at every honest party, because `y` was robustly opened.
 //!
-//! That is 7 AND layers rather than the 13 of the serial `ADD -> ADD -> MUX` chain this replaced,
-//! i.e. **16 online rounds instead of 28**, bought for about 7% more ANDs on average (11% on the
-//! sizing bound). On an asynchronous BFT network that is the right side of the trade, which is
-//! also why [`prefix::PrefixTopology`] defaults to the minimum-depth prefix network.
+//! That is 9 AND layers rather than the 17 of the serial `ADD -> ADD -> MUX` chain this replaced.
+//! On an asynchronous BFT network depth is the cost that matters, which is also why
+//! [`prefix::PrefixTopology`] defaults to the minimum-depth prefix network. The price is ANDs:
+//! Sklansky grows as `w log w`, and at this width Brent-Kung would need 1722 triples instead of
+//! 3798, over 15 layers instead of 9.
 //!
 //! A caller that has certified it needs only the low `l` output bits gets a further saving for
-//! free, because backward liveness then prunes the high cones of **both** adders: measured 316
-//! ANDs on average at `l = 33`, against 488 for the serial chain, which had to keep all 64 bits
-//! of its first adder alive to feed its second. There is deliberately no narrow entry point —
-//! the repo's signed encoding `-|v| -> p - |v|` means a value of nominal width `l` still occupies
-//! the high bits, so narrowing is the caller's certification to make, not this module's.
+//! free, because backward liveness then prunes the high cones of **both** adders. There is
+//! deliberately no narrow entry point — the repo's signed encoding `-|v| -> p - |v|` means a value
+//! of nominal width `l` still occupies the high bits, so narrowing is the caller's certification
+//! to make, not this module's.
 //!
 //! # Why Sklansky and not Kogge-Stone
 //!
-//! Identical depth `ceil(log2 w) = 6`, roughly a third of the ANDs. Kogge-Stone's advantage is
+//! Identical depth `ceil(log2 w)`, a fraction of the ANDs. Kogge-Stone's advantage is
 //! bounded wire fan-out, which is a hardware property; fan-out is free here, because a wire is a
 //! local `GfShare` that can be cloned.
 //!
@@ -106,9 +106,8 @@
 //!
 //! # Scope
 //!
-//! Exact, full-range conversion only. There is deliberately no bounded/statistical variant: on
-//! Goldilocks it would cap the input at 22 bits at `kappa = 40`, below what the repo's own default
-//! `FixedPointPrecision(32, 16)` already needs. Consequently nothing here has a statistical
+//! Exact, full-range conversion only. There is deliberately no bounded/statistical variant, so
+//! nothing here has a statistical
 //! parameter, and `HoneyBadgerMPCNodeOpts::max_masked_width` / `check_mask_security` are
 //! deliberately not involved: `y = (x - r) mod p` with `r` uniform on `[0, p)` is *exactly*
 //! uniform, so the masking is perfect rather than statistical (C14).
@@ -123,13 +122,13 @@
 //!   ambiguous at every call site.
 //! * [`BinaryCircuit`] gains an `init` method; the blueprint sketch had no way to populate a wire
 //!   store.
-//! * [`ModulusOverflowCircuit`] keeps the blueprint's AND/OR-tree construction (63 ANDs, 6 layers
-//!   on Goldilocks) but recognises the required modulus shape rather than assuming it, and falls
-//!   back to a general carry-out comparison for any other prime. Both branches are cross-checked
+//! * [`ModulusOverflowCircuit`] keeps the blueprint's AND/OR-tree construction for a modulus of
+//!   the Solinas shape, but recognises that shape rather than assuming it, and falls back to a
+//!   general carry-out comparison for any other prime — which is the path both curve fields take. Both branches are cross-checked
 //!   against each other in the tests.
-//! * The blueprint's A2B is the **serial** `ADD_w(y, r) -> ADD_w(d, t1) -> MUX` chain, 626 ANDs
-//!   over 13 layers, whose `c = c1 XOR c2` needed a lemma that `(c1, c2) = (1, 1)` is unreachable.
-//!   This module applies the offset to the public operand instead (695 / 7). The lemma is not
+//! * The blueprint's A2B is the **serial** `ADD_w(y, r) -> ADD_w(d, t1) -> MUX` chain, nearly
+//!   twice as deep, whose `c = c1 XOR c2` needed a lemma that `(c1, c2) = (1, 1)` is unreachable.
+//!   This module applies the offset to the public operand instead. The lemma is not
 //!   weakened, it is unnecessary: the first adder's carry out is never formed.
 //! * **The blueprint's cost tables undercount, and any figure quoted from them here has been
 //!   re-derived.** They price a Beaver multiplication at the triple alone and omit the
@@ -423,6 +422,64 @@ impl Netlist {
     /// Number of output bit shares the circuit produces.
     pub fn output_len(&self) -> usize {
         self.outputs.len()
+    }
+
+    /// A line-oriented dump of the plan, for checking it outside this crate (`formal/netlists`
+    /// feeds it to an SMT solver; `tests/netlist_formal.rs` interprets it).
+    ///
+    /// ```text
+    /// arena <wires>            every wire starts as the constant 0
+    /// inputs <w>..             input i is written to wire w_i
+    /// outputs <w>..
+    /// const <dst> <0|1>        dst = value
+    /// xor <dst> <a> <b>        dst = a XOR b
+    /// xorc <dst> <src> <0|1>   dst = src XOR value
+    /// layer <l>                the ANDs up to `end` read the wires as they are here
+    /// and <dst> <lhs> <rhs> <xor_in|->   dst = lhs AND rhs, XOR xor_in when given
+    /// end
+    /// ```
+    ///
+    /// Lines appear in execution order. The format is part of no wire protocol and may change.
+    pub fn to_text(&self) -> String {
+        use std::fmt::Write as _;
+        let join = |ws: &[usize]| {
+            ws.iter()
+                .map(|w| w.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let mut out = String::new();
+        let _ = writeln!(out, "arena {}", self.arena_len);
+        let _ = writeln!(out, "inputs {}", join(&self.inputs));
+        let _ = writeln!(out, "outputs {}", join(&self.outputs));
+        let free = |out: &mut String, ops: &[FreeOp]| {
+            for op in ops {
+                let _ = match *op {
+                    FreeOp::SetConst { dst, value } => writeln!(out, "const {dst} {}", value as u8),
+                    FreeOp::Xor { dst, a, b } => writeln!(out, "xor {dst} {a} {b}"),
+                    FreeOp::XorConst { dst, src, value } => {
+                        writeln!(out, "xorc {dst} {src} {}", value as u8)
+                    }
+                };
+            }
+        };
+        if let Some(first) = self.pre.first() {
+            free(&mut out, first);
+        }
+        for (index, gates) in self.layers.iter().enumerate() {
+            let _ = writeln!(out, "layer {index}");
+            for gate in gates {
+                let xor_in = gate
+                    .xor_in
+                    .map_or_else(|| "-".to_string(), |w| w.to_string());
+                let _ = writeln!(out, "and {} {} {} {xor_in}", gate.dst, gate.lhs, gate.rhs);
+            }
+            let _ = writeln!(out, "end");
+            if let Some(ops) = self.pre.get(index + 1) {
+                free(&mut out, ops);
+            }
+        }
+        out
     }
 
     fn apply_free<K: BinaryField>(
@@ -1000,8 +1057,8 @@ impl Builder {
 ///
 /// # Output convention
 ///
-/// The bits are those of the representative in `[0, p)`, **not** two's complement: on Goldilocks
-/// `-1` comes back as `0xFFFF_FFFF_0000_0000`. See the module header.
+/// The bits are those of the representative in `[0, p)`, **not** two's complement: `-1` comes
+/// back as the bits of `p - 1`. See the module header.
 #[derive(Clone, Debug)]
 pub struct FieldA2BCircuit<F: PrimeField> {
     width: usize,
@@ -1033,7 +1090,7 @@ impl<F: PrimeField> FieldA2BCircuit<F> {
         Self::plan(y_bits, topology)
     }
 
-    /// Number of bits the circuit consumes and produces: `ceil(log2 p)`, 64 for Goldilocks.
+    /// Number of bits the circuit consumes and produces: `ceil(log2 p)`.
     pub fn width(&self) -> usize {
         self.width
     }
@@ -1044,7 +1101,7 @@ impl<F: PrimeField> FieldA2BCircuit<F> {
     }
 
     /// Upper bound on [`HasNetlist::and_count`] over every admissible `y`, for sizing the triple
-    /// pool **before** `y` is known. 695 on Goldilocks.
+    /// pool **before** `y` is known. 3798 on BLS12-381's scalar field.
     ///
     /// See [`FieldA2BCircuit::max_and_count_on`] for why the bound is analytic.
     pub fn max_and_count() -> Result<usize, CircuitError> {
@@ -1058,14 +1115,13 @@ impl<F: PrimeField> FieldA2BCircuit<F> {
     /// is inadmissible, because `Y = y + d` would wrap. So the bound is taken from a synthetic
     /// plan in which *both* public operands are all-ones — the two adders read only `r`, so their
     /// costs are independent and each is separately maximised by an all-ones constant, and their
-    /// sum plus the `w` multiplexer gates therefore bounds every real `y`. At `w = 64` that is
-    /// `310 + 321 + 64 = 695`; the largest count any admissible `y` actually reaches is 693 and a
-    /// uniform `y` averages 642.
+    /// sum plus the `w` multiplexer gates therefore bounds every real `y`. At `w = 255` that is
+    /// `1765 + 1778 + 255 = 3798`, and a uniform `y` averages about 3590.
     pub fn max_and_count_on(topology: PrefixTopology) -> Result<usize, CircuitError> {
         Ok(Self::worst_case_plan(topology)?.and_count())
     }
 
-    /// Upper bound on [`HasNetlist::layers`], i.e. on the online AND rounds. 7 on Goldilocks.
+    /// Upper bound on [`HasNetlist::layers`], i.e. on the online AND rounds: `ceil(log2 w) + 1`.
     pub fn max_layers() -> Result<usize, CircuitError> {
         Self::max_layers_on(PrefixTopology::default())
     }
@@ -1073,6 +1129,33 @@ impl<F: PrimeField> FieldA2BCircuit<F> {
     /// [`FieldA2BCircuit::max_layers`] for an explicitly chosen prefix network.
     pub fn max_layers_on(topology: PrefixTopology) -> Result<usize, CircuitError> {
         Ok(Self::worst_case_plan(topology)?.layers())
+    }
+
+    /// The same construction with the mask as **inputs** instead of constants: the plan every
+    /// per-mask plan is a constant-folded specialisation of.
+    ///
+    /// Inputs, in order: the `w` bits of `r`, the `w` bits of `y`, the `w` bits of
+    /// `Y = y + (2^w - p)`. Outputs: the `w` bits of `(y + r) mod p`, for `y, r < p`.
+    ///
+    /// It is never run by the protocol. It exists so that the adder design — the prefix network,
+    /// the offset trick and the final MUX — can be proved correct for *every* mask in one query
+    /// (`formal/netlists`), which the per-mask plans cannot be: their structure depends on `y`.
+    /// It is built by the very functions [`FieldA2BCircuit::new_on`] uses, with secret wires
+    /// where that passes constants.
+    pub fn generic_plan_on(topology: PrefixTopology) -> Result<Netlist, CircuitError> {
+        let width = field_bit_width::<F>();
+        if width == 0 {
+            return Err(CircuitError::UnsupportedWidth(0));
+        }
+        let mut builder = Builder::new();
+        let r = builder.inputs(width);
+        let y = builder.inputs(width);
+        let offset = builder.inputs(width);
+        let (t1, _c1) = prefix::add_wires_on(&mut builder, topology, &y, &r)?;
+        let (t2, c2) = prefix::add_wires_on(&mut builder, topology, &offset, &r)?;
+        let outputs = mux(&mut builder, c2, &t1, &t2)?;
+        let inputs: Vec<usize> = r.iter().chain(&y).chain(&offset).copied().collect();
+        Ok(builder.finish(&inputs, &outputs))
     }
 
     /// The synthetic all-ones/all-ones plan behind the two bounds above. Not a conversion: no `y`
@@ -1094,7 +1177,7 @@ impl<F: PrimeField> FieldA2BCircuit<F> {
                 got: y_bits.len(),
             });
         }
-        // `d = 2^w - p`. On Goldilocks this is `2^32 - 1`.
+        // `d = 2^w - p`.
         let reduce = two_pow_w_minus_modulus_bits::<F>();
         if reduce.len() != width {
             return Err(CircuitError::InputLengthMismatch {
@@ -1144,22 +1227,22 @@ impl<F: PrimeField> HasNetlist for FieldA2BCircuit<F> {
 
 /// `r >= p` over the bits of `r` — the edaBit `r < p` filter.
 ///
-/// An edaBit is 64 daBits composed as `[r]_F = sum 2^i [b_i]_F`, which equals the integer
+/// An edaBit is `w` daBits composed as `[r]_F = sum 2^i [b_i]_F`, which equals the integer
 /// `sum 2^i r_i` only while that integer is below `p`. Since `p` is not a power of two, roughly
-/// `(2^w - p) / 2^w` of the candidates (`2^-32` on Goldilocks) must be rejected, and this circuit
+/// `(2^w - p) / 2^w` of the candidates (about 9% on BLS12-381's scalar field, 24% on BN254's)
+/// must be rejected, and this circuit
 /// computes the one bit that decides it. The caller opens that bit at degree `t`; because the
 /// opening is robust, every honest party sees the same verdict and no agreement step is needed —
 /// the same argument `rand_bit.rs` uses for its "square opened to zero, drop this index" branch.
 ///
 /// # Two implementations, one meaning
 ///
-/// * **Solinas shape.** When `2^w - p = 2^m - 1` — i.e. `p = 2^w - 2^m + 1`, which is exactly
-///   Goldilocks with `w = 64, m = 32` — then `r >= p` iff every bit at or above `m` is set *and*
+/// * **Solinas shape.** When `2^w - p = 2^m - 1` — i.e. `p = 2^w - 2^m + 1` — then `r >= p` iff every bit at or above `m` is set *and*
 ///   at least one bit below `m` is set. That is an `AND` tree over the top `w - m` bits beside an
-///   `OR` tree over the bottom `m`, plus one final `AND`: **63 ANDs, 6 layers** at `w = 64`.
+///   `OR` tree over the bottom `m`, plus one final `AND`: `w - 1` ANDs.
 /// * **General.** Otherwise `r >= p` is the carry out of `r + (2^w - p)`, via
-///   [`prefix::geq_public_constant`]. Correct for any prime modulus, a little dearer (89 ANDs at
-///   `w = 64`, were Goldilocks to take this path).
+///   [`prefix::geq_public_constant`]. Correct for any prime modulus, and the path both curve fields take:
+///   402 ANDs over 8 layers on BLS12-381's scalar field.
 ///
 /// Both branches are checked against each other on the boundary vectors in
 /// `test_modulus_overflow_general_path_agrees`.
@@ -1250,7 +1333,7 @@ fn add_bits_le(a: &[bool], b: &[bool]) -> Option<Vec<bool>> {
 /// `m` such that `complement == 2^m - 1`, i.e. bits `0..m` set and everything above clear, with
 /// `0 < m < complement.len()`.
 ///
-/// `complement` is `2^w - p`, so this recognises `p = 2^w - 2^m + 1` — the Solinas/Goldilocks
+/// `complement` is `2^w - p`, so this recognises `p = 2^w - 2^m + 1` — the Solinas
 /// shape. `m = 0` would mean `p = 2^w` and `m = w` would mean `p = 1`; neither is a prime modulus,
 /// so both fall through to the general comparison rather than being special-cased.
 fn solinas_exponent(complement: &[bool]) -> Option<usize> {
@@ -1278,7 +1361,7 @@ pub(crate) fn evaluate_in_the_clear<C: HasNetlist>(
     circuit: &C,
     inputs: &[bool],
 ) -> Result<Vec<bool>, CircuitError> {
-    use crate::common::convert::{binary_to_bit, bit_to_binary};
+    use crate::common::convert::{bit_to_gf, gf_to_bit};
     use crate::common::gf2k::field::Gf256;
 
     // Deliberately not 0 and not the width, so an accidental "id == index" assumption anywhere
@@ -1288,7 +1371,7 @@ pub(crate) fn evaluate_in_the_clear<C: HasNetlist>(
 
     let shares: Vec<GfShare<Gf256>> = inputs
         .iter()
-        .map(|b| GfShare::new(bit_to_binary::<Gf256>(*b), TEST_ID, TEST_DEGREE))
+        .map(|b| GfShare::new(bit_to_gf::<Gf256>(*b), TEST_ID, TEST_DEGREE))
         .collect();
 
     let mut wires = circuit.init(&shares)?;
@@ -1306,7 +1389,7 @@ pub(crate) fn evaluate_in_the_clear<C: HasNetlist>(
     circuit
         .outputs(&wires)?
         .into_iter()
-        .map(|s| binary_to_bit(s.share).map_err(CircuitError::from))
+        .map(|s| gf_to_bit(s.share).map_err(CircuitError::from))
         .collect()
 }
 
@@ -1314,27 +1397,55 @@ pub(crate) fn evaluate_in_the_clear<C: HasNetlist>(
 mod tests {
     use super::*;
     use crate::common::gf2k::field::Gf256;
-    use crate::common::math::goldilocks::GoldilocksField;
+    use ark_ff::{Fp64, MontBackend, MontConfig};
+    use num_bigint::BigUint;
 
-    /// `p = 2^64 - 2^32 + 1`.
-    const P: u64 = 0xFFFF_FFFF_0000_0001;
+    /// The scalar field of BLS12-381: 255 bits, a general modulus.
+    type Bls = ark_bls12_381::Fr;
+    /// The scalar field of BN254: 254 bits, a general modulus.
+    type Bn = ark_bn254::Fr;
 
-    fn bits_le(value: u64, width: usize) -> Vec<bool> {
-        (0..width).map(|i| (value >> i) & 1 == 1).collect()
+    #[derive(MontConfig)]
+    #[modulus = "241"]
+    #[generator = "7"]
+    pub struct F241Config;
+    /// `2^8 - 2^4 + 1`: a Solinas prime small enough to try every input, and the one modulus
+    /// shape for which the overflow circuit has a specialised form.
+    type F241 = Fp64<MontBackend<F241Config, 1>>;
+
+    #[derive(MontConfig)]
+    #[modulus = "251"]
+    #[generator = "6"]
+    pub struct F251Config;
+    /// A general 8-bit prime, small enough to try every input.
+    type F251 = Fp64<MontBackend<F251Config, 1>>;
+
+    fn modulus<F: PrimeField>() -> BigUint {
+        F::MODULUS.into()
     }
 
-    fn u64_from_bits(bits: &[bool]) -> u64 {
-        let mut acc = 0u64;
+    fn width<F: PrimeField>() -> usize {
+        field_bit_width::<F>()
+    }
+
+    fn bits_le(value: &BigUint, width: usize) -> Vec<bool> {
+        (0..width).map(|i| value.bit(i as u64)).collect()
+    }
+
+    fn from_bits(bits: &[bool]) -> BigUint {
+        let mut acc = BigUint::from(0u8);
         for (i, b) in bits.iter().enumerate() {
-            if *b {
-                acc |= 1u64 << i;
-            }
+            acc.set_bit(i as u64, *b);
         }
         acc
     }
 
-    /// Deterministic, dependency-free 64-bit stream (xorshift64*), so the sweeps below are
-    /// reproducible without pinning a `rand` version.
+    fn pow2(exponent: usize) -> BigUint {
+        BigUint::from(1u8) << exponent
+    }
+
+    /// Deterministic, dependency-free stream (xorshift64*), so the sweeps below are reproducible
+    /// without pinning a `rand` version.
     struct Xorshift(u64);
     impl Xorshift {
         fn next(&mut self) -> u64 {
@@ -1345,362 +1456,425 @@ mod tests {
             self.0 = x;
             x.wrapping_mul(0x2545_F491_4F6C_DD1D)
         }
-        fn next_field(&mut self) -> u64 {
-            self.next() % P
+        /// Uniform enough for a sweep: 64 bits more than the bound, reduced.
+        fn below(&mut self, bound: &BigUint) -> BigUint {
+            let limbs = bound.bits().div_ceil(64) + 1;
+            let mut acc = BigUint::from(0u8);
+            for _ in 0..limbs {
+                acc = (acc << 64) + BigUint::from(self.next());
+            }
+            acc % bound
         }
     }
 
-    /// The 12 values every 64-bit test below sweeps: the arithmetic boundaries of the Goldilocks
-    /// reduction, all inside `[0, p)`.
-    const FIELD_VECTORS: [u64; 12] = [
-        0,
-        1,
-        2,
-        0xFFFF_FFFF,           // 2^32 - 1, == 2^64 - p
-        0x1_0000_0000,         // 2^32
-        0x1_0000_0001,         // 2^32 + 1
-        0x7FFF_FFFF_FFFF_FFFF, // 2^63 - 1
-        0x8000_0000_0000_0000, // 2^63
-        P - 1,
-        P - 2,
-        P - 0x1_0000_0000, // p - 2^32
-        P - 0x1_0000_0001, // p - 2^32 - 1
-    ];
-
-    fn canonical_u64(x: GoldilocksField) -> u64 {
-        x.into_bigint().0[0]
+    /// The arithmetic boundaries of the reduction for `F`, all inside `[0, p)`: both ends of the
+    /// range, the offset `d = 2^w - p` the adder folds in, the top bit, and their neighbours.
+    fn field_vectors<F: PrimeField>() -> Vec<BigUint> {
+        let p = modulus::<F>();
+        let w = width::<F>();
+        let d = pow2(w) - &p;
+        let one = BigUint::from(1u8);
+        let mut out = vec![
+            BigUint::from(0u8),
+            one.clone(),
+            BigUint::from(2u8),
+            &d - &one,
+            d.clone(),
+            &d + &one,
+            pow2(w - 1) - &one,
+            pow2(w - 1),
+            &p - &one,
+            &p - BigUint::from(2u8),
+            &p >> 1,
+        ];
+        if p > d {
+            out.push(&p - &d);
+            out.push(&p - &d - &one);
+        }
+        out.retain(|v| v < &p);
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// One A2B conversion, in the clear: mask `x` with `r`, feed the opened `y` and the bits of
     /// `r` to the circuit, and demand the bits of `x` back.
-    fn check_a2b(x: u64, r: u64) {
-        assert!(x < P && r < P, "test vectors must be canonical");
-        let y_field = GoldilocksField::from(x) - GoldilocksField::from(r);
-        let y = canonical_u64(y_field);
+    fn check_a2b<F: PrimeField>(x: &BigUint, r: &BigUint) {
+        let p = modulus::<F>();
+        let w = width::<F>();
+        assert!(x < &p && r < &p, "test vectors must be canonical");
+        let y_field = F::from(x.clone()) - F::from(r.clone());
+        let y: BigUint = y_field.into_bigint().into();
         assert_eq!(
             y,
-            ((x as u128 + P as u128 - r as u128) % P as u128) as u64,
+            (x + &p - r) % &p,
             "field subtraction and the integer model disagree"
         );
 
-        let circuit = FieldA2BCircuit::<GoldilocksField>::new(y_field).expect("circuit");
-        assert!(
-            circuit.layers() <= 7,
-            "A2B must never exceed 7 AND layers (y = {y:#x})"
-        );
-        let out = evaluate_in_the_clear(&circuit, &bits_le(r, 64)).expect("eval");
-        assert_eq!(out.len(), 64);
+        let circuit = FieldA2BCircuit::<F>::new(y_field).expect("circuit");
+        assert!(circuit.layers() <= FieldA2BCircuit::<F>::max_layers().unwrap());
+        assert!(circuit.and_count() <= FieldA2BCircuit::<F>::max_and_count().unwrap());
+        let out = evaluate_in_the_clear(&circuit, &bits_le(r, w)).expect("eval");
+        assert_eq!(out.len(), w);
         assert_eq!(
-            u64_from_bits(&out),
+            &from_bits(&out),
             x,
-            "a2b failed for x = {x:#x}, r = {r:#x}, y = {y:#x}"
+            "a2b failed for x = {x}, r = {r}, y = {y}"
         );
+    }
+
+    fn boundary_vectors<F: PrimeField>() {
+        let vectors = field_vectors::<F>();
+        for x in &vectors {
+            for r in &vectors {
+                check_a2b::<F>(x, r);
+            }
+        }
+    }
+
+    fn random_sweep<F: PrimeField>(samples: usize) {
+        let p = modulus::<F>();
+        let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..samples {
+            check_a2b::<F>(&rng.below(&p), &rng.below(&p));
+        }
+        // Random x against each boundary mask, and vice versa.
+        for v in &field_vectors::<F>() {
+            check_a2b::<F>(v, &rng.below(&p));
+            check_a2b::<F>(&rng.below(&p), v);
+        }
     }
 
     #[test]
     fn test_field_a2b_boundary_vectors() {
-        for &x in &FIELD_VECTORS {
-            for &r in &FIELD_VECTORS {
-                check_a2b(x, r);
-            }
-        }
+        boundary_vectors::<Bls>();
+        boundary_vectors::<Bn>();
     }
 
     #[test]
     fn test_field_a2b_random_sweep() {
-        let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15);
-        for _ in 0..20000 {
-            check_a2b(rng.next_field(), rng.next_field());
-        }
-        // Random x against each boundary mask, and vice versa.
-        for &v in &FIELD_VECTORS {
-            check_a2b(v, rng.next_field());
-            check_a2b(rng.next_field(), v);
-        }
+        random_sweep::<Bls>(1500);
+        random_sweep::<Bn>(1500);
     }
 
-    /// A2B returns the canonical representative in `[0, p)`, **not** two's complement. `-1` is
-    /// `p - 1 = 0xFFFF_FFFF_0000_0000`, and a caller wanting a sign bit has to shift first.
+    /// Every mask against every input, on a Solinas prime and on a general one. Eight bits is
+    /// small enough for the whole cross product, so on these fields nothing is sampled.
+    #[test]
+    fn test_field_a2b_exhaustive_on_small_fields() {
+        fn all<F: PrimeField>() {
+            let p = modulus::<F>();
+            let p: u64 = p.try_into().unwrap();
+            for x in 0..p {
+                for r in 0..p {
+                    check_a2b::<F>(&BigUint::from(x), &BigUint::from(r));
+                }
+            }
+        }
+        all::<F241>();
+        all::<F251>();
+    }
+
+    /// A2B returns the canonical representative in `[0, p)`, **not** two's complement: `-1` comes
+    /// back as `p - 1`, not as all ones, and a caller wanting a sign bit has to shift first.
     #[test]
     fn test_field_a2b_signed_is_canonical_not_twos_complement() {
-        let minus_one = GoldilocksField::from(0u64) - GoldilocksField::from(1u64);
-        assert_eq!(canonical_u64(minus_one), P - 1);
-        let mut rng = Xorshift(0x1234_5678_9ABC_DEF0);
-        for _ in 0..8 {
-            let r = rng.next_field();
-            let y = canonical_u64(minus_one - GoldilocksField::from(r));
-            let circuit =
-                FieldA2BCircuit::<GoldilocksField>::new(GoldilocksField::from(y)).expect("circuit");
-            let out = evaluate_in_the_clear(&circuit, &bits_le(r, 64)).expect("eval");
-            assert_eq!(u64_from_bits(&out), 0xFFFF_FFFF_0000_0000);
-            assert_ne!(u64_from_bits(&out), u64::MAX);
+        fn check<F: PrimeField>() {
+            let p = modulus::<F>();
+            let w = width::<F>();
+            let minus_one = -F::one();
+            let mut rng = Xorshift(0x1234_5678_9ABC_DEF0);
+            for _ in 0..8 {
+                let r = rng.below(&p);
+                let circuit =
+                    FieldA2BCircuit::<F>::new(minus_one - F::from(r.clone())).expect("circuit");
+                let out = from_bits(&evaluate_in_the_clear(&circuit, &bits_le(&r, w)).unwrap());
+                assert_eq!(out, &p - BigUint::from(1u8));
+                assert_ne!(out, pow2(w) - BigUint::from(1u8));
+            }
         }
+        check::<Bls>();
+        check::<Bn>();
     }
 
-    /// The exact budget, which is what the A2B node sizes its triple pool against.
+    /// The exact budget, which is what the A2B node sizes its triple pool against, and the depth,
+    /// which is the number of online multiplication rounds.
     #[test]
     fn test_field_a2b_gate_budget() {
-        assert_eq!(
-            FieldA2BCircuit::<GoldilocksField>::max_layers().expect("plan"),
-            7,
-            "A2B online AND depth on Goldilocks: two concurrent 6-layer adders plus the MUX"
-        );
-        assert_eq!(
-            FieldA2BCircuit::<GoldilocksField>::max_and_count().expect("plan"),
-            695,
-            "A2B AND count upper bound on Goldilocks (310 + 321 + 64)"
-        );
-
-        // Every reachable mask is within budget, and the plan is a pure function of the mask, so
-        // rebuilding it gives a bit-identical netlist at every party.
-        for &y in &FIELD_VECTORS {
-            let a =
-                FieldA2BCircuit::<GoldilocksField>::new(GoldilocksField::from(y)).expect("circuit");
-            let b =
-                FieldA2BCircuit::<GoldilocksField>::new(GoldilocksField::from(y)).expect("circuit");
-            assert_eq!(a.netlist(), b.netlist(), "plan is not deterministic in y");
-            assert!(a.and_count() <= 695);
-            assert!(a.layers() <= 7);
+        fn check<F: PrimeField>(layers: usize, ands: usize) {
+            assert_eq!(FieldA2BCircuit::<F>::max_layers().expect("plan"), layers);
+            assert_eq!(FieldA2BCircuit::<F>::max_and_count().expect("plan"), ands);
+            // Every reachable mask is within budget, and the plan is a pure function of the mask,
+            // so rebuilding it gives a bit-identical netlist at every party.
+            for y in &field_vectors::<F>() {
+                let a = FieldA2BCircuit::<F>::new(F::from(y.clone())).expect("circuit");
+                let b = FieldA2BCircuit::<F>::new(F::from(y.clone())).expect("circuit");
+                assert_eq!(a.netlist(), b.netlist(), "plan is not deterministic in y");
+                assert!(a.and_count() <= ands);
+                assert!(a.layers() <= layers);
+            }
         }
+        // Two concurrent prefix adders of depth `ceil(log2 w)` plus the MUX.
+        check::<Bls>(BLS_LAYERS, BLS_ANDS);
+        check::<Bn>(BN_LAYERS, BN_ANDS);
     }
 
-    /// The bound is analytic: it is the sum of two separately-maximised adders, and no admissible
-    /// `y` attains it. This pins both halves of that claim — the decomposition `310 + 321 + 64`,
-    /// and the fact that the all-ones mask the serial circuit used to take its bound from is now
-    /// *rejected*, because `Y = y + (2^64 - p)` would wrap.
+    const BLS_LAYERS: usize = 9;
+    const BLS_ANDS: usize = 3798;
+    const BN_LAYERS: usize = 9;
+    const BN_ANDS: usize = 3771;
+
+    /// The bound is analytic: it is the sum of two separately-maximised adders and the MUX, and
+    /// the all-ones mask it is taken from is itself *rejected*, because `Y = y + (2^w - p)` would
+    /// wrap. The largest admissible mask stays below it.
     #[test]
     fn test_field_a2b_budget_is_analytic_not_realisable() {
         use prefix::{add_public_constant, PublicPlusSecretAdder};
 
-        // Adder 2 keeps its carry out; adder 1's carry cone is dead.
-        let full = PublicPlusSecretAdder::new(vec![true; 64]).expect("adder");
-        assert_eq!(full.and_count(), 321);
+        fn check<F: PrimeField>() {
+            let w = width::<F>();
+            // Adder 2 keeps its carry out; adder 1's carry cone is dead.
+            let full = PublicPlusSecretAdder::new(vec![true; w]).expect("adder");
+            let mut builder = Builder::new();
+            let x = builder.inputs(w);
+            let (sum, _carry) = add_public_constant(&mut builder, &vec![true; w], &x).unwrap();
+            let sum_only = builder.finish(&x, &sum);
+            assert!(sum_only.and_count() < full.and_count());
+            println!(
+                "w={w}: sum-only adder {}, full adder {}, overflow circuit {} ANDs / {} layers",
+                sum_only.and_count(),
+                full.and_count(),
+                ModulusOverflowCircuit::<F>::new().unwrap().and_count(),
+                ModulusOverflowCircuit::<F>::new().unwrap().layers()
+            );
+            assert_eq!(
+                sum_only.and_count() + full.and_count() + w,
+                FieldA2BCircuit::<F>::max_and_count().expect("plan"),
+                "the bound must be exactly the two adders plus the multiplexer"
+            );
 
-        let mut builder = Builder::new();
-        let x = builder.inputs(64);
-        let (sum, _carry) = add_public_constant(&mut builder, &vec![true; 64], &x).expect("adder");
-        let sum_only = builder.finish(&x, &sum);
-        assert_eq!(
-            sum_only.and_count(),
-            310,
-            "dropping the carry out prunes 11 cells of the all-ones adder"
-        );
-        assert_eq!(
-            sum_only.and_count() + full.and_count() + 64,
-            FieldA2BCircuit::<GoldilocksField>::max_and_count().expect("plan"),
-            "the bound must be exactly the two adders plus the multiplexer"
-        );
-
-        // `y = 2^64 - 1` is not a field element at all, and the bits of `p - 1` are the largest
-        // admissible mask; neither reaches the bound.
-        let biggest =
-            FieldA2BCircuit::<GoldilocksField>::new(GoldilocksField::from(P - 1)).expect("circuit");
-        assert!(biggest.and_count() < 695);
-
-        // The dearest admissible mask the module header quotes, two short of the bound. Pinned
-        // here so the header cannot drift away from the planner.
-        let dearest = FieldA2BCircuit::<GoldilocksField>::new(GoldilocksField::from(
-            0xDDD5_D776_7D77_F7D7u64,
-        ))
-        .expect("circuit");
-        assert_eq!(dearest.and_count(), 693);
-        assert_eq!(dearest.layers(), 7);
+            let biggest = FieldA2BCircuit::<F>::new(-F::one()).expect("circuit");
+            assert!(biggest.and_count() < FieldA2BCircuit::<F>::max_and_count().unwrap());
+        }
+        check::<Bls>();
+        check::<Bn>();
     }
 
-    /// Raw bits above the modulus are rejected rather than silently wrapping the offset (C12).
+    /// Raw bits at or above the modulus are rejected rather than silently wrapping the offset
+    /// (C12).
     #[test]
     fn test_field_a2b_rejects_a_non_canonical_mask() {
-        assert!(matches!(
-            FieldA2BCircuit::<GoldilocksField>::plan(vec![true; 64], PrefixTopology::default()),
-            Err(CircuitError::MaskNotCanonical)
-        ));
-        assert!(matches!(
-            FieldA2BCircuit::<GoldilocksField>::plan(bits_le(P, 64), PrefixTopology::default()),
-            Err(CircuitError::MaskNotCanonical)
-        ));
-        // One below the modulus is the largest admissible mask and must be accepted.
-        assert!(FieldA2BCircuit::<GoldilocksField>::plan(
-            bits_le(P - 1, 64),
-            PrefixTopology::default()
-        )
-        .is_ok());
-        assert!(matches!(
-            FieldA2BCircuit::<GoldilocksField>::plan(vec![false; 63], PrefixTopology::default()),
-            Err(CircuitError::InputLengthMismatch { .. })
-        ));
+        fn check<F: PrimeField>() {
+            let p = modulus::<F>();
+            let w = width::<F>();
+            let plan =
+                |bits: Vec<bool>| FieldA2BCircuit::<F>::plan(bits, PrefixTopology::default());
+            assert!(matches!(
+                plan(vec![true; w]),
+                Err(CircuitError::MaskNotCanonical)
+            ));
+            assert!(matches!(
+                plan(bits_le(&p, w)),
+                Err(CircuitError::MaskNotCanonical)
+            ));
+            // One below the modulus is the largest admissible mask and must be accepted.
+            assert!(plan(bits_le(&(&p - BigUint::from(1u8)), w)).is_ok());
+            assert!(matches!(
+                plan(vec![false; w - 1]),
+                Err(CircuitError::InputLengthMismatch { .. })
+            ));
+        }
+        check::<Bls>();
+        check::<Bn>();
+        check::<F241>();
     }
 
     /// The offset carry `c2` is the whole reduction decision: `c2 = 1` exactly when `y + r >= p`,
-    /// and the low `w` bits of `Y + r` are then `y + r - p` with no second wrap. This replaces the
-    /// serial circuit's `(c1, c2) = (1, 1)`-unreachability lemma, which the parallel form does not
-    /// need because the first adder's carry out is never formed.
+    /// and the low `w` bits of `Y + r` are then `y + r - p` with no second wrap. The first adder's
+    /// carry out is never formed.
     #[test]
     fn test_field_a2b_offset_carry_decides_the_reduction() {
-        let d = (1u128 << 64) - P as u128;
-        assert_eq!(d, 0xFFFF_FFFF, "2^64 - p must be 2^32 - 1");
+        fn check<F: PrimeField>() {
+            let p = modulus::<F>();
+            let w = width::<F>();
+            let top = pow2(w);
+            let d = &top - &p;
+            let low = &top - BigUint::from(1u8);
 
-        let mut rng = Xorshift(0xDEAD_BEEF_CAFE_BABE);
-        let mut cases: Vec<(u64, u64)> = Vec::new();
-        for &x in &FIELD_VECTORS {
-            for &r in &FIELD_VECTORS {
-                cases.push((x, r));
+            let mut rng = Xorshift(0xDEAD_BEEF_CAFE_BABE);
+            let vectors = field_vectors::<F>();
+            let mut cases: Vec<(BigUint, BigUint)> = Vec::new();
+            for x in &vectors {
+                for r in &vectors {
+                    cases.push((x.clone(), r.clone()));
+                }
+            }
+            for _ in 0..2000 {
+                cases.push((rng.below(&p), rng.below(&p)));
+            }
+
+            for (x, r) in cases {
+                let y = (&x + &p - &r) % &p;
+                let big_y = &y + &d; // Y = y + d, which must fit in w bits
+                assert!(big_y < top, "Y wrapped for y = {y}");
+
+                let a = &y + &r; // A = y + r over the integers
+                let t1 = &a & &low;
+                let sum2 = &big_y + &r;
+                let c2 = sum2 >= top;
+                let t2 = &sum2 & &low;
+
+                assert_eq!(c2, a >= p, "c2 must fire exactly when y + r >= p");
+                assert_eq!(if c2 { t2 } else { t1 }, x, "integer model disagrees");
             }
         }
-        for _ in 0..2000 {
-            cases.push((rng.next_field(), rng.next_field()));
-        }
-
-        for (x, r) in cases {
-            let y = ((x as u128 + P as u128 - r as u128) % P as u128) as u64;
-            let big_y = y as u128 + d; // Y = y + d, which must fit in 64 bits
-            assert!(big_y < 1u128 << 64, "Y wrapped for y = {y:#x}");
-
-            let a = y as u128 + r as u128; // A = y + r over the integers
-            let t1 = (a & ((1u128 << 64) - 1)) as u64;
-            let sum2 = big_y + r as u128;
-            let c2 = sum2 >= 1u128 << 64;
-            let t2 = (sum2 & ((1u128 << 64) - 1)) as u64;
-
-            assert_eq!(c2, a >= P as u128, "c2 must fire exactly when y + r >= p");
-            assert_eq!(if c2 { t2 } else { t1 }, x, "integer model disagrees");
-        }
+        check::<Bls>();
+        check::<Bn>();
+        check::<F241>();
+        check::<F251>();
     }
 
-    /// Dense neighbourhoods of every boundary the Goldilocks reduction turns on, on both the value
-    /// and the mask. The cross product of [`FIELD_VECTORS`] hits the boundaries themselves; this
-    /// hits the two integers either side of each, which is where an off-by-one in the offset
-    /// `Y = y + d` or in the `c2 = 1 <=> y + r >= p` threshold would show up.
+    /// Dense neighbourhoods of every boundary the reduction turns on, on both the value and the
+    /// mask. The cross product of [`field_vectors`] hits the boundaries themselves; this hits the
+    /// integers either side of each, which is where an off-by-one in the offset `Y = y + d` or in
+    /// the `c2 = 1 <=> y + r >= p` threshold would show up.
     #[test]
     fn test_field_a2b_boundary_neighbourhoods() {
-        let centres: [u64; 7] = [
-            0,
-            0xFFFF_FFFF,           // 2^32 - 1 == 2^64 - p, the offset itself
-            0x1_0000_0000,         // 2^32
-            0x8000_0000_0000_0000, // 2^63
-            P - 0x1_0000_0000,
-            P - 1, // the largest field element; the largest admissible mask
-            P / 2,
-        ];
-        let mut points: Vec<u64> = Vec::new();
-        for &c in &centres {
-            for delta in 0..=4i64 {
-                let candidate = (c as i128 + delta as i128 - 2) as i128;
-                if (0..P as i128).contains(&candidate) {
-                    points.push(candidate as u64);
+        fn check<F: PrimeField>() {
+            let p = modulus::<F>();
+            let w = width::<F>();
+            let d = pow2(w) - &p;
+            let centres = [
+                BigUint::from(2u8),
+                d.clone(),
+                pow2(w - 1),
+                &p - &d,
+                &p - BigUint::from(3u8),
+                &p >> 1,
+            ];
+            let mut points: Vec<BigUint> = Vec::new();
+            for c in &centres {
+                for delta in 0..=4u8 {
+                    let candidate = c + BigUint::from(delta);
+                    if candidate >= BigUint::from(2u8) && candidate - BigUint::from(2u8) < p {
+                        points.push(c + BigUint::from(delta) - BigUint::from(2u8));
+                    }
+                }
+            }
+            points.sort();
+            points.dedup();
+            for x in &points {
+                for r in &points {
+                    check_a2b::<F>(x, r);
                 }
             }
         }
-        points.sort_unstable();
-        points.dedup();
-
-        for &x in &points {
-            for &r in &points {
-                check_a2b(x, r);
-            }
-        }
+        check::<Bls>();
+        check::<Bn>();
     }
 
     /// A narrow output is a pure pruning of the same plan: the low `l` bits it keeps must be the
-    /// low `l` bits the full-width circuit produces. Checked at `l = 33`, the width of the repo's
-    /// default `FixedPointPrecision(32, 16)`, and at a few others.
+    /// low `l` bits the full-width circuit produces.
     #[test]
     fn test_field_a2b_narrow_output_matches_low_bits() {
-        let mut rng = Xorshift(0x0F1E_2D3C_4B5A_6978);
-        for ell in [1usize, 8, 33, 63, 64] {
-            for _ in 0..64 {
-                let x = rng.next_field();
-                let r = rng.next_field();
-                let y = canonical_u64(GoldilocksField::from(x) - GoldilocksField::from(r));
-                let net = truncated_parallel_plan(y, ell);
-                let out = evaluate_in_the_clear(&net, &bits_le(r, 64)).expect("eval");
-                assert_eq!(out.len(), ell);
-                let mask = if ell == 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << ell) - 1
-                };
-                assert_eq!(
-                    u64_from_bits(&out),
-                    x & mask,
-                    "l = {ell}: narrow output disagrees for x = {x:#x}, r = {r:#x}"
-                );
-                assert!(net.layers() <= 7);
+        fn check<F: PrimeField>() {
+            let p = modulus::<F>();
+            let w = width::<F>();
+            let mut rng = Xorshift(0x0F1E_2D3C_4B5A_6978);
+            for ell in [1usize, 8, 33, 64, w - 1, w] {
+                for _ in 0..16 {
+                    let x = rng.below(&p);
+                    let r = rng.below(&p);
+                    let y = (&x + &p - &r) % &p;
+                    let net = truncated_parallel_plan::<F>(&y, ell);
+                    let out = evaluate_in_the_clear(&net, &bits_le(&r, w)).expect("eval");
+                    assert_eq!(out.len(), ell);
+                    assert_eq!(
+                        from_bits(&out),
+                        &x & (pow2(ell) - BigUint::from(1u8)),
+                        "l = {ell}: narrow output disagrees for x = {x}, r = {r}"
+                    );
+                    assert!(net.layers() <= FieldA2BCircuit::<F>::max_layers().unwrap());
+                }
             }
         }
+        check::<Bls>();
+        check::<Bn>();
     }
 
-    /// Cost and depth, measured rather than asserted from the design note, at both the full field
-    /// width and the repo's default fixed-point width.
+    /// Cost and depth, measured rather than asserted from the design note, at the full field width
+    /// and at a narrow output.
     ///
-    /// `l = 33` is [`crate::common::types::fixed::FixedPointPrecision`]`(32, 16)`'s width. It does
-    /// **not** shrink the preprocessing — the mask must stay uniform on `[0, p)` whatever the
-    /// value's width, so the edaBit is 64 daBits either way — but a caller that has certified it
-    /// needs no high output bits gets a cheaper *circuit*, because backward liveness then prunes
-    /// the high cones of **both** parallel adders. The serial chain cannot do that: all 64 bits of
-    /// its first adder stay live to feed the second one.
+    /// A narrow output does **not** shrink the preprocessing — the mask must stay uniform on
+    /// `[0, p)` whatever the value's width, so the edaBit is `w` daBits either way — but a caller
+    /// that has certified it needs no high output bits gets a cheaper *circuit*, because backward
+    /// liveness then prunes the high cones of **both** parallel adders. The serial chain cannot do
+    /// that: every bit of its first adder stays live to feed the second one.
     #[test]
     fn test_field_a2b_measured_cost() {
-        let mut rng = Xorshift(0x0123_4567_89AB_CDEF);
-        let samples = 4096usize;
+        fn check<F: PrimeField>(name: &str) {
+            let p = modulus::<F>();
+            let bound = FieldA2BCircuit::<F>::max_and_count().unwrap();
+            let depth = FieldA2BCircuit::<F>::max_layers().unwrap();
+            let mut rng = Xorshift(0x0123_4567_89AB_CDEF);
+            let samples = 256usize;
 
-        let mut total = 0usize;
-        let mut worst = 0usize;
-        let mut deepest = 0usize;
-        for _ in 0..samples {
-            let circuit =
-                FieldA2BCircuit::<GoldilocksField>::new(GoldilocksField::from(rng.next_field()))
-                    .expect("circuit");
-            total += circuit.and_count();
-            worst = worst.max(circuit.and_count());
-            deepest = deepest.max(circuit.layers());
-        }
-        let mean = total / samples;
-        println!("l=64 parallel: bound 695, max seen {worst}, mean {mean}, depth {deepest}");
-        assert_eq!(deepest, 7);
-        assert!(worst <= 695);
-        assert!(
-            (630..=655).contains(&mean),
-            "mean AND count over a uniform mask drifted to {mean} (expected ~642)"
-        );
+            let mut total = 0usize;
+            let mut worst = 0usize;
+            let mut deepest = 0usize;
+            for _ in 0..samples {
+                let circuit = FieldA2BCircuit::<F>::new(F::from(rng.below(&p))).expect("circuit");
+                total += circuit.and_count();
+                worst = worst.max(circuit.and_count());
+                deepest = deepest.max(circuit.layers());
+            }
+            let mean = total / samples;
+            println!("{name}: bound {bound}, max seen {worst}, mean {mean}, depth {deepest}");
+            assert_eq!(deepest, depth);
+            assert!(worst <= bound);
+            assert!(mean < bound && mean > bound / 2);
 
-        // Narrow output: only the low 33 bits of `x` are read.
-        let mut narrow_total = 0usize;
-        let mut serial_total = 0usize;
-        let mut narrow_depth = 0usize;
-        let mut serial_depth = 0usize;
-        for _ in 0..samples {
-            let y = rng.next_field();
-            let narrow = truncated_parallel_plan(y, 33);
-            let serial = truncated_serial_plan(y, 33);
-            narrow_total += narrow.and_count();
-            serial_total += serial.and_count();
-            narrow_depth = narrow_depth.max(narrow.layers());
-            serial_depth = serial_depth.max(serial.layers());
+            // Narrow output: only the low 33 bits of `x` are read.
+            let mut narrow_total = 0usize;
+            let mut serial_total = 0usize;
+            let mut narrow_depth = 0usize;
+            let mut serial_depth = 0usize;
+            for _ in 0..samples {
+                let y = rng.below(&p);
+                let narrow = truncated_parallel_plan::<F>(&y, 33);
+                let serial = truncated_serial_plan::<F>(&y, 33);
+                narrow_total += narrow.and_count();
+                serial_total += serial.and_count();
+                narrow_depth = narrow_depth.max(narrow.layers());
+                serial_depth = serial_depth.max(serial.layers());
+            }
+            println!(
+                "{name} l=33 parallel: mean {}, depth {narrow_depth}; serial: mean {}, depth \
+                 {serial_depth}",
+                narrow_total / samples,
+                serial_total / samples
+            );
+            assert!(narrow_depth <= depth);
+            assert!(serial_depth > narrow_depth);
+            assert!(
+                narrow_total < serial_total,
+                "the parallel form must prune further at a narrow output width"
+            );
         }
-        let narrow_mean = narrow_total / samples;
-        let serial_mean = serial_total / samples;
-        println!(
-            "l=33 parallel: mean {narrow_mean}, depth {narrow_depth}; \
-             l=33 serial: mean {serial_mean}, depth {serial_depth}"
-        );
-        assert_eq!(narrow_depth, 7);
-        assert_eq!(serial_depth, 13);
-        assert!(
-            narrow_mean < serial_mean,
-            "the parallel form must prune further at a narrow output width"
-        );
+        check::<Bls>("bls12-381");
+        check::<Bn>("bn254");
     }
 
     /// `l`-bit-output A2B on the parallel offset adder: the plan of [`FieldA2BCircuit`] with only
     /// the low `l` outputs declared live. Test scaffolding for the cost measurement above — the
     /// node has no narrow entry point, because a narrow output is only correct when the caller
     /// certifies its value needs no high bits, which the repo's signed encoding does not.
-    fn truncated_parallel_plan(y: u64, ell: usize) -> Netlist {
-        let y_bits = bits_le(y, 64);
-        let reduce = two_pow_w_minus_modulus_bits::<GoldilocksField>();
+    fn truncated_parallel_plan<F: PrimeField>(y: &BigUint, ell: usize) -> Netlist {
+        let w = width::<F>();
+        let y_bits = bits_le(y, w);
+        let reduce = two_pow_w_minus_modulus_bits::<F>();
         let offset = add_bits_le(&y_bits, &reduce).expect("y must be canonical");
         let mut builder = Builder::new();
-        let r = builder.inputs(64);
+        let r = builder.inputs(w);
         let (t1, _c1) =
             prefix::add_public_constant(&mut builder, &y_bits, &r).expect("first adder");
         let (t2, c2) = prefix::add_public_constant(&mut builder, &offset, &r).expect("second");
@@ -1709,11 +1883,12 @@ mod tests {
     }
 
     /// The same, on the superseded serial `ADD -> ADD -> MUX` chain, for the comparison.
-    fn truncated_serial_plan(y: u64, ell: usize) -> Netlist {
-        let y_bits = bits_le(y, 64);
-        let reduce = two_pow_w_minus_modulus_bits::<GoldilocksField>();
+    fn truncated_serial_plan<F: PrimeField>(y: &BigUint, ell: usize) -> Netlist {
+        let w = width::<F>();
+        let y_bits = bits_le(y, w);
+        let reduce = two_pow_w_minus_modulus_bits::<F>();
         let mut builder = Builder::new();
-        let r = builder.inputs(64);
+        let r = builder.inputs(w);
         let (t1, c1) = prefix::add_public_constant(&mut builder, &y_bits, &r).expect("first adder");
         let (t2, c2) = prefix::add_public_constant(&mut builder, &reduce, &t1).expect("second");
         let c = builder.xor(c1, c2);
@@ -1725,107 +1900,137 @@ mod tests {
     /// bits for fewer triples and more rounds, and the default is the minimum-depth point.
     #[test]
     fn test_field_a2b_topology_is_a_cost_knob_only() {
-        type C = FieldA2BCircuit<GoldilocksField>;
+        fn check<F: PrimeField>() {
+            let p = modulus::<F>();
+            let w = width::<F>();
+            let sklansky_ands =
+                FieldA2BCircuit::<F>::max_and_count_on(PrefixTopology::Sklansky).unwrap();
+            let sklansky_depth =
+                FieldA2BCircuit::<F>::max_layers_on(PrefixTopology::Sklansky).unwrap();
+            let bk_ands =
+                FieldA2BCircuit::<F>::max_and_count_on(PrefixTopology::BrentKung).unwrap();
+            let bk_depth = FieldA2BCircuit::<F>::max_layers_on(PrefixTopology::BrentKung).unwrap();
+            println!(
+                "topologies at l={w}: sklansky {sklansky_ands}/{sklansky_depth}, \
+                 brent-kung {bk_ands}/{bk_depth}"
+            );
 
-        let sklansky_ands = C::max_and_count_on(PrefixTopology::Sklansky).expect("plan");
-        let sklansky_depth = C::max_layers_on(PrefixTopology::Sklansky).expect("plan");
-        let bk_ands = C::max_and_count_on(PrefixTopology::BrentKung).expect("plan");
-        let bk_depth = C::max_layers_on(PrefixTopology::BrentKung).expect("plan");
-        println!(
-            "topologies at l=64: sklansky {sklansky_ands}/{sklansky_depth}, \
-             brent-kung {bk_ands}/{bk_depth}"
-        );
+            assert_eq!(PrefixTopology::default(), PrefixTopology::Sklansky);
+            assert!(bk_ands < sklansky_ands, "Brent-Kung must spend fewer ANDs");
+            assert!(bk_depth > sklansky_depth, "... and buy that with rounds");
+            assert_eq!(
+                FieldA2BCircuit::<F>::max_and_count().expect("plan"),
+                sklansky_ands,
+                "the default must be the minimum-depth point"
+            );
 
-        assert_eq!(PrefixTopology::default(), PrefixTopology::Sklansky);
-        assert_eq!((sklansky_ands, sklansky_depth), (695, 7));
-        assert!(bk_ands < sklansky_ands, "Brent-Kung must spend fewer ANDs");
-        assert!(bk_depth > sklansky_depth, "... and buy that with rounds");
-        assert_eq!(
-            C::max_and_count().expect("plan"),
-            sklansky_ands,
-            "the default must be the minimum-depth point"
-        );
-
-        let mut rng = Xorshift(0x5555_AAAA_3333_CCCC);
-        for _ in 0..64 {
-            let x = rng.next_field();
-            let r = rng.next_field();
-            let y = GoldilocksField::from(x) - GoldilocksField::from(r);
-            for topology in [PrefixTopology::Sklansky, PrefixTopology::BrentKung] {
-                let circuit = C::new_on(y, topology).expect("circuit");
-                assert_eq!(circuit.topology(), topology);
-                let out = evaluate_in_the_clear(&circuit, &bits_le(r, 64)).expect("eval");
-                assert_eq!(u64_from_bits(&out), x, "topology {topology:?} disagrees");
+            let mut rng = Xorshift(0x5555_AAAA_3333_CCCC);
+            for _ in 0..16 {
+                let x = rng.below(&p);
+                let r = rng.below(&p);
+                let y = F::from(x.clone()) - F::from(r.clone());
+                for topology in [PrefixTopology::Sklansky, PrefixTopology::BrentKung] {
+                    let circuit = FieldA2BCircuit::<F>::new_on(y, topology).expect("circuit");
+                    assert_eq!(circuit.topology(), topology);
+                    let out = evaluate_in_the_clear(&circuit, &bits_le(&r, w)).expect("eval");
+                    assert_eq!(from_bits(&out), x, "topology {topology:?} disagrees");
+                }
             }
         }
+        check::<Bls>();
+        check::<Bn>();
     }
 
+    /// `r >= p` on the two curve fields. Neither modulus has the Solinas shape, so both take the
+    /// general carry-out comparison.
     #[test]
-    fn test_modulus_overflow_goldilocks() {
-        let circuit = ModulusOverflowCircuit::<GoldilocksField>::new().expect("circuit");
-        assert!(
-            circuit.is_specialised(),
-            "Goldilocks is 2^64 - 2^32 + 1 and must take the Solinas path"
-        );
-        assert_eq!(circuit.width(), 64);
-        assert_eq!(circuit.and_count(), 63, "31 + 31 + 1");
-        assert_eq!(circuit.layers(), 6, "two depth-5 trees plus the final AND");
+    fn test_modulus_overflow_on_the_curve_fields() {
+        fn check<F: PrimeField>() {
+            let p = modulus::<F>();
+            let w = width::<F>();
+            let circuit = ModulusOverflowCircuit::<F>::new().expect("circuit");
+            assert!(!circuit.is_specialised());
+            assert_eq!(circuit.width(), w);
+            let one = BigUint::from(1u8);
 
-        for value in [
-            0u64,
-            1,
-            0xFFFF_FFFF,
-            0x1_0000_0000,
-            P - 2,
-            P - 1, // 0xFFFF_FFFF_0000_0000: top half all ones, bottom half zero -> accept
-            P,     // -> reject
-            P + 1,
-            u64::MAX,
-            0xFFFF_FFFF_0000_0002,
-        ] {
-            let out = evaluate_in_the_clear(&circuit, &bits_le(value, 64)).expect("eval");
-            assert_eq!(out.len(), 1);
-            assert_eq!(out[0], value >= P, "r >= p for {value:#x}");
+            let mut values = vec![
+                BigUint::from(0u8),
+                one.clone(),
+                &p - BigUint::from(2u8),
+                &p - &one, // the largest value that must be accepted
+                p.clone(), // the smallest that must be rejected
+                &p + &one,
+                pow2(w) - &one,
+                pow2(w - 1),
+            ];
+            let mut rng = Xorshift(0x0BAD_C0DE_0BAD_C0DE);
+            for _ in 0..300 {
+                values.push(rng.below(&pow2(w)));
+            }
+            for value in values {
+                let out = evaluate_in_the_clear(&circuit, &bits_le(&value, w)).expect("eval");
+                assert_eq!(out.len(), 1);
+                assert_eq!(out[0], value >= p, "r >= p for {value}");
+            }
         }
+        check::<Bls>();
+        check::<Bn>();
+    }
 
-        let mut rng = Xorshift(0x0BAD_C0DE_0BAD_C0DE);
-        for _ in 0..500 {
-            let value = rng.next();
-            let out = evaluate_in_the_clear(&circuit, &bits_le(value, 64)).expect("eval");
-            assert_eq!(out[0], value >= P, "r >= p for {value:#x}");
+    /// The Solinas specialisation, on the 8-bit prime `2^8 - 2^4 + 1`, for every candidate: the
+    /// top four bits all set and the bottom four not all clear.
+    #[test]
+    fn test_modulus_overflow_solinas_path_is_exact() {
+        let circuit = ModulusOverflowCircuit::<F241>::new().expect("circuit");
+        assert!(circuit.is_specialised());
+        assert_eq!(circuit.width(), 8);
+        assert_eq!(circuit.and_count(), 7, "3 + 3 + 1");
+        assert_eq!(circuit.layers(), 3, "two depth-2 trees plus the final AND");
+        for value in 0u64..256 {
+            let out =
+                evaluate_in_the_clear(&circuit, &bits_le(&BigUint::from(value), 8)).expect("eval");
+            assert_eq!(out, vec![value >= 241], "r >= p for {value}");
         }
     }
 
     /// The general carry-out comparison must agree with the Solinas specialisation everywhere; it
-    /// is the branch any non-Goldilocks modulus would take.
+    /// is the branch every modulus of another shape takes.
     #[test]
     fn test_modulus_overflow_general_path_agrees() {
-        let complement = bits_le(0xFFFF_FFFF, 64); // 2^64 - p
-        assert_eq!(solinas_exponent(&complement), Some(32));
-        assert_eq!(solinas_exponent(&bits_le(0, 64)), None);
-        assert_eq!(solinas_exponent(&bits_le(u64::MAX, 64)), None);
-        assert_eq!(solinas_exponent(&bits_le(0b1011, 64)), None);
+        let complement = bits_le(&BigUint::from(15u8), 8); // 2^8 - 241
+        assert_eq!(solinas_exponent(&complement), Some(4));
+        assert_eq!(solinas_exponent(&bits_le(&BigUint::from(0u8), 8)), None);
+        assert_eq!(solinas_exponent(&bits_le(&BigUint::from(255u8), 8)), None);
+        assert_eq!(
+            solinas_exponent(&bits_le(&BigUint::from(0b1011u8), 8)),
+            None
+        );
+        // Neither curve field has the shape.
+        assert_eq!(
+            solinas_exponent(&two_pow_w_minus_modulus_bits::<Bls>()),
+            None
+        );
+        assert_eq!(
+            solinas_exponent(&two_pow_w_minus_modulus_bits::<Bn>()),
+            None
+        );
 
         let mut builder = Builder::new();
-        let r = builder.inputs(64);
+        let r = builder.inputs(8);
         let carry = geq_public_constant(&mut builder, &complement, &r).expect("geq");
         let general = builder.finish(&r, &[carry]);
-        let special = ModulusOverflowCircuit::<GoldilocksField>::new().expect("circuit");
+        let special = ModulusOverflowCircuit::<F241>::new().expect("circuit");
+        let fallback = ModulusOverflowCircuit::<F251>::new().expect("circuit");
+        assert!(!fallback.is_specialised());
 
-        let mut rng = Xorshift(0xFEED_FACE_FEED_FACE);
-        let mut values: Vec<u64> = vec![0, 1, P - 1, P, P + 1, u64::MAX, 0xFFFF_FFFF];
-        for _ in 0..20000 {
-            values.push(rng.next());
-        }
-        for value in values {
-            let bits = bits_le(value, 64);
+        for value in 0u64..256 {
+            let bits = bits_le(&BigUint::from(value), 8);
             let a = evaluate_in_the_clear(&general, &bits).expect("eval");
             let b = evaluate_in_the_clear(&special, &bits).expect("eval");
-            assert_eq!(a[0], value >= P, "general path wrong for {value:#x}");
-            assert_eq!(
-                a, b,
-                "the two overflow constructions disagree at {value:#x}"
-            );
+            assert_eq!(a[0], value >= 241, "general path wrong for {value}");
+            assert_eq!(a, b, "the two overflow constructions disagree at {value}");
+            let c = evaluate_in_the_clear(&fallback, &bits).expect("eval");
+            assert_eq!(c[0], value >= 251, "fallback wrong for {value}");
         }
     }
 
@@ -1879,9 +2084,10 @@ mod tests {
     /// never a silently wrong wire (C5/C12).
     #[test]
     fn test_absorb_layer_validates_products() {
-        let circuit = ModulusOverflowCircuit::<GoldilocksField>::new().expect("circuit");
-        let inputs: Vec<GfShare<Gf256>> =
-            (0..64).map(|_| GfShare::new(Gf256::one(), 3, 2)).collect();
+        let circuit = ModulusOverflowCircuit::<Bls>::new().expect("circuit");
+        let inputs: Vec<GfShare<Gf256>> = (0..width::<Bls>())
+            .map(|_| GfShare::new(Gf256::one(), 3, 2))
+            .collect();
 
         // Wrong length.
         let mut wires = circuit.init(&inputs).expect("init");
@@ -1940,25 +2146,28 @@ mod tests {
     /// C5: one evaluation is pinned to a single `(id, degree)`; a mixed input batch is rejected.
     #[test]
     fn test_init_validates_inputs() {
-        let circuit = ModulusOverflowCircuit::<GoldilocksField>::new().expect("circuit");
+        let circuit = ModulusOverflowCircuit::<Bls>::new().expect("circuit");
 
-        let short: Vec<GfShare<Gf256>> =
-            (0..63).map(|_| GfShare::new(Gf256::zero(), 3, 2)).collect();
+        let short: Vec<GfShare<Gf256>> = (0..width::<Bls>() - 1)
+            .map(|_| GfShare::new(Gf256::zero(), 3, 2))
+            .collect();
         assert!(matches!(
             circuit.init(&short),
             Err(CircuitError::InputLengthMismatch { .. })
         ));
 
-        let mut mixed_id: Vec<GfShare<Gf256>> =
-            (0..64).map(|_| GfShare::new(Gf256::zero(), 3, 2)).collect();
+        let mut mixed_id: Vec<GfShare<Gf256>> = (0..width::<Bls>())
+            .map(|_| GfShare::new(Gf256::zero(), 3, 2))
+            .collect();
         mixed_id[17] = GfShare::new(Gf256::zero(), 5, 2);
         assert!(matches!(
             circuit.init(&mixed_id),
             Err(CircuitError::IdMismatch { .. })
         ));
 
-        let mut mixed_degree: Vec<GfShare<Gf256>> =
-            (0..64).map(|_| GfShare::new(Gf256::zero(), 3, 2)).collect();
+        let mut mixed_degree: Vec<GfShare<Gf256>> = (0..width::<Bls>())
+            .map(|_| GfShare::new(Gf256::zero(), 3, 2))
+            .collect();
         mixed_degree[0] = GfShare::new(Gf256::zero(), 3, 7);
         assert!(matches!(
             circuit.init(&mixed_degree),

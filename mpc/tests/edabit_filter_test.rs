@@ -28,20 +28,18 @@ use std::time::Duration;
 use ark_std::rand::{rngs::StdRng, Rng, SeedableRng};
 use stoffelcrypto::{
     common::{
-        convert::{bit_to_binary, canonical_bits, field_bit_width},
+        convert::{bit_to_gf, canonical_bits, field_bit_width, modulus_bits},
         gf2k::{
             field::{BinaryField, Gf256},
             share::GfShare,
         },
-        math::goldilocks::GoldilocksField,
         ProtocolSessionId, SecretSharingScheme,
     },
     honeybadger::{
         dabit::{edabit::EdaBitFilterNode, DaBit},
         gf_double_share::GfDoubleShamirShare,
-        prss::{PrssAllocator, PrssExecSlot, PrssStream},
         robust_interpolate::robust_interpolate::RobustShare,
-        ProtocolType, WrappedMessage,
+        ProtocolType, SessionId, WrappedMessage,
     },
 };
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
@@ -51,34 +49,17 @@ use tracing::warn;
 
 use crate::utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 
-type F = GoldilocksField;
+type F = ark_bls12_381::Fr;
 type K = Gf256;
 type Node = EdaBitFilterNode<F, K>;
 
 const PROTOCOL_TIMEOUT: Duration = Duration::from_secs(120);
 const INSTANCE: u32 = 0x0EDA_B170;
 
-/// One burned `exec_id` per party, each off that party's own fresh allocator, so all `n` land on
-/// exec 0.
-///
-/// Mirrors production: every party's `PrssAllocator` starts at zero and claims in the same order,
-/// so the parties agree on the exec with nothing sent. The filter derives **no PRSS position** —
-/// it spends only the exec's `exec * 2^20 + wave` child-id block — so the key family stamped on
-/// these allocators is irrelevant. What matters is that the exec comes off the `DaBitSeed` cursor,
-/// the same one a daBit batch takes its parent exec from, which is what keeps the two drivers'
-/// child blocks disjoint.
-async fn exec_slots(n: usize) -> Vec<PrssExecSlot> {
-    let mut out = Vec::with_capacity(n);
-    for party in 0..n {
-        let alloc = PrssAllocator::new(INSTANCE, [party as u8; 32]);
-        out.push(
-            alloc
-                .claim_exec(PrssStream::DaBitSeed)
-                .await
-                .expect("burning an edaBit filter exec"),
-        );
-    }
-    out
+/// The parent session every party runs the filter under: a root `DaBit` session, as the node's
+/// daBit counter would mint it.
+fn filter_session() -> SessionId {
+    SessionId::new(ProtocolType::DaBit, SessionId::pack_slot(0, 0, 0), INSTANCE)
 }
 
 /// Deals one daBit per bit of `bits`, transposed per party.
@@ -86,7 +67,7 @@ fn deal_dabits(bits: &[bool], n: usize, t: usize, rng: &mut StdRng, out: &mut [V
     for bit in bits {
         let arith = RobustShare::compute_shares(F::from(*bit as u64), n, t, None, rng)
             .expect("dealing an arithmetic bit sharing failed");
-        let bin = GfShare::compute_shares(bit_to_binary::<K>(*bit), n, t, rng)
+        let bin = GfShare::compute_shares(bit_to_gf::<K>(*bit), n, t, rng)
             .expect("dealing a binary bit sharing failed");
         for party in 0..n {
             out[party].push(
@@ -224,15 +205,13 @@ async fn run_filter(n: usize, t: usize, masks: &[F], seed: u64) -> Vec<Vec<EdaBi
     let off_protocol = Arc::new(AtomicUsize::new(0));
     let mut pump = spawn_receivers(receivers, &nodes, &network, &off_protocol);
 
-    let mut slots = exec_slots(n).await.into_iter();
-
     let mut set: JoinSet<(usize, Vec<EdaBitOut>)> = JoinSet::new();
     for (party, node) in nodes.iter().enumerate() {
         let mut node = node.clone();
         let net = Arc::clone(&network[party]);
         let my_dabits = dabits[party].clone();
         let my_doubles = doubles[party].clone();
-        let slot = slots.next().expect("one exec slot per party");
+        let slot = filter_session();
         set.spawn(async move {
             let out = node
                 .compose_edabits(slot, my_dabits, my_doubles, PROTOCOL_TIMEOUT, net)
@@ -315,9 +294,9 @@ async fn a_mask_below_the_modulus_composes_in_both_domains() {
     }
 }
 
-/// A mask at or above `p` is rejected, and its 64 daBits go with it.
+/// A mask at or above `p` is rejected, and all of its daBits go with it.
 ///
-/// `p = 2^64 - 2^32 + 1` on Goldilocks, so any 64-bit pattern in `[p, 2^64)` wraps. The bits are
+/// `p < 2^w`, so any `w`-bit pattern in `[p, 2^w)` wraps. The bits are
 /// dealt directly rather than derived from a field element, because a field element *cannot*
 /// represent `r >= p` — which is precisely the condition the filter exists to catch.
 #[tokio::test(flavor = "multi_thread")]
@@ -329,7 +308,7 @@ async fn a_mask_at_or_above_the_modulus_is_rejected_with_all_of_its_dabits() {
 
     let nodes: Vec<Node> = (0..n).map(|id| Node::new(id, n, t).unwrap()).collect();
 
-    // Candidate 0: r = 2^64 - 1, comfortably above p. Candidate 1: r = 5, comfortably below.
+    // Candidate 0: r = 2^w - 1, comfortably above p. Candidate 1: r = 5, comfortably below.
     let overflow_bits = vec![true; width];
     let ok_bits: Vec<bool> = canonical_bits(F::from(5u64), width).unwrap();
 
@@ -344,15 +323,13 @@ async fn a_mask_at_or_above_the_modulus_is_rejected_with_all_of_its_dabits() {
     let off_protocol = Arc::new(AtomicUsize::new(0));
     let mut pump = spawn_receivers(receivers, &nodes, &network, &off_protocol);
 
-    let mut slots = exec_slots(n).await.into_iter();
-
     let mut set: JoinSet<(usize, usize)> = JoinSet::new();
     for (party, node) in nodes.iter().enumerate() {
         let mut node = node.clone();
         let net = Arc::clone(&network[party]);
         let my_dabits = dabits[party].clone();
         let my_doubles = doubles[party].clone();
-        let slot = slots.next().expect("one exec slot per party");
+        let slot = filter_session();
         set.spawn(async move {
             let out = node
                 .compose_edabits(slot, my_dabits, my_doubles, PROTOCOL_TIMEOUT, net)
@@ -398,12 +375,9 @@ async fn the_modulus_itself_is_rejected() {
 
     let nodes: Vec<Node> = (0..n).map(|id| Node::new(id, n, t).unwrap()).collect();
 
-    // p = 2^64 - 2^32 + 1: bit 0 set, bits 32..63 set.
-    let mut p_bits = vec![false; width];
-    p_bits[0] = true;
-    for bit in p_bits.iter_mut().take(width).skip(32) {
-        *bit = true;
-    }
+    // The bits of `p` itself: the smallest value the filter must reject.
+    let p_bits = modulus_bits::<F>();
+    assert_eq!(p_bits.len(), width);
 
     let mut dabits: Vec<Vec<DaBit<F, K>>> = vec![Vec::new(); n];
     deal_dabits(&p_bits, n, t, &mut rng, &mut dabits);
@@ -415,15 +389,13 @@ async fn the_modulus_itself_is_rejected() {
     let off_protocol = Arc::new(AtomicUsize::new(0));
     let mut pump = spawn_receivers(receivers, &nodes, &network, &off_protocol);
 
-    let mut slots = exec_slots(n).await.into_iter();
-
     let mut set: JoinSet<usize> = JoinSet::new();
     for (party, node) in nodes.iter().enumerate() {
         let mut node = node.clone();
         let net = Arc::clone(&network[party]);
         let my_dabits = dabits[party].clone();
         let my_doubles = doubles[party].clone();
-        let slot = slots.next().expect("one exec slot per party");
+        let slot = filter_session();
         set.spawn(async move {
             node.compose_edabits(slot, my_dabits, my_doubles, PROTOCOL_TIMEOUT, net)
                 .await
@@ -473,7 +445,6 @@ async fn every_session_is_retired_when_the_run_returns() {
     let (network, receivers, _, _) = test_setup(n, vec![]);
     let off_protocol = Arc::new(AtomicUsize::new(0));
     let mut pump = spawn_receivers(receivers, &nodes, &network, &off_protocol);
-    let mut slots = exec_slots(n).await.into_iter();
 
     let mut set: JoinSet<()> = JoinSet::new();
     for (party, node) in nodes.iter().enumerate() {
@@ -481,7 +452,7 @@ async fn every_session_is_retired_when_the_run_returns() {
         let net = Arc::clone(&network[party]);
         let my_dabits = dabits[party].clone();
         let my_doubles = doubles[party].clone();
-        let slot = slots.next().expect("one exec slot per party");
+        let slot = filter_session();
         set.spawn(async move {
             node.compose_edabits(slot, my_dabits, my_doubles, PROTOCOL_TIMEOUT, net)
                 .await

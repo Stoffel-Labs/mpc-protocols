@@ -4,8 +4,8 @@
 //! value, batched into as few batch-reconstruction sessions as the chunking allows. Then the
 //! binary adder and conditional reduction of [`FieldA2BCircuit`], evaluated AND layer by AND layer
 //! with **every conversion in the batch sharing each layer's multiplication** — which is why the
-//! round count is `2 + layers * rounds_per_wave` — 16 batched, 9 direct on Goldilocks — whatever
-//! the batch size. See [`A2BNode::message_rounds`].
+//! round count is `2 + layers * rounds_per_wave` — 20 batched, 11 direct on a 255-bit field —
+//! whatever the batch size. See [`A2BNode::message_rounds`].
 //!
 //! See the module header of [`super`] for the algebra, the privacy argument and the output
 //! convention.
@@ -51,7 +51,7 @@ pub const MAX_A2B_SESSIONS: usize = 256;
 /// Hard ceiling on the number of values one [`A2BNode::init`] call converts.
 ///
 /// Each conversion carries its own netlist (the plan depends on that conversion's opened mask) and
-/// its own wire arena — on Goldilocks roughly 180 KiB together — so a batch of 256 is about 45 MiB
+/// its own wire arena, which grow with the field's bit width, so a large batch is a large amount
 /// of resident planner state. Larger batches buy nothing: the round count is already independent
 /// of the batch size, and the per-layer multiplication is chunked and depth-capped regardless.
 pub const MAX_A2B_CONVERSIONS: usize = 256;
@@ -298,7 +298,8 @@ where
         self.gf_mul.opening_policy()
     }
 
-    /// Bits per converted value: `ceil(log2 p)`, 64 on Goldilocks. Also the width every edaBit
+    /// Bits per converted value: `ceil(log2 p)`, 255 on BLS12-381's scalar field. Also the width
+    /// every edaBit
     /// handed to [`Self::init`] must have.
     pub fn bit_width() -> usize {
         field_bit_width::<F>()
@@ -308,13 +309,12 @@ where
     ///
     /// This is the worst case over every admissible mask, because the exact gate count depends on
     /// the mask — a cleared bit of the public operand makes a whole sub-tree of the carry prefix
-    /// statically zero, and the planner folds it away. **695 on Goldilocks**; a uniform mask
-    /// averages about 642, and the surplus is simply not consumed.
+    /// statically zero, and the planner folds it away. **3798 on BLS12-381's scalar field**; a
+    /// uniform mask averages about 3590, and the surplus is simply not consumed.
     ///
-    /// The blueprint quoted 626 here, for the *serial* `ADD64 -> ADD64 -> MUX` chain this node no
-    /// longer runs. The parallel offset adder applies the mod-`p` offset to the public operand,
-    /// so the two additions are independent: +11% on the sizing bound (626 -> 695) and +7% on the
-    /// average (600 -> 642), for 6 fewer AND layers.
+    /// The parallel offset adder applies the mod-`p` offset to the public operand, so the two
+    /// additions are independent and run in the same layers: 9 AND layers at 255 bits, where the
+    /// serial `ADD -> ADD -> MUX` chain needs 17.
     ///
     /// Deviates from the blueprint's `-> usize` only in being fallible: building the worst-case
     /// plan can fail for a degenerate field width, and this crate does not panic on that.
@@ -322,17 +322,17 @@ where
         Ok(FieldA2BCircuit::<F>::max_and_count()?)
     }
 
-    /// Upper bound on the AND layers, i.e. on the online multiplication *waves*. **7** on
-    /// Goldilocks, down from the blueprint's 13.
+    /// Upper bound on the AND layers, i.e. on the online multiplication *waves*: `ceil(log2 w) + 1`,
+    /// so **9** on a 254- or 255-bit field.
     ///
     /// Message rounds are `2 + layers * (rounds per wave)`: the degree-`t` mask opening is a
     /// two-round [`BatchReconNode`] session, then one wave per layer. A batched wave is two
-    /// rounds, giving **16**; a direct wave is one, giving **9** — not 8, because the policy
-    /// governs the AND layers alone. [`A2BNode::message_rounds`] computes it; see also
+    /// rounds, giving **20**; a direct wave is one, giving **11** — the policy governs the AND
+    /// layers alone, never the mask opening. [`A2BNode::message_rounds`] computes it; see also
     /// [`A2BNode::new_with_opening_policy`].
     ///
-    /// Exposed as a function rather than the blueprint's `A2B_AND_LAYERS` constant because 7 is a
-    /// property of Goldilocks, not of the protocol, and this node is generic over `F`.
+    /// A function rather than a constant because the depth is a property of the field, not of
+    /// the protocol, and this node is generic over `F`.
     pub fn max_and_layers() -> Result<usize, A2BError> {
         Ok(FieldA2BCircuit::<F>::max_layers()?)
     }
@@ -343,8 +343,8 @@ where
     /// multiplication wave per AND layer. A wave is two rounds when any part of it is opened
     /// through batch reconstruction and one when the whole wave goes direct, and which of those
     /// applies is a property of this node's [`OpeningPolicy`], its party count and the wave's
-    /// **width** — so **16** on Goldilocks wherever the policy batches and **9** where it does
-    /// not, never 8.
+    /// **width** — so, on a 255-bit field, **20** wherever the policy batches and **11** where
+    /// it does not.
     ///
     /// An **upper bound** rather than an exact count, and the width is why. [`Self::mul_k`] cuts
     /// each AND layer into waves of at most `max_mul_pairs_per_session(t) = 128 * (t+1)`
@@ -354,10 +354,9 @@ where
     /// — so a conversion that keeps its layers under the crossover finishes in fewer rounds than
     /// this returns. It never finishes in more.
     ///
-    /// Measured, a real 64-bit conversion is **9 rounds at every `n`** — its layers are 89-118
-    /// wide, far below the crossover, so every wave goes direct — while this returns 9 at
-    /// `n = 4` and 16 at `n >= 7`, where the 512- and 640-wide waves the cap permits would batch.
-    /// `conv_cost_measurement::measured_rounds_a2b_n*` reads 9.01 at all four party counts.
+    /// So this is a bound and not a measurement: on a 255-bit field it returns 11 at `n = 4` and
+    /// 20 at `n >= 7`, where the widest waves the cap permits would batch.
+    /// `conv_cost_measurement::measured_rounds_a2b_n*` measures what a conversion actually takes.
     pub fn message_rounds(&self) -> Result<usize, A2BError> {
         let rounds_per_wave = self.opening_policy().max_rounds_per_wave(
             self.n_parties,
@@ -672,7 +671,7 @@ where
     ///
     /// This is a **long-running driver**: it awaits its own child sessions, so it must not be
     /// polled on the task that pumps the network — spawn it, exactly as `RandBit::init` and
-    /// `PrssDaBitNode::generate` are spawned. The result is delivered through
+    /// `ReplicatedDaBitNode::generate` are spawned. The result is delivered through
     /// [`Self::wait_for_result`]; `init` itself returns once the batch is complete or has failed.
     ///
     /// # Preconditions, all checked
@@ -1012,22 +1011,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::convert::{binary_to_bit, bit_to_binary, canonical_bits};
+    use crate::common::convert::{bit_to_gf, canonical_bits, gf_to_bit};
     use crate::common::gf2k::field::Gf256;
-    use crate::common::math::goldilocks::GoldilocksField;
     use crate::common::SecretSharingScheme;
     use crate::honeybadger::dabit::DaBit;
     use crate::honeybadger::WrappedMessage;
+    use ark_bls12_381::Fr as CurveField;
+    #[allow(unused_imports)]
+    use ark_ff::{AdditiveGroup, Field, One, UniformRand, Zero};
     use ark_std::rand::rngs::StdRng;
-    use ark_std::rand::{Rng, SeedableRng};
+    use ark_std::rand::SeedableRng;
     use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
 
-    type F = GoldilocksField;
+    type F = CurveField;
     type K = Gf256;
     type Node = A2BNode<F, K>;
-
-    /// `p = 2^64 - 2^32 + 1`.
-    const P: u64 = 0xFFFF_FFFF_0000_0001;
 
     fn parent(exec: u64) -> SessionId {
         SessionId::new(ProtocolType::A2B, SessionId::pack_slot(exec, 0, 0), 0)
@@ -1099,7 +1097,7 @@ mod tests {
             small.message_rounds().unwrap(),
             MASK_OPENING_ROUNDS + layers
         );
-        assert_eq!(small.message_rounds().unwrap(), 9);
+        assert_eq!(small.message_rounds().unwrap(), 11);
 
         for (n, t) in [(7usize, 2usize), (10, 3), (13, 4)] {
             let node = Node::new(0, n, t).unwrap();
@@ -1111,9 +1109,8 @@ mod tests {
             // measured when a direct share cost 17 bytes; with `GfShareWire` the same remainder
             // is ~8%, nearly all of it the 52-byte frame. The mechanism is unchanged.)
             //
-            // 16 is a bound on the widest wave and NOT what a conversion costs: a real 64-bit
-            // A2B issues 89-118-wide waves, every one of which goes direct, and measures
-            // 9 rounds at every `n` (`conv_cost_measurement::measured_rounds_a2b_n*`).
+            // That is a bound on the widest wave and NOT what every conversion costs: a wave
+            // narrower than the crossover goes direct, in one round.
             let widest = OpeningPolicy::Auto.plan(n, t, max_mul_pairs_per_session(t));
             assert_eq!(widest.direct, 0, "n={n} batches its widest wave");
             assert_eq!(widest.padded % (t + 1), 0, "n={n} pads to whole groups");
@@ -1122,7 +1119,7 @@ mod tests {
                 MASK_OPENING_ROUNDS + 2 * layers,
                 "n={n} must stay at the batched round count"
             );
-            assert_eq!(node.message_rounds().unwrap(), 16);
+            assert_eq!(node.message_rounds().unwrap(), 20);
 
             // And the half of the new rule the old one could not express: a *narrow* layer at the
             // same `n` goes direct, for one round and fewer bytes. The old rule keyed on `t`
@@ -1138,11 +1135,11 @@ mod tests {
         // count with it: the policy is what the round count is a function of, not `n`.
         let forced_direct = Node::new_with_opening_policy(0, 10, 3, OpeningPolicy::Direct).unwrap();
         assert_eq!(forced_direct.opening_policy(), OpeningPolicy::Direct);
-        assert_eq!(forced_direct.message_rounds().unwrap(), 9);
+        assert_eq!(forced_direct.message_rounds().unwrap(), 11);
         let forced_batched =
             Node::new_with_opening_policy(0, 4, 1, OpeningPolicy::Batched).unwrap();
         assert_eq!(forced_batched.opening_policy(), OpeningPolicy::Batched);
-        assert_eq!(forced_batched.message_rounds().unwrap(), 16);
+        assert_eq!(forced_batched.message_rounds().unwrap(), 20);
 
         // The deployment knob, at both ends. A budget of zero refuses to spend a byte for a
         // round, which moves the crossover down — at `n = 7` a 250-wide layer batches under it
@@ -1157,7 +1154,7 @@ mod tests {
         let thrifty =
             Node::new_with_opening_policy(0, 7, 2, OpeningPolicy::Tuned { bytes_per_round: 0 })
                 .unwrap();
-        assert_eq!(thrifty.message_rounds().unwrap(), 16);
+        assert_eq!(thrifty.message_rounds().unwrap(), 20);
         assert_eq!(thrifty.opening_policy().plan(7, 2, 250).direct, 0);
         assert_eq!(OpeningPolicy::Auto.plan(7, 2, 250).direct, 250);
         assert_eq!(
@@ -1176,7 +1173,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(hasty.message_rounds().unwrap(), 9);
+        assert_eq!(hasty.message_rounds().unwrap(), 11);
         assert_eq!(
             hasty
                 .opening_policy()
@@ -1206,17 +1203,16 @@ mod tests {
             Node::max_and_layers().unwrap(),
             FieldA2BCircuit::<F>::max_layers().unwrap()
         );
-        // Goldilocks: 695 ANDs over 7 AND layers, i.e. one two-round arithmetic mask opening + 7
-        // two-round layers of multiplication = 2 + 7 * 2 = 16 message rounds, independent of
-        // batch size. That is the batched worst case; a real conversion's layers go direct and
-        // measure 9 at every n (`conv_cost_measurement::measured_rounds_a2b_n*`).
+        // BLS12-381's scalar field: 3798 ANDs over 9 AND layers, i.e. one two-round arithmetic
+        // mask opening + 9 two-round layers of multiplication = 2 + 9 * 2 = 20 message rounds in
+        // the batched worst case, independent of batch size.
         //
         // The parallel offset adder applies the mod-p offset to the *public* operand so both
-        // additions run concurrently, trading +11% worst-case ANDs (626 -> 695) for 6 fewer AND
-        // layers (13 -> 7) and 12 fewer message rounds (2 + 13 * 2 = 28 -> 16).
-        assert_eq!(Node::gf_triples_per_conversion().unwrap(), 695);
-        assert_eq!(Node::max_and_layers().unwrap(), 7);
-        assert_eq!(Node::bit_width(), 64);
+        // additions run concurrently: the serial `ADD -> ADD -> MUX` chain it replaced needs
+        // nearly twice the layers.
+        assert_eq!(Node::gf_triples_per_conversion().unwrap(), 3798);
+        assert_eq!(Node::max_and_layers().unwrap(), 9);
+        assert_eq!(Node::bit_width(), 255);
     }
 
     #[test]
@@ -1232,13 +1228,7 @@ mod tests {
         let mut total = 0usize;
         let samples = 256usize;
         for _ in 0..samples {
-            let y = loop {
-                let candidate: u64 = rng.gen();
-                if candidate < P {
-                    break candidate;
-                }
-            };
-            let circuit = FieldA2BCircuit::<F>::new(F::from(y)).unwrap();
+            let circuit = FieldA2BCircuit::<F>::new(F::rand(&mut rng)).unwrap();
             assert!(circuit.and_count() <= budget);
             assert!(circuit.layers() <= depth);
             total += circuit.and_count();
@@ -1493,7 +1483,7 @@ mod tests {
     // End-to-end
     // -----------------------------------------------------------------------------------------
 
-    /// Trusted-dealer stand-in for `PrssDaBitNode` + `EdaBit::compose_full_width`: one full-range
+    /// Trusted-dealer stand-in for `ReplicatedDaBitNode` + `EdaBit::compose_full_width`: one full-range
     /// edaBit per conversion, per party, with `r` drawn uniformly from `[0, p)` exactly as the
     /// `r < p` filter guarantees.
     fn deal_edabits(
@@ -1505,15 +1495,9 @@ mod tests {
         let width = Node::bit_width();
         let mut per_party: Vec<Vec<EdaBit<F, K>>> = vec![Vec::new(); n_parties];
         for _ in 0..count {
-            // Rejection-sample `r < p`; this is what the ModulusOverflowCircuit filter does in
-            // the real pipeline, at a rejection rate of `(2^32 - 1)/2^64`.
-            let r = loop {
-                let candidate: u64 = rng.gen();
-                if candidate < P {
-                    break candidate;
-                }
-            };
-            let bits = canonical_bits::<F>(F::from(r), width).unwrap();
+            // A uniform `r < p`, which is what the ModulusOverflowCircuit filter leaves in the
+            // real pipeline.
+            let bits = canonical_bits::<F>(F::rand(rng), width).unwrap();
             let mut per_party_dabits: Vec<Vec<DaBit<F, K>>> = vec![Vec::new(); n_parties];
             for bit in bits {
                 let arith = RobustShare::compute_shares(
@@ -1524,9 +1508,8 @@ mod tests {
                     rng,
                 )
                 .unwrap();
-                let bin =
-                    GfShare::compute_shares(bit_to_binary::<K>(bit), n_parties, threshold, rng)
-                        .unwrap();
+                let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n_parties, threshold, rng)
+                    .unwrap();
                 for party in 0..n_parties {
                     per_party_dabits[party].push(
                         DaBit::new(arith[party].clone(), bin[party].clone(), threshold).unwrap(),
@@ -1725,50 +1708,46 @@ mod tests {
             .collect()
     }
 
-    /// Reconstructs conversion `index` and returns it as a `u64`.
+    /// Reconstructs conversion `index` and returns the field element its bits spell.
     fn recover(
         by_party: &[Vec<Vec<GfShare<K>>>],
         index: usize,
         n_parties: usize,
         threshold: usize,
-    ) -> u64 {
+    ) -> F {
         let width = Node::bit_width();
-        let mut value = 0u64;
+        let mut value = num_bigint::BigUint::from(0u8);
         for bit in 0..width {
             let shares: Vec<GfShare<K>> = by_party
                 .iter()
                 .map(|party| party[index][bit].clone())
                 .collect();
             let (_, secret) = GfShare::recover_secret(&shares, n_parties, threshold).unwrap();
-            let b = binary_to_bit::<K>(secret)
+            let b = gf_to_bit::<K>(secret)
                 .unwrap_or_else(|_| panic!("output bit {bit} of conversion {index} is not a bit"));
-            if b {
-                value |= 1u64 << bit;
-            }
+            value.set_bit(bit as u64, b);
         }
-        value
-    }
-
-    fn canonical_u64(x: F) -> u64 {
-        let limbs = x.into_bigint().0;
-        limbs[0]
+        // The bits must spell the canonical representative: a value at or above `p` would be
+        // reduced by `F::from` and hide the error.
+        assert!(value < F::MODULUS.into(), "output bits are not canonical");
+        F::from(value)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a2b_converts_the_boundary_vectors_and_a_random_value() {
         let (n, t) = (4usize, 1usize);
-        let values: Vec<F> = [
-            0u64,
-            1,
-            1u64 << 32,
-            P - 1,
-            P - (1u64 << 32),
-            P - 1 - (1u64 << 32),
-            0x0123_4567_89AB_CDEF,
-        ]
-        .iter()
-        .map(|v| F::from(*v))
-        .collect();
+        let two = F::from(2u64);
+        let width = Node::bit_width() as u64;
+        let values: Vec<F> = vec![
+            F::zero(),
+            F::one(),
+            two.pow([32]),
+            -F::one(),
+            two.pow([width - 1]),
+            -two.pow([width - 1]),
+            two.pow([width]), // `2^w mod p`, the offset the adder folds in
+            F::from(0x0123_4567_89AB_CDEFu64),
+        ];
 
         let by_party = a2b_e2e(n, t, &values).await;
         for (party, out) in by_party.iter().enumerate() {
@@ -1786,7 +1765,7 @@ mod tests {
         for (index, value) in values.iter().enumerate() {
             assert_eq!(
                 recover(&by_party, index, n, t),
-                canonical_u64(*value),
+                *value,
                 "conversion {index} disagrees with the canonical representative"
             );
         }
@@ -1798,24 +1777,23 @@ mod tests {
         // opener pads its tail. At `m = t + 1` the padding loop does not run at all, which is the
         // one batch shape the other end-to-end tests (m = 7 and m = 1, both padded) never take.
         let (n, t) = (4usize, 1usize);
-        let values = [F::from(0u64), F::from(P - 1)];
+        let values = [F::zero(), -F::one()];
         let by_party = a2b_e2e(n, t, &values).await;
         for (index, value) in values.iter().enumerate() {
-            assert_eq!(recover(&by_party, index, n, t), canonical_u64(*value));
+            assert_eq!(recover(&by_party, index, n, t), *value);
         }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a2b_of_minus_one_is_canonical_not_twos_complement() {
-        // `common/types` encodes `-|v|` as `p - |v|`, so A2B returns `p - 1` and NOT
-        // `0xFFFF_FFFF_FFFF_FFFF`. A caller wanting a sign bit must shift by `2^(k-1)` first,
-        // exactly as `truncpr.rs` does.
+        // `common/types` encodes `-|v|` as `p - |v|`, so A2B returns the bits of `p - 1` and NOT
+        // all ones. A caller wanting a sign bit must shift by `2^(k-1)` first, exactly as
+        // `truncpr.rs` does.
         let (n, t) = (4usize, 1usize);
-        let minus_one = F::from(0u64) - F::from(1u64);
+        let minus_one = -F::one();
         let by_party = a2b_e2e(n, t, &[minus_one]).await;
-        let recovered = recover(&by_party, 0, n, t);
-        assert_eq!(recovered, P - 1);
-        assert_eq!(recovered, 0xFFFF_FFFF_0000_0000);
-        assert_ne!(recovered, u64::MAX);
+        assert_eq!(recover(&by_party, 0, n, t), minus_one);
+        let expected = canonical_bits::<F>(minus_one, Node::bit_width()).unwrap();
+        assert!(expected.iter().any(|b| !*b), "p - 1 is not all ones");
     }
 }

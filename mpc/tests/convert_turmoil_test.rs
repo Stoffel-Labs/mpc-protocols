@@ -50,16 +50,11 @@
 //! equivocating one is caught by quorum bookkeeping, while a consistent one is only caught by the
 //! error-correcting decode itself.
 //!
-//! **What is deliberately not here, and why the list shrank.** This file used to carry four
-//! dealer-side daBit cases — a corrupt opener inside daBit generation, corrupted mask shares fed
-//! to a dealer, churn against a dealt batch, and replay of a retired daBit session. There is no
-//! dealer left to attack: `PrssDaBitNode` derives both halves of every daBit from PRSS keys, so a
-//! party's only remaining freedom is to lie at the single Mod2 opening. That one surviving attack
-//! is covered, closer to the code, by `prss_dabit_test::a_corrupt_opener_cannot_change_or_stall_the_batch`;
-//! the dealt-material attacks have no analogue because the material no longer exists. What stays
-//! here is the *consuming* end — `an_inconsistent_dabit_silently_flips_a_b2a_output_bit`, which
+//! **What is deliberately not here.** Attacks on daBit *generation* — an equivocating dealer, a
+//! lying echo, a malformed dealing — live closer to the code, in `dabit_test.rs`. What stays here
+//! is the *consuming* end — `an_inconsistent_dabit_silently_flips_a_b2a_output_bit`, which
 //! hand-deals a bad pad rather than asking a protocol to produce one — because it records what an
-//! inconsistent daBit would cost downstream even though nothing can now produce one.
+//! inconsistent daBit would cost downstream.
 
 mod utils;
 
@@ -77,12 +72,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use stoffelcrypto::{
     common::{
-        convert::{bit_to_binary, canonical_bits, field_bit_width},
+        convert::{bit_to_gf, canonical_bits, field_bit_width},
         gf2k::{
             field::{BinaryField, Gf256},
             share::{GfShare, GfShareWire},
         },
-        math::goldilocks::GoldilocksField,
         rbc::rbc::Avid,
         MPCProtocol, ProtocolSessionId, ProtocolTag, SecretSharingScheme, ShareConversionProtocol,
     },
@@ -90,19 +84,11 @@ use stoffelcrypto::{
         a2b::a2b::A2BNode,
         batch_recon::{BatchReconMsg, BatchReconMsgType},
         dabit::{DaBit, EdaBit},
-        dn07::{
-            double_share::GfPrssDoubleShareSource, phase_of, Dn07Error, PreprocessingSessionId,
-            ProtocolPhase,
-        },
+        dn07::{phase_of, Dn07Error, PreprocessingSessionId, ProtocolPhase},
         gf_batch_recon::{GfBatchReconMsg, GfBatchReconMsgType},
+        gf_double_share::GfDoubleShamirShare,
         gf_mul::{GfMultMessage, GfMultReconstructionMessage},
-        gf_prss::gf_prss::GfPrssKeys,
         gf_triple_gen::GfBeaverTriple,
-        prss::{
-            prss::{all_tsets, held_ranks},
-            PRSS_KEY_LEN,
-        },
-        przs::gf_przs::GfPrzsKeys,
         robust_interpolate::robust_interpolate::RobustShare,
         HoneyBadgerMPCNode, ProtocolType, SessionId, WrappedMessage, MIN_STATISTICAL_SECURITY,
     },
@@ -114,7 +100,7 @@ use stoffelmpc_network::{
 use stoffelnet::network_utils::Network;
 use tokio::sync::mpsc::Receiver;
 
-type F = GoldilocksField;
+type F = ark_bls12_381::Fr;
 type K = Gf256;
 type Node = HoneyBadgerMPCNode<F, Avid<SessionId>>;
 
@@ -890,7 +876,7 @@ fn deal_dabits(
         let bit = dabit_bit_at(index);
         let arith =
             RobustShare::compute_shares(F::from(bit as u64), n_parties, t, None, rng).unwrap();
-        let bin = GfShare::compute_shares(bit_to_binary::<K>(bit), n_parties, t, rng).unwrap();
+        let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n_parties, t, rng).unwrap();
         for party in 0..n_parties {
             per_party[party].push(DaBit::new(arith[party].clone(), bin[party].clone(), t).unwrap());
         }
@@ -898,7 +884,7 @@ fn deal_dabits(
     per_party
 }
 
-/// `p = 2^64 - 2^32 + 1`.
+/// the modulus.
 const P: u64 = 0xFFFF_FFFF_0000_0001;
 
 fn deal_edabits(
@@ -924,7 +910,7 @@ fn deal_edabits(
         for bit in bits {
             let arith =
                 RobustShare::compute_shares(F::from(bit as u64), n_parties, t, None, rng).unwrap();
-            let bin = GfShare::compute_shares(bit_to_binary::<K>(bit), n_parties, t, rng).unwrap();
+            let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n_parties, t, rng).unwrap();
             for party in 0..n_parties {
                 per_party_dabits[party]
                     .push(DaBit::new(arith[party].clone(), bin[party].clone(), t).unwrap());
@@ -1292,7 +1278,7 @@ fn assert_a2b_bits(
             let (_, got) = GfShare::recover_secret(&shares, n_parties, t).unwrap();
             assert_eq!(
                 got,
-                bit_to_binary::<K>(want[bit]),
+                bit_to_gf::<K>(want[bit]),
                 "value {index} bit {bit} mismatch"
             );
         }
@@ -1304,7 +1290,7 @@ fn assert_a2b_bits(
 ///
 /// `p - 1` is the case that matters most: it is the `c1 = 1` branch of the conditional reduction,
 /// so a decode that quietly returned a wrong `y` would land on the wrong side of it. It is also
-/// `-1`, which must come back as the canonical `0xFFFF_FFFF_0000_0000` and not a two's-complement
+/// `-1`, which must come back as the canonical `p - 1` and not a two's-complement
 /// `u64::MAX`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a2b_tolerates_a_corrupt_opener() {
@@ -1419,7 +1405,7 @@ async fn an_inconsistent_dabit_silently_flips_a_b2a_output_bit() {
     // this, and why only the bucketed cross-domain check can.
     let dealt_bit = dabit_bit_at(bad_index);
     let flipped =
-        GfShare::compute_shares(bit_to_binary::<K>(!dealt_bit), n_parties, t, &mut rng).unwrap();
+        GfShare::compute_shares(bit_to_gf::<K>(!dealt_bit), n_parties, t, &mut rng).unwrap();
     for party in 0..n_parties {
         let arith = dabits[party][bad_index].arith.clone();
         dabits[party][bad_index] = DaBit::new(arith, flipped[party].clone(), t).unwrap();
@@ -2002,7 +1988,7 @@ fn a2b_e2e_turmoil_with_latency() {
             .map(|p| by_party[p].as_ref().expect("party reported")[0][bit].clone())
             .collect();
         let (_, got) = GfShare::recover_secret(&shares, n_parties, t).unwrap();
-        assert_eq!(got, bit_to_binary::<K>(want[bit]), "bit {bit} mismatch");
+        assert_eq!(got, bit_to_gf::<K>(want[bit]), "bit {bit} mismatch");
     }
 }
 
@@ -2176,7 +2162,7 @@ fn a2b_e2e_turmoil_with_latency_and_a_corrupt_opener() {
             .take(2 * t + 1)
             .collect();
         let (_, got) = GfShare::recover_secret(&shares, n_parties, t).unwrap();
-        assert_eq!(got, bit_to_binary::<K>(want[bit]), "bit {bit} mismatch");
+        assert_eq!(got, bit_to_gf::<K>(want[bit]), "bit {bit} mismatch");
     }
     assert!(
         STATS.tampered() > 0,
@@ -2206,55 +2192,42 @@ fn a2b_e2e_turmoil_with_latency_and_a_corrupt_opener() {
 // party that lies on the **wire**, whose forgery therefore has to survive admission, sender
 // authentication and the drain before it can reach the decode at all.
 
-/// The GF PRSS/PRZS double-sharing source behind `GfDn07MulNode`, dealt rather than established
-/// by running RISS over the network — `setup_prss_keys` is `PRandIntNode`'s protocol, not this
-/// one. What matters is only that each party holds the key for every maximal unqualified set it
-/// is outside of, which is what the one-time setup produces.
-fn deal_gf_doubles(n_parties: usize, t: usize, seed: u64) -> Vec<GfPrssDoubleShareSource<K>> {
+/// `count` GF(2^k) double sharings per party, dealt by the test. In production these come from
+/// `GfRanDouSha`, which has its own tests; what is under test here is the opening that spends
+/// them.
+fn deal_gf_doubles(
+    n_parties: usize,
+    t: usize,
+    count: usize,
+    seed: u64,
+) -> Vec<Vec<GfDoubleShamirShare<K>>> {
     let mut rng = StdRng::seed_from_u64(seed);
-    let family: Vec<[u8; PRSS_KEY_LEN]> = (0..all_tsets(n_parties, t).len())
-        .map(|_| {
-            let mut key = [0u8; PRSS_KEY_LEN];
-            rng.fill(&mut key);
-            key
-        })
-        .collect();
-    (0..n_parties)
-        .map(|id| {
-            let keys: Vec<(usize, [u8; PRSS_KEY_LEN])> = held_ranks(n_parties, t, id)
-                .into_iter()
-                .map(|rank| (rank, family[rank]))
-                .collect();
-            GfPrssDoubleShareSource::new(
-                GfPrssKeys::<K>::new(id, n_parties, t, &keys).unwrap(),
-                GfPrzsKeys::<K>::new(id, n_parties, t, &keys).unwrap(),
-            )
-            .unwrap()
-        })
-        .collect()
+    let mut per_party = vec![Vec::with_capacity(count); n_parties];
+    for _ in 0..count {
+        let r = K::random(&mut rng);
+        let low = GfShare::compute_shares(r, n_parties, t, &mut rng).unwrap();
+        let high = GfShare::compute_shares(r, n_parties, 2 * t, &mut rng).unwrap();
+        for (party, (l, h)) in low.into_iter().zip(high).enumerate() {
+            per_party[party].push(GfDoubleShamirShare::new(l, h));
+        }
+    }
+    per_party
 }
 
 /// One batch of DN07 multiplications over `Gf256`, driven end to end through
 /// `HoneyBadgerMPCNode::process`.
 ///
-/// This is the degree-`2t` engine under conversion preprocessing, and it is now **caller-driven
-/// as well as dispatch-reachable**: `EdaBitFilterNode` runs every AND layer of the modulus-
-/// overflow circuit through `GfDn07MulNode::init_mul` under `ProtocolType::DaBitGfMul`, in place
-/// of the `GfMultiply` and the 63 GF(2^k) Beaver triples per candidate it used to spend. What
-/// this harness drives is `gf_preprocess.gf_dn07` under `ProtocolType::GfDn07` — the same node
-/// type on the node's own instance and dispatcher arm — so it exercises the primitive and the
-/// routing directly rather than through the filter, which `edabit_filter_test.rs` covers.
-///
-/// No production caller uses `init_zero_check`: the bit-ness obligations it was meant to
-/// discharge went away with the dealt daBit protocol, and PRSS daBits carry no dealt value to
-/// certify. The exact-zero check is tested here and in `dn07_test.rs` and is unspent.
+/// This is the degree-`2t` engine under conversion preprocessing: `EdaBitFilterNode` runs every
+/// AND layer of the modulus-overflow circuit through `GfDn07MulNode::init_mul` under
+/// `ProtocolType::DaBitGfMul`. This harness drives that same node instance — `conv.edabit.gf_dn07`
+/// — on that same tag and dispatcher arm, so it exercises the primitive and the routing exactly
+/// as production reaches them, without the filter's circuit on top.
 ///
 /// The batch is `2t + 1` wide because that is a degree-`2t` batch-reconstruction group: a partial
 /// group would be padded and the test would be measuring the padding.
 ///
 /// The session is **retired here, on both exit paths**, because retirement is the caller's
-/// obligation for this node — `clear_store` is public and `run_dabit_batch` calls its `F`-side
-/// twin before its own `?` for exactly this reason. Doing it in the harness is what lets the
+/// obligation for this node. Doing it in the harness is what lets the
 /// tests below assert containment after an abort rather than only after a success.
 ///
 /// Returns each party's outcome, `None` for an error, so a caller can distinguish "aborted" from
@@ -2270,7 +2243,7 @@ async fn run_gf_dn07_mul(
     let width = 2 * t + 1;
     let (network, receivers, _, _) = test_setup(n_parties, vec![]);
     let mut nodes = nodes_for(n_parties, t, instance_id);
-    let sources = deal_gf_doubles(n_parties, t, instance_id as u64);
+    let sources = deal_gf_doubles(n_parties, t, width, instance_id as u64);
 
     let mut rng = StdRng::seed_from_u64(instance_id as u64 ^ 0x5A5A);
     let xs: Vec<K> = (0..width).map(|_| K::random(&mut rng)).collect();
@@ -2287,7 +2260,7 @@ async fn run_gf_dn07_mul(
     }
 
     let session_id = SessionId::new(
-        ProtocolType::GfDn07,
+        ProtocolType::DaBitGfMul,
         SessionId::pack_slot(instance_id as u64, 0, 0),
         instance_id,
     );
@@ -2299,8 +2272,9 @@ async fn run_gf_dn07_mul(
     pump_fake(receivers, nodes.clone(), network.clone(), adv, tape);
 
     for (party, node) in nodes.iter_mut().enumerate() {
-        let doubles = sources[party].double_shares_at(pre, 0, width).unwrap();
-        node.gf_preprocess
+        let doubles = sources[party].clone();
+        node.conv
+            .edabit
             .gf_dn07
             .init_mul(
                 pre,
@@ -2315,7 +2289,7 @@ async fn run_gf_dn07_mul(
 
     let mut outcomes = Vec::with_capacity(n_parties);
     for node in nodes.iter() {
-        let handle = node.gf_preprocess.gf_dn07.clone();
+        let handle = node.conv.edabit.gf_dn07.clone();
         outcomes.push(
             handle
                 .wait_for_products(session_id, Duration::from_secs(2))
@@ -2330,7 +2304,7 @@ async fn run_gf_dn07_mul(
 }
 
 /// The honest control for the two tests below: a DN07 batch over `Gf256` really does produce
-/// degree-`t` sharings of the products, routed through the node dispatcher's `GfDn07` arm.
+/// degree-`t` sharings of the products, routed through the node dispatcher's `DaBitGfMul` arm.
 ///
 /// Without this, the corrupt-party test could pass because the harness never worked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2357,7 +2331,7 @@ async fn conversion_preprocessing_multiplies_through_node_dispatch() {
     }
     for node in &nodes {
         assert_eq!(
-            node.gf_preprocess.gf_dn07.store_len().await,
+            node.conv.edabit.gf_dn07.store_len().await,
             0,
             "a retired DN07 session left a store behind"
         );
@@ -2428,7 +2402,7 @@ async fn a_corrupt_share_in_conversion_preprocessing_is_detected_not_accepted() 
     // drive memory by aborting batches forever.
     for node in &nodes {
         assert_eq!(
-            node.gf_preprocess.gf_dn07.store_len().await,
+            node.conv.edabit.gf_dn07.store_len().await,
             0,
             "an aborted DN07 session left a store behind; cleanup must run on the failure \
              path too, or a peer can drive memory by aborting batches forever"
@@ -2453,7 +2427,11 @@ async fn conversion_preprocessing_puts_only_preprocessing_sessions_on_the_wire()
         run_gf_dn07_mul(n_parties, t, 243, Adversary::watching(&WIRE), None).await;
     assert!(outcomes.iter().all(|o| o.is_some()));
 
-    assert_wire_phase(&WIRE, ProtocolPhase::Preprocessing, &[ProtocolType::GfDn07]);
+    assert_wire_phase(
+        &WIRE,
+        ProtocolPhase::Preprocessing,
+        &[ProtocolType::DaBitGfMul],
+    );
 }
 
 /// A finished preprocessing batch's traffic, replayed into a party that has retired it.
@@ -2474,7 +2452,7 @@ async fn replayed_traffic_cannot_resurrect_a_retired_preprocessing_batch() {
 
     let recorded = tape.lock().unwrap().clone();
     assert_tape_carries(&recorded, &["GfBatchRecon"]);
-    assert_eq!(nodes[0].gf_preprocess.gf_dn07.store_len().await, 0);
+    assert_eq!(nodes[0].conv.edabit.gf_dn07.store_len().await, 0);
 
     let (network, _receivers, _, _) = test_setup(n_parties, vec![]);
     let mut victim = nodes[0].clone();
@@ -2483,7 +2461,7 @@ async fn replayed_traffic_cannot_resurrect_a_retired_preprocessing_batch() {
     }
 
     assert_eq!(
-        victim.gf_preprocess.gf_dn07.store_len().await,
+        victim.conv.edabit.gf_dn07.store_len().await,
         0,
         "a replayed preprocessing batch re-admitted a retired degree-2t session"
     );
@@ -2640,10 +2618,8 @@ fn no_online_session_id_can_construct_a_preprocessing_session_id() {
     for tag in [
         ProtocolType::Dn07,
         ProtocolType::GfDn07,
-        // The rewiring's tag. `RandBit` is drawn from PRSS + PRZS now rather than from dealt
-        // `RanSha` + `ZeroSha`, and is reachable from A2B by lazy top-up — but only ever as
-        // preprocessing work scheduled *around* the conversion, never on the conversion's own
-        // session. Its classification is what keeps that true.
+        ProtocolType::DaBitMul,
+        ProtocolType::DaBitGfMul,
         ProtocolType::RandBit,
     ] {
         assert!(
@@ -3132,11 +3108,15 @@ async fn an_aborted_preprocessing_batch_stays_inside_the_preprocessing_phase() {
     // The claim this test adds: nothing the aborting batch put on the wire belongs to an online
     // session. A preprocessing failure may cost the batch; it may not spill into the phase that
     // is not allowed to fail.
-    assert_wire_phase(&WIRE, ProtocolPhase::Preprocessing, &[ProtocolType::GfDn07]);
+    assert_wire_phase(
+        &WIRE,
+        ProtocolPhase::Preprocessing,
+        &[ProtocolType::DaBitGfMul],
+    );
 
     for node in &nodes {
         assert_eq!(
-            node.gf_preprocess.gf_dn07.store_len().await,
+            node.conv.edabit.gf_dn07.store_len().await,
             0,
             "an aborted DN07 session left a store behind"
         );

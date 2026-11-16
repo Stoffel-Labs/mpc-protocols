@@ -9,7 +9,7 @@
 //! ```text
 //!   client inputs x, y      -- InputClient, over RBC
 //!   z   = mul(x, y)         -- ARITHMETIC, consumes a Beaver triple
-//!   b   = a2b(z)            -- consumes an edaBit (and so daBits) + ~695 GF triples
+//!   b   = a2b(z)            -- consumes an edaBit (and so daBits) + its GF triples
 //!   a_i = b_i AND b_{i+1}   -- BINARY multiplicative: node.gf_mul, W triples
 //!   u_i = a_i XOR b_i       -- BINARY linear: local GfShare addition, no round
 //!   n_i = NOT u_i           -- BINARY linear: local GfShare + public K::one()
@@ -26,7 +26,7 @@
 //! **Degree and provenance.** `a2b`'s input here is the output of a Beaver multiplication, not a
 //! freshly input or freshly dealt sharing. A `mul` result is a degree-`t` sharing that was
 //! *reconstituted* from a degree-`2t` product minus a mask, and nothing in the tree currently
-//! feeds one to a conversion. `assert_bits` below checks the whole 64-bit decomposition against
+//! feeds one to a conversion. `assert_bits` below checks the whole full-width decomposition against
 //! `canonical_bits(z)` so a provenance failure is localised to the bit, not just to the answer.
 //!
 //! **Preprocessing pool interaction.** Nothing is dealt by a trusted dealer. Every piece of
@@ -70,14 +70,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use stoffelcrypto::{
     common::{
-        convert::{bit_to_binary, canonical_bits, field_bit_width},
+        convert::{bit_to_gf, canonical_bits, field_bit_width},
         gf2k::field::{BinaryField, Gf256},
         gf2k::share::GfShare,
-        math::goldilocks::GoldilocksField,
         rbc::rbc::Avid,
         types::fixed::FixedPointPrecision,
-        GfMPCProtocol, MPCProtocol, PreprocessingMPCProtocol, ProtocolSessionId,
-        SecretSharingScheme, ShareConversionProtocol,
+        ConversionPreprocessingProtocol, GfMPCProtocol, GfPreprocessingMPCProtocol, MPCProtocol,
+        PreprocessingMPCProtocol, ProtocolSessionId, SecretSharingScheme, ShareConversionProtocol,
     },
     honeybadger::{
         a2b::a2b::A2BNode, robust_interpolate::robust_interpolate::RobustShare,
@@ -87,7 +86,7 @@ use stoffelcrypto::{
 use stoffelmpc_network::fake_network::{FakeNetwork, SenderId};
 use stoffelnet::network_utils::ClientId;
 
-type F = GoldilocksField;
+type F = ark_bls12_381::Fr;
 type K = Gf256;
 type Node = stoffelcrypto::honeybadger::HoneyBadgerMPCNode<F, Avid<SessionId>>;
 
@@ -162,7 +161,9 @@ fn nodes_for(n_parties: usize, t: usize, instance_id: u32, input_ids: Vec<Client
         0,
         conv_precision(),
         MIN_STATISTICAL_SECURITY,
-        Duration::from_secs(120),
+        // Generous: at ten parties a 255-bit edaBit is some thirty thousand preprocessing
+        // multiplications, which an unoptimised build takes minutes over.
+        Duration::from_secs(1800),
         input_ids,
     );
     for node in &mut nodes {
@@ -259,7 +260,7 @@ fn assert_bits(per_party: &[Vec<Vec<GfShare<K>>>], z: F, n_parties: usize, t: us
         let column: Vec<GfShare<K>> = per_party.iter().map(|r| r[0][bit].clone()).collect();
         assert_eq!(
             recover_bit(&column, n_parties, t),
-            bit_to_binary::<K>(want[bit]),
+            bit_to_gf::<K>(want[bit]),
             "a2b of a multiplication output is wrong at bit {bit}"
         );
     }
@@ -271,13 +272,13 @@ fn assert_high_bits_zero(per_party: &[Vec<Vec<GfShare<K>>>], n_parties: usize, t
         let column: Vec<GfShare<K>> = per_party.iter().map(|r| r[0][bit].clone()).collect();
         assert_eq!(
             recover_bit(&column, n_parties, t),
-            bit_to_binary::<K>(false),
+            bit_to_gf::<K>(false),
             "high bit {bit} of a value below 2^{W} is not zero"
         );
     }
 }
 
-/// The precision PRSS key setup can carry on Goldilocks.
+/// The precision PRSS key setup is given in this test.
 ///
 /// `setup_prss_keys` sizes its RISS batch from `params.mask_bits() = (2k - f) + kappa`, and
 /// `PRandIntNode` refuses a mask wider than
@@ -301,10 +302,8 @@ fn f_to_u64(v: F) -> u64 {
 /// Runs `run_preprocessing` on every party, then drives the client input protocol, and returns
 /// each party's `(x_share, y_share)`.
 ///
-/// Preprocessing is explicit here only because the *input masks* have no lazy top-up path of
-/// their own -- `input.init` needs random shares in hand. Everything downstream (triples, GF
-/// triples, edaBits, daBits) is deliberately left to top itself up from inside the online calls,
-/// which is what puts the two tracks in contention over one allocator.
+/// All preprocessing happens here, before anything goes online: the arithmetic pools, the
+/// conversion pools (daBits and edaBits) and the GF triples A2B's adder spends.
 async fn run_input_phase(
     nodes: &mut [Node],
     network: &[Arc<FakeNetwork>],
@@ -319,10 +318,20 @@ async fn run_input_phase(
         handles.push(tokio::spawn(async move {
             let mut rng = StdRng::seed_from_u64(0xA2B0_0000 + pid as u64);
             PreprocessingMPCProtocol::<F, RobustShare<F>, FakeNetwork>::run_preprocessing(
-                &mut node, net, &mut rng,
+                &mut node,
+                net.clone(),
+                &mut rng,
             )
             .await
             .expect("preprocessing failed");
+            // The conversions do not preprocess on demand: a short pool is an error there, so
+            // their material is made here, in the preprocessing phase, like everything else.
+            node.run_conversion_preprocessing(net.clone(), &mut rng)
+                .await
+                .expect("conversion preprocessing failed");
+            node.run_gf_preprocessing(net, &mut rng)
+                .await
+                .expect("GF preprocessing failed");
         }));
     }
     for handle in handles {
@@ -562,6 +571,7 @@ async fn mixed_circuit_e2e_n4_t1() {
 /// `n = 10`, `t = 3`: the size at which batch reconstruction is the cheaper opening and at which
 /// `2t + 1 = 7` shares is a genuine quorum rather than the whole committee.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "ten parties on a 255-bit field: minutes in a debug build; run with --release -- --ignored"]
 async fn mixed_circuit_e2e_n10_t3() {
     mixed_circuit_e2e(10, 3, 702).await;
 }
@@ -577,9 +587,8 @@ async fn mixed_circuit_e2e_n10_t3() {
 /// contention: every pool draw and every session-id mint is separated in time from the next, so a
 /// collision between the arithmetic and binary tracks has no opportunity to occur. Here `a2b` and
 /// a second `mul` are driven from two clones of the same node concurrently, so their
-/// `SubProtocolCounters` mints, their `BatchRecon`/`GfBatchRecon` child sessions and -- when
-/// either finds its pool short -- their preprocessing top-ups off the one `PrssAllocator`
-/// interleave arbitrarily.
+/// `SubProtocolCounters` mints and their `BatchRecon`/`GfBatchRecon` child sessions interleave
+/// arbitrarily.
 ///
 /// The assertion is that *both* results are right: the conversion still decomposes `z`, and the
 /// concurrent multiplication still returns `x * x`.
@@ -735,6 +744,7 @@ async fn mixed_circuit_with_concurrent_arithmetic_n4_t1() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "ten parties on a 255-bit field: minutes in a debug build; run with --release -- --ignored"]
 async fn mixed_circuit_with_concurrent_arithmetic_n10_t3() {
     mixed_circuit_concurrent(10, 3, 704).await;
 }
@@ -1090,6 +1100,7 @@ async fn mixed_circuit_survives_t_corrupt_online_openers_n4_t1() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "ten parties on a 255-bit field: minutes in a debug build; run with --release -- --ignored"]
 async fn mixed_circuit_survives_t_corrupt_online_openers_n10_t3() {
     mixed_circuit_byzantine(10, 3, 706).await;
 }

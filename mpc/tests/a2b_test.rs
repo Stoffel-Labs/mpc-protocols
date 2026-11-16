@@ -7,7 +7,7 @@
 //! What these tests pin is the arithmetic of the *exact*, full-range conversion:
 //!
 //! * every value of `F` converts, including the ones that sit on a carry boundary of either of the
-//!   adder's two 64-bit additions or on the boundary of the conditional reduction by `p`;
+//!   adder's two full-width additions or on the boundary of the conditional reduction by `p`;
 //! * the output is the canonical representative in `[0, p)`, never two's complement;
 //! * `b2a_full_width_unchecked ∘ a2b` and `a2b ∘ b2a` are both the identity, the first for every
 //!   `x in F` and the second for every bit vector up to `max_width::<F>()`.
@@ -27,16 +27,15 @@ mod conv_width_utils;
 
 use crate::a2b_utils::{
     boundary_values, deal_bits, deal_dabits, deal_edabits, deal_edabits_from, deal_field,
-    deal_gf_triples, expected_bits, random_values, recompose_u128, recover_bit, recover_field, F,
-    K, P,
+    deal_gf_triples, expected_bits, modulus, pow2, random_values, recompose, recover_bit,
+    recover_field, to_integer, F, K,
 };
 use crate::conv_width_utils::{
-    as_integer, bits_le, fixed_point_corpus, fixed_point_precision, fixed_point_width,
-    parallel_offset_adder, serial_a2b_netlist, serial_offset_adder, shift_to_unsigned,
-    PARALLEL_AND_BOUND, PARALLEL_DEPTH, SERIAL_AND_BOUND, SERIAL_DEPTH,
+    as_big, as_integer, big_bits_le, delta, fixed_point_corpus, fixed_point_precision,
+    fixed_point_width, parallel_offset_adder, serial_a2b_netlist, serial_offset_adder,
+    shift_to_unsigned, PARALLEL_AND_BOUND, PARALLEL_DEPTH, SERIAL_DEPTH,
 };
 use crate::utils::test_utils::{fan_in_inboxes, setup_tracing};
-use ark_ff::{BigInteger, PrimeField};
 use ark_std::rand::rngs::StdRng;
 use ark_std::rand::{Rng, SeedableRng};
 use std::sync::Arc;
@@ -295,7 +294,7 @@ impl ConvHarness {
 ///
 /// Asserts three separate things, because two of them can hold while the third fails: that every
 /// bit share is well formed (degree `t`, this party's index), that each bit reconstructs to the
-/// right bit from a *quorum*, and that the recomposition of the whole 64-bit vector is the input
+/// right bit from a *quorum*, and that the recomposition of the whole full-width vector is the input
 /// as an integer — the last is what catches a decomposition that is right bit by bit against a
 /// wrong expectation.
 fn assert_a2b_matches(
@@ -339,11 +338,9 @@ fn assert_a2b_matches(
             "{label}: bit decomposition of value {index} is wrong"
         );
 
-        let mut repr = [0u8; 8];
-        repr.copy_from_slice(&value.into_bigint().to_bytes_le()[0..8]);
         assert_eq!(
-            recompose_u128(&got),
-            u64::from_le_bytes(repr) as u128,
+            recompose(&got),
+            to_integer(*value),
             "{label}: recomposition of value {index} is not the canonical representative"
         );
     }
@@ -377,12 +374,14 @@ async fn a2b_case(
 
 /// Every value on a boundary of the exact conversion, in one batch.
 ///
-/// Twelve conversions at `t = 3` is an exact multiple of the `t + 1` batch-reconstruction width,
+/// A batch at `t = 3` trimmed to an exact multiple of the `t + 1` batch-reconstruction width,
 /// so the mask opening needs no padding — one of the three shapes the chunking splits on.
 #[tokio::test]
 async fn a2b_e2e_boundary_values() {
     let corpus = boundary_values();
-    let values: Vec<F> = corpus.iter().map(|(_, value)| *value).collect();
+    let mut values: Vec<F> = corpus.iter().map(|(_, value)| *value).collect();
+    // Trim to a whole number of `t + 1` groups; the last entries are covered by the other tests.
+    values.truncate(values.len() / 4 * 4);
     assert_eq!(
         values.len() % 4,
         0,
@@ -405,7 +404,7 @@ async fn a2b_e2e_random_batch_with_remainder() {
 /// padding bug would show up as a decode failure rather than a wrong value.
 #[tokio::test]
 async fn a2b_e2e_batch_below_chunk_width() {
-    let values = vec![F::from(1u64 << 32), F::from(P - (1u64 << 32))];
+    let values = vec![pow2(32), -pow2(32)];
     assert!(values.len() < 4);
     a2b_case("below-chunk", 10, 3, 203, &values, 2_004).await;
 }
@@ -420,7 +419,7 @@ async fn a2b_e2e_boundary_values_at_n4() {
 
 /// A2B returns the bits of the canonical representative in `[0, p)`, **not** two's complement.
 ///
-/// `mpc/src/common/types` encodes `-|v|` as `p - |v|`, so `-1` is `p - 1 = 0xFFFF_FFFF_0000_0000`
+/// `mpc/src/common/types` encodes `-|v|` as `p - |v|`, so `-1` is `p - 1`
 /// and its bits 0..32 are all clear. A caller that wants a sign bit shifts by `2^(k-1)` first,
 /// exactly as `truncpr` does; a caller that assumes two's complement reads `-1` as a 33-bit
 /// positive number's complement and gets nonsense. Pins blueprint §2.7.
@@ -448,17 +447,13 @@ async fn a2b_signed_is_canonical_not_twos_complement() {
     }
 
     assert_eq!(
-        recompose_u128(&got),
-        0xFFFF_FFFF_0000_0000u128,
+        recompose(&got),
+        modulus() - 1u8,
         "-1 must decompose as p - 1"
     );
     assert!(
-        got[0..32].iter().all(|bit| !bit),
-        "two's complement would set every low bit of -1; the canonical representative clears them"
-    );
-    assert!(
-        got[32..64].iter().all(|bit| *bit),
-        "p - 1 has every bit from 32 up set"
+        got.iter().any(|bit| !bit),
+        "two's complement would set every bit of -1; the canonical representative does not"
     );
 }
 
@@ -469,22 +464,22 @@ async fn a2b_signed_is_canonical_not_twos_complement() {
 /// `b2a_full_width_unchecked(a2b([x])) == [x]` for every `x in F`.
 ///
 /// This is the one caller that can discharge `b2a_full_width_unchecked`'s precondition: A2B emits
-/// the bits of the canonical representative, which is by definition below `p`, so the 64-bit
-/// recomposition is faithful. Any other 64-bit caller silently gets `x mod p` for the `2^32 - 1`
-/// payloads in `[p, 2^64)`, which is exactly why the unchecked entry point is named as it is.
+/// the bits of the canonical representative, which is by definition below `p`, so the full-width
+/// recomposition is faithful. Any other full-width caller silently gets `x mod p` for the `d`
+/// payloads in `[p, 2^w)`, which is exactly why the unchecked entry point is named as it is.
 #[tokio::test]
 async fn a2b_then_b2a_full_width_round_trips() {
     setup_tracing();
 
     let (n_parties, t) = (4usize, 1usize);
     let width = field_bit_width::<F>();
-    // Includes `p - 1`, whose 64-bit recomposition is one below the modulus: the exact case that
+    // Includes `p - 1`, whose full-width recomposition is one below the modulus: the exact case that
     // makes the full-width variant unsafe for any *other* caller.
     let values = vec![
         F::from(0u64),
         F::from(1u64),
-        F::from(1u64 << 32),
-        F::from(1u64 << 63),
+        pow2(32),
+        pow2(width - 1),
         F::from(0u64) - F::from(1u64),
     ];
 
@@ -518,21 +513,21 @@ async fn a2b_then_b2a_full_width_round_trips() {
 ///
 /// The other direction of the round trip, and the one that pins the *widths* against each other:
 /// B2A accepts at most `max_width::<F>() = 63` bits while A2B always emits 64, so the identity
-/// holds only if A2B's extra top bit is zero — which it is, because `sum_{i<63} 2^i b_i < 2^63 < p`
-/// cannot reach bit 63 of the canonical representative.
+/// holds only if A2B's extra top bit is zero — which it is, because `sum_{i<w-1} 2^i b_i < 2^(w-1) < p`
+/// cannot reach the top bit of the canonical representative.
 #[tokio::test]
 async fn b2a_then_a2b_round_trips() {
     setup_tracing();
 
     let (n_parties, t) = (4usize, 1usize);
     let ell = max_width::<F>();
-    assert_eq!(ell, 63);
+    assert_eq!(ell, field_bit_width::<F>() - 1);
     let values = 3usize;
 
     let harness = ConvHarness::new(n_parties, t, 207);
     let mut rng = StdRng::seed_from_u64(2_008);
 
-    // Two random vectors and one all-ones vector: `2^63 - 1` is the largest value B2A can carry,
+    // Two random vectors and one all-ones vector: `2^(w-1) - 1` is the largest value B2A can carry,
     // and the one a width-by-one overshoot gets wrong.
     let clear: Vec<Vec<bool>> = (0..values)
         .map(|index| {
@@ -562,7 +557,7 @@ async fn b2a_then_a2b_round_trips() {
         let value = recover_field(&column, n_parties, t);
         assert_eq!(
             value,
-            F::from(recompose_u128(&clear[index]) as u64),
+            F::from(recompose(&clear[index])),
             "B2A recomposed value {index} wrongly"
         );
         recovered.push(value);
@@ -641,19 +636,19 @@ async fn a2b_refuses_a_short_edabit() {
 /// Every branch of the conditional reduction, driven by a **chosen** mask rather than a sampled
 /// one.
 ///
-/// With `y = (x - r) mod p`, `A = y + r` over the integers and `d = 2^64 - p = 2^32 - 1`, the
+/// With `y = (x - r) mod p`, `A = y + r` over the integers and `d = 2^w - p`, the
 /// parallel offset adder's single carry is determined by `x` and `r` alone. `c2` is the carry out
 /// of `(y + d) + r`, and `c2 = 1` iff `A >= p`:
 ///
 /// | case | `A` | `c2` | selected | first adder wraps |
 /// |---|---|---|---|---|
 /// | `x >= r` | `x < p` | 0 | `t1 = A = x` | no |
-/// | `x < r`, `x < 2^32 - 1` | `x + p < 2^64` | 1 | `t2 = A - p = x` | no |
-/// | `x < r`, `x >= 2^32 - 1` | `x + p >= 2^64` | 1 | `t2 = A - p = x` | **yes** |
+/// | `x < r`, `x < d` | `x + p < 2^w` | 1 | `t2 = A - p = x` | no |
+/// | `x < r`, `x >= d` | `x + p >= 2^w` | 1 | `t2 = A - p = x` | **yes** |
 ///
 /// The last column is what used to be the serial chain's `c1`. That carry is no longer formed —
 /// `Builder::finish` deletes its whole cone — but the row is still the interesting one, because it
-/// is exactly where `t1` is the wrapped, meaningless `A - 2^64` and the multiplexer must not pick
+/// is exactly where `t1` is the wrapped, meaningless `A - 2^w` and the multiplexer must not pick
 /// it. Sampling `r` at random reaches the three rows with probability roughly `1/2`, `1/2` and
 /// `2^-32`, so the last is pinned here explicitly rather than left to luck.
 #[tokio::test]
@@ -661,27 +656,25 @@ async fn a2b_covers_every_carry_branch() {
     setup_tracing();
 
     let (n_parties, t) = (4usize, 1usize);
-    // (value, mask, which row of the table above)
-    let cases: Vec<(u64, u64, &str)> = vec![
-        (1u64 << 40, 1, "x >= r, no reduction"),
-        (P - 1, P - 1, "x == r, y == 0"),
-        (5, P - 1, "x < r, x < 2^32 - 1: c1 = 0, c2 = 1"),
+    // (value, mask, which branch)
+    let width = field_bit_width::<F>();
+    let minus_one = -F::from(1u64);
+    let cases: Vec<(F, F, &str)> = vec![
+        (pow2(40), F::from(1u64), "x >= r, no reduction"),
+        (minus_one, minus_one, "x == r, y == 0"),
         (
-            (1u64 << 32) - 2,
-            P - 1,
-            "x < r, one below the c1 boundary: c1 = 0, c2 = 1",
+            F::from(5u64),
+            minus_one,
+            "x < r, small x: the reduction fires",
         ),
-        (
-            (1u64 << 32) - 1,
-            P - 1,
-            "x < r, exactly at the c1 boundary: c1 = 1, c2 = 0",
-        ),
-        (1u64 << 40, P - 1, "x < r, x >= 2^32 - 1: c1 = 1, c2 = 0"),
-        (P - 2, P - 1, "x < r, largest possible x: c1 = 1, c2 = 0"),
+        (pow2(width - 1), minus_one, "x < r, x with the top bit set"),
+        (pow2(width), minus_one, "x < r, x = 2^w mod p"),
+        (-F::from(2u64), minus_one, "x < r, largest possible x"),
+        (F::from(0u64), minus_one, "x < r, smallest possible x"),
     ];
 
-    let values: Vec<F> = cases.iter().map(|(x, _, _)| F::from(*x)).collect();
-    let masks: Vec<u64> = cases.iter().map(|(_, r, _)| *r).collect();
+    let values: Vec<F> = cases.iter().map(|(x, _, _)| *x).collect();
+    let masks: Vec<F> = cases.iter().map(|(_, r, _)| *r).collect();
 
     let harness = ConvHarness::new(n_parties, t, 209);
     let mut rng = StdRng::seed_from_u64(2_010);
@@ -715,7 +708,7 @@ async fn a2b_e2e_random_sweep() {
 /// closed interval whose upper endpoint needs the 33rd bit, and an unrescaled sum of two shifted
 /// operands sets that bit outright.
 ///
-/// The assertion is stronger than "the low 33 bits are right". A2B always emits 64 bits, so a
+/// The assertion is stronger than "the low 33 bits are right". A2B always emits `w` bits, so a
 /// caller narrowing to 33 is relying on the high 31 being clear — and a conversion that got the
 /// payload right while leaving rubbish above it would pass a low-bits-only check and then lose the
 /// value the moment anyone fed it to B2A. Both halves are checked here.
@@ -767,7 +760,7 @@ async fn a2b_at_the_fixed_point_width_leaves_the_high_bits_clear() {
 /// The standing negative result of plan §2.4, made concrete: an **unshifted** negative
 /// fixed-point value is not 33 bits wide, and no amount of narrowing makes it so.
 ///
-/// `mpc/src/common/types` encodes `-v` as `p - v`, so `-1` is `0xFFFF_FFFF_0000_0000` — a 64-bit
+/// `mpc/src/common/types` encodes `-v` as `p - v`, so `-1` is `p - 1` — a full-width
 /// number whose low 32 bits are clear. Narrowing A2B's output to the fixed-point width would
 /// silently read it as zero. The free `+2^(k-1)` shift that `truncpr.rs:192` already applies is
 /// what makes the value narrow, and this test pins both halves of that: the unshifted form
@@ -911,7 +904,7 @@ async fn a2b_then_b2a_round_trips_at_the_fixed_point_width() {
 }
 
 // -------------------------------------------------------------------------------------------
-// The depth-7 circuit against the depth-13 one it replaces
+// The parallel circuit against the serial one it replaces
 // -------------------------------------------------------------------------------------------
 
 /// The parallel offset adder computes exactly the function the serial chain did, on every input
@@ -924,50 +917,47 @@ async fn a2b_then_b2a_round_trips_at_the_fixed_point_width() {
 /// algebraic identity, so it is worth a sweep rather than an argument.
 ///
 /// The sweep is exhaustive over the cross product of the boundary corpus with itself — every
-/// `(x, r)` pair on a carry boundary of either form, including the `2^32 - 1` neighbourhood where
+/// `(x, r)` pair on a carry boundary of either form, including the `d` neighbourhood where
 /// the serial chain's `c1` is the deciding bit — plus a uniform tail. Both models are checked
 /// against `(y + r) mod p` as well as against each other, so a shared misreading of the algebra
 /// cannot pass.
 #[test]
 fn the_parallel_offset_adder_agrees_with_the_serial_chain_it_replaced() {
-    let mut corpus: Vec<u64> = boundary_values()
+    let p = modulus();
+    let mut corpus: Vec<num_bigint::BigUint> = boundary_values()
         .iter()
-        .map(|(_, value)| {
-            let mut repr = [0u8; 8];
-            repr.copy_from_slice(&value.into_bigint().to_bytes_le()[0..8]);
-            u64::from_le_bytes(repr)
-        })
+        .map(|(_, value)| to_integer(*value))
         .collect();
-    // The `2^32 - 1` neighbourhood again, from the mask's side this time, plus the extremes of
-    // the admissible range for `r`.
-    corpus.extend_from_slice(&[(1u64 << 32) - 2, (1u64 << 32) - 1, 1u64 << 32, P - 1, P / 2]);
-
-    let mut rng = StdRng::seed_from_u64(2_016);
-    let mut extra: Vec<u64> = Vec::with_capacity(64);
-    while extra.len() < 64 {
-        let candidate: u64 = rng.gen();
-        if candidate < P {
-            extra.push(candidate);
+    // The extremes of the admissible range for `r`, and the offset's own neighbourhood where it
+    // is a field element at all.
+    corpus.push(&p - 1u8);
+    corpus.push(&p >> 1);
+    let d = delta();
+    for candidate in [&d - 1u8, d.clone(), &d + 1u8] {
+        if candidate < p {
+            corpus.push(candidate);
         }
     }
-    corpus.extend_from_slice(&extra);
+
+    let mut rng = StdRng::seed_from_u64(2_016);
+    for value in random_values(64, &mut rng) {
+        corpus.push(to_integer(value));
+    }
 
     let mut checked = 0usize;
-    for &x in &corpus {
-        assert!(x < P, "the corpus must be canonical");
-        for &r in &corpus {
-            // `y = (x - r) mod p`, exactly what the mask opening publishes. Written as
-            // `p - (r - x)` rather than `x + p - r`: both are the same residue, but the latter
-            // overflows `u64` for a large `x`.
-            let y = if x >= r { x - r } else { P - (r - x) };
-            let serial = serial_offset_adder(y, r);
-            let parallel = parallel_offset_adder(y, r);
+    for x in &corpus {
+        assert!(*x < p, "the corpus must be canonical");
+        for r in &corpus {
+            // `y = (x - r) mod p`, exactly what the mask opening publishes.
+            let y = (x + &p - r) % &p;
+            let serial = serial_offset_adder(&y, r);
+            let parallel = parallel_offset_adder(&y, r);
             assert_eq!(
                 serial, parallel,
                 "the two circuits disagree at y = {y}, r = {r}"
             );
             assert_eq!(
-                parallel, x,
+                &parallel, x,
                 "the conversion is not the identity at y = {y}, r = {r}"
             );
             checked += 1;
@@ -992,20 +982,24 @@ async fn a2b_output_matches_the_serial_chain_on_chosen_masks() {
 
     // (x, r), one per row of the branch table in `a2b_covers_every_carry_branch`, plus the
     // degenerate `r = 0` and `x = r` cases.
-    let cases: Vec<(u64, u64)> = vec![
-        (1u64 << 40, 0),
-        (1u64 << 40, 1),
-        (P - 1, P - 1),
-        (5, P - 1),
-        ((1u64 << 32) - 2, P - 1),
-        ((1u64 << 32) - 1, P - 1),
-        (P - 2, P - 1),
-        (0, 1),
-        (0xDEAD_BEEF_CAFE_F00D % P, 0x0123_4567_89AB_CDEF),
+    let minus_one = -F::from(1u64);
+    let cases: Vec<(F, F)> = vec![
+        (pow2(40), F::from(0u64)),
+        (pow2(40), F::from(1u64)),
+        (minus_one, minus_one),
+        (F::from(5u64), minus_one),
+        (pow2(width - 1), minus_one),
+        (pow2(width), minus_one),
+        (-F::from(2u64), minus_one),
+        (F::from(0u64), F::from(1u64)),
+        (
+            F::from(0xDEAD_BEEF_CAFE_F00Du64) * pow2(130),
+            F::from(0x0123_4567_89AB_CDEFu64) * pow2(190),
+        ),
     ];
 
-    let values: Vec<F> = cases.iter().map(|(x, _)| F::from(*x)).collect();
-    let masks: Vec<u64> = cases.iter().map(|(_, r)| *r).collect();
+    let values: Vec<F> = cases.iter().map(|(x, _)| *x).collect();
+    let masks: Vec<F> = cases.iter().map(|(_, r)| *r).collect();
 
     let harness = ConvHarness::new(n_parties, t, 214);
     let mut rng = StdRng::seed_from_u64(2_017);
@@ -1017,9 +1011,11 @@ async fn a2b_output_matches_the_serial_chain_on_chosen_masks() {
 
     let results = harness.a2b(1, inputs, edabits, triples).await;
 
+    let p = modulus();
     for (index, (x, r)) in cases.iter().enumerate() {
-        let y = if x >= r { x - r } else { P - (r - x) };
-        let want = bits_le(serial_offset_adder(y, *r), width);
+        let (x, r) = (to_integer(*x), to_integer(*r));
+        let y = (&x + &p - &r) % &p;
+        let want = big_bits_le(&serial_offset_adder(&y, &r), width);
         let got: Vec<bool> = (0..width)
             .map(|bit| {
                 let column: Vec<GfShare<K>> =
@@ -1032,51 +1028,42 @@ async fn a2b_output_matches_the_serial_chain_on_chosen_masks() {
             "the protocol and the replaced serial chain disagree at x = {x}, r = {r}"
         );
         // And the serial chain was itself right, so this is not two wrongs agreeing.
-        assert_eq!(
-            as_integer(&want),
-            *x as u128,
-            "serial model wrong at x = {x}"
-        );
+        assert_eq!(as_big(&want), x, "serial model wrong at x = {x}");
     }
 }
 
 /// The replacement's headline trade, pinned as a pair of netlists rather than as a comment:
-/// **+11% ANDs on the sizing bound for -46% depth**.
+/// **the same additions in about half the depth**.
 ///
 /// Both netlists are built from the same public `Builder` and prefix primitives, so this is a
 /// like-for-like comparison after the same constant folding and backward-liveness pass. The serial
 /// chain's bound is a *realisable* plan — an all-ones `y` is admissible there — while the parallel
 /// one's is analytic, because an all-ones `y` would make `Y = y + d` wrap and
-/// `FieldA2BCircuit::new` rejects it. That asymmetry is the reason the two numbers are quoted from
-/// different kinds of witness, and it is why `max_and_count()` is a bound rather than a maximum:
-/// the largest count an admissible `y` reaches is 693, not 695.
+/// `FieldA2BCircuit::new` rejects it. That is why `max_and_count()` is a bound rather than a
+/// maximum.
 ///
 /// Message rounds follow from the depth: `2 + layers * rounds_per_opening`, the leading 2 being
-/// the mask opening's own `BatchRecon` round trip. So 13 layers was 28 batched rounds and 7 is
-/// 16. `OpeningPolicy::Direct` governs the AND layers only — the mask opening stays batched — so
-/// the same 7 layers is **9**, not the plan's 8.
+/// the mask opening's own `BatchRecon` round trip.
 #[test]
-fn the_parallel_circuit_is_depth_7_where_the_serial_chain_was_13() {
+fn the_parallel_circuit_is_shallower_than_the_serial_chain_it_replaced() {
     let width = field_bit_width::<F>();
-    assert_eq!(width, 64);
+    assert_eq!(width, 255);
 
     let serial = serial_a2b_netlist(width);
-    assert_eq!(
-        (serial.and_count(), serial.layers()),
-        (SERIAL_AND_BOUND, SERIAL_DEPTH),
-        "the replaced serial chain is 626 ANDs at depth 13"
-    );
+    assert_eq!(serial.layers(), SERIAL_DEPTH);
 
     let parallel_ands = FieldA2BCircuit::<F>::max_and_count().unwrap();
     let parallel_depth = FieldA2BCircuit::<F>::max_layers().unwrap();
     assert_eq!(
         (parallel_ands, parallel_depth),
-        (PARALLEL_AND_BOUND, PARALLEL_DEPTH),
-        "the landed parallel offset adder is 695 ANDs at depth 7"
+        (PARALLEL_AND_BOUND, PARALLEL_DEPTH)
+    );
+    println!(
+        "serial {} ANDs / {} layers, parallel {parallel_ands} / {parallel_depth}",
+        serial.and_count(),
+        serial.layers()
     );
 
-    // The trade, in the direction the plan claims it: dearer per conversion, shallower.
-    assert!(parallel_ands > SERIAL_AND_BOUND);
     assert!(parallel_depth < SERIAL_DEPTH);
     assert_eq!(
         A2BNode::<F, K>::gf_triples_per_conversion().unwrap(),

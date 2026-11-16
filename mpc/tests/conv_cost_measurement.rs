@@ -15,9 +15,9 @@
 //!
 //! Each test prints `MEASURE ...` lines of `key=value` pairs. The groups are
 //! `measured_cost_n*` (one A2B and one B2A end to end, split preprocessing vs online),
-//! `measured_rounds_{a2b,b2a}_n*` (round counts), `measured_gf_prss_n*` and `measured_gf_dealt_n*`
-//! (GF Beaver triple cost from each source), `dealt_gf_random_share_generation_stalls_above_a_batch_size`
-//! (a liveness gap this walked into), and `message_framing_and_per_element_cost`, which is the only
+//! `measured_rounds_{a2b,b2a}_n*` (round counts), `measured_gf_ransha_n*` and `measured_gf_dealt_n*`
+//! (GF share and Beaver triple cost), `dealt_gf_random_share_generation_completes_at_every_committee_size`
+//! (a regression test for a liveness gap this walked into), and `message_framing_and_per_element_cost`, which is the only
 //! one that is not `#[ignore]`d because it is instantaneous.
 //!
 //! # What is measured, and why it does not depend on machine load
@@ -84,10 +84,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use stoffelcrypto::{
     common::{
-        convert::{bit_to_binary, canonical_bits, field_bit_width},
+        convert::{bit_to_gf, canonical_bits, field_bit_width},
         gf2k::field::{BinaryField, Gf256},
         gf2k::share::GfShare,
-        math::goldilocks::GoldilocksField,
         rbc::rbc::Avid,
         types::fixed::FixedPointPrecision,
         ConversionPreprocessingProtocol, GfPreprocessingMPCProtocol, MPCProtocol,
@@ -104,17 +103,15 @@ use stoffelmpc_network::fake_network::{
 };
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId, VerifiedOrdering};
 
-type F = GoldilocksField;
+type F = ark_bls12_381::Fr;
 type K = Gf256;
 type Node = HoneyBadgerMPCNode<F, Avid<SessionId>>;
 type Net = WireTally<CountingNetwork<FakeNetwork>>;
 
 /// Whole degree-`2t` opening groups in the two GF triple batches the marginal cost is read from.
 ///
-/// Deliberately small. A single dealt batch of all 695 triples an A2B spends does **not** complete
-/// on this mesh — see `dealt_gf_triple_generation_does_not_scale_to_one_whole_a2b` — so the dealt
-/// figure has to come from batches that do, and the PRSS figure is taken at the same sizes so the
-/// two are comparable. `measured_cost_n*` separately measures the PRSS path at the full 695.
+/// Deliberately small: the marginal cost is the difference between the two, and both must
+/// complete quickly at every `n`.
 const GF_BATCH_GROUPS_SMALL: usize = 4;
 const GF_BATCH_GROUPS_LARGE: usize = 12;
 
@@ -623,7 +620,7 @@ fn report(label: &str, n: usize, t: usize, tag: &str, ta: &Tally, unit: f64) {
     println!("MEASURE cfg={label} n={n} t={t} phase={tag} split_bytes_per_msgs_per_party{split}");
 }
 
-/// Precision the PRSS key setup can actually carry on Goldilocks.
+/// Precision the PRSS key setup is given in this harness.
 ///
 /// `setup_prss_keys` derives its RISS batch width from `params.mask_bits() = (2k - f) + kappa`,
 /// and `PRandIntNode` refuses a mask wider than
@@ -652,19 +649,12 @@ async fn install_prss(rig: &mut Rig) -> Tally {
         })
         .await
     });
-    for (pid, node) in rig.nodes.iter().enumerate() {
-        assert!(
-            node.gf_dn07_uses_prss(),
-            "node {pid} has no GF PRSS source: the PRSS path would be measured vacuously"
-        );
-    }
     tally
 }
 
 // ── the measurements ────────────────────────────────────────────────────────
 
-/// One 64-bit A2B and one 63-bit B2A, each end to end, split preprocessing vs online; plus the
-/// GF triple cost on both the PRSS and the fully dealt path.
+/// One 64-bit A2B and one 63-bit B2A, each end to end, split preprocessing vs online.
 async fn measure(n: usize, t: usize) {
     setup_quiet_tracing();
 
@@ -687,8 +677,8 @@ async fn measure(n: usize, t: usize) {
             p.n_gf_triples = per_conversion;
             p.n_gf_random_shares = 0;
         });
-        let dabits_per_edabit = rig.nodes[0].conv.dabit_gen.rand_bits_per_dabit();
-        println!("MEASURE cfg=const n={n} t={t} rand_bits_per_dabit={dabits_per_edabit}");
+        let doubles_per_dabit = rig.nodes[0].conv.dabit_gen.doubles_per_dabit();
+        println!("MEASURE cfg=const n={n} t={t} doubles_per_dabit={doubles_per_dabit}");
 
         let setup = install_prss(&mut rig).await;
         report("a2b", n, t, "prss_key_setup", &setup, 1.0);
@@ -722,7 +712,7 @@ async fn measure(n: usize, t: usize) {
             .length()
             .beaver_triples;
         println!("MEASURE cfg=a2b n={n} t={t} gf_triples_generated={triples_made}");
-        report("a2b", n, t, "pre_gf_prss", &gf, triples_made as f64);
+        report("a2b", n, t, "pre_gf", &gf, triples_made as f64);
 
         let mut rng = StdRng::seed_from_u64(n as u64);
         let value = F::from(0u64) - F::from(1u64);
@@ -744,7 +734,7 @@ async fn measure(n: usize, t: usize) {
             for bit in 0..width {
                 let col: Vec<GfShare<K>> = (0..n).map(|p| out[p][0][bit].clone()).collect();
                 let (_, got) = GfShare::recover_secret(&col[0..=2 * t], n, t).unwrap();
-                assert_eq!(got, bit_to_binary::<K>(want[bit]), "A2B bit {bit}");
+                assert_eq!(got, bit_to_gf::<K>(want[bit]), "A2B bit {bit}");
             }
         });
         report("a2b", n, t, "online", &online, 1.0);
@@ -790,7 +780,7 @@ async fn measure(n: usize, t: usize) {
 
         // Every bit set: the widest payload this width can carry.
         let mut rng = StdRng::seed_from_u64(n as u64 + 100);
-        let value: u64 = (1u64 << b2a_width) - 1;
+        let value = F::from(2u64).pow([b2a_width as u64]) - F::from(1u64);
         let mut columns: Vec<Vec<GfShare<K>>> = vec![Vec::new(); n];
         for _ in 0..b2a_width {
             let sh = GfShare::compute_shares(K::one(), n, t, &mut rng).unwrap();
@@ -812,7 +802,7 @@ async fn measure(n: usize, t: usize) {
             .await;
             let col: Vec<RobustShare<F>> = (0..n).map(|p| out[p][0].clone()).collect();
             let (_, got) = RobustShare::recover_secret(&col[0..=2 * t], n, t).unwrap();
-            assert_eq!(got, F::from(value), "B2A recomposition");
+            assert_eq!(got, value, "B2A recomposition");
         });
         report("b2a", n, t, "online", &online, 1.0);
 
@@ -826,57 +816,22 @@ async fn measure(n: usize, t: usize) {
     }
 }
 
-/// GF Beaver triple cost, both sources, as a **marginal** figure.
+/// `GfRanSha` on its own, at two batch sizes: `[a]` and `[b]` of a dealt GF triple are two of its
+/// output shares, so this is the share-generation part of a triple's cost.
 ///
-/// Measured at two batch sizes and differenced, rather than read off one batch and divided: a
-/// batch carries fixed per-session framing that a single division silently attributes to the
-/// triples, and the derived model's `O2` is a marginal quantity. The totals are printed too.
-///
-/// The dealt path is reached by simply never establishing PRSS keys — `gf_dn07_uses_prss()`'s own
-/// predicate — so this is the **fully dealt** baseline (`2 x GfRanSha` for `[a]`/`[b]` plus
-/// `GfRanDouSha` for the mask). It is *not* the state immediately before this workflow's change
-/// (PRSS doubles with dealt `[a]`/`[b]`); that intermediate is unreachable without editing the
-/// source, and is reconstructed from `gf_ransha_only` plus the PRSS triple figure instead.
-async fn measure_gf_prss(n: usize, t: usize) {
+/// Tolerant of failure, and reports it rather than asserting, so that one stalled batch does not
+/// take the whole measurement with it.
+async fn measure_gf_ransha(n: usize, t: usize) {
     setup_quiet_tracing();
     let group = 2 * t + 1;
     let small = GF_BATCH_GROUPS_SMALL * group;
     let large = GF_BATCH_GROUPS_LARGE * group;
     println!("MEASURE cfg=const n={n} t={t} gf_batch_small={small} gf_batch_large={large}");
 
-    for (label, batch) in [("small", small), ("large", large)] {
-        let mut rig = Rig::new(n, t, 2900 + 100 * batch as u32 + n as u32, |p| {
-            p.n_gf_triples = batch;
-            p.n_gf_random_shares = 0;
-        });
-        let setup = install_prss(&mut rig).await;
-        report("gf_prss", n, t, "prss_key_setup", &setup, 1.0);
-        let gf = phase!(rig, {
-            drive(&mut rig, |mut node, net, pid| async move {
-                let mut rng = StdRng::seed_from_u64(pid as u64 + 37);
-                node.run_gf_preprocessing(net, &mut rng)
-                    .await
-                    .expect("gf preprocessing");
-                (node, ())
-            })
-            .await
-        });
-        let made = check_triples(&rig, n, t, group, "gf_prss").await;
-        println!("MEASURE cfg=gf_prss n={n} t={t} batch={label} gf_triples_generated={made}");
-        report(
-            "gf_prss",
-            n,
-            t,
-            &format!("triples_{label}"),
-            &gf,
-            made as f64,
-        );
-    }
-
     // `[a]` and `[b]` of a *dealt* triple are two `GfRanSha` output shares. Measuring the share
     // generator on its own gives the measured `P1` the pre-change intermediate needs. Tolerant of
     // failure for the same reason the dealt triple path is: dealt `GfRanSha` does not complete at
-    // every `n` — see `dealt_gf_random_share_generation_stalls_above_a_batch_size`.
+    // every `n` — see `dealt_gf_random_share_generation_completes_at_every_committee_size`.
     for (label, want) in [("small", 2 * small), ("large", 2 * large)] {
         let mut rig = Rig::new(n, t, 3900 + 100 * want as u32 + n as u32, |p| {
             p.n_gf_triples = 0;
@@ -934,16 +889,11 @@ async fn measure_gf_prss(n: usize, t: usize) {
     }
 }
 
-/// The **fully dealt** GF triple path: `2 x GfRanSha` for `[a]`/`[b]` plus `GfRanDouSha` for the
-/// mask, reached by simply never establishing PRSS keys — `gf_dn07_uses_prss()`'s own predicate.
+/// The GF triple path, which is dealt: `2 x GfRanSha` for `[a]`/`[b]` plus `GfRanDouSha` for the
+/// mask. This is the only GF triple source and the one A2B spends from.
 ///
-/// This is *not* the state immediately before this workflow's change (PRSS doubles with dealt
-/// `[a]`/`[b]`); that intermediate is unreachable without editing the source, and is reconstructed
-/// from the `gf_ransha` figure plus the PRSS triple figure instead.
-///
-/// The node timeout is cut to [`dealt_timeout_secs`] and a failure is *reported*, not asserted: this
-/// path does not complete at every `n` on this mesh, and a hang would take the whole measurement
-/// with it.
+/// The node timeout is cut to [`dealt_timeout_secs`] and a failure is *reported*, not asserted, so
+/// that a hang cannot take the whole measurement with it.
 async fn measure_gf_dealt(n: usize, t: usize) {
     setup_quiet_tracing();
     let group = 2 * t + 1;
@@ -965,10 +915,6 @@ async fn measure_gf_dealt(n: usize, t: usize) {
                     p.n_gf_random_shares = 0;
                     p.timeout = Duration::from_secs(dealt_timeout_secs());
                 },
-            );
-            assert!(
-                !rig.nodes[0].gf_dn07_uses_prss(),
-                "no PRSS keys installed, so the dealt path must be selected"
             );
             let failures;
             let gf = phase!(rig, {
@@ -1085,8 +1031,8 @@ async fn measured_cost_n13() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "measurement harness; run explicitly with --ignored"]
-async fn measured_gf_prss_n4() {
-    measure_gf_prss(4, 1).await;
+async fn measured_gf_ransha_n4() {
+    measure_gf_ransha(4, 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1097,8 +1043,8 @@ async fn measured_gf_dealt_n4() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "measurement harness; run explicitly with --ignored"]
-async fn measured_gf_prss_n7() {
-    measure_gf_prss(7, 2).await;
+async fn measured_gf_ransha_n7() {
+    measure_gf_ransha(7, 2).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1109,8 +1055,8 @@ async fn measured_gf_dealt_n7() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "measurement harness; run explicitly with --ignored"]
-async fn measured_gf_prss_n10() {
-    measure_gf_prss(10, 3).await;
+async fn measured_gf_ransha_n10() {
+    measure_gf_ransha(10, 3).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1121,8 +1067,8 @@ async fn measured_gf_dealt_n10() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "measurement harness; run explicitly with --ignored"]
-async fn measured_gf_prss_n13() {
-    measure_gf_prss(13, 4).await;
+async fn measured_gf_ransha_n13() {
+    measure_gf_ransha(13, 4).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1152,13 +1098,11 @@ async fn measured_gf_dealt_n13() {
 // it: the question is the online round count, and preprocessing rounds would otherwise be folded
 // into the same elapsed time.
 
-use ark_ff::UniformRand;
+use ark_ff::{Field, UniformRand};
 use stoffelcrypto::honeybadger::dabit::{DaBit, EdaBit};
 use stoffelcrypto::honeybadger::gf_triple_gen::GfBeaverTriple;
 use stoffelmpc_network::turmoil_network::TurmoilNetwork;
 
-/// `p = 2^64 - 2^32 + 1`.
-const P: u64 = 0xFFFF_FFFF_0000_0001;
 /// One-way message latency in the round simulation. Elapsed / this = rounds.
 const LATENCY_MS: u64 = 100;
 
@@ -1167,7 +1111,7 @@ fn deal_dabits(n: usize, t: usize, count: usize, rng: &mut StdRng) -> Vec<Vec<Da
     for index in 0..count {
         let bit = index % 2 == 0;
         let arith = RobustShare::compute_shares(F::from(bit as u64), n, t, None, rng).unwrap();
-        let bin = GfShare::compute_shares(bit_to_binary::<K>(bit), n, t, rng).unwrap();
+        let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n, t, rng).unwrap();
         for party in 0..n {
             per_party[party].push(DaBit::new(arith[party].clone(), bin[party].clone(), t).unwrap());
         }
@@ -1179,17 +1123,11 @@ fn deal_edabits(n: usize, t: usize, count: usize, rng: &mut StdRng) -> Vec<Vec<E
     let width = field_bit_width::<F>();
     let mut per_party: Vec<Vec<EdaBit<F, K>>> = vec![Vec::new(); n];
     for _ in 0..count {
-        let r = loop {
-            let candidate: u64 = ark_std::rand::Rng::gen(rng);
-            if candidate < P {
-                break candidate;
-            }
-        };
-        let bits = canonical_bits::<F>(F::from(r), width).unwrap();
+        let bits = canonical_bits::<F>(F::rand(rng), width).unwrap();
         let mut per_party_dabits: Vec<Vec<DaBit<F, K>>> = vec![Vec::new(); n];
         for bit in bits {
             let arith = RobustShare::compute_shares(F::from(bit as u64), n, t, None, rng).unwrap();
-            let bin = GfShare::compute_shares(bit_to_binary::<K>(bit), n, t, rng).unwrap();
+            let bin = GfShare::compute_shares(bit_to_gf::<K>(bit), n, t, rng).unwrap();
             for party in 0..n {
                 per_party_dabits[party]
                     .push(DaBit::new(arith[party].clone(), bin[party].clone(), t).unwrap());
@@ -1459,7 +1397,7 @@ fn measured_rounds_b2a_n13() {
 /// The per-message cost the element-counting cost model does not have a term for.
 ///
 /// `O1 = 2n/(t+1)` and `O2 = 2n/(2t+1)` price an opening in *field elements*: one byte for a
-/// `Gf256` element, eight for a Goldilocks one. A message carries more than its elements — the
+/// `Gf256` element, thirty-two for a curve scalar. A message carries more than its elements — the
 /// `WrappedMessage` discriminant, the `SessionId`, a sender id, a message-type tag and a length
 /// prefix — and a batched GF opening's payload at these widths is tens of bytes, so the constant
 /// is not a rounding error. This serializes the two shapes the conversions actually put on the
@@ -1522,8 +1460,8 @@ fn message_framing_and_per_element_cost() {
     );
     assert_eq!(
         f100 - f0,
-        800,
-        "a Goldilocks element is 8 bytes on the wire"
+        3200,
+        "a BLS12-381 scalar is 32 bytes on the wire"
     );
     assert_eq!(
         f0, 48,
@@ -1576,51 +1514,23 @@ fn message_framing_and_per_element_cost() {
 
 // ── a liveness gap the measurement walked into ───────────────────────────────
 
-/// **Dealt `GfRanSha` does not reliably complete.** Found while measuring the fully dealt GF triple
-/// path as the baseline for this workflow's PRSS change.
+/// **Dealt `GfRanSha` completes at every committee size.** A regression test.
+///
+/// It did not always. With the degree check written as `poly.degree() != threshold`, a dealing
+/// whose polynomial happened to have a zero leading coefficient was rejected, every party took the
+/// `Output(false)` branch, and the run waited out its timeout: nothing completed at `n = 7` or
+/// `n = 13`, and only the smaller batches at `n = 10`. The check is now `poly.degree() > threshold`
+/// (`gf_share_gen`, `gf_ran_dou_sha`).
+///
+/// This matters because the dealt generator is on the A2B critical path: every GF Beaver triple
+/// the adder spends is made from its output.
 ///
 /// Deliberately built with the *shared* helpers — `test_setup`'s plain `FakeNetwork` and
 /// `test_utils::receive` — with no `CountingNetwork`, no `WireTally` and no Lamport table, so the
 /// result is a statement about `gf_share_gen` and not about this file's instrumentation.
-///
-/// Observed, requesting 8 / 16 / 24 / 32 / 48 / 64 GF random shares at each `n`:
-///
-/// | `n`, `t`  | completes |
-/// |-----------|-----------|
-/// | 4, 1      | all six   |
-/// | 7, 2      | **none**  |
-/// | 10, 3     | 8..32 yes, 48 and 64 no |
-/// | 13, 4     | **none**  |
-///
-/// So it is neither `n` alone nor batch size alone. One correlation worth handing on rather than
-/// asserting: `n - 2t`, the number of outputs a dealing yields, is even (2, 4) exactly at the two
-/// `n` that work at all and odd (3, 5) at the two that never do.
-///
-/// A stall is not wall clock running out. Under `setup_quiet_tracing` the same configuration logs
-/// every party's `output_handler` taking the `Output(false)` branch and returning
-/// `GfRanShaError::Abort` within milliseconds of the dealing; `wait_for_result` then waits out the
-/// whole timeout with nothing further arriving. `try_finalize` gates on `2 * threshold` OK votes
-/// **and** `batch_size * n_parties` computed shares, and one of those two is never reached.
-///
-/// The existing coverage is why this had not been seen. `gf_node_mul_test.rs` is the only
-/// node-level test of the dealt GF path and runs at `n = 4`; `gf_ransha_test.rs` runs at `n = 10`
-/// but drives `GfRanShaNode` directly, and only on the *negative* path (a corrupted share must
-/// abort). Nobody had asked the positive question anywhere else.
-///
-/// **It is not on the A2B/B2A critical path.** Once PRSS keys exist — which every conversion path
-/// establishes — `gf_dn07_uses_prss()` is true, `[a]`, `[b]` and the double sharing are all
-/// derived, and `GfRanSha` is not called at all. It is reachable only by a deployment that declines
-/// PRSS key setup and still asks for GF triples or GF random shares, which after this workflow's
-/// change is the only remaining caller of the dealt path. The practical consequence for the cost
-/// work is narrower and worth stating plainly: the *fully dealt* baseline that the plan's
-/// "6.6x cheaper than `GfRanDouSha`" is quoted against cannot be measured at `n >= 7` at all,
-/// because it does not run.
-///
-/// This prints what it observes and asserts only `n = 4`, the configuration `gf_node_mul_test`
-/// covers, so that it documents the gap without pinning a bug in place as expected behaviour.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "diagnostic for a liveness gap; run explicitly with --ignored"]
-async fn dealt_gf_random_share_generation_stalls_above_a_batch_size() {
+#[ignore = "about a minute; run explicitly with --ignored"]
+async fn dealt_gf_random_share_generation_completes_at_every_committee_size() {
     use crate::utils::test_utils::{receive, test_setup};
 
     for (n, t) in [(4usize, 1usize), (7, 2), (10, 3), (13, 4)] {
@@ -1704,15 +1614,9 @@ async fn dealt_gf_random_share_generation_stalls_above_a_batch_size() {
         println!(
             "MEASURE cfg=dealt_ransha_liveness n={n} t={t} largest_completing_request={largest_ok}"
         );
-        if n == 4 {
-            // `n = 4` is the configuration `gf_node_mul_test` covers, and it is the one half of
-            // this that is not in dispute. Every larger `n` is left as an observation rather than
-            // an assertion, so that a fix makes this test print something different instead of
-            // making it fail.
-            assert!(
-                largest_ok >= 64,
-                "dealt GfRanSha must still work at n = 4, which is what gf_node_mul_test covers"
-            );
-        }
+        assert!(
+            largest_ok >= 64,
+            "dealt GfRanSha stalled at n = {n}, t = {t}: largest completing request {largest_ok}"
+        );
     }
 }
