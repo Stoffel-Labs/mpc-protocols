@@ -59,7 +59,7 @@ use crate::{
         fpdiv::fpdiv_const::{FPDivConstError, FPDivConstNode},
         fpmul::{
             fpmul::{FPError, FPMulNode},
-            prandint::PRandIntNode,
+            prandint::{log2_tsets_ceil, PRandIntNode},
             rand_bit::RandBit,
             PRandIntError, PRandIntMessage, RandBitError, TruncPrError, TruncPrMessage,
         },
@@ -430,6 +430,29 @@ where
                     value_bits,
                 },
             ));
+        }
+        Ok(())
+    }
+
+    /// PreMod2m opens `v = 2^{k-1} + a + 2^m*r'' + r'` and takes the low m bits
+    /// of the reconstruction — correct only if `v < q` over the integers. `r''`
+    /// is a shared-pool PRandInt draw: nominally `mask_bits()` wide, but as a
+    /// sum over the C(n,t) unqualified sets (times n per-set contributions on
+    /// the RISS path) its true magnitude carries the same margins
+    /// `generate_riss` enforces at generation time — and the `2^m` shift here
+    /// is the one consumer those generation-side checks cannot see. Rejects
+    /// parameters where the shifted reveal could wrap the modulus and silently
+    /// return wrong `a mod 2^i` outputs.
+    fn check_premod2m_headroom(&self, m: usize) -> Result<(), HoneyBadgerError> {
+        const B_MARGIN: usize = 2; // the 2^{k-1} + a + r' terms, plus slack
+        let n_margin = (self.params.n_parties as f64).log2().ceil() as usize;
+        let tset_margin = log2_tsets_ceil(self.params.n_parties, self.params.threshold);
+        let required_bits = m + self.params.mask_bits() + B_MARGIN + n_margin + tset_margin;
+        if required_bits as u32 >= F::MODULUS_BIT_SIZE {
+            return Err(HoneyBadgerError::FPError(FPError::RevealExceedsField {
+                required_bits,
+                modulus_bits: F::MODULUS_BIT_SIZE as usize,
+            }));
         }
         Ok(())
     }
@@ -1962,6 +1985,14 @@ where
         let k = x.precision().k();
         let f = x.precision().f();
 
+        // AppRec's SufOr runs Mod2 with k_Mod2 = k (the widest Mod2 on the
+        // FpDiv path; BitDec's chain only reaches k-1), so the PRandInt pool
+        // mask must cover k_Mod2 - 1 = k-1 bits plus κ — see `ltz_on_share`.
+        self.check_mask_security(k - 1)?;
+        // BitDec runs PreMod2m(k, m = k-1), whose reveal shifts the pool mask
+        // left by m bits and must still fit under the modulus.
+        self.check_premod2m_headroom(k - 1)?;
+
         // Top up if the pool is short. Sizing lives in `PreprocDemand` and is
         // applied by `run_preprocessing` from the declared workload
         // (`add_fpdiv_ops`); FpDiv needs two PreMulC bundles at pk = k-1.
@@ -2561,9 +2592,16 @@ where
                 "k must be >= 3 (got {k}); PreMod2m requires m = k-1 >= 2"
             ))));
         }
+        // PreBitLT runs Mod2 with k_Mod2 = k-1, whose reveal hides everything
+        // but the parity bit behind a PRandInt draw: the pool mask must cover
+        // k_Mod2 - 1 = k-2 bits plus κ (equivalently k_Mod2 <= 2k'-f'+1 for the
+        // pool precision (k', f')). Checked here because Mod2Node itself never
+        // sees the pool parameters — same placement as TruncPr's mask check.
+        self.check_mask_security(k - 2)?;
         // LTZ runs PreMod2m(a, k, m = k-1); its inner PreBitLT operates on m
         // bits and needs one PreMulC bundle sized at exactly pk = m.
         let m = k - 1;
+        self.check_premod2m_headroom(m)?;
         let pk = m;
 
         // Top up if the pool is short, mirroring `mul`. The sizing itself lives
@@ -3192,6 +3230,23 @@ where
         Ok(())
     }
 
+    /// Retires every PreMulC offline store in `sessions`, warning (not
+    /// failing) on the ones already gone. Used on the error paths of
+    /// `ensure_premulc_shares_at` so a mid-batch failure doesn't leave the
+    /// other sessions' pending outputs alive until TTL eviction.
+    async fn clear_premulc_sessions(&self, sessions: &[SessionId]) {
+        for premulc_session in sessions {
+            if let Err(e) = self
+                .preprocess
+                .premulc_offline
+                .clear_store(*premulc_session)
+                .await
+            {
+                warn!("PreMulC preprocessing: failed to clear store for session {premulc_session:?}: {e:?}");
+            }
+        }
+    }
+
     /// Tops the pool up to `target` PreMulC bundles sized at exactly `pk`.
     async fn ensure_premulc_shares_at<N>(
         &mut self,
@@ -3260,20 +3315,17 @@ where
                     self.params.timeout,
                 )
                 .await;
-            if gen_result.is_err() {
-                if let Err(e) = self
-                    .preprocess
-                    .premulc_offline
-                    .clear_store(premulc_session)
-                    .await
-                {
-                    warn!("PreMulC preprocessing: failed to clear store for session {premulc_session:?}: {e:?}");
-                }
-            }
-            gen_result?;
             premulc_sessions.push(premulc_session);
+            if let Err(e) = gen_result {
+                // Clear every session started so far, not just the failing
+                // one — the earlier outputs are pending collection below and
+                // would otherwise sit in the store until TTL eviction.
+                self.clear_premulc_sessions(&premulc_sessions).await;
+                return Err(e.into());
+            }
         }
-        for premulc_session in premulc_sessions {
+        let mut pending = premulc_sessions.into_iter();
+        while let Some(premulc_session) = pending.next() {
             let result = self
                 .preprocess
                 .premulc_offline
@@ -3287,12 +3339,27 @@ where
             {
                 warn!("PreMulC preprocessing: failed to clear store for session {premulc_session:?}: {e:?}");
             }
-            let (w, z, r_out) = result?;
-            let triples = self
+            // Same rule as the generation loop: a failure here must clear the
+            // sessions not yet drained before propagating.
+            let (w, z, r_out) = match result {
+                Ok(out) => out,
+                Err(e) => {
+                    self.clear_premulc_sessions(pending.as_slice()).await;
+                    return Err(e.into());
+                }
+            };
+            let triples = match self
                 .preprocessing_material
                 .lock()
                 .await
-                .take_beaver_triples(pk)?;
+                .take_beaver_triples(pk)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    self.clear_premulc_sessions(pending.as_slice()).await;
+                    return Err(e);
+                }
+            };
             self.preprocessing_material
                 .lock()
                 .await

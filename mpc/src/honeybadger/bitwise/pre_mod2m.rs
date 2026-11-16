@@ -9,8 +9,10 @@
 //! # Algorithm
 //!
 //! 1. PRandM preprocessing gives `[r'']`, `[r']`, `{[r'_j]}_{j=0}^{m-1}`.
-//! 2. Each party broadcasts its share of `v = 2^{k-1} + [a] + 2^m * [r''] + [r']`
-//!    via RBC.  After n-t shares arrive all parties reconstruct `c` (public).
+//! 2. Each party sends its share of `v = 2^{k-1} + [a] + 2^m * [r''] + [r']`
+//!    to every peer point-to-point (plain `PreMod2mMessage`, no RBC).
+//!    Reconstruction of `c` (public) is first attempted at 2t+1 received
+//!    shares and retried as more arrive.
 //! 3. For each i ∈ [1,m]:
 //!    * `c_i = c mod 2^i`                             (public, lower i bits of c)
 //!    * `[s_i] = Σ_{j=0}^{i-1} 2^j [r'_j]`          (prefix sum of random bits)
@@ -132,7 +134,7 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
         self.handle_reveal_share(parent, sender, share_val).await
     }
 
-    /// Records one party's share of v and, once n-t shares are in, calls
+    /// Records one party's share of v and, once 2t+1 shares are in, calls
     /// `try_finalize` to complete Phase 1-2.
     async fn handle_reveal_share(
         &mut self,
@@ -166,9 +168,9 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
     /// bit/prefix extraction) and gathers Phase 3's inputs, sending them
     /// through the store's oneshot. Entirely local — never touches the
     /// network, so it's safe to call inline from a shared dispatch loop.
-    /// Called both from `init` (in case n-t shares already arrived before
-    /// `init` completed) and from `drain_rbc_output` once a fresh share
-    /// pushes the count over threshold.
+    /// Called both from `init` (in case 2t+1 shares already arrived before
+    /// `init` completed) and from `process` once a fresh share pushes the
+    /// count over threshold.
     async fn try_finalize(
         &mut self,
         parent: SessionId,
@@ -286,8 +288,9 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
     }
 
     /// Runs Protocol 9 (PreMod2m) to completion: broadcasts this party's
-    /// share of v via RBC, awaits the reveal (driven concurrently by the
-    /// outer message loop's `drain_rbc_output`), then drives Phase 3 (nested
+    /// share of v point-to-point, awaits the reveal (driven concurrently by
+    /// the outer message loop routing PreMod2m messages to `process`), then
+    /// drives Phase 3 (nested
     /// PreBitLT) and Phase 4 (local assembly) itself before returning
     /// `[[a mod 2], [a mod 4], ..., [a mod 2^m]]`. Must be called from a
     /// dedicated driver task, never from the shared dispatch loop — it
@@ -301,6 +304,12 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
     /// * `a`         – secret share of the value; must lie in [0, 2^k).
     /// * `k`         – declared bit length of a (k ≥ 2).
     /// * `m`         – number of prefix reductions (2 ≤ m < k, per the paper).
+    ///                 The reveal's statistical margin is `mask_bits + m − k`,
+    ///                 so the caller must ensure the PRandInt pool satisfies
+    ///                 `mask_bits >= (k − m) + κ`. The node entry points use
+    ///                 m = k−1, where this holds for any precision; a new
+    ///                 caller with small m must check it (this node never
+    ///                 sees the pool parameters).
     /// * `prep`      – all preprocessing.
     /// * `session`   – caller session; `instance_id()` is inherited.
     /// * `network`   – network handle shared with the message loop.
@@ -347,8 +356,8 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
             + prep.prandm.r_prime.clone())?;
 
         // Pre-create the store and stash everything try_finalize needs after
-        // the reveal — set before starting the RBC broadcast so a
-        // fast-arriving share can never race ahead of this being in place.
+        // the reveal — set before broadcasting so a fast-arriving share can
+        // never race ahead of this being in place.
         {
             let store = self
                 .get_or_create_store(session, self.id)
@@ -377,7 +386,7 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
         let bytes_wrapped = wire_format::serialize(&wrapped)?;
         network.broadcast(&bytes_wrapped).await?;
 
-        // If n-t shares already arrived during init, finalize immediately.
+        // If 2t+1 shares already arrived during init, finalize immediately.
         {
             let store = self
                 .store
@@ -397,7 +406,7 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
 
         // Await Phase 1-2's local-only result (resolved either by the
         // early-arrival check above, or concurrently by the outer message
-        // loop's drain_rbc_output → try_finalize).
+        // loop's process → try_finalize).
         let (c_bits, r_prime_bits, pre_bitlt_prep, c_prefix_vals, s_vals) = {
             let rx = {
                 let store = self

@@ -7,19 +7,23 @@
 //!   2. c0 ← c mod 2  (public parity)
 //!   3. [a0] ← c0 + [r0'] - 2*c0*[r0']  = XOR(c0, [r0'])  (local)
 //!
-//! Each party broadcasts its share of c via one RBC instance.
-//! RBC session IDs: calling_protocol = outer, sub_id = party_id, round_id = 0.
-//! Reconstruction fires when n-t shares have been delivered.
+//! Each party sends its share of c to every peer as a plain point-to-point
+//! `Mod2Message` broadcast — no RBC; robust interpolation already tolerates
+//! t wrong shares, so echo/ready amplification buys nothing here.
+//! Wire session IDs: calling_protocol = outer, sub_id = party_id,
+//! round_id = 0 (single-value) or 1 (batch).
+//! Reconstruction is first attempted at 2t+1 received shares and retried as
+//! more arrive (see `try_finalize` on why a bad share defers decoding).
 //!
 //! Session routing (add to HoneyBadgerMPCNode.process):
-//!   Rbc (round_id=1): → mod2_node.rbc.process + mod2_node.drain_rbc_output
+//!   WrappedMessage::Mod2 → owning sub-protocol's mod2_node.process
 //!
 //! # Batched variant
 //!
 //! `init_batch`/`wait_for_batch_result` reveal m independent values in a
-//! single RBC broadcast per party (round_id = 1) instead of m separate
+//! single broadcast per party (round_id = 1) instead of m separate
 //! sessions sharing one exec_id — the latter doesn't work because
-//! `drain_rbc_output` reconstructs the single-value store key as
+//! `process` reconstructs the single-value store key as
 //! `(exec_id, sub_id=0, round_id=0)` unconditionally, so m single-value calls
 //! under one exec_id would all collide on that same key. Batching sidesteps
 //! this: there is exactly one store per batched session, keyed the same way
@@ -29,6 +33,7 @@ use crate::common::wire_format;
 use crate::{
     common::{
         session_store::{Admission, SessionStore},
+        utils::deser_bounded_vec,
         ProtocolSessionId, SecretSharingScheme,
     },
     honeybadger::{
@@ -38,7 +43,7 @@ use crate::{
     },
 };
 use ark_ff::{BigInteger, PrimeField};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::CanonicalSerialize;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use stoffelnet::network_utils::Network;
 use tokio::{
@@ -49,12 +54,20 @@ use tracing::warn;
 
 const MAX_MOD2_SESSIONS: usize = 1024;
 
+/// Per-session state for one single-value Mod2 reveal.
 #[derive(Debug)]
 pub struct Mod2Store<F: PrimeField> {
+    /// Waiting until finalized; Finished once the output has been sent.
     pub state: PhaseState,
+    /// This party's [r0'] from the PRandM bundle, needed to compute the
+    /// output XOR after c is reconstructed. None until `init` stores it —
+    /// shares can arrive first (see `process`).
     pub r_prime: Option<RobustShare<F>>,
-    pub received_shares: HashMap<usize, F>, // party_id → share value
+    /// Received c-shares, party_id → share value; first message per sender wins.
+    pub received_shares: HashMap<usize, F>,
+    /// One-shot carrying the result [a0] from `try_finalize` to `wait_for_result`.
     pub output_sender: Option<tokio::sync::oneshot::Sender<RobustShare<F>>>,
+    /// Taken (once) by `wait_for_result`.
     pub output_receiver: Option<tokio::sync::oneshot::Receiver<RobustShare<F>>>,
 }
 
@@ -71,12 +84,21 @@ impl<F: PrimeField> Mod2Store<F> {
     }
 }
 
+/// Per-session state for one batched Mod2 reveal of m values (see the
+/// "Batched variant" module docs).
 #[derive(Debug)]
 pub struct Mod2BatchStore<F: PrimeField> {
+    /// Waiting until finalized; Finished once the output has been sent.
     pub state: PhaseState,
+    /// This party's m [r0'_i] values, in input order; their length is also
+    /// the expected per-sender share count. None until `init_batch` stores it.
     pub r_primes: Option<Vec<RobustShare<F>>>,
-    pub received_shares: HashMap<usize, Vec<F>>, // party_id → its m c-shares
+    /// Received c-shares, party_id → its m c-shares; first message per sender wins.
+    pub received_shares: HashMap<usize, Vec<F>>,
+    /// One-shot carrying the m results from `try_finalize_batch` to
+    /// `wait_for_batch_result`.
     pub output_sender: Option<tokio::sync::oneshot::Sender<Vec<RobustShare<F>>>>,
+    /// Taken (once) by `wait_for_batch_result`.
     pub output_receiver: Option<tokio::sync::oneshot::Receiver<Vec<RobustShare<F>>>>,
 }
 
@@ -93,12 +115,19 @@ impl<F: PrimeField> Mod2BatchStore<F> {
     }
 }
 
+/// One party's Mod2 engine: runs the reveal/finalize state machine for any
+/// number of concurrent sessions, single-value and batched.
 #[derive(Clone, Debug)]
 pub struct Mod2Node<F: PrimeField> {
+    /// This party's index in [0, n).
     pub id: usize,
+    /// Total number of parties.
     pub n: usize,
+    /// Corruption threshold (n >= 3t + 1).
     pub t: usize,
+    /// Single-value sessions (wire round_id = 0), admission-capped per peer.
     store: Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<Mod2Store<F>>>)>>>,
+    /// Batched sessions (wire round_id = 1), admission-capped per peer.
     batch_store:
         Arc<Mutex<SessionStore<SessionId, (usize, Instant, Arc<Mutex<Mod2BatchStore<F>>>)>>>,
 }
@@ -168,6 +197,9 @@ impl<F: PrimeField> Mod2Node<F> {
         }
     }
 
+    /// Blocks until `session`'s result [a mod 2] is ready or `duration`
+    /// elapses. Call after `init`; single-consumer — a second call on the
+    /// same session returns `ResultAlreadyReceived`.
     pub async fn wait_for_result(
         &self,
         session: SessionId,
@@ -195,7 +227,14 @@ impl<F: PrimeField> Mod2Node<F> {
     /// Protocol 3.4 Mod2.
     ///
     /// Each party broadcasts its share of c = 2^{k-1} + [a] + 2*[r''] + [r0'].
-    /// Drive `drain_rbc_output` until `wait_for_result` resolves.
+    /// Keep routing incoming Mod2 messages to `process` until
+    /// `wait_for_result` resolves.
+    ///
+    /// Requires `k >= 2`. The caller must also ensure the PRandInt draw behind
+    /// `prep.r_double_prime` is wide enough for this `k` — see
+    /// `check_mask_security` on the node, which enforces
+    /// `k <= max_masked_width + 1` there (this node never sees the pool
+    /// parameters).
     pub async fn init<N: Network + Send + Sync>(
         &mut self,
         a: RobustShare<F>,
@@ -204,6 +243,11 @@ impl<F: PrimeField> Mod2Node<F> {
         session: SessionId,
         network: Arc<N>,
     ) -> Result<(), Mod2Error> {
+        // k = 0 underflows the exponent below; k = 1 makes the offset 2^0 = 1
+        // odd, which flips the parity of c and inverts the result.
+        if k < 2 {
+            return Err(Mod2Error::InvalidK(k));
+        }
         let two = F::one() + F::one();
         let two_pow_k_minus_1 = two.pow([(k as u64) - 1]);
 
@@ -242,7 +286,7 @@ impl<F: PrimeField> Mod2Node<F> {
         let wrapped = WrappedMessage::Mod2(mod2_msg);
         let bytes_wrapped = wire_format::serialize(&wrapped)?;
         network.broadcast(&bytes_wrapped).await?;
-        // If n-t shares already arrived before r_prime was stored, finalize now.
+        // If 2t+1 shares already arrived before r_prime was stored, finalize now.
         {
             let store = self
                 .get_or_create_store(session, self.id)
@@ -260,11 +304,11 @@ impl<F: PrimeField> Mod2Node<F> {
     }
 
     /// Batched Mod2: reveals m independent values (each `2^{k-1} + [a_i] +
-    /// 2*[r''_i] + [r0'_i]`) in a single RBC broadcast per party, avoiding the
+    /// 2*[r''_i] + [r0'_i]`) in a single broadcast per party, avoiding the
     /// session collisions that m separate `init` calls sharing one exec_id
     /// would hit (see module docs). `a_vec` and `preps` must have equal,
-    /// non-zero length. Drive `drain_rbc_output` until `wait_for_batch_result`
-    /// resolves.
+    /// non-zero length, and `k >= 2` as in `init`. Keep routing incoming Mod2
+    /// messages to `process` until `wait_for_batch_result` resolves.
     pub async fn init_batch<N: Network + Send + Sync>(
         &mut self,
         a_vec: Vec<RobustShare<F>>,
@@ -275,6 +319,10 @@ impl<F: PrimeField> Mod2Node<F> {
     ) -> Result<(), Mod2Error> {
         if a_vec.is_empty() || a_vec.len() != preps.len() {
             return Err(Mod2Error::SessionIdError(session));
+        }
+        // Same bound as `init`: 2^{k-1} must be even to leave c's parity intact.
+        if k < 2 {
+            return Err(Mod2Error::InvalidK(k));
         }
 
         let two = F::one() + F::one();
@@ -319,7 +367,7 @@ impl<F: PrimeField> Mod2Node<F> {
         let wrapped = WrappedMessage::Mod2(mod2_msg);
         let bytes_wrapped = wire_format::serialize(&wrapped)?;
         network.broadcast(&bytes_wrapped).await?;
-        // If n-t shares already arrived before r_primes was stored, finalize now.
+        // If 2t+1 shares already arrived before r_primes was stored, finalize now.
         {
             let store = self
                 .get_or_create_batch_store(session, self.id)
@@ -336,9 +384,9 @@ impl<F: PrimeField> Mod2Node<F> {
         Ok(())
     }
 
-    /// Handles a directly-opened share of `c`, accumulates it, and finalises
-    /// once n-t shares have arrived (enough for robust reconstruction despite
-    /// t faults). `msg.sender` must already be authenticated by the caller
+    /// Handles a directly-opened share of `c`, accumulates it, and attempts to
+    /// finalise once 2t+1 shares have arrived (retrying on later shares if
+    /// decoding fails). `msg.sender` must already be authenticated by the caller
     /// (network-layer sender == `msg.sender`) before this is invoked.
     pub async fn process(&self, msg: Mod2Message) -> Result<(), Mod2Error> {
         let id = msg.session_id;
@@ -352,8 +400,9 @@ impl<F: PrimeField> Mod2Node<F> {
         );
 
         if id.round_id() == 1 {
-            let share_vals: Vec<F> =
-                CanonicalDeserialize::deserialize_compressed(payload.as_slice())?;
+            // Bounded by payload.len(): an adversarial length header can't
+            // reserve more memory than the bytes actually sent.
+            let share_vals: Vec<F> = deser_bounded_vec(&mut payload.as_slice(), payload.len())?;
             // Attributed to `sender`: whichever party's message happens to
             // create this entry (same heuristic as Bracha/Avid), so no
             // single sender can flood past its own per-peer share.
@@ -487,7 +536,7 @@ impl<F: PrimeField> Mod2Node<F> {
 
         let m = r_primes.len();
         // Shares may have been stored before r_primes was known locally (see
-        // drain_rbc_output), so re-validate lengths here before indexing into them —
+        // `process`), so re-validate lengths here before indexing into them —
         // a malformed length must never reach `vals[j]` below.
         let shares: HashMap<usize, Vec<F>> = shares
             .into_iter()
@@ -548,6 +597,9 @@ impl<F: PrimeField> Mod2Node<F> {
         Ok(())
     }
 
+    /// Batch counterpart of `wait_for_result`: blocks until all m results of
+    /// `session` are ready (in input order) or `duration` elapses. Call after
+    /// `init_batch`; single-consumer like `wait_for_result`.
     pub async fn wait_for_batch_result(
         &self,
         session: SessionId,

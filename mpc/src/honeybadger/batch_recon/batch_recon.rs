@@ -422,7 +422,25 @@ impl<F: FftField> BatchReconNode<F> {
                             .filter(|(_, v)| v.len() == width)
                             .cloned()
                             .collect();
-                        let decoded = batch_recover_secret(&agreeing, self.n, self.degree, self.t)?;
+                        let decoded =
+                            match batch_recover_secret(&agreeing, self.n, self.degree, self.t) {
+                                Ok(d) => d,
+                                // OEC needs degree+t+2 shares before it can correct even one
+                                // error, so a bad eval makes this fail routinely at the
+                                // quorum. Wait for more entries (same as the Eval arm).
+                                Err(InterpolateError::DecodingError(_))
+                                    if store.batch_evals_received.len() < self.n =>
+                                {
+                                    return Ok(());
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        self_id = self.id,
+                                        "Batched interpolation of y_j failed: {:?}", e
+                                    );
+                                    return Err(BatchReconError::InterpolateError(e));
+                                }
+                            };
                         // The opened value per chunk is the constant term P(0).
                         let y_j_values: Vec<F> = decoded
                             .into_iter()
@@ -502,7 +520,24 @@ impl<F: FftField> BatchReconNode<F> {
                             .filter(|(_, v)| v.len() == width)
                             .cloned()
                             .collect();
-                        let decoded = batch_recover_secret(&agreeing, self.n, self.degree, self.t)?;
+                        let decoded =
+                            match batch_recover_secret(&agreeing, self.n, self.degree, self.t) {
+                                Ok(d) => d,
+                                // Same as the EvalBatch arm: a bad reveal at the bare quorum
+                                // is pending, not fatal. Wait for more entries.
+                                Err(InterpolateError::DecodingError(_))
+                                    if store.batch_reveals_received.len() < self.n =>
+                                {
+                                    return Ok(());
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        self_id = self.id,
+                                        "Batched reveal interpolation failed: {:?}", e
+                                    );
+                                    return Err(BatchReconError::InterpolateError(e));
+                                }
+                            };
                         let mut result = Vec::with_capacity(decoded.len() * (self.degree + 1));
                         for coeffs in decoded {
                             // `batch_recover_secret` normalizes every chunk to `degree + 1`,

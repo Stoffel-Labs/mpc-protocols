@@ -111,7 +111,11 @@ pub struct PRandMPrep<F: FftField> {
 }
 impl<F: FftField> PRandMPrep<F> {
     /// Protocol 2.2 step 3: computes [r'] = Σ_{i=0}^{m-1} 2^i * [b_i].
-    /// `r_double_prime` is the PRandInt(k + κ − m) output.
+    /// In the paper `r_double_prime` is a dedicated PRandInt(k + κ − m) draw;
+    /// here it comes from the shared PRandInt pool, whose width
+    /// `mask_bits = 2k_p − f + κ` is fixed by the node's precision (k_p, f)
+    /// and depends on neither k nor m. Callers must ensure the pool width
+    /// covers their reveal: `mask_bits >= (k − m) + κ`.
     /// `r_prime_bits` must be non-empty (m >= 1), LSB first.
     pub fn from_prand_outputs(
         r_double_prime: RobustShare<F>,
@@ -178,6 +182,8 @@ pub enum PreMulCError {
 
 #[derive(Debug, Error)]
 pub enum Mod2Error {
+    #[error("k must be >= 2 (got {0}): the reveal offset 2^(k-1) is odd for k = 1, flipping the parity of c")]
+    InvalidK(usize),
     #[error("rbc error: {0}")]
     RbcError(#[from] RbcError),
     #[error("there was an error in the network: {0:?}")]

@@ -960,7 +960,7 @@ fn commit_contribution(
 /// very inputs the check exists for. The combinatorics make those party counts unreachable long
 /// before the arithmetic matters — every RISS and PRSS structure here is `C(n, t)`-sized — but the
 /// bound guarding correctness does not get to be the part that overflows.
-fn log2_tsets_ceil(n: usize, t: usize) -> usize {
+pub(crate) fn log2_tsets_ceil(n: usize, t: usize) -> usize {
     let t = t.min(n);
     (1..=t)
         .map(|i| (((n - t + i) as f64) / (i as f64)).log2())
