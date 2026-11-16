@@ -45,8 +45,23 @@
 //!
 //! Preprocessing dominates the total: each conversion spends one edaBit (`w` daBits and one run
 //! of the `r < p` filter, which rejects about 9% of candidates on BLS12-381 and 24% on BN254)
-//! and the triples above, all made by the dealt, information-theoretic protocols. Wire bytes are
-//! measured by `tests/conv_cost_measurement.rs`.
+//! and the triples above, all made by the dealt, information-theoretic protocols.
+//!
+//! Measured by `tests/conv_cost_measurement.rs` for one conversion on the BLS12-381 scalar
+//! field: bytes each party puts on the wire (a broadcast counted once per other party), and
+//! online message rounds under a fixed one-way latency.
+//!
+//! | `n`, `t` | edaBit | GF(2^8) triples | online | online rounds |
+//! |---|---|---|---|---|
+//! | 4, 1 | 339,281 | 1,207,151 | 23,449 | 11 |
+//! | 7, 2 | 2,386,204 | 1,967,655 | 43,656 | 18 |
+//! | 10, 3 | 15,138,478 | 2,693,003 | 52,326 | 20 |
+//! | 13, 4 | 98,454,773 | 3,406,269 | 59,550 | 20 |
+//!
+//! The edaBit column grows with `C(n,t)`: a daBit folds one dealt bit per `t`-set, so it spends
+//! 3 / 20 / 119 / 714 double sharings at these sizes. The online figures are lower bounds, about
+//! 5-10% short, because the harness reads its counters as soon as one party has its output; the
+//! round count depends on the opened mask and is at most `A2BNode::message_rounds`.
 //!
 //!
 //! Every opening here is degree-`t`, where this repo's robust reconstruction genuinely corrects

@@ -33,7 +33,18 @@
 //!   online bytes/party = 2n * (48 + ceil(ell/(t+1)))
 //! ```
 //!
-//! The daBits it spends dominate the total; `tests/conv_cost_measurement.rs` measures both. See
+//! The daBits it spends dominate the total. `tests/conv_cost_measurement.rs` measures both; for
+//! one 254-bit conversion on the BLS12-381 scalar field, per party:
+//!
+//! | `n`, `t` | 254 daBits, wire bytes | online bytes (formula above) | online rounds |
+//! |---|---|---|---|
+//! | 4, 1 | 286,941 | 1,400 | 2 |
+//! | 7, 2 | 2,305,489 | 1,862 | 2 |
+//! | 10, 3 | 14,986,145 | 2,240 | 2 |
+//! | 13, 4 | 97,975,038 | 2,574 | 2 |
+//!
+//! The measured online bytes equal the formula exactly. The daBit column counts a broadcast once
+//! per other party and grows with `C(n,t)`, the number of dealt bits folded into each daBit. See
 //! [`crate::honeybadger::dn07`] for the units rule this crate follows everywhere.
 //!
 //! A one-round B2A does exist: open every `c_i` directly all-to-all instead — the same trade

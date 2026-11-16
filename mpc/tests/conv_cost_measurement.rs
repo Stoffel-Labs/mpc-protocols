@@ -55,17 +55,16 @@
 //! # A2B's online figure is a LOWER BOUND, and two mechanisms move it
 //!
 //! * **Data dependence.** A2B's circuit plan depends on the mask it opens, which is fresh
-//!   preprocessing each time, so the realised AND count moves inside the `[642, 695]` band the
-//!   cost model brackets. Take the median of repeats.
+//!   preprocessing each time, so the realised AND count moves below the bound
+//!   `A2BNode::gf_triples_per_conversion` (3798 on BLS12-381, about 3590 on average). Take the
+//!   median of repeats.
 //! * **Snapshot truncation, which is the larger of the two.** `run_a2b` returns as soon as the
 //!   *local* node holds its output shares, and the tally is read immediately after. A party whose
 //!   last broadcast has not yet issued is booked short, so the transcript is truncated rather
-//!   than mismodelled. It shows up as a non-structural message count: the online `GfMult` row
-//!   reads 25 / 46 / 66 / 88 messages at `n = 4/7/10/13` where the structural figure — 7 layers,
-//!   one all-to-all wave each — is 28 / 49 / 70 / 91, i.e. 3-11% short, and bytes track messages
-//!   almost linearly. `conv_cost_model::and_layer_cost` awaits *every* party before reading its
-//!   ledger and reproduces the model at 0.000000% on all 168 configurations; that is the control
-//!   showing the mechanism is the snapshot point and not a missing term.
+//!   than mismodelled, and it shows up as a message count a little below one all-to-all wave per
+//!   layer. `conv_cost_model::and_layer_cost` awaits *every* party before reading its ledger and
+//!   reproduces the model exactly; that is the control showing the mechanism is the snapshot
+//!   point and not a missing term.
 //!
 //! So the A2B totals printed here understate by roughly 5-10%. Quote them as lower bounds, or
 //! quote the model in `conv_cost_model.rs` applied to the measured layer widths.
