@@ -37,5 +37,16 @@ pub fn deserialize_limited<'a, T>(bytes: &'a [u8], limit: u64) -> Result<T, Box<
 where
     T: Deserialize<'a>,
 {
+    // bincode 1.3.3's `with_limit` only counts bytes it actually reads, and
+    // `allow_trailing_bytes()` (set in `options`) lets it stop early — so a
+    // small valid wrapper padded with megabytes of trailing garbage slips
+    // past the limit, and an oversized length prefix can drive an allocation
+    // before the counter trips. Reject anything larger than `limit` up front;
+    // the encoded form can never be smaller than the buffer it came in. This
+    // is the last line of defence only: the raw frame is already allocated by
+    // the transport, which must cap frame size too.
+    if bytes.len() as u64 > limit {
+        return Err(Box::new(bincode::ErrorKind::SizeLimit));
+    }
     options().with_limit(limit).deserialize(bytes)
 }
