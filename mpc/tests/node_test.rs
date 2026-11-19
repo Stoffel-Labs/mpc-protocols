@@ -1816,6 +1816,71 @@ async fn fpdiv_const_rejects_undersized_prandint_mask() {
     );
 }
 
+/// `div_fixed`'s FXDiv step 3 runs `TruncPr(a·w, 2k, f)` — the same truncation as
+/// `mul_fixed`/`div_with_const_fixed`, masking `2k - f`. The Div reveal check must
+/// size for that, not the narrower `k - 1` it used before: at the node precision
+/// those agree, but when the operands' precision is wider than the pool, `2k - f`
+/// exceeds `k - 1` and the old check let an undersized mask through. Mirrors
+/// `fpdiv_const_rejects_undersized_prandint_mask`: the node is sized one bit shy of
+/// `2k - f`, so the check must report exactly `MIN_STATISTICAL_SECURITY - 1`.
+#[tokio::test]
+async fn fpdiv_rejects_undersized_step3_mask() {
+    setup_tracing();
+    let n_parties = 4;
+    let t = 1;
+    let mut rng = test_rng();
+
+    let (network, _receivers, _, _) = test_setup(n_parties, vec![]);
+
+    let k = 16;
+    let m = 4;
+    let precision = FixedPointPrecision::new(k, m);
+    let value_bits = 2 * k - m; // step 3's TruncPr masks 2k - f
+
+    // One fractional bit too wide for the pool: 2k - (m+1) is one bit shy of the
+    // 2k - m the step-3 reveal needs. The old k-1 check (= 15 here) would have
+    // delivered MIN + 12 and passed; the corrected 2k - f check catches it.
+    let too_narrow = FixedPointPrecision::new(k, m + 1);
+    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
+        n_parties,
+        t,
+        0,
+        0,
+        223,
+        0,
+        0,
+        too_narrow,
+        MIN_STATISTICAL_SECURITY,
+        Duration::from_secs(30),
+        vec![],
+    );
+
+    let x_shares = RobustShare::compute_shares(Fr::from(88), n_parties, t, None, &mut rng).unwrap();
+    let y_shares = RobustShare::compute_shares(Fr::from(32), n_parties, t, None, &mut rng).unwrap();
+    let a = SecretFixedPoint::new_with_precision(x_shares[0].clone(), precision);
+    let b = SecretFixedPoint::new_with_precision(y_shares[0].clone(), precision);
+
+    let mut node = nodes[0].clone();
+    let err = node
+        .div_fixed(a, b, network[0].clone())
+        .await
+        .expect_err("division must refuse to run below the statistical security floor");
+
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("InsufficientStatisticalSecurity"),
+        "expected InsufficientStatisticalSecurity, got {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("delivered: {}", MIN_STATISTICAL_SECURITY - 1)),
+        "error should report the delivered margin, got {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("value_bits: {value_bits}")),
+        "error should report the value width {value_bits}, got {rendered}"
+    );
+}
+
 /// PRSS key setup end to end: one RISS run establishes the keys, after which every party derives
 /// its PRandInt masks locally and they still reconstruct as a valid degree-`t` sharing.
 ///

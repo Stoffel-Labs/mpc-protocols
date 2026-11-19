@@ -504,11 +504,23 @@ where
                 self.check_mask_security((2 * k).saturating_sub(f))?;
                 self.check_reveal_headroom(2 * k, f)?;
             }
-            // SufOr Mod2 masks k-1; AppRec TruncPr masks 2f+2. Widest reveal:
-            // PreMod2m(k, k-1) vs TruncPr(2k, 2(k-f-1)).
+            // FpDiv opens, across its stages, every reveal shape in this family:
+            //   - step 3   TruncPr(a·w, 2k, f)         — masks 2k-f (= mul_fixed's
+            //     shape); a·w can reach ~2^{k-1+2f} (w̄ ≈ 2^{2f}/b̄, up to 2^{2f}).
+            //   - BitDec   PreMod2m(k, k-1)            — offset 2^{k-1}, shift k-1.
+            //   - SufOr    Mod2(k-1)                   — masks k-1.
+            //   - AppRec   TruncPr(2k, 2(k-f-1))       — masks 2f+2.
+            //   - steps 6/7 TruncPr(c·(α+d) | d·d, 2k, 2f) — c·(α+d) < 2^{k+2f};
+            //     d·d reaches 2^{4f} (at b=0, where d stays = α = 2^{2f}), shift 2f.
+            // Statistical margin over the widest masked value (2k-f, = max_masked_width,
+            // which also covers 2f+2/k-1/2f); modulus headroom over the widest
+            // (offset, shift) — the shifted-mask term dominates, so folding onto the
+            // larger offset is exact. See `check_reveal_headroom`.
             FpRevealOp::Div => {
-                self.check_mask_security((k - 1).max(2 * f + 2))?;
-                self.check_reveal_headroom(2 * k, (k - 1).max(2 * (k - f - 1)))?;
+                self.check_mask_security((2 * k).saturating_sub(f).max(2 * f + 2))?;
+                let offset = (2 * k).max(k + 2 * f).max(4 * f);
+                let shift = (k - 1).max(2 * (k - f - 1)).max(2 * f);
+                self.check_reveal_headroom(offset, shift)?;
             }
             // Inner Mod2(k-1) masks k-2; PreMod2m(k, k-1) reveal (offset k).
             FpRevealOp::Ltz => {
