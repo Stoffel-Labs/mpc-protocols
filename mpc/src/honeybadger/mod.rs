@@ -313,6 +313,27 @@ pub struct HoneyBadgerMPCNode<F: PrimeField, R: RBC> {
     pub statistics_counters: std::sync::Arc<statistics::NodeStatisticsCounters>,
 }
 
+/// A fixed-point operation that opens one or more masked reveals.
+///
+/// Every variant maps, in `check_reveals`, to the set of masked openings it
+/// performs — so the reveal-safety bounds live in exactly one place per op
+/// instead of being re-derived at each call site. Adding a new masking op means
+/// adding one arm there; forgetting leaves it unguarded, so this is the single
+/// list to keep complete.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FpRevealOp {
+    /// `mul_fixed` → FpMul: TruncPr(2k, f).
+    Mul,
+    /// `div_with_const_fixed` → FPDivConst: TruncPr(2k, f).
+    DivConst,
+    /// `div_fixed` → FpDiv: SufOr's Mod2, BitDec's PreMod2m, AppRec's TruncPr.
+    Div,
+    /// `ltz_on_share` → LTZ: PreMod2m(k, k-1) and its inner Mod2(k-1).
+    Ltz,
+    /// `eqz_on_share` → EQZ: the `a + 2^k*r'' + r'` opening.
+    Eqz,
+}
+
 impl<F, R> HoneyBadgerMPCNode<F, R>
 where
     F: PrimeField,
@@ -434,25 +455,71 @@ where
         Ok(())
     }
 
-    /// PreMod2m opens `v = 2^{k-1} + a + 2^m*r'' + r'` and takes the low m bits
-    /// of the reconstruction — correct only if `v < q` over the integers. `r''`
-    /// is a shared-pool PRandInt draw: nominally `mask_bits()` wide, but as a
-    /// sum over the C(n,t) unqualified sets (times n per-set contributions on
-    /// the RISS path) its true magnitude carries the same margins
-    /// `generate_riss` enforces at generation time — and the `2^m` shift here
-    /// is the one consumer those generation-side checks cannot see. Rejects
-    /// parameters where the shifted reveal could wrap the modulus and silently
-    /// return wrong `a mod 2^i` outputs.
-    fn check_premod2m_headroom(&self, m: usize) -> Result<(), HoneyBadgerError> {
-        const B_MARGIN: usize = 2; // the 2^{k-1} + a + r' terms, plus slack
+    /// Both PreMod2m and TruncPr open a value of the shape
+    /// `2^{offset_bits-1} + a + 2^m*r'' + r'` and take its low `m` bits — correct
+    /// only if that value stays below the modulus `q` over the integers. `r''` is
+    /// a shared-pool PRandInt draw: nominally `mask_bits()` wide, but as a sum
+    /// over the C(n,t) unqualified sets (times n per-set contributions on the
+    /// RISS path) its true magnitude carries the same margins `generate_riss`
+    /// enforces at generation time — and the `2^m` shift is the one consumer
+    /// those generation-side checks cannot see.
+    ///
+    /// `offset_bits` is the width of the `2^{offset_bits-1} + a` additive term:
+    /// `k` for PreMod2m (`a` is k-bit), `2k` for AppRec's TruncPr (a 2k-bit
+    /// product). The reveal is bounded by `max(offset_bits, m + mask_bits +
+    /// margins) + 2`, covering whichever of the offset or the shifted mask
+    /// dominates, plus carry/`r'` slack. Rejects parameters where the reveal
+    /// could wrap the modulus and silently return wrong low bits.
+    fn check_reveal_headroom(&self, offset_bits: usize, m: usize) -> Result<(), HoneyBadgerError> {
+        const SLACK: usize = 2; // sum carry + the sub-offset `a`/`r'` terms
         let n_margin = (self.params.n_parties as f64).log2().ceil() as usize;
         let tset_margin = log2_tsets_ceil(self.params.n_parties, self.params.threshold);
-        let required_bits = m + self.params.mask_bits() + B_MARGIN + n_margin + tset_margin;
+        let shift_bits = m + self.params.mask_bits() + n_margin + tset_margin;
+        let required_bits = offset_bits.max(shift_bits) + SLACK;
         if required_bits as u32 >= F::MODULUS_BIT_SIZE {
             return Err(HoneyBadgerError::FPError(FPError::RevealExceedsField {
                 required_bits,
                 modulus_bits: F::MODULUS_BIT_SIZE as usize,
             }));
+        }
+        Ok(())
+    }
+
+    /// Validates every masked reveal `op` will open against the shared pool mask:
+    /// each reveal must keep κ bits of statistical margin (`check_mask_security`)
+    /// *and* stay below the modulus (`check_reveal_headroom`). Called by each
+    /// fixed-point entry point with the operands' runtime `(k, f)`, so a value
+    /// carrying wider precision than the pool was sized for is caught at use time.
+    ///
+    /// This is the one place the reveal shapes of all masking ops are recorded.
+    /// `f` is ignored by [`FpRevealOp::Ltz`]/[`FpRevealOp::Eqz`] (integer ops).
+    /// Each pair of checks folds its op's reveals onto the widest masked value
+    /// and the widest `(offset, shift)` — exact, since the shifted-mask term
+    /// dominates the offset (see `check_reveal_headroom`).
+    fn check_reveals(&self, op: FpRevealOp, k: usize, f: usize) -> Result<(), HoneyBadgerError> {
+        match op {
+            // TruncPr(2k, f): masks the 2k-f high bits of a 2k-bit product,
+            // offset 2^{2k-1}, shift 2^f.
+            FpRevealOp::Mul | FpRevealOp::DivConst => {
+                self.check_mask_security((2 * k).saturating_sub(f))?;
+                self.check_reveal_headroom(2 * k, f)?;
+            }
+            // SufOr Mod2 masks k-1; AppRec TruncPr masks 2f+2. Widest reveal:
+            // PreMod2m(k, k-1) vs TruncPr(2k, 2(k-f-1)).
+            FpRevealOp::Div => {
+                self.check_mask_security((k - 1).max(2 * f + 2))?;
+                self.check_reveal_headroom(2 * k, (k - 1).max(2 * (k - f - 1)))?;
+            }
+            // Inner Mod2(k-1) masks k-2; PreMod2m(k, k-1) reveal (offset k).
+            FpRevealOp::Ltz => {
+                self.check_mask_security(k - 2)?;
+                self.check_reveal_headroom(k, k - 1)?;
+            }
+            // Opens a + 2^k*r'' + r': masks all k bits of a, offset k, shift k.
+            FpRevealOp::Eqz => {
+                self.check_mask_security(k)?;
+                self.check_reveal_headroom(k, k)?;
+            }
         }
         Ok(())
     }
@@ -715,12 +782,17 @@ impl HoneyBadgerMPCNodeOpts {
     /// The widest value any supported fixed-point operation masks at this precision.
     ///
     /// `mul_fixed` and `div_with_const_fixed` both truncate a `2k`-bit product by `f` bits, so
-    /// `2k - f` covers both. **A new operation that masks something wider belongs here** —
-    /// otherwise `check_mask_security` rejects it at first use rather than under-masking it
-    /// silently. Sizing one pool for the widest consumer is deliberate: an over-wide mask costs
-    /// only keystream bytes during derivation, while a short one leaks.
+    /// they mask `2k - f`. `div_fixed`'s AppRec step truncates a `2k`-bit product by
+    /// `2(k-f-1)`, masking `2k - 2(k-f-1) = 2f + 2`; for high fractional precision
+    /// (`3f + 2 > 2k`) that is the wider of the two, so the pool has to cover it. **A new
+    /// operation that masks something wider belongs here** — otherwise `check_mask_security`
+    /// rejects it at first use rather than under-masking it silently. Sizing one pool for the
+    /// widest consumer is deliberate: an over-wide mask costs only keystream bytes during
+    /// derivation, while a short one leaks.
     pub fn max_masked_width(precision: FixedPointPrecision) -> usize {
-        (2usize * precision.k()).saturating_sub(precision.f())
+        let mul_trunc = (2usize * precision.k()).saturating_sub(precision.f());
+        let apprec_trunc = 2 * precision.f() + 2;
+        mul_trunc.max(apprec_trunc)
     }
 
     /// Declares `count` planned `ltz_int` calls at bit width `bit_len`
@@ -1853,7 +1925,7 @@ where
         if x.precision() != y.precision() {
             return Err(HoneyBadgerError::FPError(FPError::IncompatiblePrecision));
         }
-        self.check_mask_security(HoneyBadgerMPCNodeOpts::max_masked_width(*x.precision()))?;
+        self.check_reveals(FpRevealOp::Mul, x.precision().k(), x.precision().f())?;
 
         let (no_rand_bit, no_rand_int) = {
             let store = self.preprocessing_material.lock().await;
@@ -1918,8 +1990,8 @@ where
         }
 
         // `fpdiv_const` multiplies the secret by a public f-scaled reciprocal and feeds the
-        // resulting 2k-bit value into TruncPr, so it needs the same mask margin as `mul_fixed`.
-        self.check_mask_security(HoneyBadgerMPCNodeOpts::max_masked_width(*x.precision()))?;
+        // resulting 2k-bit value into TruncPr, so its reveal matches `mul_fixed`'s.
+        self.check_reveals(FpRevealOp::DivConst, x.precision().k(), x.precision().f())?;
 
         // 2. Check preprocessing inventory --------------------------------
         let (no_rand_bit, no_rand_int) = {
@@ -1985,13 +2057,7 @@ where
         let k = x.precision().k();
         let f = x.precision().f();
 
-        // AppRec's SufOr runs Mod2 with k_Mod2 = k (the widest Mod2 on the
-        // FpDiv path; BitDec's chain only reaches k-1), so the PRandInt pool
-        // mask must cover k_Mod2 - 1 = k-1 bits plus κ — see `ltz_on_share`.
-        self.check_mask_security(k - 1)?;
-        // BitDec runs PreMod2m(k, m = k-1), whose reveal shifts the pool mask
-        // left by m bits and must still fit under the modulus.
-        self.check_premod2m_headroom(k - 1)?;
+        self.check_reveals(FpRevealOp::Div, k, f)?;
 
         // Top up if the pool is short. Sizing lives in `PreprocDemand` and is
         // applied by `run_preprocessing` from the declared workload
@@ -2592,16 +2658,12 @@ where
                 "k must be >= 3 (got {k}); PreMod2m requires m = k-1 >= 2"
             ))));
         }
-        // PreBitLT runs Mod2 with k_Mod2 = k-1, whose reveal hides everything
-        // but the parity bit behind a PRandInt draw: the pool mask must cover
-        // k_Mod2 - 1 = k-2 bits plus κ (equivalently k_Mod2 <= 2k'-f'+1 for the
-        // pool precision (k', f')). Checked here because Mod2Node itself never
-        // sees the pool parameters — same placement as TruncPr's mask check.
-        self.check_mask_security(k - 2)?;
+        // Validates LTZ's reveals (inner Mod2 + PreMod2m) against the pool mask;
+        // checked here, not in the sub-nodes, which never see the pool params.
+        self.check_reveals(FpRevealOp::Ltz, k, 0)?;
         // LTZ runs PreMod2m(a, k, m = k-1); its inner PreBitLT operates on m
         // bits and needs one PreMulC bundle sized at exactly pk = m.
         let m = k - 1;
-        self.check_premod2m_headroom(m)?;
         let pk = m;
 
         // Top up if the pool is short, mirroring `mul`. The sizing itself lives
@@ -2656,6 +2718,9 @@ where
         if k == 0 {
             return Err(HoneyBadgerError::EQZError(EQZError::LengthError));
         }
+        // EQZ opens `a + 2^k*r'' + r'`, masking all k bits of a (no 2^{k-1}
+        // offset trick — it consumes every low bit); validate against the pool.
+        self.check_reveals(FpRevealOp::Eqz, k, 0)?;
         let m = (k as u32).ilog2() as usize + 1;
 
         // Top up if short — see the note in `ltz_on_share`. EQZ needs no PreMulC
