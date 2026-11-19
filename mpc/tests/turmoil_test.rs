@@ -17,6 +17,7 @@ use ark_std::{
 };
 use chacha20poly1305::aead::OsRng;
 use std::sync::Arc;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::{
     common::{
         rbc::rbc::Avid,
@@ -392,7 +393,7 @@ fn test_input_protocol_e2e_turmoil() {
                         let SenderId::Node(sender) = sender else {
                             continue;
                         };
-                        let wrapped: WrappedMessage = match bincode::deserialize(&msg) {
+                        let wrapped: WrappedMessage = match wire_format::deserialize(&msg) {
                             Ok(w) => w,
                             Err(_) => continue,
                         };
@@ -587,7 +588,7 @@ fn preprocessing_e2e_turmoil(
     let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
     let barrier = Arc::new(tokio::sync::Barrier::new(n_parties));
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
         no_of_triples,
@@ -600,6 +601,11 @@ fn preprocessing_e2e_turmoil(
         Duration::from_secs(30),
         vec![],
     );
+    for node in nodes.iter_mut() {
+        // RandBit's MulPub pipeline consumes one zero-sharing per bit; `extra_demand`
+        // has no positional slot for it above, so it's set directly here.
+        node.params.extra_demand.zero_shares = n_randbit;
+    }
 
     for id in 0..n_parties {
         let inner = inner.clone();
@@ -807,7 +813,7 @@ fn run_preprocessing_stress_turmoil(
     let (done_tx, done_rx) = tokio::sync::broadcast::channel::<()>(n_parties);
     let barrier = Arc::new(Barrier::new(n_parties));
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
         n_triples,
@@ -820,6 +826,11 @@ fn run_preprocessing_stress_turmoil(
         Duration::from_secs(120),
         vec![],
     );
+    for node in nodes.iter_mut() {
+        // RandBit's MulPub pipeline consumes one zero-sharing per bit; `extra_demand`
+        // has no positional slot for it above, so it's set directly here.
+        node.params.extra_demand.zero_shares = n_randbit;
+    }
 
     for id in 0..n_parties {
         let inner = inner.clone();
@@ -1033,20 +1044,14 @@ async fn preprocessing_stress_snapshot(
         for (session_id, store) in rand_bit_sessions.iter().take(8) {
             let store = store.2.lock().await;
             out.push_str(&format!(
-                "  rand_bit {:?} state={:?} a_len={} output_len={} openings={}\n",
+                "  rand_bit {:?} state={:?} output_len={}\n",
                 session_id,
                 store.protocol_state,
-                store
-                    .a_share
-                    .as_ref()
-                    .map(|shares| shares.len())
-                    .unwrap_or(0),
                 store
                     .protocol_output
                     .as_ref()
                     .map(|shares| shares.len())
                     .unwrap_or(0),
-                store.output_open.len()
             ));
         }
         drop(rand_bit_sessions);
@@ -1381,7 +1386,6 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
 
     let n_parties = 4;
     let t = 1;
-    let no_of_triples = 2 * t + 1;
     let input_client_id: ClientId = 100;
     let output_client_id: ClientId = 200;
     let client_ids = vec![input_client_id, output_client_id];
@@ -1400,11 +1404,11 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
     let barrier_input_done = Arc::new(tokio::sync::Barrier::new(n_parties + 1)); // nodes + input client
     let barrier_mul_done = Arc::new(tokio::sync::Barrier::new(n_parties));
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
-        no_of_triples,
-        2,
+        0,
+        0,
         111,
         0,
         0,
@@ -1413,6 +1417,10 @@ fn mul_e2e_with_preprocessing_turmoil_variable_latency() {
         Duration::from_secs(30),
         vec![input_client_id],
     );
+    for node in nodes.iter_mut() {
+        node.params.add_mul_ops(no_of_multiplications);
+        node.params.add_rand_ops(2);
+    }
 
     let clients = create_clients::<Fr, Avid<SessionId>>(
         client_ids.clone(),
@@ -2227,7 +2235,7 @@ fn fpmul_e2e_with_preprocessing(
         ));
     }
 
-    let nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
+    let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, TurmoilNetwork>(
         n_parties,
         t,
         n_triples,
@@ -2240,6 +2248,11 @@ fn fpmul_e2e_with_preprocessing(
         Duration::from_secs(300),
         vec![],
     );
+    for node in nodes.iter_mut() {
+        // RandBit's MulPub pipeline consumes one zero-sharing per bit; `extra_demand`
+        // has no positional slot for it above, so it's set directly here.
+        node.params.extra_demand.zero_shares = n_randbit;
+    }
 
     let barrier_net = Arc::new(Barrier::new(n_parties));
 
@@ -3033,7 +3046,7 @@ fn batch_reconstruction_with_partition(hold_nodes: Vec<usize>, n_parties: usize,
                             Some((sender, raw_msg)) => {
                                 msg_count += 1;
                                 let wrapped: WrappedMessage =
-                                    bincode::deserialize(&raw_msg).unwrap();
+                                    wire_format::deserialize(&raw_msg).unwrap();
                                 match wrapped {
                                     WrappedMessage::BatchRecon(msg) => {
                                         node.process(msg, network_arc.clone()).await.unwrap();

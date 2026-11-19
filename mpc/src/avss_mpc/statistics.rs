@@ -30,6 +30,7 @@
 //! println!("RBC bracha_echo msgs sent: {}", snap.sent.rbc.bracha_echo);
 //! ```
 
+use crate::common::wire_format;
 use std::fmt;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -38,8 +39,6 @@ use std::sync::{
 
 use async_trait::async_trait;
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId, VerifiedOrdering};
-
-use bincode::Options;
 
 use crate::avss_mpc::AvssWrappedMessage;
 
@@ -116,11 +115,7 @@ impl NodeStatisticsCounters {
     pub fn record_outbound(&self, data: &[u8], n_recipients: u64) {
         self.bytes_sent
             .fetch_add(data.len() as u64 * n_recipients, RELAX);
-        if let Ok(msg) = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .deserialize::<AvssWrappedMessage>(data)
-        {
+        if let Ok(msg) = wire_format::deserialize::<AvssWrappedMessage>(data) {
             record_received(&msg, &self.sent);
         }
     }

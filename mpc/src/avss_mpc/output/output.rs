@@ -1,6 +1,7 @@
 use crate::avss_mpc::output::{AvssOutputError, AvssOutputMessage};
 use crate::avss_mpc::{deser_bounded_feldman_vec, AvssWrappedMessage};
 use crate::common::share::{avss::verify_feldman, feldman::FeldmanShamirShare};
+use crate::common::wire_format;
 use crate::common::SecretSharingScheme;
 use ark_ec::CurveGroup;
 use ark_ff::FftField;
@@ -49,7 +50,7 @@ impl AvssOutputServer {
         shares.serialize_compressed(&mut payload)?;
         let msg = AvssOutputMessage::new(self.id, self.instance_id, payload);
         let wrapped = AvssWrappedMessage::Output(msg);
-        let bytes = bincode::serialize(&wrapped)?;
+        let bytes = wire_format::serialize(&wrapped)?;
 
         net.send_to_client(client_id, &bytes).await?;
         info!(

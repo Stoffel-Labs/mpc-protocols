@@ -12,6 +12,7 @@ use stoffelcrypto::common::rbc::rbc::Avid;
 use stoffelcrypto::common::rbc::RbcError;
 use stoffelcrypto::common::share::shamir::NonRobustShare;
 use stoffelcrypto::common::types::fixed::FixedPointPrecision;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::{MPCProtocol, SecretSharingScheme, RBC};
 use stoffelcrypto::honeybadger::ran_dou_sha::{RanDouShaError, RanDouShaNode};
 use stoffelcrypto::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -76,7 +77,7 @@ pub async fn spawn_parties<T, N>(
         let mut merge_rx = fan_in_inboxes(inbox);
         tokio::spawn(async move {
             while let Some(msg) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg.1) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&msg.1) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("Malformed or unrecognized message format.");
@@ -258,7 +259,7 @@ pub fn spawn_receiver_tasks(
         set.spawn(async move {
             while let Some(msg_bytes) = merge_rx.recv().await {
                 // Attempt to deserialize into WrappedMessage
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg_bytes.1) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&msg_bytes.1) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("Malformed or unrecognized message format.");
@@ -546,19 +547,19 @@ where
     S: SecretSharingScheme<F>,
     HoneyBadgerMPCNode<F, R>: MPCProtocol<F, S, N, MPCOpts = HoneyBadgerMPCNodeOpts>,
 {
-    let parameters = HoneyBadgerMPCNodeOpts::new(
+    let mut parameters = HoneyBadgerMPCNodeOpts::new(
         n_parties,
         t,
-        n_triples,
-        n_random_shares,
         instance_id,
-        n_randbit,
-        n_prandint,
         precision,
         statistical_security,
         timeout,
     )
     .unwrap();
+    parameters.extra_demand.triples = n_triples;
+    parameters.extra_demand.random_shares = n_random_shares;
+    parameters.extra_demand.randbit = n_randbit;
+    parameters.extra_demand.prandint = n_prandint;
     (0..n_parties)
         .map(|id| HoneyBadgerMPCNode::setup(id, parameters.clone(), input_ids.clone()).unwrap())
         .collect()
