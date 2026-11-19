@@ -1716,6 +1716,24 @@ async fn app_rec_zero() {
     app_rec_run(0, 15, 6).await; // b = 0 → z = 1
 }
 
+// Regression: b̄ = -1 is all-ones in two's complement, so every b'_i = b_i XOR
+// sign is 0 and the suffix-OR `c` is all-zero. The earlier difference-sum form
+// of v had no term there and returned v = 0 → w = 0 (a spurious 1/b = 0 with
+// z = 0). The corrected `v = 1 + Σ 2^(k-2-i)(1-c_i)` yields v = 2^(k-1) here.
+#[tokio::test]
+async fn app_rec_neg_one() {
+    setup_tracing();
+    app_rec_run(-1, 15, 6).await; // b = -1/64 → 1/b = -64
+}
+
+// Mirror of the above: magnitude-1 positive (c = (1,0,...,0)) always worked,
+// kept as the symmetric case.
+#[tokio::test]
+async fn app_rec_pos_one() {
+    setup_tracing();
+    app_rec_run(1, 15, 6).await; // b = 1/64 → 1/b = 64
+}
+
 // ── FXDiv e2e ────────────────────────────────────────────────────────────────
 //
 // Routes every message one level deeper than `spawn_apprec_receiver_tasks`

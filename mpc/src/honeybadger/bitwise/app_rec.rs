@@ -193,28 +193,28 @@ impl<F: PrimeField + FftField> AppRecNode<F> {
 
         // ── Step 5: v, local ──────────────────────────────────────────────────
         //
-        // Not the paper's printed line (`v = 1 + Σ 2^i(1-c_i)`) — that doesn't
-        // reduce to the paper's own stated target `v̄ = 2^(k-m-1)` (checked by
-        // hand: k=5,m=2 gives 13, not 4), most likely a typo where the exponent
-        // should run `2^(k-2-i)` instead of `2^i`. Uses instead
-        // `v = Σ_{i=0}^{k-2} (c_i-c_{i+1}) * 2^(k-2-i)` (c_{k-1}:=0), derived
-        // from the paper's own (correct) fact that `c` is a suffix-OR, hence
-        // monotone (1,1,...,1,0,...,0), switching once at index m-1→m: the
-        // consecutive difference `c_i - c_{i+1}` is a one-hot vector, nonzero
-        // only at that transition, so the weighted sum collapses to the single
-        // surviving term `2^(k-2-(m-1)) = 2^(k-m-1)` — the paper's target,
-        // reached without depending on the suspect line.
-        let mut v = RobustShare::new(F::zero(), self.id, self.t);
-        let m = c.len(); // = k-1
-        for i in 0..m {
-            let c_next = if i + 1 < m {
-                c[i + 1].clone()
-            } else {
-                RobustShare::new(F::zero(), self.id, self.t)
-            };
-            let diff = (c[i].clone() - c_next)?;
+        // `v = 1 + Σ_{i=0}^{k-2} 2^(k-2-i) * (1 - c_i)`.
+        //
+        // This is the paper's printed line `v = 1 + Σ 2^i(1-c_i)` with its
+        // exponent typo fixed: `2^i` gives wrong values (by hand, k=5 → 13 where
+        // the paper's own target v̄ = 2^(k-m-1) is 4); the exponent must run
+        // `2^(k-2-i)`. With that fix the sum telescopes over the monotone
+        // suffix-OR `c` = (1,...,1,0,...,0): with the leading set bit at index p
+        // it collapses to `2^(k-2-p)`, the paper's target.
+        //
+        // The all-zero `c` is the reason this is written as the full sum rather
+        // than the consecutive-difference form `Σ (c_i - c_{i+1}) 2^(k-2-i)` a
+        // previous rewrite used: that form has no term when `c` never switches,
+        // yielding v = 0 (hence w = v*w' = 0 and a spurious 1/b = 0). `c` is
+        // all-zero exactly when every b'_i = b_i XOR sign is 0, i.e. b̄ ∈ {0,-1}
+        // (b̄ = 0 is masked by z=1; b̄ = -1 is a real divisor). Here the leading
+        // `1 +` plus the full sum give `1 + (2^(k-1) - 1) = 2^(k-1)` — exactly
+        // the target for b̄ = -1 — with no special-casing.
+        let one = RobustShare::new(F::one(), self.id, self.t);
+        let mut v = one.clone();
+        for (i, c_i) in c.iter().enumerate() {
             let weight = two.pow([(k - 2 - i) as u64]);
-            v = (v + (diff * weight)?)?;
+            v = (v + ((one.clone() - c_i.clone())? * weight)?)?;
         }
 
         // ── Steps 6/7: batched round — {v*b, c_0*sign} ───────────────────────
