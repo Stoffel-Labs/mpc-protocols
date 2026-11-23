@@ -29,11 +29,13 @@ const T: usize = 1;
 type Node = HoneyBadgerMPCNode<Fr, Avid<SessionId>>;
 
 /// Builds nodes whose only preprocessing configuration is the **declared
-/// workload**: one LTZ and one EQZ at width `K`. Every raw pool size is derived
-/// from that by `run_preprocessing`, so no test hand-computes triple/random-
-/// share counts. Each case below builds fresh nodes and runs a single op, and
-/// the derived ops (`lt`/`gt`/`le`/`ge`/`gtz`/`lez`/`gez`, `eq`) each cost
-/// exactly one LTZ or one EQZ.
+/// workload**. Every raw pool size is derived from that by `run_preprocessing`,
+/// so no test hand-computes triple/random-share counts. Each case below builds
+/// fresh nodes and runs a single op, and the derived ops each cost exactly one
+/// LTZ or one EQZ — but at different widths: `ltz`/`gez` and `eq`/`eqz` run at
+/// `K`, while the comparisons whose LTZ input is a derived value
+/// (`lt`/`gt`/`le`/`ge` on `a - b`, `gtz`/`lez` on `-x`) run at `K + 1`, so both
+/// widths are declared.
 fn make_nodes() -> (Vec<Node>, Vec<Arc<FakeNetwork>>) {
     let (network, receivers, _, _) = test_setup(N_PARTIES, vec![]);
     let mut nodes = create_global_nodes::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -51,6 +53,7 @@ fn make_nodes() -> (Vec<Node>, Vec<Arc<FakeNetwork>>) {
     );
     for node in nodes.iter_mut() {
         node.params.add_ltz_ops(K, 1);
+        node.params.add_ltz_ops(K + 1, 1);
         node.params.add_eqz_ops(K, 1);
     }
     receive::<Fr, Avid<SessionId>, RobustShare<Fr>, FakeNetwork>(
@@ -171,7 +174,9 @@ async fn ltz_int_cases() {
 async fn gtz_int_cases() {
     run_unary(
         "gtz_int",
-        &[(7, true), (-5, false), (0, false), (-1, false)],
+        // -128 = -2^{K-1}: negating it gives 2^{K-1}, outside Z<K>. Under the old
+        // k-width LTZ that wrapped to -128 and reported "> 0"; k+1 handles it.
+        &[(7, true), (-5, false), (0, false), (-1, false), (-128, false)],
         |mut node, x, net| async move { node.gtz_int(x, net).await.expect("gtz_int failed") },
     )
     .await;
@@ -181,7 +186,7 @@ async fn gtz_int_cases() {
 async fn lez_int_cases() {
     run_unary(
         "lez_int",
-        &[(-5, true), (0, true), (7, false), (-1, true)],
+        &[(-5, true), (0, true), (7, false), (-1, true), (-128, true)],
         |mut node, x, net| async move { node.lez_int(x, net).await.expect("lez_int failed") },
     )
     .await;
@@ -226,6 +231,10 @@ async fn lt_int_cases() {
             (5, 5, false),
             (-7, -3, true),
             (-5, 5, true),
+            // Max spread: a-b = 255 (resp. -255) needs K+1 bits. Under the old
+            // k-width LTZ, 255 wrapped to -1 and inverted the result.
+            (127, -128, false),
+            (-128, 127, true),
         ],
         |mut node, a, b, net| async move { node.lt_int(a, b, net).await.expect("lt_int failed") },
     )
@@ -236,7 +245,14 @@ async fn lt_int_cases() {
 async fn gt_int_cases() {
     run_binary(
         "gt_int",
-        &[(7, 3, true), (4, 10, false), (5, 5, false), (5, -5, true)],
+        &[
+            (7, 3, true),
+            (4, 10, false),
+            (5, 5, false),
+            (5, -5, true),
+            (127, -128, true),
+            (-128, 127, false),
+        ],
         |mut node, a, b, net| async move { node.gt_int(a, b, net).await.expect("gt_int failed") },
     )
     .await;

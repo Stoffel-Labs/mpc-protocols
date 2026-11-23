@@ -808,7 +808,13 @@ impl HoneyBadgerMPCNodeOpts {
     }
 
     /// Declares `count` planned `ltz_int` calls at bit width `bit_len`
-    /// (`gtz`/`lez`/`gez`/`lt`/`gt`/`le`/`ge` each cost one LTZ too).
+    /// (`gez` costs one LTZ at the same `bit_len` too).
+    ///
+    /// The comparisons whose LTZ input is a *derived* value run one width wider:
+    /// `lt`/`gt`/`le`/`ge` test a difference `a - b ∈ (−2^k, 2^k)`, and
+    /// `gtz`/`lez` test `−x` (with `−(−2^{k-1}) = 2^{k-1}` outside `Z⟨k⟩`), so
+    /// each needs an LTZ at `k + 1` — declare those with `add_ltz_ops(k + 1, …)`.
+    /// (Same convention `common/mod.rs` documents for the fixed-point comparisons.)
     ///
     /// Accumulates, so calling it repeatedly with different widths provisions
     /// for all of them.
@@ -2216,16 +2222,19 @@ where
     async fn gtz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
         let k = x.bit_length();
         let neg_x = (x * ClearInt::new(-F::one(), k))?;
-        self.ltz_int(neg_x, net).await
+        // -x lands in Z<k+1> (negating -2^{k-1} gives 2^{k-1}, outside Z<k>), so
+        // run the sign test one bit wider, then tag the result back at k.
+        let bit = self.ltz_on_share(neg_x.share().clone(), k + 1, net).await?;
+        Ok(SecretInt::new(bit, k))
     }
 
     async fn lez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
         let k = x.bit_length();
         let neg_x = (x * ClearInt::new(-F::one(), k))?;
-        let ltz = self.ltz_int(neg_x, net).await?;
-        let k2 = ltz.bit_length();
-        let neg_ltz = (ltz * ClearInt::new(-F::one(), k2))?;
-        Ok((neg_ltz + ClearInt::new(F::one(), k2))?)
+        let bit = self.ltz_on_share(neg_x.share().clone(), k + 1, net).await?;
+        let ltz = SecretInt::new(bit, k);
+        let neg_ltz = (ltz * ClearInt::new(-F::one(), k))?;
+        Ok((neg_ltz + ClearInt::new(F::one(), k))?)
     }
 
     async fn gez_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
@@ -2241,7 +2250,11 @@ where
         b: Self::Sint,
         net: Arc<N>,
     ) -> Result<Self::Sint, Self::Error> {
-        self.ltz_int((a - b)?, net).await
+        let diff = (a - b)?;
+        let k = diff.bit_length();
+        // a - b lies in (-2^k, 2^k), so the sign test needs k+1 bits; tag at k.
+        let bit = self.ltz_on_share(diff.share().clone(), k + 1, net).await?;
+        Ok(SecretInt::new(bit, k))
     }
 
     async fn gt_int(
@@ -2250,7 +2263,10 @@ where
         b: Self::Sint,
         net: Arc<N>,
     ) -> Result<Self::Sint, Self::Error> {
-        self.ltz_int((b - a)?, net).await
+        let diff = (b - a)?;
+        let k = diff.bit_length();
+        let bit = self.ltz_on_share(diff.share().clone(), k + 1, net).await?;
+        Ok(SecretInt::new(bit, k))
     }
 
     async fn le_int(
@@ -2259,8 +2275,10 @@ where
         b: Self::Sint,
         net: Arc<N>,
     ) -> Result<Self::Sint, Self::Error> {
-        let ltz = self.ltz_int((b - a)?, net).await?;
-        let k = ltz.bit_length();
+        let diff = (b - a)?;
+        let k = diff.bit_length();
+        let bit = self.ltz_on_share(diff.share().clone(), k + 1, net).await?;
+        let ltz = SecretInt::new(bit, k);
         Ok(((ltz * ClearInt::new(-F::one(), k))? + ClearInt::new(F::one(), k))?)
     }
 
@@ -2270,8 +2288,10 @@ where
         b: Self::Sint,
         net: Arc<N>,
     ) -> Result<Self::Sint, Self::Error> {
-        let ltz = self.ltz_int((a - b)?, net).await?;
-        let k = ltz.bit_length();
+        let diff = (a - b)?;
+        let k = diff.bit_length();
+        let bit = self.ltz_on_share(diff.share().clone(), k + 1, net).await?;
+        let ltz = SecretInt::new(bit, k);
         Ok(((ltz * ClearInt::new(-F::one(), k))? + ClearInt::new(F::one(), k))?)
     }
     async fn eqz_int(&mut self, x: Self::Sint, net: Arc<N>) -> Result<Self::Sint, Self::Error> {
