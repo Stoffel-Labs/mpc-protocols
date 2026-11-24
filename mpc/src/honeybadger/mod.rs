@@ -2589,23 +2589,40 @@ where
                     .await?;
             }
 
-            // Phase 2 — collect each result as it completes (all sessions' rounds overlap here).
+            // Phase 2 — collect each result, then clear ALL sessions regardless of outcome
+            // (two-phase, see `ensure_ran_sha`): a `?` in the wait loop would skip clearing
+            // finished siblings after an errored one, leaving them for the no-longer-
+            // tombstoning `evict_stale` where a straggler could re-create them.
+            let mut first_err = None;
+            let mut outputs = Vec::with_capacity(sessions.len());
             for (sessionid, _, _) in &sessions {
-                let result = self
+                match self
                     .preprocess
                     .triple_gen
                     .wait_for_result(*sessionid, self.params.timeout)
-                    .await;
+                    .await
+                {
+                    Ok(output) => outputs.push(output),
+                    Err(e) if first_err.is_none() => first_err = Some(HoneyBadgerError::from(e)),
+                    Err(_) => {}
+                }
+            }
+            for (sessionid, _, _) in &sessions {
                 if !self.preprocess.triple_gen.clear_store(*sessionid).await {
                     warn!(
                         sessionid = ?sessionid,
                         "failed to clear triple generation protocol state"
                     );
                 }
+            }
+            if let Some(e) = first_err {
+                return Err(e);
+            }
+            for output in outputs {
                 self.preprocessing_material
                     .lock()
                     .await
-                    .add(Some(result?), None, None, None);
+                    .add(Some(output), None, None, None);
             }
             trace_preprocessing_phase(self.id, "triples", total_triples_to_generate, phase_start);
         }
@@ -2907,23 +2924,37 @@ where
                 .await?;
         }
 
-        // Phase 2 — collect each result as it completes (sessions' rounds overlap here).
+        // Phase 2 — collect each result, then clear every session regardless of outcome.
+        // Two-phase (mirroring `mul`): a `?` inside the wait loop would early-return on an
+        // errored session and skip clearing the *finished* siblings after it, leaving them
+        // un-retired to be reclaimed by `evict_stale` — which no longer tombstones, so a
+        // straggler could then re-create them. Collect first, clear all, propagate after.
+        let mut first_err = None;
+        let mut outputs = Vec::with_capacity(sessions.len());
         for (sessionid, _) in &sessions {
-            // Clear the store whether wait_for_result succeeds or times out — otherwise a
-            // session that never completes (e.g. a Byzantine peer withholding shares) leaks
-            // its slot in the SessionStore forever, since nothing else ever retires it.
-            let result = self
+            match self
                 .preprocess
                 .share_gen
                 .wait_for_result(*sessionid, self.params.timeout)
-                .await;
+                .await
+            {
+                Ok(output) => outputs.push(output),
+                Err(e) if first_err.is_none() => first_err = Some(HoneyBadgerError::from(e)),
+                Err(_) => {}
+            }
+        }
+        for (sessionid, _) in &sessions {
             if !self.preprocess.share_gen.clear_store(*sessionid).await {
                 warn!(
                     sessionid = ?sessionid,
                     "failed to clear share generation protocol state"
                 );
             }
-            let output = result?;
+        }
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+        for output in outputs {
             self.preprocessing_material
                 .lock()
                 .await
@@ -2990,22 +3021,35 @@ where
                 .await?;
         }
         // 1b: collect every DoubleShare output (rounds overlap here), in session order.
+        // Two-phase (see `ensure_ran_sha`): collect, then clear ALL sessions regardless of
+        // outcome, then propagate — a `?` in the wait loop would skip clearing finished
+        // siblings after an errored one, leaving them for the (no-longer-tombstoning)
+        // `evict_stale` and thus re-creatable by a straggler.
         let mut all_double_shares: Vec<Vec<DoubleShamirShare<F>>> =
             Vec::with_capacity(sessions.len());
+        let mut first_err = None;
         for (sessionid, _) in &sessions {
-            // Clear regardless of outcome — a timed-out session must not linger forever.
-            let result = self
+            match self
                 .preprocess
                 .dou_sha
                 .wait_for_result(*sessionid, self.params.timeout)
-                .await;
+                .await
+            {
+                Ok(output) => all_double_shares.push(output),
+                Err(e) if first_err.is_none() => first_err = Some(HoneyBadgerError::from(e)),
+                Err(_) => {}
+            }
+        }
+        for (sessionid, _) in &sessions {
             if !self.preprocess.dou_sha.clear_store(*sessionid).await {
                 warn!(
                     sessionid = ?sessionid,
                     "failed to clear double share protocol state"
                 );
             }
-            all_double_shares.push(result?);
+        }
+        if let Some(e) = first_err {
+            return Err(e);
         }
 
         // Phase 2 — RanDouSha for every session, pipelined, each fed by its own DoubleShare output.
@@ -3036,21 +3080,37 @@ where
                 .await?;
             rds_sessions.push(*sessionid);
         }
-        // 2b: collect every RanDouSha output (rounds overlap here), in session order.
+        // 2b: collect every RanDouSha output, then clear ALL sessions regardless of
+        // outcome (two-phase, see `ensure_ran_sha`): a `?` here would skip clearing
+        // finished siblings after an errored one, leaking them to the no-longer-tombstoning
+        // `evict_stale` where a straggler could re-create them.
+        let mut first_err = None;
+        let mut rds_outputs = Vec::with_capacity(rds_sessions.len());
         for sessionid in &rds_sessions {
-            // Clear regardless of outcome — a timed-out session must not linger forever.
-            let result = self
+            match self
                 .preprocess
                 .ran_dou_sha
                 .wait_for_result(*sessionid, self.params.timeout)
-                .await;
+                .await
+            {
+                Ok(output) => rds_outputs.push(output),
+                Err(e) if first_err.is_none() => first_err = Some(HoneyBadgerError::from(e)),
+                Err(_) => {}
+            }
+        }
+        for sessionid in &rds_sessions {
             if !self.preprocess.ran_dou_sha.clear_store(*sessionid).await {
                 warn!(
                     sessionid = ?sessionid,
                     "failed to clear RanDouSha protocol state"
                 );
             }
-            pair.extend(result?);
+        }
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+        for output in rds_outputs {
+            pair.extend(output);
         }
         Ok(pair)
     }
