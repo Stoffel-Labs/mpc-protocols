@@ -11,8 +11,9 @@
 //! 3. `b'_i ← b_i ⊕ b_{k-1}`  for `i ∈ [0,k-2]`               — XOR each non-sign bit
 //!    with the sign bit, so positive and negative `b` are handled uniformly.
 //! 4. `{c_i}_{i=0}^{k-2} ← SufOr({b'_i}_{i=0}^{k-2})`         — locates the leading bit.
-//! 5. `v ← 1 + Σ_{i=0}^{k-2} 2^i(1-c_i)`                      — normalization factor,
-//!    as a secret share (never reveals its exponent).
+//! 5. `v ← 1 + Σ_{i=0}^{k-2} 2^(k-2-i)(1-c_i)`                — normalization factor,
+//!    as a secret share (never reveals its exponent). The exponent is
+//!    `2^(k-2-i)`, not the paper's printed `2^i` — see the step-5 code comment.
 //! 6. `z ← 1 - (c_0 ∨ b_{k-1})`                               — zero flag.
 //! 7. `w' ← α(1-2b_{k-1}) - 2v·b`                             — linear approximation
 //!    of `1/b'` where `b' = v·b` is the (still secret) normalized divisor.

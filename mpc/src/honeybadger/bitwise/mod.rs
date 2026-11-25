@@ -113,9 +113,11 @@ impl<F: FftField> PRandMPrep<F> {
     /// Protocol 2.2 step 3: computes [r'] = Σ_{i=0}^{m-1} 2^i * [b_i].
     /// In the paper `r_double_prime` is a dedicated PRandInt(k + κ − m) draw;
     /// here it comes from the shared PRandInt pool, whose width
-    /// `mask_bits = 2k_p − f + κ` is fixed by the node's precision (k_p, f)
-    /// and depends on neither k nor m. Callers must ensure the pool width
-    /// covers their reveal: `mask_bits >= (k − m) + κ`.
+    /// `mask_bits = max(2k_p − f, 2f + 2) + κ` is fixed by the node's precision
+    /// (k_p, f) and depends on neither k nor m. (The `2f + 2` term covers
+    /// AppRec's TruncPr, the widest masked value at high fractional precision.)
+    /// Callers must ensure the pool width covers their reveal:
+    /// `mask_bits >= (k − m) + κ`.
     /// `r_prime_bits` must be non-empty (m >= 1), LSB first.
     pub fn from_prand_outputs(
         r_double_prime: RobustShare<F>,

@@ -1961,18 +1961,12 @@ async fn prss_setup_from_riss_then_local_masks() {
     assert_ne!(other, per_party[0]);
 }
 
-#[tokio::test]
-async fn fpdiv_e2e() {
+async fn fpdiv_e2e_run(a_bar: i128, b_bar: i128, k: usize, f: usize, expected: f64, tol: f64) {
     setup_tracing();
     let n_parties = 4;
     let t = 1;
 
-    let k = 16;
-    let f = 4;
     let precision = FixedPointPrecision::new(k, f);
-    // a=6.0 (96), b=2.0 (32) -> c ~= 3.0
-    let a_bar: i128 = 96;
-    let b_bar: i128 = 32;
 
     let a_shares = share_signed_fixed(a_bar, n_parties, t);
     let b_shares = share_signed_fixed(b_bar, n_parties, t);
@@ -2042,11 +2036,25 @@ async fn fpdiv_e2e() {
 
     assert_eq!(z_val, Fr::from(0u64), "z must be 0 for b != 0");
     let c_real = field_to_signed_real(c_val, f);
-    let rel_err = (c_real - 3.0f64).abs() / 3.0f64;
+    let rel_err = (c_real - expected).abs() / expected.abs();
     assert!(
-        rel_err < 0.2,
-        "FpDiv(6.0/2.0) = {c_real}, relative error {rel_err} exceeds tolerance"
+        rel_err < tol,
+        "FpDiv({a_bar}/{b_bar}) = {c_real}, expected {expected}, relative error {rel_err} exceeds tolerance"
     );
+}
+
+#[tokio::test]
+async fn fpdiv_e2e() {
+    // a=6.0 (96), b=2.0 (32) -> c ~= 3.0, at precision (16, 4).
+    fpdiv_e2e_run(96, 32, 16, 4, 3.0, 0.2).await;
+}
+
+#[tokio::test]
+async fn fpdiv_e2e_divide_by_neg_one() {
+    // Divisor integer rep b̄ = -1 is all-ones in two's complement — AppRec's v
+    // collapsed to 0 there in the old formula, returning a spurious 1/b = 0 (so
+    // c = a*w = 0). Regression: a=1.0 (16) / (-1/16 = -0.0625) must give -16.0.
+    fpdiv_e2e_run(16, -1, 16, 4, -16.0, 0.2).await;
 }
 
 //----------------------------------------COMPARISON----------------------------------------

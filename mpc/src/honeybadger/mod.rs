@@ -2327,7 +2327,9 @@ where
     async fn gtz_fixed(&mut self, x: Self::Sfix, net: Arc<N>) -> Result<Self::Sfix, Self::Error> {
         let precision = *x.precision();
         let neg = (x.value().clone() * (-F::one()))?;
-        let bit = self.ltz_on_share(neg, precision.k(), net).await?;
+        // -x lands in Z<k+1> (negating -2^{k-1} gives 2^{k-1}, outside Z<k>), so
+        // run the sign test one bit wider — same as `gtz_int`.
+        let bit = self.ltz_on_share(neg, precision.k() + 1, net).await?;
         Ok(SecretFixedPoint::from_bit(bit, precision)?)
     }
 
@@ -2335,7 +2337,8 @@ where
         // x <= 0  <=>  not (x > 0)  <=>  not ltz(-x)
         let precision = *x.precision();
         let neg = (x.value().clone() * (-F::one()))?;
-        let bit = self.ltz_on_share(neg, precision.k(), net).await?;
+        // -x can be 2^{k-1} (outside Z<k>), so run LTZ at k+1 — see `gtz_fixed`.
+        let bit = self.ltz_on_share(neg, precision.k() + 1, net).await?;
         let bit = ((bit * (-F::one()))? + F::one())?; // NOT
         Ok(SecretFixedPoint::from_bit(bit, precision)?)
     }

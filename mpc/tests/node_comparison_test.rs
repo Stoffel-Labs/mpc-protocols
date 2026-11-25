@@ -176,7 +176,13 @@ async fn gtz_int_cases() {
         "gtz_int",
         // -128 = -2^{K-1}: negating it gives 2^{K-1}, outside Z<K>. Under the old
         // k-width LTZ that wrapped to -128 and reported "> 0"; k+1 handles it.
-        &[(7, true), (-5, false), (0, false), (-1, false), (-128, false)],
+        &[
+            (7, true),
+            (-5, false),
+            (0, false),
+            (-1, false),
+            (-128, false),
+        ],
         |mut node, x, net| async move { node.gtz_int(x, net).await.expect("gtz_int failed") },
     )
     .await;
@@ -262,7 +268,15 @@ async fn gt_int_cases() {
 async fn le_int_cases() {
     run_binary(
         "le_int",
-        &[(3, 7, true), (5, 5, true), (10, 4, false), (-3, -3, true)],
+        &[
+            (3, 7, true),
+            (5, 5, true),
+            (10, 4, false),
+            (-3, -3, true),
+            // Max spread: a-b = ±255 needs K+1 bits.
+            (127, -128, false),
+            (-128, 127, true),
+        ],
         |mut node, a, b, net| async move { node.le_int(a, b, net).await.expect("le_int failed") },
     )
     .await;
@@ -272,7 +286,14 @@ async fn le_int_cases() {
 async fn ge_int_cases() {
     run_binary(
         "ge_int",
-        &[(7, 3, true), (5, 5, true), (4, 10, false), (-7, -7, true)],
+        &[
+            (7, 3, true),
+            (5, 5, true),
+            (4, 10, false),
+            (-7, -7, true),
+            (127, -128, true),
+            (-128, 127, false),
+        ],
         |mut node, a, b, net| async move { node.ge_int(a, b, net).await.expect("ge_int failed") },
     )
     .await;
