@@ -241,14 +241,21 @@ impl<F: PrimeField + FftField> PreMod2mNode<F> {
             if s.state == PhaseState::Finished {
                 return Ok(());
             }
-            let r_prime_bits = s
-                .r_prime_bits
-                .take()
-                .ok_or(PreMod2mError::ResultAlreadyReceived(parent))?;
-            let pre_bitlt_prep = s
-                .pre_bitlt_prep
-                .take()
-                .ok_or(PreMod2mError::ResultAlreadyReceived(parent))?;
+            // `init`'s early-arrival check and the dispatch loop's `process`
+            // run on separate tasks over shared node clones, so two
+            // finalizers can both pass the quorum check above. The winner
+            // takes these options and finishes in a later lock scope that
+            // flips `state` to Finished; between its take and that flip, the
+            // loser lands here with the options already gone but `state` not
+            // yet Finished. That's the in-flight winner owning completion —
+            // benign, so back off rather than aborting the whole PreMod2m
+            // (which would propagate out of LTZ/BitDec and discard a result
+            // that is about to be delivered).
+            let (Some(r_prime_bits), Some(pre_bitlt_prep)) =
+                (s.r_prime_bits.take(), s.pre_bitlt_prep.take())
+            else {
+                return Ok(());
+            };
             (r_prime_bits, pre_bitlt_prep)
         };
 
