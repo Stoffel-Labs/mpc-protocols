@@ -1,6 +1,7 @@
 use crate::utils::test_utils::fan_in_inboxes;
 use ark_ff::PrimeField;
 use std::sync::Arc;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::RBC;
 use stoffelcrypto::honeybadger::fpmul::prandint::PRandIntNode;
 use stoffelcrypto::honeybadger::{SessionId, WrappedMessage};
@@ -32,7 +33,7 @@ where
 
         set.spawn(async move {
             while let Some((_, bytes)) = merge_rx.recv().await {
-                let wrapped: WrappedMessage = bincode::deserialize(&bytes).unwrap();
+                let wrapped: WrappedMessage = wire_format::deserialize(&bytes).unwrap();
                 match wrapped {
                     WrappedMessage::PRandInt(msg) => {
                         node.process(msg).await.unwrap();

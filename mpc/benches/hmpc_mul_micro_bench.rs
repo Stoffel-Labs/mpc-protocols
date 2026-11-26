@@ -23,6 +23,7 @@ use ark_serialize::CanonicalSerialize;
 use ark_std::test_rng;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::ops::Mul;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::{
     share::{apply_vandermonde, make_vandermonde},
     ProtocolSessionId, SecretSharingScheme, ShamirShare,
@@ -191,13 +192,13 @@ fn bench_serialize(c: &mut Criterion) {
         payload,
     ));
     group.bench_function("wrapped_eval_bincode", |b| {
-        b.iter(|| bincode::serialize(black_box(&eval_msg)).unwrap())
+        b.iter(|| wire_format::serialize(black_box(&eval_msg)).unwrap())
     });
     group.bench_function("wrapped_eval_bincode_deser", |b| {
-        let bytes = bincode::serialize(&eval_msg).unwrap();
+        let bytes = wire_format::serialize(&eval_msg).unwrap();
         b.iter(|| {
             let _: WrappedMessage =
-                bincode::deserialize(black_box(&bytes)).expect("deserialize failed");
+                wire_format::deserialize(black_box(&bytes)).expect("deserialize failed");
         })
     });
 

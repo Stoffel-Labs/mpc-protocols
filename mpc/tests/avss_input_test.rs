@@ -1,3 +1,4 @@
+use stoffelcrypto::common::wire_format;
 use utils::test_utils::{fan_in_inboxes, setup_tracing, test_setup};
 
 use ark_bls12_381::{Fr, G1Projective as G};
@@ -94,7 +95,7 @@ async fn test_avss_input_e2e() {
             panic!("Unexpected sender kind");
         };
         let wrapped: AvssWrappedMessage =
-            bincode::deserialize(&raw).expect("deserialization error");
+            wire_format::deserialize(&raw).expect("deserialization error");
         match wrapped {
             AvssWrappedMessage::Input(msg) => {
                 assert!(client
@@ -121,7 +122,7 @@ async fn test_avss_input_e2e() {
         tokio::spawn(async move {
             while let Some(raw_msg) = merged_rx.recv().await {
                 let wrapped: AvssWrappedMessage =
-                    bincode::deserialize(&raw_msg.1).expect("deserialization error");
+                    wire_format::deserialize(&raw_msg.1).expect("deserialization error");
                 match wrapped {
                     AvssWrappedMessage::Rbc(rbc_msg) => {
                         let _ = node.rbc.process(rbc_msg, network[i].clone()).await;

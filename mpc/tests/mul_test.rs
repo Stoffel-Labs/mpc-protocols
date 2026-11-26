@@ -7,6 +7,7 @@ use ark_bls12_381::Fr;
 use ark_ff::UniformRand;
 use ark_std::test_rng;
 use std::{collections::HashMap, sync::Arc, time::Duration, vec};
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::ProtocolSessionId;
 use stoffelcrypto::common::SecretSharingScheme;
 use stoffelcrypto::honeybadger::{
@@ -136,7 +137,7 @@ async fn mul_e2e(n_parties: usize, t: usize, no_of_mul: usize) {
         set.spawn(async move {
             while let Some(msg_bytes) = merged_rx.recv().await {
                 // Attempt to deserialize into WrappedMessage
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg_bytes.1) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&msg_bytes.1) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("failed to deserialize into wrapped message");

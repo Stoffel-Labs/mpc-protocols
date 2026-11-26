@@ -1,8 +1,8 @@
+use crate::common::wire_format;
 use ark_ff::FftField;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
-use bincode::Options;
 use std::{sync::Arc, time::Instant};
 use stoffelnet::network_utils::{Network, PartyId};
 use tokio::sync::Mutex;
@@ -87,11 +87,8 @@ where
                 }
             };
             let output = self.rbc.get_store(id).await?;
-            let mut msg: ZeroShaMessage = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_limit(MAX_MESSAGE_SIZE)
-                .deserialize(&output)?;
+            let mut msg: ZeroShaMessage =
+                wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE)?;
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!("Dropping RBC output: sender mismatch");
@@ -262,7 +259,7 @@ where
                 payload,
             ));
             network
-                .send(recipient_id, &bincode::serialize(&msg)?)
+                .send(recipient_id, &wire_format::serialize(&msg)?)
                 .await?;
         }
 
@@ -427,7 +424,7 @@ where
                 session_id,
                 payload,
             ));
-            network.send(i, &bincode::serialize(&message)?).await?;
+            network.send(i, &wire_format::serialize(&message)?).await?;
         }
         Ok(())
     }
@@ -532,7 +529,7 @@ where
                 msg.session_id,
                 ZeroShaPayload::Output(ok),
             );
-            let bytes = bincode::serialize(&result)?;
+            let bytes = wire_format::serialize(&result)?;
             // Tag read dynamically from the caller's own session (not hardcoded
             // to ZeroSha) so the small-field instance's OK-vote broadcast routes
             // back to the small-field node instead of the big-field one.

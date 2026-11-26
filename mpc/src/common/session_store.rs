@@ -130,23 +130,30 @@ impl<Id: std::hash::Hash + Eq + Copy, V: Clone> SessionStore<Id, V> {
         self.active.iter()
     }
 
-    /// Retires every active entry for which `is_stale` returns true. Returns the number evicted.
+    /// Removes every active entry for which `is_stale` returns true, **without
+    /// tombstoning them**. Returns the number removed.
     ///
     /// Intended for reclaiming session-count quota from abandoned entries (timed-out or
     /// unsolicited sessions that no local caller will ever `retire()` itself) once a
     /// capacity cap is hit, without waiting for a background reaper.
+    ///
+    /// Unlike `retire`, this does NOT record a tombstone. That distinction is deliberate
+    /// and load-bearing:
+    /// - `retire` tombstones because it cleans up a **finished** session, and a late
+    ///   straggler for a finished session must not be able to re-create it (zombie
+    ///   prevention). Every protocol retires on its completion path, so a finished
+    ///   session never lingers long enough to be seen here.
+    /// - `evict_stale` only ever reclaims entries idle past the TTL — i.e. **abandoned or
+    ///   foreign** sessions that never finished. Tombstoning those would let a Byzantine
+    ///   peer pre-create sessions at the victim's own upcoming (monotonic) exec-ids, let
+    ///   them go stale, and have this eviction tombstone them — denying the victim its own
+    ///   future sessions. Removing without a tombstone closes that self-DoS; the only cost
+    ///   is that a straggler for an abandoned session can re-create an empty entry, which is
+    ///   bounded by the same caps and re-reclaimed on the next TTL sweep.
     pub fn evict_stale<P: FnMut(&V) -> bool>(&mut self, mut is_stale: P) -> usize {
-        let ids: Vec<Id> = self
-            .active
-            .iter()
-            .filter(|(_, v)| is_stale(v))
-            .map(|(id, _)| *id)
-            .collect();
-        let n = ids.len();
-        for id in ids {
-            self.retire(id);
-        }
-        n
+        let before = self.active.len();
+        self.active.retain(|_, v| !is_stale(v));
+        before - self.active.len()
     }
 
     /// Retires every active session, tombstoning each one before clearing the
@@ -327,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn evict_stale_retires_matching_entries_only() {
+    fn evict_stale_removes_matching_entries_without_tombstoning() {
         let mut store: SessionStore<u32, bool> = SessionStore::with_default_cap();
         store.get_or_create_with(1, || true); // stale
         store.get_or_create_with(2, || false); // fresh
@@ -338,9 +345,22 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert!(store.contains_key(&2));
 
-        // Evicted IDs are tombstoned, not just removed — stragglers must not resurrect them.
+        // Evicted IDs are removed but NOT tombstoned: evict_stale only ever reclaims
+        // abandoned/foreign sessions (a finished one is retired explicitly, never left to
+        // go stale), so the owner — or a straggler — may create that id again. Tombstoning
+        // here would instead let a peer pre-tombstone the owner's own upcoming exec-ids.
+        assert!(store.get_or_create_with(1, || false).is_some());
+        assert!(store.get_or_create_with(3, || false).is_some());
+    }
+
+    #[test]
+    fn explicit_retire_still_tombstones() {
+        // The completion-path guarantee is unchanged: a session cleaned up via `retire`
+        // (what every protocol calls on completion) stays dead against late stragglers.
+        let mut store: SessionStore<u32, bool> = SessionStore::with_default_cap();
+        store.get_or_create_with(1, || false);
+        assert!(store.retire(1));
         assert!(store.get_or_create_with(1, || false).is_none());
-        assert!(store.get_or_create_with(3, || false).is_none());
     }
 
     #[test]

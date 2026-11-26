@@ -25,6 +25,7 @@
 //! println!("RanSha share msgs sent: {}", snap.sent.ran_sha.share);
 //! ```
 
+use crate::common::wire_format;
 use std::fmt;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -33,8 +34,6 @@ use std::sync::{
 
 use async_trait::async_trait;
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId, VerifiedOrdering};
-
-use bincode::Options;
 
 use crate::honeybadger::WrappedMessage;
 
@@ -100,6 +99,10 @@ pub struct DirectionalMsgCounts {
     pub mult: AtomicU64,
     pub trunc: AtomicU64,
     pub zero_sha: AtomicU64,
+    pub mod2: AtomicU64,
+    pub pre_mod2m: AtomicU64,
+    pub kor_cl: AtomicU64,
+    pub eqz: AtomicU64,
 }
 
 // ── top-level counters ────────────────────────────────────────────────────────
@@ -143,11 +146,7 @@ impl NodeStatisticsCounters {
     pub fn record_outbound(&self, data: &[u8], n_recipients: u64) {
         self.bytes_sent
             .fetch_add(data.len() as u64 * n_recipients, RELAX);
-        if let Ok(msg) = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .deserialize::<WrappedMessage>(data)
-        {
+        if let Ok(msg) = wire_format::deserialize::<WrappedMessage>(data) {
             record_received(&msg, &self.sent);
         }
     }
@@ -261,6 +260,10 @@ pub struct DirectionalMsgSnapshot {
     pub mult: u64,
     pub trunc: u64,
     pub zero_sha: u64,
+    pub mod2: u64,
+    pub pre_mod2m: u64,
+    pub kor_cl: u64,
+    pub eqz: u64,
 }
 
 impl From<&DirectionalMsgCounts> for DirectionalMsgSnapshot {
@@ -277,6 +280,10 @@ impl From<&DirectionalMsgCounts> for DirectionalMsgSnapshot {
             mult: c.mult.load(RELAX),
             trunc: c.trunc.load(RELAX),
             zero_sha: c.zero_sha.load(RELAX),
+            mod2: c.mod2.load(RELAX),
+            pre_mod2m: c.pre_mod2m.load(RELAX),
+            kor_cl: c.kor_cl.load(RELAX),
+            eqz: c.eqz.load(RELAX),
         }
     }
 }
@@ -392,6 +399,10 @@ impl fmt::Display for NodeStatisticsSnapshot {
         row!("Mult", self.sent.mult, self.received.mult);
         row!("Trunc", self.sent.trunc, self.received.trunc);
         row!("ZeroSha", self.sent.zero_sha, self.received.zero_sha);
+        row!("Mod2", self.sent.mod2, self.received.mod2);
+        row!("PreMod2m", self.sent.pre_mod2m, self.received.pre_mod2m);
+        row!("KOrCl", self.sent.kor_cl, self.received.kor_cl);
+        row!("Eqz", self.sent.eqz, self.received.eqz);
         write!(
             f,
             "└───────────────────────────────────────┴──────────┴──────────┘"
@@ -483,6 +494,18 @@ pub(crate) fn record_received(msg: &WrappedMessage, counts: &DirectionalMsgCount
         }
         WrappedMessage::ZeroSha(_) => {
             counts.zero_sha.fetch_add(1, RELAX);
+        }
+        WrappedMessage::Mod2(_) => {
+            counts.mod2.fetch_add(1, RELAX);
+        }
+        WrappedMessage::PreMod2m(_) => {
+            counts.pre_mod2m.fetch_add(1, RELAX);
+        }
+        WrappedMessage::KOrCl(_) => {
+            counts.kor_cl.fetch_add(1, RELAX);
+        }
+        WrappedMessage::Eqz(_) => {
+            counts.eqz.fetch_add(1, RELAX);
         }
     }
 }

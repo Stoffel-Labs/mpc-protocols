@@ -1,4 +1,5 @@
 use crate::common::session_store::{Admission, SessionStore};
+use crate::common::wire_format;
 use crate::{
     common::{
         share::ShareError, utils::deser_bounded_vec, ProtocolSessionId, SecretSharingScheme,
@@ -53,8 +54,8 @@ use tracing::{error, info, warn};
 /// The storage per multiplication is accessed by `Multiply::init` and `process` and is protected by
 /// a mutex.
 
-// requires that Multiply::init has been called before and all chunks and shares via RBC have been
-// received
+// requires that Multiply::init has been called before and all chunks and shares via direct
+// point-to-point messages have been received
 fn finalize_mul<F: FftField>(storage: &MultStorage<F>) -> Result<Vec<RobustShare<F>>, MulError> {
     assert!(storage.openings.is_some()); // always ensured by the caller
 
@@ -217,14 +218,16 @@ impl<F: FftField> Multiply<F> {
                 session_id.calling_protocol().unwrap(),
                 SessionId::pack_slot(session_id.exec_id(), 0, 1),
                 session_id.instance_id(),
-            );
+            )
+            .with_extra_bits(session_id.extra_bits());
             self.batch_recon.clear_store(session_id1).await;
 
             let session_id2 = SessionId::new(
                 session_id.calling_protocol().unwrap(),
                 SessionId::pack_slot(session_id.exec_id(), 1, 1),
                 session_id.instance_id(),
-            );
+            )
+            .with_extra_bits(session_id.extra_bits());
             self.batch_recon.clear_store(session_id2).await;
         }
 
@@ -280,8 +283,8 @@ impl<F: FftField> Multiply<F> {
 
         // 2. Batch reconstruction is batched: one session for all a-x values (dealer/sub_id 0)
         //    and one for all b-y values (dealer/sub_id 1). When there are no full (t+1)-chunks
-        //    (no_of_batch == 0, i.e. N < t+1), everything goes through RBC and these are vacuously
-        //    satisfied.
+        //    (no_of_batch == 0, i.e. N < t+1), everything goes through the direct-open path and
+        //    these are vacuously satisfied.
         let have_batch_recon1 = no_of_batch == 0 || storage.output_open_mult1.contains_key(&0u8);
         let have_batch_recon2 = no_of_batch == 0 || storage.output_open_mult2.contains_key(&1u8);
 
@@ -356,7 +359,8 @@ impl<F: FftField> Multiply<F> {
                 session_id.calling_protocol().unwrap(),
                 SessionId::pack_slot(session_id.exec_id(), 0, 1),
                 session_id.instance_id(),
-            );
+            )
+            .with_extra_bits(session_id.extra_bits());
             self.batch_recon
                 .init_batch_reconstruct_many(a_full, session_id1, Arc::clone(&network))
                 .await?;
@@ -367,7 +371,8 @@ impl<F: FftField> Multiply<F> {
                 session_id.calling_protocol().unwrap(),
                 SessionId::pack_slot(session_id.exec_id(), 1, 1),
                 session_id.instance_id(),
-            );
+            )
+            .with_extra_bits(session_id.extra_bits());
             self.batch_recon
                 .init_batch_reconstruct_many(b_full, session_id2, Arc::clone(&network))
                 .await?;
@@ -387,11 +392,12 @@ impl<F: FftField> Multiply<F> {
                 session_id.calling_protocol().unwrap(),
                 SessionId::pack_slot(session_id.exec_id(), self.id as u8, 2),
                 session_id.instance_id(),
-            );
+            )
+            .with_extra_bits(session_id.extra_bits());
 
             let mult_msg = MultMessage::new(self.id, sessionid, bytes_rec_message);
             let wrapped = WrappedMessage::Mult(mult_msg);
-            let bytes_wrapped = bincode::serialize(&wrapped)?;
+            let bytes_wrapped = wire_format::serialize(&wrapped)?;
 
             network.broadcast(&bytes_wrapped).await?;
         }
@@ -402,14 +408,15 @@ impl<F: FftField> Multiply<F> {
     // 1. Take storage lock
     // 2. Store the a-x, b-y values opened through batch reconstruction in the appropriate slot
     // 3. Get the number of multiplications or return if `init` has not been called yet
-    // 4. Reconstruct from RBC-sent shares if enough have been received and needed
+    // 4. Reconstruct from directly-opened shares if enough have been received and needed
     // 5. Return if not all openings are available
     // 5. Perform the multiplication and return if all openings are available
     // 6. Otherwise, compute all local (a - x)- and (b - y)-shares
     //
     // `process` mainly serves to receive opened values from batch reconstruction
-    // or shares from RBC, from which openings will be manually reconstructed.
-    // If `init` has been called, then it can also try to perform the multiplication.
+    // or shares from direct point-to-point messages, from which openings will be manually
+    // reconstructed. If `init` has been called, then it can also try to perform the
+    // multiplication.
     pub async fn process(
         &self,
         sender: usize,
@@ -430,7 +437,8 @@ impl<F: FftField> Multiply<F> {
             calling_proto,
             SessionId::pack_slot(sid.exec_id(), 0, 0),
             sid.instance_id(),
-        );
+        )
+        .with_extra_bits(sid.extra_bits());
 
         // 1.
         let storage_bind = match self.get_or_create_mult_storage(session_id, sender).await {
@@ -492,9 +500,9 @@ impl<F: FftField> Multiply<F> {
                 self_id = self.id,
                 "Received shares for reconstruction using RBC for session_id: {:?}", session_id
             );
-            // Late/duplicate RBC delivery from a dealer we already have shares from. Benign:
-            // RBC agreement delivers one value per dealer and reconstruction counts each dealer
-            // once, so a duplicate cannot change the result. Ignore it instead of erroring.
+            // Late/duplicate delivery from a dealer we already have shares from. Benign:
+            // reconstruction counts each dealer once, so a duplicate cannot change the result.
+            // Ignore it instead of erroring.
             if storage.received_shares.contains_key(&sender) {
                 warn!(
                     self_id = self.id,
@@ -550,7 +558,7 @@ impl<F: FftField> Multiply<F> {
 
         // 5. With batched batch-recon, completion needs the single a-x result (dealer 0) and the
         //    single b-y result (dealer 1). When there are no full chunks (no_of_batch == 0), all
-        //    values come through RBC, so only `openings` is required.
+        //    values come through the direct-open path, so only `openings` is required.
         let batch_done = no_of_batch == 0
             || (storage.output_open_mult1.contains_key(&0u8)
                 && storage.output_open_mult2.contains_key(&1u8));
@@ -833,7 +841,7 @@ pub mod tests {
             tokio::spawn(async move {
                 while let Some(raw_msg) = merged_rx.recv().await {
                     let wrapped: WrappedMessage =
-                        bincode::deserialize(&raw_msg.1).expect("deserialization error");
+                        wire_format::deserialize(&raw_msg.1).expect("deserialization error");
 
                     match wrapped {
                         WrappedMessage::BatchRecon(batchrecon_msg) => {
@@ -911,7 +919,7 @@ pub mod tests {
             .unwrap();
         let storage = storage_bind.lock().await;
 
-        // openings via RBC should be there now
+        // openings via direct point-to-point messages should be there now
         assert!(storage.openings.is_some());
 
         drop(storage);
@@ -1223,7 +1231,7 @@ pub mod tests {
 
         let mul_node = Multiply::<Fr>::new(node_id, n, t).unwrap();
 
-        // Seed the session: init has run, and dealer 3 has already delivered its RBC shares.
+        // Seed the session: init has run, and dealer 3 has already delivered its shares.
         {
             let storage = mul_node
                 .get_or_create_mult_storage(session_id, node_id)
@@ -1245,7 +1253,7 @@ pub mod tests {
         let result = mul_node.process(3, dup_sid, Vec::new()).await;
         assert!(
             result.is_ok(),
-            "duplicate RBC delivery must be tolerated: {result:?}"
+            "duplicate delivery must be tolerated: {result:?}"
         );
 
         // No double-insert: dealer 3 still has exactly one entry.

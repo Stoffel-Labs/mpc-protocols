@@ -1,8 +1,6 @@
 use crate::{
     common::{lagrange_interpolate, rbc::RbcError, share::ShareError},
     honeybadger::{
-        batch_recon::BatchReconError,
-        mul::MulError,
         mul_pub::MulPubError,
         robust_interpolate::{robust_interpolate::RobustShare, InterpolateError},
         SessionId,
@@ -29,8 +27,6 @@ pub mod truncpr;
 pub enum RandBitError {
     #[error("incompatible treshold ({0:}) and number of parties {1:}")]
     IncompatibleNumberOfParties(usize, usize),
-    #[error("the square multiplication was not completed successfuly")]
-    SquareMult(#[from] MulError),
     #[error("the square is zero")]
     ZeroSquare,
     #[error("the square root does not exist")]
@@ -43,8 +39,8 @@ pub enum RandBitError {
     Duplicate(String),
     #[error("waiting for more openings")]
     WaitForOk,
-    #[error("error in batch reconstruction: {0:?}")]
-    BatchRecError(#[from] BatchReconError),
+    #[error("mul_pub error: {0}")]
+    MulPubError(MulPubError),
     #[error("error during deserialization: {0:?}")]
     SerializationError(#[from] SerializationError),
     #[error("error operating with the shares: {0:?}")]
@@ -61,8 +57,6 @@ pub enum RandBitError {
     SessionIdError(SessionId),
     #[error("cannot create {0:?} random bits at once")]
     ShareLimitError(usize),
-    #[error("mul pub error: {0:?}")]
-    MulPubError(MulPubError),
     #[error("failed to clear the store for session {0:?}")]
     ClearStoreError(SessionId),
     #[error("result already received: {0:?}")]
@@ -92,7 +86,6 @@ where
     pub protocol_output: Option<Vec<RobustShare<F>>>,
     /// Share of `a`
     pub a_share: Option<Vec<RobustShare<F>>>,
-    pub output_open: HashMap<u8, Vec<F>>,
     pub output_sender: Option<Sender<Vec<RobustShare<F>>>>,
     pub output_receiver: Option<Receiver<Vec<RobustShare<F>>>>,
 }
@@ -107,7 +100,6 @@ where
             protocol_state: ProtocolState::NotInitialized,
             protocol_output: None,
             a_share: None,
-            output_open: HashMap::new(),
             output_sender: Some(output_sender),
             output_receiver: Some(output_receiver),
         }

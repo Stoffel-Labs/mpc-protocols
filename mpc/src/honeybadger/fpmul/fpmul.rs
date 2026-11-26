@@ -42,6 +42,15 @@ pub enum FPError {
         mask_bits: usize,
         value_bits: usize,
     },
+    #[error(
+        "a PreMod2m reveal needs {required_bits} bits but the field has only {modulus_bits}: \
+         the 2^m-shifted mask would wrap the modulus and silently corrupt the opened low bits \
+         -- use a smaller k or a larger field"
+    )]
+    RevealExceedsField {
+        required_bits: usize,
+        modulus_bits: usize,
+    },
 }
 
 #[derive(Clone, Debug)]

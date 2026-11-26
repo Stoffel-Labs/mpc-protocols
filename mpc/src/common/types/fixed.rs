@@ -103,6 +103,20 @@ where
         }
     }
 
+    /// Builds a fixed-point value from a share known to hold 0 or 1: `0.0` or
+    /// `1.0`.
+    ///
+    /// This is how comparison results re-enter fixed-point arithmetic. The bit
+    /// is scaled by `2^f` with a raw multiply rather than a fixed-point one
+    pub fn from_bit(bit: S, precision: FixedPointPrecision) -> Result<Self, TypeError> {
+        let scale = F::from(2u64).pow([precision.f as u64]);
+        Ok(Self {
+            value: (bit * scale)?,
+            precision,
+            _field_type: PhantomData,
+        })
+    }
+
     pub fn value(&self) -> &S {
         &self.value
     }

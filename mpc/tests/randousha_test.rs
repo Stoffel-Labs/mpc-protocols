@@ -12,6 +12,7 @@ use std::mem;
 use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::Arc, time::Duration, vec};
 use stoffelcrypto::common::rbc::rbc::Avid;
 use stoffelcrypto::common::share::shamir::NonRobustShare;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use stoffelcrypto::honeybadger::ran_dou_sha::messages::{
     RanDouShaMessage, RanDouShaPayload, ReconstructionMessage,
@@ -74,7 +75,7 @@ async fn test_init_reconstruct_flow() {
                 .await
                 .expect("timed out waiting for reconstruct message")
                 .expect("channel closed");
-            let wrapped: WrappedMessage = bincode::deserialize(&received_message).unwrap();
+            let wrapped: WrappedMessage = wire_format::deserialize(&received_message).unwrap();
             let rdsmsg = match wrapped {
                 WrappedMessage::RanDouSha(ran_dou_sha_message) => ran_dou_sha_message,
                 _ => todo!(),
@@ -183,7 +184,7 @@ async fn test_reconstruct_handler() {
 
         set.spawn(async move {
             while let Some(received) = merged_rx.recv().await {
-                let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&received.1) {
                     Ok(w) => w,
                     Err(_) => continue,
                 };
@@ -301,7 +302,7 @@ async fn test_reconstruct_handler_mismatch_r_t_2t() {
         set.spawn(async move {
             let _ = timeout(Duration::from_secs(1), async {
                 while let Some(received) = merged_rx.recv().await {
-                    let wrapped: WrappedMessage = match bincode::deserialize(&received.1) {
+                    let wrapped: WrappedMessage = match wire_format::deserialize(&received.1) {
                         Ok(w) => w,
                         Err(_) => continue,
                     };

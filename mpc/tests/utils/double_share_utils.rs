@@ -1,5 +1,6 @@
 use ark_bls12_381::Fr;
 use std::sync::Arc;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::honeybadger::{
     double_share::{
         double_share_generation::{DoubleShareNode, ProtocolState},
@@ -51,7 +52,7 @@ pub fn spawn_receiver_tasks(
                     Some(msg) => msg,
                     None => break,
                 };
-                let wrapped: WrappedMessage = match bincode::deserialize(&msg.1) {
+                let wrapped: WrappedMessage = match wire_format::deserialize(&msg.1) {
                     Ok(m) => m,
                     Err(_) => {
                         warn!("Malformed or unrecognized message format.");

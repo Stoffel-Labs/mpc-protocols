@@ -1,3 +1,4 @@
+use crate::common::wire_format;
 use crate::{
     avss_mpc::{
         input::{
@@ -31,7 +32,7 @@ use ark_std::rand::{
     Rng, SeedableRng,
 };
 use async_trait::async_trait;
-use bincode::{ErrorKind, Options};
+use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Duration};
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, PartyId};
@@ -150,11 +151,8 @@ impl<F: FftField, R: RBC<Id = AvssSessionId>, G: CurveGroup<ScalarField = F>>
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), AvssMPCError> {
-        let wrapped: AvssWrappedMessage = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .with_limit(MAX_MESSAGE_SIZE)
-            .deserialize(&raw_msg)?;
+        let wrapped: AvssWrappedMessage =
+            wire_format::deserialize_limited(&raw_msg, MAX_MESSAGE_SIZE)?;
 
         match wrapped {
             AvssWrappedMessage::Input(input_msg) => {
@@ -464,11 +462,8 @@ where
         raw_msg: Vec<u8>,
         net: Arc<N>,
     ) -> Result<(), Self::Error> {
-        let wrapped: AvssWrappedMessage = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .with_limit(MAX_MESSAGE_SIZE)
-            .deserialize(&raw_msg)?;
+        let wrapped: AvssWrappedMessage =
+            wire_format::deserialize_limited(&raw_msg, MAX_MESSAGE_SIZE)?;
 
         #[cfg(feature = "statistics")]
         {
@@ -478,17 +473,18 @@ where
             statistics::record_received(&wrapped, &self.statistics_counters.received);
         }
 
+        // Reject session ids with nonzero reserved bits before any routing or admission
+        // decision is made from them: left unchecked, such a value hashes and compares
+        // as a distinct session id from its canonical counterpart while every accessor
+        // reports the same protocol/round/sub/exec/instance fields, letting a single
+        // logical session be re-admitted many times against session-count caps (see
+        // `AvssSessionId::is_canonical`).
+        if let Some(session_id) = wrapped.non_canonical_session_id() {
+            return Err(AvssMPCError::InvalidSessionId(session_id));
+        }
+
         match wrapped {
             AvssWrappedMessage::Rbc(rbc_msg) => {
-                // Reject session ids with nonzero reserved bits before any routing or admission
-                // decision is made from them: left unchecked, such a value hashes and compares
-                // as a distinct session id from its canonical counterpart while every accessor
-                // reports the same protocol/round/sub/exec/instance fields, letting a single
-                // logical session be re-admitted many times against session-count caps (see
-                // `AvssSessionId::is_canonical`).
-                if !rbc_msg.session_id.is_canonical() {
-                    return Err(AvssMPCError::InvalidSessionId(rbc_msg.session_id));
-                }
                 if sender_id != rbc_msg.sender_id {
                     return Err(AvssMPCError::InvalidPartyId);
                 }
@@ -922,19 +918,34 @@ impl AvssWrappedMessage {
     /// Wraps an RBC message.
     pub fn rbc_wrap(msg: Msg<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = AvssWrappedMessage::Rbc(msg);
-        Ok(bincode::serialize(&wrapped)?)
+        Ok(wire_format::serialize(&wrapped)?)
     }
 
     /// Wraps an AVSS message.
     pub fn avss_wrap(msg: AvssMessage<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = AvssWrappedMessage::Avss(msg);
-        Ok(bincode::serialize(&wrapped)?)
+        Ok(wire_format::serialize(&wrapped)?)
     }
 
     /// Wraps an AVSS OK/READY/Reveal agreement message.
     pub fn agreement_wrap(msg: AvssAgreementMessage<AvssSessionId>) -> Result<Vec<u8>, RbcError> {
         let wrapped = AvssWrappedMessage::Agreement(msg);
-        Ok(bincode::serialize(&wrapped)?)
+        Ok(wire_format::serialize(&wrapped)?)
+    }
+
+    /// Returns the message's session id when it is a non-canonical alias that must be rejected
+    /// before routing or admission (see [`AvssSessionId::is_canonical`]). `Input`/`Output` carry
+    /// no session id — theirs is rebuilt locally from `instance_id`.
+    pub fn non_canonical_session_id(&self) -> Option<AvssSessionId> {
+        let session_id = match self {
+            AvssWrappedMessage::Rbc(m) => m.session_id,
+            AvssWrappedMessage::Avss(m) => m.session_id,
+            AvssWrappedMessage::Mul(m) => m.session_id,
+            AvssWrappedMessage::Agreement(m) => m.session_id(),
+            AvssWrappedMessage::Input(_) | AvssWrappedMessage::Output(_) => return None,
+        };
+
+        (!session_id.is_canonical()).then_some(session_id)
     }
 }
 

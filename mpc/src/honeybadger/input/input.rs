@@ -1,3 +1,4 @@
+use crate::common::wire_format;
 use crate::common::{ProtocolSessionId, SecretSharingScheme, RBC};
 use crate::honeybadger::input::InputError;
 use crate::honeybadger::input::InputMessage;
@@ -5,7 +6,6 @@ use crate::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use crate::honeybadger::{ProtocolType, SessionId, WrappedMessage, MAX_MESSAGE_SIZE};
 use ark_ff::FftField;
 use ark_serialize::CanonicalSerialize;
-use bincode::Options;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stoffelnet::network_utils::{ClientId, Network, PartyId};
@@ -162,18 +162,14 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
                     return Err(e.into());
                 }
             };
-            let msg: InputMessage = match bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_limit(MAX_MESSAGE_SIZE)
-                .deserialize(&output)
-            {
-                Ok(msg) => msg,
-                Err(e) => {
-                    self.rbc.clear_session(id).await;
-                    return Err(e.into());
-                }
-            };
+            let msg: InputMessage =
+                match wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        self.rbc.clear_session(id).await;
+                        return Err(e.into());
+                    }
+                };
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender {
                 warn!(
@@ -262,7 +258,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputServer<F, R> {
             shares.serialize_compressed(&mut payload)?;
             let msg = InputMessage::new(self.id, self.instance_id, payload);
             let wrapped = WrappedMessage::Input(msg);
-            let bytes = bincode::serialize(&wrapped)?;
+            let bytes = wire_format::serialize(&wrapped)?;
             net.send_to_client(client_id, &bytes).await?;
             info!("Server {} sent MaskShare to client {}", self.id, client_id);
         }
@@ -528,7 +524,7 @@ impl<F: FftField, R: RBC<Id = SessionId>> InputClient<F, R> {
             let mut payload = Vec::new();
             output.serialize_compressed(&mut payload)?;
             let msg = InputMessage::new(self.client_id, self.instance_id, payload);
-            let bytes = bincode::serialize(&msg)?;
+            let bytes = wire_format::serialize(&msg)?;
 
             //Broadcast to servers
             let sessionid = SessionId::new(
@@ -685,7 +681,7 @@ pub mod tests {
                 panic!("Unexpected sender kind");
             };
             let wrapped: WrappedMessage =
-                bincode::deserialize(&raw).expect("deserialization error");
+                wire_format::deserialize(&raw).expect("deserialization error");
             match wrapped {
                 WrappedMessage::Input(msg) => {
                     assert!(client
@@ -711,7 +707,7 @@ pub mod tests {
             tokio::spawn(async move {
                 while let Some(raw_msg) = merged_rx.recv().await {
                     let wrapped: WrappedMessage =
-                        bincode::deserialize(&raw_msg.1).expect("deserialization error");
+                        wire_format::deserialize(&raw_msg.1).expect("deserialization error");
 
                     let _ = match wrapped {
                         WrappedMessage::Rbc(rbc_msg) => {

@@ -68,7 +68,7 @@ where
 
     fn mul(self, rhs: ClearInt<F>) -> Self::Output {
         if self.bit_length != rhs.bit_length {
-            return Err(TypeError::IncompatibleIntegerPrecision {
+            return Err(TypeError::IncompatibleIntegerBitLength {
                 current: self.bit_length,
                 other: rhs.bit_length,
             });
@@ -96,7 +96,7 @@ where
 
     fn sub(self, rhs: ClearInt<F>) -> Self::Output {
         if self.bit_length != rhs.bit_length {
-            return Err(TypeError::IncompatibleIntegerPrecision {
+            return Err(TypeError::IncompatibleIntegerBitLength {
                 current: self.bit_length,
                 other: rhs.bit_length,
             });
@@ -118,7 +118,7 @@ where
 
     fn sub(self, rhs: Self) -> Self::Output {
         if self.bit_length != rhs.bit_length {
-            return Err(TypeError::IncompatibleIntegerPrecision {
+            return Err(TypeError::IncompatibleIntegerBitLength {
                 current: self.bit_length,
                 other: rhs.bit_length,
             });
@@ -180,7 +180,7 @@ where
 
     fn add(self, rhs: ClearInt<F>) -> Self::Output {
         if self.bit_length != rhs.bit_length {
-            return Err(TypeError::IncompatibleIntegerPrecision {
+            return Err(TypeError::IncompatibleIntegerBitLength {
                 current: self.bit_length,
                 other: rhs.bit_length,
             });
@@ -202,7 +202,7 @@ where
 
     fn add(self, rhs: Self) -> Self::Output {
         if self.bit_length != rhs.bit_length {
-            return Err(TypeError::IncompatibleIntegerPrecision {
+            return Err(TypeError::IncompatibleIntegerBitLength {
                 current: self.bit_length,
                 other: rhs.bit_length,
             });

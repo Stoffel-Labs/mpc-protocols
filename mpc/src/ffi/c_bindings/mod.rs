@@ -115,6 +115,22 @@ impl From<crate::honeybadger::ProtocolType> for ProtocolType {
             crate::honeybadger::ProtocolType::Trunc => ProtocolType::Trunc,
             crate::honeybadger::ProtocolType::FpDivConst => ProtocolType::FpDivConst,
             crate::honeybadger::ProtocolType::ZeroSha => ProtocolType::ZeroSha,
+            crate::honeybadger::ProtocolType::PreMulCOff => ProtocolType::None,
+            crate::honeybadger::ProtocolType::FpDiv => ProtocolType::None,
+            crate::honeybadger::ProtocolType::PreBitMul => todo!(),
+            crate::honeybadger::ProtocolType::PreBitMul1 => todo!(),
+            crate::honeybadger::ProtocolType::PreBitMul2 => todo!(),
+            crate::honeybadger::ProtocolType::PreBitMul3 => todo!(),
+            crate::honeybadger::ProtocolType::SufOr => todo!(),
+            crate::honeybadger::ProtocolType::FpDivTrunc => todo!(),
+            crate::honeybadger::ProtocolType::FpDivMulA => todo!(),
+            crate::honeybadger::ProtocolType::FpDivMulB => todo!(),
+            crate::honeybadger::ProtocolType::KOr1 => todo!(),
+            crate::honeybadger::ProtocolType::KOr2 => todo!(),
+            crate::honeybadger::ProtocolType::EQZ => todo!(),
+            crate::honeybadger::ProtocolType::LTZ => todo!(),
+            crate::honeybadger::ProtocolType::RandInvPair => todo!(),
+            crate::honeybadger::ProtocolType::LTZBitMul => todo!(),
         }
     }
 }
