@@ -36,7 +36,7 @@ use stoffelcrypto::{
     },
     honeybadger::{
         robust_interpolate::robust_interpolate::RobustShare, HoneyBadgerMPCNode,
-        HoneyBadgerMPCNodeOpts, SessionId,
+        HoneyBadgerMPCNodeOpts, SessionId, MIN_STATISTICAL_SECURITY,
     },
 };
 use stoffelmpc_network::fake_network::{FakeInnerNetwork, FakeNetwork, FakeNetworkConfig};
@@ -147,7 +147,7 @@ async fn measure_ltz_batch(n: usize, t: usize, batch: usize) {
         })
         .collect();
 
-    let opts = HoneyBadgerMPCNodeOpts::new(n, t, 777, crate::utils::test_utils::unused_precision(), 40, Duration::from_secs(60)).unwrap();
+    let opts = HoneyBadgerMPCNodeOpts::new(n, t, 777, crate::utils::test_utils::unused_precision(), MIN_STATISTICAL_SECURITY, Duration::from_secs(60)).unwrap();
     let mut nodes: Vec<Node> = (0..n)
         .map(|id| {
             <Node as MPCProtocol<Fr, RobustShare<Fr>, CountingNet<FakeNetwork>>>::setup(
@@ -223,7 +223,7 @@ async fn measure_eqz_batch(n: usize, t: usize, batch: usize) {
         })
         .collect();
 
-    let opts = HoneyBadgerMPCNodeOpts::new(n, t, 778, crate::utils::test_utils::unused_precision(), 40, Duration::from_secs(60)).unwrap();
+    let opts = HoneyBadgerMPCNodeOpts::new(n, t, 778, crate::utils::test_utils::unused_precision(), MIN_STATISTICAL_SECURITY, Duration::from_secs(60)).unwrap();
     let mut nodes: Vec<Node> = (0..n)
         .map(|id| {
             <Node as MPCProtocol<Fr, RobustShare<Fr>, CountingNet<FakeNetwork>>>::setup(
@@ -298,6 +298,7 @@ macro_rules! f_side_suite {
     };
 }
 
+f_side_suite!(measured_ltz_batch1_n4, measured_eqz_batch1_n4, 4, 1, 1);
 f_side_suite!(measured_ltz_batch1_n10, measured_eqz_batch1_n10, 10, 3, 1);
 f_side_suite!(measured_ltz_batch10_n10, measured_eqz_batch10_n10, 10, 3, 10);
 f_side_suite!(measured_ltz_batch50_n10, measured_eqz_batch50_n10, 10, 3, 50);
@@ -329,7 +330,7 @@ async fn measure_ltz_split(n: usize, t: usize, batch: usize) {
         t,
         779,
         crate::utils::test_utils::unused_precision(),
-        40,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(60),
     )
     .unwrap();
@@ -428,7 +429,7 @@ async fn measure_eqz_split(n: usize, t: usize, batch: usize) {
         t,
         780,
         crate::utils::test_utils::unused_precision(),
-        40,
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(60),
     )
     .unwrap();
