@@ -1,3 +1,4 @@
+use crate::common::wire_format;
 use crate::{
     common::{
         session_store::{Admission, SessionStore},
@@ -20,7 +21,6 @@ use crate::{
 use ark_ff::PrimeField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial};
 use ark_std::rand::{CryptoRng, Rng, SeedableRng};
-use bincode::Options;
 use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc, time::Instant};
@@ -212,11 +212,8 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: PRandIntCommitMessage = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_limit(MAX_MESSAGE_SIZE)
-                .deserialize(&output)?;
+            let msg: PRandIntCommitMessage =
+                wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE)?;
 
             let authenticated_sender = id.sub_id() as usize;
             if msg.sender_id != authenticated_sender || authenticated_sender >= self.n {
@@ -601,7 +598,7 @@ where
 
         self.rbc
             .init(
-                bincode::serialize(&commit_msg)?,
+                wire_format::serialize(&commit_msg)?,
                 commit_session,
                 network.clone(),
             )
@@ -666,7 +663,7 @@ where
                         r_t_i.clone(),
                         nonce,
                     ));
-                    let bytes_msg = bincode::serialize(&msg)?;
+                    let bytes_msg = wire_format::serialize(&msg)?;
                     network.send(j, &bytes_msg).await?;
                 }
             }
@@ -963,7 +960,7 @@ fn commit_contribution(
 /// very inputs the check exists for. The combinatorics make those party counts unreachable long
 /// before the arithmetic matters — every RISS and PRSS structure here is `C(n, t)`-sized — but the
 /// bound guarding correctness does not get to be the part that overflows.
-fn log2_tsets_ceil(n: usize, t: usize) -> usize {
+pub(crate) fn log2_tsets_ceil(n: usize, t: usize) -> usize {
     let t = t.min(n);
     (1..=t)
         .map(|i| (((n - t + i) as f64) / (i as f64)).log2())

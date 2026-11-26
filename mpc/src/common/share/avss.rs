@@ -1,3 +1,4 @@
+use crate::common::wire_format;
 use crate::common::{
     lagrange_interpolate,
     rbc::RbcError,
@@ -13,7 +14,7 @@ use ark_std::rand::{
     rngs::{OsRng, StdRng},
     Rng, SeedableRng,
 };
-use bincode::{ErrorKind, Options};
+use bincode::ErrorKind;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
@@ -685,11 +686,7 @@ where
             };
 
             let output = self.rbc.get_store(id).await?;
-            let msg: AvssMessage<Id> = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .allow_trailing_bytes()
-                .with_limit(MAX_MESSAGE_SIZE)
-                .deserialize(&output)?;
+            let msg: AvssMessage<Id> = wire_format::deserialize_limited(&output, MAX_MESSAGE_SIZE)?;
 
             if msg.session_id != id {
                 warn!("Dropping RBC output: inner session_id does not match RBC session metadata");
@@ -786,7 +783,7 @@ where
             encrypted_shares: encrypted,
         };
 
-        let bytes = bincode::serialize(&msg)?;
+        let bytes = wire_format::serialize(&msg)?;
         if bytes.len() as u64 > MAX_MESSAGE_SIZE {
             return Err(AvssError::InvalidInput(format!(
                 "batched AVSS payload exceeds {} bytes",

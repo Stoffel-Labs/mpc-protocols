@@ -6,6 +6,7 @@ mod tests {
     use ark_ff::Zero;
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
     use std::time::Duration;
+    use stoffelcrypto::common::wire_format;
     use stoffelcrypto::{
         common::{
             share::{apply_vandermonde, make_vandermonde},
@@ -175,7 +176,7 @@ mod tests {
                         Ok(Some(v)) => v,
                         _ => continue,
                     };
-                    let wrapped: WrappedMessage = match bincode::deserialize(&raw) {
+                    let wrapped: WrappedMessage = match wire_format::deserialize(&raw) {
                         Ok(m) => m,
                         Err(_) => {
                             warn!("Malformed or unrecognized message format.");

@@ -6,6 +6,7 @@ use num_bigint::BigUint;
 use num_integer::binomial;
 use std::time::Duration;
 use stoffelcrypto::common::rbc::rbc::Avid;
+use stoffelcrypto::common::wire_format;
 use stoffelcrypto::common::{ProtocolSessionId, SecretSharingScheme};
 use stoffelcrypto::honeybadger::fpmul::prandint::PRandIntNode;
 use stoffelcrypto::honeybadger::fpmul::{PRandIntMessage, PRANDINT_NONCE_LEN};
@@ -248,7 +249,7 @@ async fn riss_holds_openings_until_every_party_has_committed() {
     let mut openings = 0;
     for rx in receivers[0].iter_mut() {
         while let Ok(bytes) = rx.try_recv() {
-            match bincode::deserialize::<WrappedMessage>(&bytes).unwrap() {
+            match wire_format::deserialize::<WrappedMessage>(&bytes).unwrap() {
                 WrappedMessage::Rbc(_) => commitments += 1,
                 WrappedMessage::PRandInt(_) => openings += 1,
                 _ => {}
